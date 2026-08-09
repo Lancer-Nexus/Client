@@ -169,7 +169,6 @@ namespace LibreLancer.Fx
                 ? int.MaxValue
                 : (int) Math.Ceiling(MaxParticles.GetValue(sparam, (float) instance.GlobalTime));
             var freq = Frequency?.GetValue(sparam, (float) instance.GlobalTime) ?? 0f;
-            var spawnMs = freq <= 0 ? 0 : 1 / (double) freq;
             var lifespan = InitLifeSpan.GetValue(sparam, 0f);
 
             if (lifespan <= 0)
@@ -179,28 +178,33 @@ namespace LibreLancer.Fx
 
             ref EmitterState state = ref instance.Emitters[index];
 
-            if (spawnMs > 0)
+            if(freq > 0)
             {
-                if (state.SpawnTimer > spawnMs)
-                {
-                    state.SpawnTimer = spawnMs;
-                }
-
                 // Spawn lots of particles
                 var dt = Math.Min(delta, 3); // don't go crazy during debug pauses
 
-                while (true)
+                //Number of particles to spawn in this timestep
+                int toEmit = 0;
+
+                //Calculate amount of particles to spawn as float value
+                state.NextEmitCount += dt*freq;
+
+                if (state.NextEmitCount > 1)
                 {
-                    if (state.SpawnTimer < dt)
-                    {
-                        dt -= state.SpawnTimer;
-                        state.SpawnTimer = spawnMs;
-                    }
-                    else
-                    {
-                        state.SpawnTimer -= dt;
-                        break;
-                    }
+                    //Use floored value to determine integral amount of particles to spawn for this time step
+                    toEmit = Math.Min((int) Math.Floor(state.NextEmitCount), maxCount);
+                    //Subtract the amount of particles which will be spawned
+                    state.NextEmitCount -= toEmit;
+                }
+
+                //In case of spawning more than one particle, set starting time how long they are alive evenly distributed to simulate non discrete behaviour
+                double correctionFactor = 0;
+                if(toEmit > 1)
+                    correctionFactor =  dt / toEmit;
+
+                //Spawn particles for this time step
+                for (int count=0; count < toEmit; count++)
+                {
 
                     if (lifespan < dt) // Don't spawn if it is already gone
                     {
@@ -222,7 +226,7 @@ namespace LibreLancer.Fx
                     }
 
                     particle.LifeSpan = lifespan;
-                    particle.TimeAlive = (float) dt;
+                    particle.TimeAlive =  (float) (count * correctionFactor); //Spread the starting time evenly among the spawned particles
                     particle.EmitterIndex = index;
                     particle.Orientation = Quaternion.Identity;
                     SetParticle(instance, reference, ref particle, sparam, (float) instance.GlobalTime);
@@ -235,13 +239,17 @@ namespace LibreLancer.Fx
                         continue;
                     }
 
+                    //Correct position since the time alive can be non zero (see above)
+                    if(toEmit > 1)
+                        particle.Position += particle.Velocity * particle.TimeAlive;
+
                     var nr = particle.Velocity.Normalized();
                     particle.Normal = nr;
                 }
             }
             else
             {
-                state.SpawnTimer = 0;
+                state.NextEmitCount = 0;
             }
         }
     }
