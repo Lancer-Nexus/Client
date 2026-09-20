@@ -228,12 +228,6 @@ namespace LibreLancer.Fx
                     SetParticle(instance, reference, ref particle, sparam, (float) instance.GlobalTime);
                     state.Count++;
 
-                    // Put particle in world space if needed
-                    if (reference.Linked.Parent != null)
-                    {
-                        continue;
-                    }
-
                     var len = particle.Velocity.Length();
 
                     if (!(Math.Abs(len) > float.Epsilon))
