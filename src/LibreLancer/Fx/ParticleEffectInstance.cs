@@ -22,7 +22,7 @@ namespace LibreLancer.Fx
 
     public struct EmitterState
     {
-        public double SpawnTimer;
+        public double NextEmitCount;
         public int Count;
     }
 

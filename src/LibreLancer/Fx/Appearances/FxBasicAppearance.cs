@@ -113,6 +113,7 @@ namespace LibreLancer.Fx
                 ref var particle = ref instance.Buffer[nodeIdx, i];
                 var time = particle.TimeAlive / particle.LifeSpan;
                 var p = Vector3.Transform(Vector3.Transform(particle.Position, particle.Orientation), nodeTr);
+                var v = Vector3.TransformNormal(particle.Velocity, nodeTr);
                 var c = Color.GetValue(sparam, time);
                 var a = Alpha.GetValue(sparam, time);
                 instance.Pool?.AddParticle(
@@ -121,9 +122,10 @@ namespace LibreLancer.Fx
                     new Vector2(Size?.GetValue(sparam, time) ?? 1.0f) * 2,
                     new Color4(c, a),
                     GetFrame((float) instance.GlobalTime, sparam, ref particle),
-                    Vector3.Zero,
+                    v, //For motion blur pass not normalized velocity as normal (needed)
                     Rotate == null ? 0f : MathHelper.DegreesToRadians(Rotate.GetValue(sparam, time)),
-                    FlipHorizontal, FlipVertical
+                    FlipHorizontal, FlipVertical,
+                    MotionBlur
                 );
             }
 
