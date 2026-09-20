@@ -13,8 +13,8 @@ struct Particle
     float4 texCoords;
     //
     float2 halfSize; // XY + padding
+    int motionBlurEnabled;
     float _pad1;
-    float _pad2;
 };
 
 cbuffer ParticleParameters : register(b3, UNIFORM_SPACE)
@@ -58,20 +58,43 @@ Output main(int vertexID: SV_VertexID)
 
     float3 right;
     float3 up;
+    float stretchVel;
+    float3 toCamera;
 
     if (Type == 0)
     {
-        // Basic
-        right = float3(
-            View[0][0],
-            View[1][0],
-            View[2][0]
-        );
-        up = float3(
-            View[0][1],
-            View[1][1],
-            View[2][1]
-        );
+        if (!particle.motionBlurEnabled)
+        {
+            // Basic
+            right = float3(
+                View[0][0],
+                View[1][0],
+                View[2][0]
+            );
+            up = float3(
+                View[0][1],
+                View[1][1],
+                View[2][1]
+            );
+        }
+        else
+        {
+            //For motion blur the particle is aligned to the velocity vector (here passed via particle.normal) and stretched accordingly, while still being parallel to the screen.
+
+            toCamera = normalize(CameraPosition - p);
+            up=particle.normal;
+            right=cross(up,toCamera);
+
+            //TODO: There is probably a simpler and thus better solution instead of using the angle (e.g. projected vector onto screen plane / vector parallel to it)
+            float angle = atan2(length(right),dot(up,toCamera));
+            float velocity = length(particle.normal);
+            stretchVel=velocity*0.03*abs(sin(angle)); //0.03: Chosen by visual inspection of the result
+
+            //Build base vectors using Gram-Schmidt
+            right=normalize(right);
+            up = normalize(cross(toCamera,right));
+            toCamera = normalize(cross(right, up));
+        }
     }
     else if (Type == 1)
     {
@@ -87,18 +110,43 @@ Output main(int vertexID: SV_VertexID)
         up = cross(right, particle.normal);
     }
 
-    float s, c;
-    sincos(particle.rotate, s, c);
+    float3 positions[4];
+    float3 vUp;
+    float3 vRight;
 
-    float3 vUp = (c * right - s * up) * particle.halfSize.x;
-    float3 vRight = (s * right + c * up) * particle.halfSize.y;
+    if (particle.motionBlurEnabled && (Type == 0))
+    {
+        //TODO: Optimize rendering. The way particles are rendered now makes this much more expensive (3 times the cost, since 3 results are not used).
 
-    float3 positions[4] = {
-        p - vRight - vUp,
-        p + vRight - vUp,
-        p - vRight + vUp,
-        p + vRight + vUp
-    };
+        //Create rotation matrix for particle alignment to the velocity vector
+        float3x3 rotmat=float3x3(right, up, toCamera);
+
+        //For motion blur the start of the particle is being stretched to an earlier position depending on the velocity
+        float3 quadPositions[4]={
+            float3(-1.0 * particle.halfSize.x, -1.0 * particle.halfSize.y - stretchVel, 0.0),
+            float3( 1.0 * particle.halfSize.x, -1.0 * particle.halfSize.y - stretchVel, 0.0),
+            float3(-1.0 * particle.halfSize.x,  1.0 * particle.halfSize.y, 0.0),
+            float3( 1.0 * particle.halfSize.x,  1.0 * particle.halfSize.y, 0.0),
+        };
+
+        //Apply rotation matrix
+        positions[0] = p + mul(quadPositions[0], rotmat);
+        positions[1] = p + mul(quadPositions[1], rotmat);
+        positions[2] = p + mul(quadPositions[2], rotmat);
+        positions[3] = p + mul(quadPositions[3], rotmat);
+    }
+    else
+    {
+        float s, c;
+        sincos(particle.rotate, s, c);
+        vUp = (c * right - s * up) * particle.halfSize.x;
+        vRight = (s * right + c * up) * particle.halfSize.y;
+
+        positions[0] = p - vRight - vUp;
+        positions[1] = p + vRight - vUp,
+        positions[2] = p - vRight + vUp,
+        positions[3] = p + vRight + vUp;
+    }
 
     float2 uvs[4] = {
         particle.texCoords.xw,

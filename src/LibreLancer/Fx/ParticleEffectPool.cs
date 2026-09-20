@@ -28,6 +28,7 @@ namespace LibreLancer.Fx
             public float Rotate;
             public Vector4 TextureCoordinates;
             public Vector2 HalfSize;
+            public int MotionBlurEnabled;
             // Padding After
         }
 
@@ -90,7 +91,8 @@ namespace LibreLancer.Fx
             Vector3 normal,
             float angle,
             bool flipU,
-            bool flipV)
+            bool flipV,
+            bool motionBlurEnabled = false)
         {
             if (color.A <= 0.0001f) //won't render
                 return;
@@ -109,7 +111,8 @@ namespace LibreLancer.Fx
                 Normal = normal,
                 Rotate = angle,
                 TextureCoordinates = new(left,top,right,bottom),
-                HalfSize = size * 0.5f
+                HalfSize = size * 0.5f,
+                MotionBlurEnabled = motionBlurEnabled ? 1 : 0
             };
         }
 
