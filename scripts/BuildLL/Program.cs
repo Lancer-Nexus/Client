@@ -76,8 +76,9 @@ namespace BuildLL
 
         static void Clean()
         {
-            Dotnet.Clean("LibreLancer.sln");
             Dotnet.Clean("src/LLShaderCompiler/LLShaderCompiler.csproj", "Debug");
+            Dotnet.Clean("LibreLancer.sln", "Debug");
+            Dotnet.Clean("LibreLancer.sln");
             RmDir("./obj/");
             RmDir("./bin/");
         }
