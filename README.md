@@ -21,3 +21,13 @@ The client targets the current .NET version used by the upstream project. Cluste
 - `Cluster` – shared client/server abstractions
 
 See `AGENTS.md` for contribution and integration rules.
+
+## Shared Protocol
+
+The shared contracts are checked out in the `Protocol` submodule. Update it before MMO/client builds with:
+
+```bash
+git submodule update --init --remote --merge Protocol
+```
+
+CI performs the same update before the existing LibreLancer build. Standalone client builds remain possible when the cluster integration is disabled.
