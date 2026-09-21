@@ -4,6 +4,13 @@
 
 Maintain the Lancer Nexus client fork while preserving compatibility with upstream LibreLancer wherever possible.
 
+## MVP architecture baseline
+
+- The client authenticates only through Gateway and never owns placement, leases, credits, inventory or other authoritative character state.
+- It treats Gateway assignments and short-lived, single-use transfer tickets as untrusted input and follows the transfer lifecycle `Requested -> Reserved -> Prepared -> SourceFrozen -> TargetAccepted -> Committed -> SourceReleased` without returning to the main menu.
+- The active game instance remains authoritative until the MySQL-backed lease changes atomically at `Committed`; the client must handle rejection, expiry and recovery states.
+- Shared, versioned MessagePack contracts and capabilities belong in `Protocol`; Redis is never exposed to the client.
+
 ## Rules
 
 - Do not rewrite or reformat unrelated upstream code.
