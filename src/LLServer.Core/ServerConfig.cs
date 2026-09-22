@@ -11,6 +11,10 @@ public class ServerConfig
     public string DatabasePath = "";
     public int Port = LNetConst.DEFAULT_PORT;
     public int ThreadCount = 0;
+    public string? RuntimeStatusFile;
+    public string? InstanceId;
+    public string? SystemId;
+    public string? InstanceEndpoint;
 
     public void CopyFrom(ServerConfig other)
     {
@@ -20,5 +24,9 @@ public class ServerConfig
         LoginUrl = other.LoginUrl;
         DatabasePath = other.DatabasePath;
         Port = other.Port;
+        RuntimeStatusFile = other.RuntimeStatusFile;
+        InstanceId = other.InstanceId;
+        SystemId = other.SystemId;
+        InstanceEndpoint = other.InstanceEndpoint;
     }
 }

@@ -31,3 +31,7 @@ git submodule update --init --remote --merge Protocol
 ```
 
 CI performs the same update before the existing LibreLancer build. Standalone client builds remain possible when the cluster integration is disabled.
+
+## Dedicated server runtime status
+
+`LLServer` can optionally publish an atomic JSON runtime snapshot for the host Agent. Set `RuntimeStatusFile`, `InstanceId`, `SystemId`, and `InstanceEndpoint` in its server configuration. The snapshot reports the actual listener running state and connected peers; it contains no credentials. Leave these fields unset for standalone deployments. The Agent treats missing or stale snapshots as not ready.
