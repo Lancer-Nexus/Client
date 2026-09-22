@@ -57,7 +57,8 @@ public class ServerApp(ServerConfig config)
             LoginUrl = Config.LoginUrl,
             Listener =
             {
-                Port = Config.Port > 0 ? Config.Port : LNetConst.DEFAULT_PORT
+                Port = Config.Port > 0 ? Config.Port : LNetConst.DEFAULT_PORT,
+                MaxConnections = Config.MaxPlayers > 0 ? Config.MaxPlayers : 200
             }
         };
         if(Config.ThreadCount > 0)
@@ -95,6 +96,12 @@ public class ServerApp(ServerConfig config)
         catch (Exception exception)
         {
             FLLog.Error("Server", $"Runtime status writer stopped: {exception.Message}");
+        }
+        if (!string.IsNullOrWhiteSpace(Config.RuntimeStatusFile))
+        {
+            var statusPath = Path.GetFullPath(Config.RuntimeStatusFile, Platform.GetBasePath());
+            if (File.Exists(statusPath))
+                File.Delete(statusPath);
         }
         statusCancellation?.Dispose();
         statusCancellation = null;
