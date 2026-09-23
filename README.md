@@ -35,3 +35,5 @@ CI performs the same update before the existing LibreLancer build. Standalone cl
 ## Dedicated server runtime status
 
 `LLServer` can optionally publish an atomic JSON runtime snapshot for the host Agent. Set `RuntimeStatusFile`, `InstanceId`, `SystemId`, `InstanceEndpoint`, and `MaxPlayers` in its server configuration. `MaxPlayers` controls the listener limit and must match the Agent's `Agent__Instance__MaxPlayers`. The snapshot reports the actual listener running state and connected peers; it contains no credentials. Leave these fields unset for standalone deployments. The Agent treats missing or stale snapshots as not ready; LLServer removes the snapshot on a clean stop.
+
+When `LoginUrl` points at the Gateway, the existing LLServer connection challenge verifies the client's short-lived `JoinTicket` through `POST /api/v1/game/verify-ticket`; legacy `/verifytoken` servers remain supported as a fallback. The ticket must be obtained from Gateway placement and is never logged or stored in client configuration.

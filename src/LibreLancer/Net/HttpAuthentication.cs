@@ -192,10 +192,20 @@ namespace LibreLancer.Net
         {
             try
             {
-                var result = await client.PostAsync(Combine(url, "/verifytoken"), JsonContent.Create(new
+                var result = await client.PostAsync(Combine(url, "/api/v1/game/verify-ticket"), JsonContent.Create(new
                 {
-                    token = token
+                    ticket = token
                 }));
+
+                // Preserve compatibility with existing standalone/auth-server deployments.
+                if (result.StatusCode == System.Net.HttpStatusCode.NotFound)
+                {
+                    result.Dispose();
+                    result = await client.PostAsync(Combine(url, "/verifytoken"), JsonContent.Create(new
+                    {
+                        token = token
+                    }));
+                }
 
                 if (result.IsSuccessStatusCode)
                 {
