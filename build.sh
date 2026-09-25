@@ -24,6 +24,11 @@ elif [ -f "$SCRIPT_DIR/.git/index" ]; then
     ( cd "$SCRIPT_DIR" ; git submodule update --recursive )
 fi
 
+# Apply the Lancer Nexus overlay before any managed/native projects are built.
+if [ -x "$SCRIPT_DIR/scripts/apply-lancer-nexus-patches.sh" ]; then
+    "$SCRIPT_DIR/scripts/apply-lancer-nexus-patches.sh"
+fi
+
 ere_quote() {
     sed 's/[][\.|$(){}?+*^]/\\&/g' <<< "$*"
 }

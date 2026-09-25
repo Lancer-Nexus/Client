@@ -1,0 +1,159 @@
+--- a/src/LibreLancer/Net/NexusGatewayLogin.cs
++++ b/src/LibreLancer/Net/NexusGatewayLogin.cs
+@@ -130,6 +130,36 @@
+         };
+     }
+ 
++    /// <summary>Requests a target reservation for a transfer that the source server has approved for preparation.</summary>
++    public async Task<TransferStartResult> StartTransferAsync(
++        string accessToken, TransferStartRequest request, CancellationToken cancellationToken = default)
++    {
++        if (string.IsNullOrWhiteSpace(accessToken))
++            throw new ArgumentException("Gateway access token is required.", nameof(accessToken));
++        if (request.TransferId == Guid.Empty || request.SessionId == Guid.Empty || request.CharacterId <= 0 ||
++            string.IsNullOrWhiteSpace(request.TargetInstanceId) || string.IsNullOrWhiteSpace(request.TargetSystemId) ||
++            request.ExpiresUtc.Kind != DateTimeKind.Utc || request.ExpiresUtc <= DateTime.UtcNow ||
++            string.IsNullOrWhiteSpace(request.IdempotencyKey))
++            throw new ArgumentException("Transfer request is incomplete or expired.", nameof(request));
++
++        using var message = new HttpRequestMessage(HttpMethod.Post, new Uri(gateway, "/api/v1/transfers/start"));
++        message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
++        message.Content = JsonContent.Create(request);
++        using var response = await http.SendAsync(message, cancellationToken);
++        if (!response.IsSuccessStatusCode)
++            throw new HttpRequestException($"Gateway transfer preparation failed with HTTP {(int)response.StatusCode}.");
++        var result = await response.Content.ReadFromJsonAsync<TransferStartResult>(cancellationToken: cancellationToken)
++            ?? throw new InvalidDataException("Gateway transfer response is empty.");
++        var prepared = result.Prepared;
++        if (prepared is null || prepared.TransferId != request.TransferId || !prepared.Accepted ||
++            string.IsNullOrWhiteSpace(prepared.TransferTicket) || prepared.ExpiresUtc.Kind != DateTimeKind.Utc ||
++            prepared.ExpiresUtc <= DateTime.UtcNow || prepared.ExpiresUtc > request.ExpiresUtc ||
++            string.IsNullOrWhiteSpace(result.SourceInstanceId) || string.IsNullOrWhiteSpace(result.TargetEndpoint) ||
++            !string.Equals(result.TargetSystemId, request.TargetSystemId, StringComparison.Ordinal) || result.LeaseVersion < 0)
++            throw new InvalidDataException("Gateway transfer response is invalid.");
++        return result;
++    }
++
+     internal ClientVersionHello LoadInstalledHello()
+     {
+         try
+--- a/src/LibreLancer.Tests/NexusGatewayLoginTests.cs
++++ b/src/LibreLancer.Tests/NexusGatewayLoginTests.cs
+@@ -7,6 +7,7 @@
+ using System.Text.Json;
+ using System.Threading;
+ using System.Threading.Tasks;
++using LancerNexus.Protocol;
+ using LibreLancer.Net;
+ using Xunit;
+ 
+@@ -76,6 +77,62 @@
+     }
+ 
+     [Fact]
++    public async Task TransferStartUsesBearerSessionAndValidatesPreparedTicket()
++    {
++        var folder = CreateMetadata();
++        try
++        {
++            var handler = new FakeHandler(false);
++            using var client = new NexusGatewayLogin(new Uri("https://gateway.example.test"), folder, handler);
++            var request = new TransferStartRequest
++            {
++                TransferId = Guid.NewGuid(),
++                SessionId = Guid.NewGuid(),
++                CharacterId = 42,
++                TargetInstanceId = "instance-eu-02",
++                TargetSystemId = "li02",
++                ExpiresUtc = DateTime.UtcNow.AddMinutes(1),
++                IdempotencyKey = Guid.NewGuid().ToString("N")
++            };
++
++            var result = await client.StartTransferAsync("access", request, TestContext.Current.CancellationToken);
++
++            Assert.True(result.Prepared.Accepted);
++            Assert.Equal(request.TransferId, result.Prepared.TransferId);
++            Assert.Equal("transfer-ticket", result.Prepared.TransferTicket);
++            Assert.Equal("li02", result.TargetSystemId);
++            Assert.Equal("Bearer access", handler.TransferAuthorization);
++            Assert.Equal("/api/v1/transfers/start", handler.Requests[^1].Path);
++        }
++        finally { Directory.Delete(folder, true); }
++    }
++
++    [Fact]
++    public async Task TransferStartRejectsResponseForDifferentTargetSystem()
++    {
++        var folder = CreateMetadata();
++        try
++        {
++            var handler = new FakeHandler(false, mismatchedTransferTarget: true);
++            using var client = new NexusGatewayLogin(new Uri("https://gateway.example.test"), folder, handler);
++            var request = new TransferStartRequest
++            {
++                TransferId = Guid.NewGuid(),
++                SessionId = Guid.NewGuid(),
++                CharacterId = 42,
++                TargetInstanceId = "instance-eu-02",
++                TargetSystemId = "li02",
++                ExpiresUtc = DateTime.UtcNow.AddMinutes(1),
++                IdempotencyKey = Guid.NewGuid().ToString("N")
++            };
++
++            await Assert.ThrowsAsync<InvalidDataException>(() => client.StartTransferAsync(
++                "access", request, TestContext.Current.CancellationToken));
++        }
++        finally { Directory.Delete(folder, true); }
++    }
++
++    [Fact]
+     public async Task RequiredUpdateStopsBeforeSendingCredentials()
+     {
+         var folder = CreateMetadata();
+@@ -103,10 +160,11 @@
+         return folder;
+     }
+ 
+-    private sealed class FakeHandler(bool updateRequired) : HttpMessageHandler
++    private sealed class FakeHandler(bool updateRequired, bool mismatchedTransferTarget = false) : HttpMessageHandler
+     {
+         public List<(string Path, string Body)> Requests { get; } = [];
+         public string? PlacementAuthorization { get; private set; }
++        public string? TransferAuthorization { get; private set; }
+ 
+         protected override async Task<HttpResponseMessage> SendAsync(
+             HttpRequestMessage request, CancellationToken cancellationToken)
+@@ -119,6 +177,8 @@
+                     : """{"status":"supported","sessionAllowed":true,"serverProtocolVersion":1,"messageKey":"client_version_supported","handshakeToken":"proof"}"""
+                 : request.RequestUri.AbsolutePath == "/api/v1/placement/request"
+                     ? PlacementPayload(request, body)
++                : request.RequestUri.AbsolutePath == "/api/v1/transfers/start"
++                    ? TransferPayload(request, body)
+                 : JsonSerializer.Serialize(new
+                 {
+                     accessToken = "access", refreshToken = "refresh",
+@@ -146,5 +206,24 @@
+                 duplicate = false
+             });
+         }
++
++        private string TransferPayload(HttpRequestMessage request, string body)
++        {
++            TransferAuthorization = request.Headers.Authorization?.ToString();
++            var transferId = JsonDocument.Parse(body).RootElement.GetProperty("transferId").GetGuid();
++            return JsonSerializer.Serialize(new
++            {
++                prepared = new
++                {
++                    transferId, accepted = true, transferTicket = "transfer-ticket",
++                    expiresUtc = DateTime.UtcNow.AddSeconds(30), reasonCode = "prepared"
++                },
++                sourceInstanceId = "instance-eu-01",
++                targetEndpoint = "game-2.example.test:2300",
++                targetSystemId = mismatchedTransferTarget ? "li99" : "li02",
++                leaseVersion = 5,
++                duplicate = false
++            });
++        }
+     }
+ }

@@ -1,0 +1,72 @@
+diff --git a/src/LLServer.Core/ServerConfig.cs b/src/LLServer.Core/ServerConfig.cs
+index f6d9212..e26e096 100644
+--- a/src/LLServer.Core/ServerConfig.cs
++++ b/src/LLServer.Core/ServerConfig.cs
+@@ -17,6 +17,7 @@ public class ServerConfig
+     public string? InstanceId;
+     public string? SystemId;
+     public string? InstanceEndpoint;
++    public int? TestNewCharacterRank;
+ 
+     public void CopyFrom(ServerConfig other)
+     {
+@@ -32,5 +33,6 @@ public class ServerConfig
+         InstanceId = other.InstanceId;
+         SystemId = other.SystemId;
+         InstanceEndpoint = other.InstanceEndpoint;
++        TestNewCharacterRank = other.TestNewCharacterRank;
+     }
+ }
+diff --git a/src/LLServer.Core/ServerApp.cs b/src/LLServer.Core/ServerApp.cs
+index aa407d3..e32d199 100644
+--- a/src/LLServer.Core/ServerApp.cs
++++ b/src/LLServer.Core/ServerApp.cs
+@@ -29,6 +29,11 @@ public class ServerApp(ServerConfig config)
+             FLLog.Error("Config", "Only HTTPS login servers are supported");
+             return false;
+         }
++        if (Config.TestNewCharacterRank is < 0 or > 100)
++        {
++            FLLog.Error("Config", "TestNewCharacterRank must be between 0 and 100");
++            return false;
++        }
+         if (!GameConfig.CheckFLDirectory(Config.FreelancerPath))
+         {
+             FLLog.Error("Config", $"'{Config.FreelancerPath ?? "NULL"}' is not a valid game folder");
+@@ -60,8 +65,11 @@ public class ServerApp(ServerConfig config)
+             ServerName = Config.ServerName,
+             ServerDescription = Config.ServerDescription,
+             ScriptsFolder = Path.Combine(GetBasePath(), "scripts"),
+-            LoginUrl = Config.LoginUrl
++            LoginUrl = Config.LoginUrl,
++            TestNewCharacterRank = Config.TestNewCharacterRank
+         };
++        if (Config.TestNewCharacterRank is int testRank)
++            FLLog.Info("Server", $"Test new-character rank override enabled: {testRank}");
+         var listener = Server.Listener ?? throw new InvalidOperationException("Game server listener was not initialized.");
+         listener.Port = Config.Port > 0 ? Config.Port : LNetConst.DEFAULT_PORT;
+         listener.MaxConnections = Config.MaxPlayers > 0 ? Config.MaxPlayers : 200;
+diff --git a/src/LibreLancer/Server/GameServer.cs b/src/LibreLancer/Server/GameServer.cs
+index c74f674..37665f7 100644
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -31,6 +31,7 @@ namespace LibreLancer.Server
+         public string ServerDescription = "Description of the server is here.";
+         public string ServerNews = "News of the server goes here";
+         public string? LoginUrl = null;
++        public int? TestNewCharacterRank { get; set; }
+ 
+         public bool SendDebugInfo = false;
+         public string DebugInfo { get; private set; } = null!;
+@@ -130,7 +131,10 @@ namespace LibreLancer.Server
+             // append
+             src.Replace("%%PACKAGE%%", pkgStr.ToString());
+             var initext = src.ToString();
+-            return SaveGame.FromString($"mpnewcharacter: {fac.Nickname}", initext);
++            var newCharacter = SaveGame.FromString($"mpnewcharacter: {fac.Nickname}", initext);
++            if (TestNewCharacterRank is int testRank && newCharacter.Player is not null)
++                newCharacter.Player.Rank = testRank;
++            return newCharacter;
+         }
+ 
+         public void Start()

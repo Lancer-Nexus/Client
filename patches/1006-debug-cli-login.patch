@@ -1,0 +1,228 @@
+diff --git a/src/lancer/Program.cs b/src/lancer/Program.cs
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -12,15 +12,100 @@
+     [STAThread]
+     public static void Main(string[] args)
+     {
++#if DEBUG
++        if (!TryParseArguments(args, out var configPath, out var email, out var password,
++                out var character, out var error))
++        {
++            Console.Error.WriteLine(error);
++            return;
++        }
++#else
++        foreach (var arg in args)
++        {
++            if (arg.StartsWith("--email", StringComparison.Ordinal) ||
++                arg.StartsWith("--password", StringComparison.Ordinal) ||
++                arg.StartsWith("--character", StringComparison.Ordinal))
++            {
++                Console.Error.WriteLine("Automated login options are available in Debug builds only.");
++                return;
++            }
++        }
++        var configPath = args.Length > 0 ? args[0] : null;
++#endif
+         FreelancerGame? game = null;
+         AppHandler.Run(() =>
+         {
+-            Func<string>? filePath = null;
+-            if (args.Length > 0)
+-                filePath = () => args[0];
++            Func<string>? filePath = configPath is null ? null : () => configPath;
+             var cfg = GameConfig.Create(true, filePath);
++#if DEBUG
++            if (email is not null && string.IsNullOrWhiteSpace(cfg.ClusterGatewayUrl))
++            {
++                Console.Error.WriteLine("Automated login requires cluster_gateway_url in the client configuration.");
++                return;
++            }
++#endif
+             game = new FreelancerGame(cfg);
++#if DEBUG
++            game.DebugLoginEmail = email;
++            game.DebugLoginPassword = password;
++            game.DebugCharacterName = character;
++#endif
+             game.Run();
+         }, () => game?.Crashed());
+     }
++
++#if DEBUG
++    private static bool TryParseArguments(string[] args, out string? configPath, out string? email,
++        out string? password, out string? character, out string? error)
++    {
++        configPath = email = password = character = error = null;
++        foreach (var arg in args)
++        {
++            if (arg.StartsWith("--email=", StringComparison.Ordinal))
++            {
++                if (email is not null) { error = "--email may be supplied only once."; return false; }
++                email = arg[8..];
++            }
++            else if (arg.StartsWith("--password=", StringComparison.Ordinal))
++            {
++                if (password is not null) { error = "--password may be supplied only once."; return false; }
++                password = arg[11..];
++            }
++            else if (arg.StartsWith("--character=", StringComparison.Ordinal))
++            {
++                if (character is not null) { error = "--character may be supplied only once."; return false; }
++                character = arg[12..];
++            }
++            else if (arg.StartsWith("--", StringComparison.Ordinal))
++            {
++                error = "Unknown option. Use --email=..., --password=..., and optionally --character=... .";
++                return false;
++            }
++            else if (configPath is null)
++            {
++                configPath = arg;
++            }
++            else
++            {
++                error = "Only one client configuration path may be supplied.";
++                return false;
++            }
++        }
++
++        if ((email is null) != (password is null) ||
++            (email is not null && string.IsNullOrWhiteSpace(email)) ||
++            (password is not null && string.IsNullOrWhiteSpace(password)))
++        {
++            error = "--email and --password must both be supplied with non-empty values.";
++            return false;
++        }
++        if ((character is not null && string.IsNullOrWhiteSpace(character)) ||
++            (character is not null && email is null))
++        {
++            error = "--character requires a non-empty name and both login options.";
++            return false;
++        }
++        return true;
++    }
++#endif
+ }
+diff --git a/src/LibreLancer/FreelancerGame.cs b/src/LibreLancer/FreelancerGame.cs
+--- a/src/LibreLancer/FreelancerGame.cs
++++ b/src/LibreLancer/FreelancerGame.cs
+@@ -43,6 +43,12 @@
+ 
+ 		public GameConfig Config => _cfg;
+ 
++#if DEBUG
++        public string? DebugLoginEmail { get; set; }
++        public string? DebugLoginPassword { get; set; }
++        public string? DebugCharacterName { get; set; }
++#endif
++
+         private GameConfig _cfg;
+ 		public FreelancerGame(GameConfig config) : base(config.BufferWidth, config.BufferHeight, false)
+ 		{
+diff --git a/src/LibreLancer/GameStates/LuaMenu.cs b/src/LibreLancer/GameStates/LuaMenu.cs
+--- a/src/LibreLancer/GameStates/LuaMenu.cs
++++ b/src/LibreLancer/GameStates/LuaMenu.cs
+@@ -243,6 +243,48 @@
+ 
+             public SaveGameFolder SaveGames() => state.Game.Saves;
+             public bool GatewayEnabled() => !string.IsNullOrWhiteSpace(state.Game.Config.ClusterGatewayUrl);
++
++            public bool HasDebugLoginCredentials()
++            {
++#if DEBUG
++                return GatewayEnabled() && !string.IsNullOrWhiteSpace(state.Game.DebugLoginEmail) &&
++                       !string.IsNullOrEmpty(state.Game.DebugLoginPassword);
++#else
++                return false;
++#endif
++            }
++
++            public void LoginWithDebugCredentials()
++            {
++#if DEBUG
++                if (HasDebugLoginCredentials())
++                    Login(state.Game.DebugLoginEmail!, state.Game.DebugLoginPassword!);
++#endif
++            }
++
++            public bool SelectDebugCharacter()
++            {
++#if DEBUG
++                var requestedName = state.Game.DebugCharacterName;
++                if (string.IsNullOrWhiteSpace(requestedName))
++                    return false;
++                var index = cselInfo.Characters.FindIndex(character =>
++                    string.Equals(character.Name, requestedName, StringComparison.OrdinalIgnoreCase));
++                if (index < 0)
++                {
++                    FLLog.Warning("Debug", $"Requested character '{requestedName}' was not found; opening character selection.");
++                    state.Game.DebugCharacterName = null;
++                    return false;
++                }
++                cselInfo.Selected = index;
++                FLLog.Info("Debug", $"Automatically selecting requested character '{cselInfo.Characters[index].Name}'.");
++                state.Game.DebugCharacterName = null;
++                return true;
++#else
++                return false;
++#endif
++            }
++
+             public void DeleteSelectedGame() => state.Game.Saves.TryDelete(state.Game.Saves.Selected);
+ 
+             public void LoadSelectedGame()
+diff --git a/uixml/serverlist.lua b/uixml/serverlist.lua
+--- a/uixml/serverlist.lua
++++ b/uixml/serverlist.lua
+@@ -21,7 +21,18 @@
+ 		e.animgroupA.Animate('flyinleft', 0, 0.8)
+ 		e.animgroupB.Animate('flyinright', 0, 0.8)
+ 		this.InitNetwork();
+-		if (Game.GatewayEnabled()) Timer(0.01, () => this.Login());
++		if (Game.GatewayEnabled()) Timer(0.01, () => {
++			if (Game.HasDebugLoginCredentials()) this.DebugLogin();
++			else this.Login();
++		});
++	}
++
++	DebugLogin()
++	{
++		this.Widget.Visible = false;
++		this.connecting = new connecting();
++		OpenModal(this.connecting);
++		Game.LoginWithDebugCredentials();
+ 	}
+ 
+     Leave()
+@@ -59,7 +70,10 @@
+ 		if(this.connecting != nil) {
+ 			this.connecting.Close();
+ 		}
+-		this.ExitAnimation(() => OpenScene("characterlist"));
++		this.ExitAnimation(() => {
++			OpenScene("characterlist");
++			if (Game.SelectDebugCharacter()) Game.LoadCharacter();
++		});
+ 	}
+ 
+ 	Update()
+@@ -130,5 +144,4 @@
+ 
+ 
+ 
+-
+ 
+diff --git a/src/LibreLancer/Interface/Default/interface.json b/src/LibreLancer/Interface/Default/interface.json
+--- a/src/LibreLancer/Interface/Default/interface.json
++++ b/src/LibreLancer/Interface/Default/interface.json
+@@ -59,7 +59,7 @@
+     "scancargo.designer.lua": "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",
+     "scancargo.lua": "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",
+     "serverlist.designer.lua": "GxsiAOTXn/r/35+vI+4bk8QL7uJJlNGiTAEdE7lwkljPsSPjjnW0Zgr1X5LqHbJtlLzJbhkcsCQc2rvs5lICDrgCKV0jHlRlbVWVu75LVcRZ6wE9YKCOzdoY30fEPxBGdE/otBp9l+OotgYdvB8BQOuMP/6EPtcBANwh+Z9xoYYtekgg0659PeAYztWDw7k0PbquMh7dRvbYNT0aDLvO4PNkdpqTFPo2ELzECAm8fzbDHp4XVjkkENzn+j0PWr6iC7qW07aXGjo7JeN5zevocd8p9oqxu6T6CaD6bq5G33UdocvO1E4v3nUduWZnJZL1VlHt5RZLpdf8N3SWhGvpd5BAUC3boi7TrJhUy7ZeTapFelI0k/v4sEO3cYiaxPLabm3otzKYaO2FGl4vjPh0B6M5RbXdeUiAf20sPw3TYfijs4QcR8k9ei0N6pWAWDZLo/a3YfbYpSR+jISp6XfWQQL/uG+mzBDeVlrb1Ui7LuihC9kU9vw8bdPJo3qQBI4bJ/aF75QjHaaQbbvYZ1h4rkb1oBHOQ4R/zKdyb8G6iDWw2mg1+oM0qKnvxzQeSSP+wktIgH6d574rSOBrT2PfJXJhjNOZqtEM6OSD5Zm5jrnwE7vmajxo+eq41DrUwSg/4aUXdjC1pVHYugMkcIL+n8v+CHwE+GhzVZBeIOT5QvItIo/72fM7K5qPY2GUid6JoI55xDS1uXFyUXD9FY8fvbdmvFU8ajHNRIC2iZ6mbGsPtdrufOf1Lb546y2vHPYeqnUw1wsvIQFCp3/IFSRA9jjqFl98o94QEvjWf23jX6127Qn6f+72R/CsHJ6TkBEouFp0RTHewermRybeTHg+ohbcjAzfSd7Vqqpr8cUfa9v/7w7ScItPw7n/S3hYmY2tBkiAfWOMtRuG/85lXRTzdJkVNTRFfV7UTdB3p2YnB/vMvwMzq637I/gy/e3EsrQFmDrqRkfczOOL73yTS0iA4rWlNSqw4JczjQqkgGhPJBGRL7iCBP4l8jaC8jh5x1AI4DREGCiUqk+fTsLJuB9ap96s8VKnWm3NHlcvtdxGOMeNoRzSFPMiayGVXDjoGM9Xp4i8Gbbk2m/tE3nrJYwpElmXexx6dC69bD8iK7ABlN4wgyaghpzVPHgFCXC7tR7vJCLqbsPsSci3efIhZofaPmf2Ua39r4PvdK4Mchw65zi1T/hK3c4+oRtyk9w+G7HPvCzLchkP7azkjJS7c2yH185x0Ty3iaWnwIEQB8KJYrVgxMUmkmxE6vSaM6sf9+ZnB2M8m+RTtsfhXD4kGi8MlumiCJpH3XinBkiAfI3YuDHJpZeQQGDkHl92rIzySuoosWGNrvcqHlVnk6i0iDOzmAlWrSHN87pomiW1TZg4q/teN9PD6zuvmqot8o+26RM/qVH5rX7I4fbW1fJELm3zkxxUpTQZLOZi8/QqTaEm07YACOM/M8rm9Z0XdVOtlktqO7I3HmCSOZzmPF1O2/GZa7mUf8eVvcbVuq1WSz1r+ytzq1KaytQu4yEdQmEopa5cfYFymfBd5fgBFmY7pQeHppnkyRIuIU0OCANsNPI46ryuXpwbZ40BFshefAUJMDHtCuBWhXupzB7NI/vZ4i3XHs2jH+fdPahYGCfP5RZptYRFsTwTVxuUY5OlD75IEZZgRR2hMgGu5QKbTGH6siP6jdI+2Y6HT60Jpk5GBcZLtFBW87a2MPiWsgBGFIbvcI8AUVJSzEtgKScBDHvCD5JMuKJVKli1Vd7iuD28XbzDPPsoT9KwY64Bx15c5UsdW+/tvl4FwFF48eN+hss+9xQFbPPjuO4YgPXAZBYqBUdIkkPN9VOlWYCRHacP65TZWDsHW/XohAtji3JEJImUjjnhmYO+unJLjY1NoT6BZ9pDU1FUkrfVo0XBGmkCnMwxtCFX+6H6vKghL5qsrjKPcNA3HiinU2hqitu0pL4giUdcixJlO4ZCooXCAy11KrGKcAnazTqOAI2Tdgsw/Ffpt3j/nBxA9xLn6LzqB/P/f2PY2gOFmUTsrKgfPlejbxmJfzAcC13h56WR2M8KTMgAuBRVRP/Ss11k9OkkXFSOym9j5HDjcNxpNdb5yfxqW4yqLsq6aE5hXjWt3Ay4rcxUCZXALxJxjxXd2qLgFnyOCs+nNmwuL9IPhsSTzrdCqUkvpLwql62WyyJr4T/lLhJFQE6lDHnwnRyrFOCaSo5sMEfoKys0nEeCqgZ4bzj+m9kLeNR1n0efRw==",
+-    "serverlist.lua": "G6sMAGQzVd/k54Woi8rgub8sNc6cctOnj5YgGRcKVEnII+P+x1xoK2ktrda7+3/myQWxxLgvmCaTKNaskgkFljraSCQeLfEoidAiKuJ025Edg0w9Jj3fR8SnQ8K4wOgpCew/PG16holaxqg/tKL7ApNr9aGVmrmEJj/QSi1cBIQCdk1+jXO/lIHHpQOtFNrOEXfIg33kU0/VmzE5FH+oh96hW6DJ2cDwj/SP6hbFPvJ5qlyP9Jei9ZRkXtub20c+C8PMo4D1k7heGKsc+VIRm4hp7imJSsMuXYf2hcRXAhJKZyLMTEaY5LC/5T9XP2TiY498H2rnl716N/XIEtdG5pRyDYvUgNHkc1w6waVbn7ObeaxNnsOHVnZ3vVKimUeIF6RRLLR4ENZYUEjtbe7ELAq37oUCC64YPfhLK/Xk3boMA9fm10DTLggFnqYlpfmvHKSqY+qWO/u9ju0xU+cEza/Gr4k9NvJrG0bbMLK79K5OxF/lVy8gUN7VNZM8oCxDfDPIPmtCHUYzsqPf2xBrztASj/zSGgAg+uBt38drKQAIzNL5ikS5NAX2NiNLAUBwlUsJvWqXErcmPzjZeh8+dOj5imRcEX3CuBpdVshoskybmdEGvs42fGkVq5i/kFcU3YcQtzBHNHsn5jaLXN0YeATFKQeCZW0LGPRmK3+gYLD0iFJcFEQwAxayAcQsKSw8E4aXKGdOHH6YuL67CiW00Hgo0Dwd40PlfMWarvDdpTDIxRZhkAsRj63dbWhyA0afzl10ldiFIK5JjTNGwkYBTL5Q6DxVsac+lOngV55okMHo59Ekm0SfpyQZnhf87WsnqItd2Koz0YQOwN4qVXxFHz98AQW4cIxWKlVceon/U6GAtLCvzlMdb0SvrU+lCa5k0MWnQ4zI0l0DBmRK9ukF15hOSfKw2yY4jKWuZyq7mq7h86UJ78ktq695pvh/diVPLqVliLVBVmqN2gaJAyrXBnVGqXHOMCtKFgX0p4I9fuEiUA0FiO0NigKyE8eMdQZHUE5ers+mJ8cPD+dnsP+uJ55dl6ePDw/np5MSqzH0/j70Q29G20D1NmThLWsYmlI/n3SgmfBsUqFAnUcp4KQWS8DuF/w/UMTa/Brqn77FdQRjqo7oY+h6aRMSFC2MGoiCl90rcxFi/QBPIkNZemfYKYWemmyJUkokbm0ER/J/5kRouszlMVXw04G3v6/MtFLqCLJ9mUVaB1SBEmyMh2DYEAvHDINWFaAEG8g+y66yD9nxtYEuBHNGQz5uYrM8UxEpUTPHvGDvKLrtF3QWKj5Fx3h2CvtQ4iTO+17bM9ROHFCCjlIibiFEqF3nWqwtTOaIfzLCtFO+KHX7QALp4C+ttdYa",
++    "serverlist.lua": "G9QNAGQzVd/k54Woi8rgub8sN3vITZ8+WIJtXChQJSGPy/n+x1xoy2G13v37M0+mmCfGfcE0mUSxZnWPUthSxyyReLTEoyRCi9gYqUn3AIU7wHyXfvk+It4cMqUFpcBZ4fDxZuNLyjwTSvbLGrkvcKU1X9aYCWZy5ZE1ZoEJCIawa/JLXIWlDDSWj6wx5FtkaUl6/yIXgetP50oY/pHu+0i4IFc2A+of6R83M1L/Ile5xo7kTyUfOOu8thf3L3IZ+0mgDpaP0nphrFLzrhJNE+V54Kwm9bvBlvy7iLcCJJjPKcxMTpj6YX/Lf6pOZeRLR/IUGwzLXq3PHYmmtdM559LCAk/BWfI5blBpiesrwUmgxpUlfFnjd80HZ54EgnhBGcVDi0fyxkJCWm9zT7MoXLpTjqK0aujaG2vMa8B1FXtp3K+ex21UjjLOS87zXyVIFRRulzv7vc78mXCLSu7XNKxZAk311y4MdmHg9+WdndNf5VcvIVAe1Z2wPpMuY/p0yNYdcUvJDfzg9y7wBFhLLhq5xXxJk372GGcsF4kaEmUM2ZVlVDIJTIQOQyFTwLLPnLcpj6zZWGtUMIcmatibcIfQFwG4C8sMpnFmH8SeWXDpdMAu8B/sLPxjnZuhuoP2lQAAcgze9359NAUASZ1csVKQ4igxzcSSAJBCpUpjR4CwcCK8sI1xaGHXqxWrHoB61UtHUtUk5Ip6MrGQ9W/OV2ysyUiO8rjDKDI9UFXwgGNWjTq8B6U9KsWkiGCez2QLiElaPnm+969IL1ExkrE8eR/rMMWWhiH/1JB9Qqwx1OXxStJNir1erhF7vaSsa9/fhWnpwOCLOSas1S8EcUmekjEQtoYgHMqhTqDsL0IcjAKbaqBBhuc4Dyk5HrYHzlrksQxVpBuzhgyVAbv9MWLzGTXXT/jbNajkj10RUufsCR4Rtlau5Vp8fvcFDCEMBlljci1B7vcF7qYwhLzwHxi4iVkhr63kxRGtVOnkiz4lEj0d4ndEqYVrvAgypmSCA3W2aM1Ci6VmfPUGi/FBlN/FdzKn/j+71lfMeRlT45CVWYN2QVNPxnWAueTcxQS39mYqwj8V7OELTMANDKHb5mA4hOIcRagp4ASq0fvd5fj87Pn56hIOP3TDy7vq4uX5+epiVKY12L+si13fucEucLMLRfwshtaJ8GI6HasnwnFUoSCHV1KLb8pWWALWvtP/nhM17hd2//QDrSMYU3VAl2Lb6VAjQdHCqIEocDMCpq9jqh/QKTbIxgU2+dJNs69IK00sMx+BSP5vrwiOFwQ9pI5h3MuWypmFNcacQLHXtyjrgApwhs2WIKj18XAm0FtVBs6wKeH1zZUPoTi7McgFYXZtCH6fL68sUxEpOm005J065ETbL0gWGj5Gx1hxAXtflqwYwsjUNDSoCJyh5ZxZZhATNNjijBoPozlhm0gwQZc3QbV+YIW018Zaay0=",
+     "shipdealer.designer.lua": "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",
+     "shipdealer.lua": "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",
+     "spdead.designer.lua": "GzALAORcmv338xo5yV1HBnuvk1LbiJhZGx0GCyalTVwTaK0SLTrRL3palI1nlV+1qKSiwt3MJlBAQxrPwDxnxYfmVQz7HxG/FPJgyVhcpuzaQAleRwAQovn0GQwfAwD4I/KPOHO2JQYNSz4dPw+Uxba7S7RtQkMJNwJTmpiG8KihQAIx0GNmSDZVVvyyD8Rl0PD6HnzKx8Z4wFjmv+voOTP1qFR3xknPf4BrcNtlRsQaOE9cXbsjYj3gwhqT0BD7+yaQv41RioXQdDGBhi9rWy5YsYyv+KjPnjnLHWioZRn28nVybcegQf0qUShQVe4dJ+6QgqVk7jzQcCN1KlbQjF52efDmmTfKmJpYQxn23okWWkctQsNAwxpxxLufCkopJnoavJlH34Zo+qFIeKoSC9Z+wlgH8JTQ2jFWacqksBcQQVuVvIaNsgCJmKGQyZGL98wxpP8OsbEMGgofjUVzzzGbByoAIRPnk4uROfbbNGHsQkf87Alw4GvMp+LRJRqxiQDmKxzTE4OGotynjzg5CxrkD/mLnb0XoEGVPz9/TE985F4INMgqAeyXTqnGGW05Bw1yi1iIVxWA1mrQqvDDHKEr7IRv9FEqxY9MPdkbF7CncF9EoMgN8aCjSOquUCSlYpipVDIZ8do4ZYwqRNFgnMJABFKAc+Bv2GM4remtsdpD13b7GT4aWzB2/ed+rwDgmn0DvvjAY3riRR+b/+I8yY79oAPUoh5JSlWv4zjYhELvSkmblFUO87jleON4e6WWyKP7eKxyDCxFX13nGn294FPB9MTF56I3O2PjY2zHVPlSubqahKaDQCSZd0/WRpjExiTbqZPbaMsFaPguVxhrm+oXBVMRU4VVZRX5Ow+wM8PMYIiXoacpWSSl2E0Pn7bUOW8TBZy0a7TMW58EO2yCtKB+gu+j9xE=",
