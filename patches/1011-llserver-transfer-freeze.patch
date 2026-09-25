@@ -1,0 +1,494 @@
+--- a/src/LibreLancer/Server/Player.cs
++++ b/src/LibreLancer/Server/Player.cs
+@@ -58,6 +58,21 @@
+         private bool jumpPending;
+ 
+         private ConcurrentQueue<Action> saveActions = new();
++        private readonly object transferSync = new();
++        private readonly object saveSync = new();
++        private readonly SemaphoreSlim packetProcessingGate = new(1, 1);
++        private Guid transferId;
++        private Task<byte[]>? transferSnapshotTask;
++        private int transferState;
++        private int sourceDisconnected;
++
++        private const int TransferActive = 0;
++        private const int TransferFreezing = 1;
++        private const int TransferFrozen = 2;
++        private const int TransferReleased = 3;
++        private const int MaxTransferSnapshotBytes = 16 * 1024 * 1024;
++
++        public bool TransferInProgress => Volatile.Read(ref transferState) is TransferFreezing or TransferFrozen;
+ 
+         // State
+         public NetCharacter? Character;
+@@ -119,6 +134,8 @@
+ 
+         public void UpdateMissionRuntime(double elapsed)
+         {
++            if (Volatile.Read(ref transferState) != TransferActive)
++                return;
+             msnRuntime?.Update(elapsed);
+ 
+             if (Space != null)
+@@ -1138,6 +1155,8 @@
+ 
+         public void EnqueuePacket(IPacket packet)
+         {
++            if (Volatile.Read(ref transferState) != TransferActive)
++                return;
+             inputPackets.Post(packet);
+         }
+ 
+@@ -1168,23 +1187,30 @@
+ 
+         public async Task ProcessPacketDirect(IPacket packet)
+         {
+-            if (ResponseHandler.HandlePacket(packet))
+-                return;
+-            if (await GeneratedProtocol.HandleIServerPlayer(packet, this, Client))
+-                return;
+-            if (Space != null && await GeneratedProtocol.HandleISpacePlayer(packet, Space, Client))
+-                return;
+-            if (Baseside != null && await GeneratedProtocol.HandleIBasesidePlayer(packet, Baseside, Client))
+-                return;
+-
+-            if (packet is InputUpdatePacket p)
+-                Space?.World.InputsUpdate(this, p);
+-            else
+-            {
+-                FLLog.Info("Player", $"Disconnecting player, invalid packet type {packet.GetType()}");
+-                Client.Disconnect(DisconnectReason.ConnectionError);
+-                Disconnected();
+-            }
++            await packetProcessingGate.WaitAsync().ConfigureAwait(false);
++            try
++            {
++                if (Volatile.Read(ref transferState) != TransferActive)
++                    return;
++                if (ResponseHandler.HandlePacket(packet))
++                    return;
++                if (await GeneratedProtocol.HandleIServerPlayer(packet, this, Client))
++                    return;
++                if (Space != null && await GeneratedProtocol.HandleISpacePlayer(packet, Space, Client))
++                    return;
++                if (Baseside != null && await GeneratedProtocol.HandleIBasesidePlayer(packet, Baseside, Client))
++                    return;
++
++                if (packet is InputUpdatePacket p)
++                    Space?.World.InputsUpdate(this, p);
++                else
++                {
++                    FLLog.Info("Player", $"Disconnecting player, invalid packet type {packet.GetType()}");
++                    Client.Disconnect(DisconnectReason.ConnectionError);
++                    Disconnected();
++                }
++            }
++            finally { packetProcessingGate.Release(); }
+         }
+ 
+         private NetLoadout? _scanLoadout;
+@@ -1522,8 +1548,173 @@
+ 
+         public void RunSave()
+         {
+-            while (saveActions.TryDequeue(out var a))
+-                a();
++            lock (saveSync)
++            {
++                while (saveActions.TryDequeue(out var a))
++                    a();
++            }
++        }
++
++        /// <summary>Freezes this character in the source simulation and returns its Freelancer save snapshot.</summary>
++        public async Task<byte[]> FreezeForTransferAsync(Guid id, long expectedCharacterId)
++        {
++            if (id == Guid.Empty || expectedCharacterId <= 0)
++                throw new ArgumentException("Transfer and character IDs must be valid.");
++
++            await packetProcessingGate.WaitAsync().ConfigureAwait(false);
++            Task<byte[]> snapshotTask;
++            try
++            {
++                lock (transferSync)
++                {
++                    if (transferState != TransferActive)
++                    {
++                        if (transferId == id && transferSnapshotTask != null)
++                            snapshotTask = transferSnapshotTask;
++                        else
++                            throw new InvalidOperationException("Player already has another transfer in progress.");
++                    }
++                    else
++                    {
++                        if (Character == null || Character.ID != expectedCharacterId || Space == null || Base != null)
++                            throw new InvalidOperationException("Character is not eligible for a space transfer.");
++                        transferId = id;
++                        Volatile.Write(ref transferState, TransferFreezing);
++                        transferSnapshotTask = FreezeTransferCoreAsync(id, expectedCharacterId, Space);
++                        snapshotTask = transferSnapshotTask;
++                    }
++                }
++            }
++            finally { packetProcessingGate.Release(); }
++
++            return await snapshotTask.ConfigureAwait(false);
++        }
++
++        private async Task<byte[]> FreezeTransferCoreAsync(Guid id, long expectedCharacterId, SpacePlayer sourceSpace)
++        {
++            var removedFromWorld = false;
++            try
++            {
++                var transform = await sourceSpace.FreezeAsync().ConfigureAwait(false);
++                removedFromWorld = true;
++                Position = transform.Position;
++                Orientation = transform.Orientation;
++
++                byte[] snapshot;
++                lock (saveSync)
++                {
++                    if (Character == null || Character.ID != expectedCharacterId || transferId != id)
++                        throw new InvalidOperationException("Character ownership changed during transfer freeze.");
++
++                    RunSave();
++                    var now = DateTime.UtcNow;
++                    using (var characterUpdate = Character.BeginTransaction())
++                    {
++                        characterUpdate.UpdatePosition(Base, System, Position, Orientation);
++                        characterUpdate.UpdateTime(Character.Time + (now - StartTime).TotalSeconds);
++                    }
++                    StartTime = now;
++
++                    SaveGame save;
++                    lock (thns)
++                    {
++                        save = SaveWriter.CreateSave(Character, null, 0, now, Game.GameData, thns.Rtcs,
++                            thns.Ambients, Story, MPlayer);
++                    }
++                    MissionRuntime?.WriteActiveTriggers(save);
++                    using var stream = new MemoryStream();
++                    IniWriter.WriteIni(stream, save.ToIni());
++                    if (stream.Length is 0 or > MaxTransferSnapshotBytes)
++                        throw new InvalidDataException("Transfer snapshot size is outside the supported limit.");
++                    snapshot = stream.ToArray();
++                }
++
++                lock (transferSync)
++                    Volatile.Write(ref transferState, TransferFrozen);
++                return snapshot;
++            }
++            catch
++            {
++                lock (transferSync)
++                {
++                    transferId = Guid.Empty;
++                    transferSnapshotTask = null;
++                    Volatile.Write(ref transferState, TransferActive);
++                }
++                if (removedFromWorld && Character != null && Volatile.Read(ref sourceDisconnected) == 0)
++                    SpaceInitialSpawn(null);
++                if (Volatile.Read(ref sourceDisconnected) != 0)
++                    FinalizeDisconnectedTransfer();
++                throw;
++            }
++        }
++
++        /// <summary>Resumes the source character after Gateway confirms that the transfer was aborted.</summary>
++        public bool AbortTransferFreeze(Guid id)
++        {
++            lock (transferSync)
++            {
++                if (transferState != TransferFrozen || transferId != id)
++                    return false;
++                transferId = Guid.Empty;
++                transferSnapshotTask = null;
++                Volatile.Write(ref transferState, TransferActive);
++            }
++            if (Volatile.Read(ref sourceDisconnected) != 0)
++                FinalizeDisconnectedTransfer();
++            else
++                SpaceInitialSpawn(null);
++            return true;
++        }
++
++        /// <summary>Discards the source copy only after Gateway confirms the atomic lease commit.</summary>
++        public bool ReleaseAfterTransferCommit(Guid id)
++        {
++            lock (transferSync)
++            {
++                if (transferState != TransferFrozen || transferId != id || Character == null)
++                    return false;
++                var characterId = Character.ID;
++                Volatile.Write(ref transferState, TransferReleased);
++                Game.CharactersInUse.Remove(characterId);
++                Game.ServerEvents.Enqueue(new ServerEvent
++                {
++                    Type = ServerEventType.CharacterDisconnected,
++                    TimeUtc = DateTime.UtcNow,
++                    Payload = new CharacterDisconnectedEventPayload(this)
++                });
++                Character = null;
++                Space = null;
++            }
++            foreach (var player in Game.AllPlayers.Where(x => x != this))
++                player.RpcClient.OnPlayerLeave(ID, Name);
++            Client.Disconnect(DisconnectReason.Unknown);
++            if (Volatile.Read(ref sourceDisconnected) != 0)
++                RemoveDisconnectedTransferPlayer();
++            return true;
++        }
++
++        private void FinalizeDisconnectedTransfer()
++        {
++            if (Character != null)
++            {
++                Game.CharactersInUse.Remove(Character.ID);
++                Game.ServerEvents.Enqueue(new ServerEvent
++                {
++                    Type = ServerEventType.CharacterDisconnected,
++                    TimeUtc = DateTime.UtcNow,
++                    Payload = new CharacterDisconnectedEventPayload(this)
++                });
++                Character = null;
++            }
++            Space = null;
++            RemoveDisconnectedTransferPlayer();
++        }
++
++        private void RemoveDisconnectedTransferPlayer()
++        {
++            lock (Game.ConnectedPlayers)
++                Game.ConnectedPlayers.Remove(this);
+         }
+ 
+         private const string SAVE_ALPHABET = "23456789bcdfghjlmnpqrstvwxyz";
+@@ -1547,55 +1738,60 @@
+ 
+         public Task<string> SaveSP(string? description, int ids, bool isAutoSave, DateTime? timeStamp)
+         {
+-            var completionSource = new TaskCompletionSource<string>();
+-            saveActions.Enqueue(() =>
+-            {
+-                if (Character != null)
+-                {
+-                    using var c = Character.BeginTransaction();
+-                    c.UpdatePosition(Base, System, Position, Orientation);
+-                    var n = DateTime.UtcNow;
+-                    c.UpdateTime(Character.Time + (n - StartTime).Seconds);
+-                    StartTime = n;
+-                }
+-
+-                SaveGame sg;
+-
+-                lock (thns)
+-                {
+-                    sg = SaveWriter.CreateSave(Character!, description, ids, timeStamp, Game.GameData, thns.Rtcs,
+-                        thns.Ambients, Story, MPlayer);
+-                }
+-
+-                string path;
+-                MissionRuntime?.WriteActiveTriggers(sg);
+-
+-                if (isAutoSave)
+-                {
+-                    path = Path.Combine(SaveFolder, "AutoSave.fl");
+-                }
+-                else
+-                {
+-                    var filename = $"Save0{EncodeTime(DateTimeOffset.Now.ToUnixTimeSeconds())}.fl";
+-                    path = Path.Combine(SaveFolder, filename);
+-                    int i = 0;
+-
+-                    while (File.Exists(path))
+-                    {
+-                        filename = $"Save0{EncodeTime(DateTimeOffset.Now.ToUnixTimeSeconds())}{i++}.fl";
++            var completionSource = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
++            lock (transferSync)
++            {
++                if (transferState != TransferActive)
++                    return Task.FromException<string>(new InvalidOperationException("Character is frozen for transfer."));
++                saveActions.Enqueue(() =>
++                {
++                    if (Character != null)
++                    {
++                        using var c = Character.BeginTransaction();
++                        c.UpdatePosition(Base, System, Position, Orientation);
++                        var n = DateTime.UtcNow;
++                        c.UpdateTime(Character.Time + (n - StartTime).Seconds);
++                        StartTime = n;
++                    }
++
++                    SaveGame sg;
++
++                    lock (thns)
++                    {
++                        sg = SaveWriter.CreateSave(Character!, description, ids, timeStamp, Game.GameData, thns.Rtcs,
++                            thns.Ambients, Story, MPlayer);
++                    }
++
++                    string path;
++                    MissionRuntime?.WriteActiveTriggers(sg);
++
++                    if (isAutoSave)
++                    {
++                        path = Path.Combine(SaveFolder, "AutoSave.fl");
++                    }
++                    else
++                    {
++                        var filename = $"Save0{EncodeTime(DateTimeOffset.Now.ToUnixTimeSeconds())}.fl";
+                         path = Path.Combine(SaveFolder, filename);
+-                    }
+-                }
+-
+-                IniWriter.WriteIniFile(path, sg.ToIni());
+-                completionSource.SetResult(path);
+-
+-                if (isAutoSave || ids != 0)
+-                {
+-                    // For the "load autosave" functionality
+-                    rpcClient.SPSetAutosave(path);
+-                }
+-            });
++                        int i = 0;
++
++                        while (File.Exists(path))
++                        {
++                            filename = $"Save0{EncodeTime(DateTimeOffset.Now.ToUnixTimeSeconds())}{i++}.fl";
++                            path = Path.Combine(SaveFolder, filename);
++                        }
++                    }
++
++                    IniWriter.WriteIniFile(path, sg.ToIni());
++                    completionSource.SetResult(path);
++
++                    if (isAutoSave || ids != 0)
++                    {
++                        // For the "load autosave" functionality
++                        rpcClient.SPSetAutosave(path);
++                    }
++                });
++            }
+             return completionSource.Task;
+         }
+ 
+@@ -1635,6 +1831,16 @@
+ 
+         public void Disconnected()
+         {
++            if (Volatile.Read(ref transferState) == TransferReleased)
++            {
++                RemoveDisconnectedTransferPlayer();
++                return;
++            }
++            if (TransferInProgress)
++            {
++                Volatile.Write(ref sourceDisconnected, 1);
++                return;
++            }
+             if (packetQueueTask != null)
+             {
+                 inputPackets.Complete();
+--- a/src/LibreLancer/Server/SpacePlayer.cs
++++ b/src/LibreLancer/Server/SpacePlayer.cs
+@@ -1,4 +1,5 @@
+ using System.Numerics;
++using System.Threading.Tasks;
+ using LibreLancer.Missions;
+ using LibreLancer.Net;
+ using LibreLancer.Net.Protocol;
+@@ -26,6 +27,8 @@
+     {
+         world.RemovePlayer(player, exploded);
+     }
++
++    public Task<(Vector3 Position, Quaternion Orientation)> FreezeAsync() => world.FreezePlayerAsync(player);
+ 
+     public void ForceMove(Vector3 position, Quaternion? orientation = null)
+     {
+--- a/src/LibreLancer/Server/ServerWorld.cs
++++ b/src/LibreLancer/Server/ServerWorld.cs
+@@ -10,6 +10,7 @@
+ using System.Linq;
+ using System.Numerics;
+ using System.Threading;
++using System.Threading.Tasks;
+ using LibreLancer.Data;
+ using LibreLancer.Data.GameData;
+ using LibreLancer.Data.GameData.Items;
+@@ -890,6 +891,29 @@
+ 
+                 Interlocked.Decrement(ref PlayerCount);
+             });
++        }
++
++        public Task<(Vector3 Position, Quaternion Orientation)> FreezePlayerAsync(Player player)
++        {
++            var completion = new TaskCompletionSource<(Vector3, Quaternion)>(
++                TaskCreationOptions.RunContinuationsAsynchronously);
++            actions.Enqueue(() =>
++            {
++                if (!Players.TryGetValue(player, out var obj))
++                {
++                    completion.TrySetException(new InvalidOperationException("Player is not active in this world."));
++                    return;
++                }
++
++                var transform = obj.WorldTransform;
++                RemoveObjectInternal(obj);
++                Players.Remove(player);
++                foreach (var other in Players)
++                    other.Key.Despawn(player.ID, false);
++                Interlocked.Decrement(ref PlayerCount);
++                completion.TrySetResult((transform.Position, transform.Orientation));
++            });
++            return completion.Task;
+         }
+ 
+         public void RemoveSpawnedObject(GameObject obj, bool exploded)
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -236,6 +236,26 @@
+         public Player? GetConnectedPlayer(string name) =>
+             GetConnectedPlayers().FirstOrDefault(x => x.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+ 
++        /// <summary>
++        /// Freezes a connected character and captures its save snapshot. The caller must first validate
++        /// the transfer with Gateway and may only release or abort it using the matching authoritative result.
++        /// </summary>
++        public Task<byte[]> FreezeCharacterForTransferAsync(Guid transferId, long characterId)
++        {
++            if (transferId == Guid.Empty || characterId <= 0)
++                throw new ArgumentException("Transfer and character IDs must be valid.");
++            var player = GetConnectedPlayers().SingleOrDefault(x => x.Character?.ID == characterId);
++            if (player == null)
++                return Task.FromException<byte[]>(new InvalidOperationException("Character is not connected to this instance."));
++            return player.FreezeForTransferAsync(transferId, characterId);
++        }
++
++        public bool AbortCharacterTransfer(Guid transferId, long characterId) =>
++            GetConnectedPlayers().SingleOrDefault(x => x.Character?.ID == characterId)?.AbortTransferFreeze(transferId) ?? false;
++
++        public bool ReleaseCharacterAfterTransferCommit(Guid transferId, long characterId) =>
++            GetConnectedPlayers().SingleOrDefault(x => x.Character?.ID == characterId)?.ReleaseAfterTransferCommit(transferId) ?? false;
++
+         public void LoadSaveGame(SaveGame sg) => worldRequests.Enqueue(() =>
+         {
+             LocalPlayer!.OpenSaveGame(sg);
+--- a/src/LibreLancer/Net/GameListener.cs
++++ b/src/LibreLancer/Net/GameListener.cs
+@@ -146,10 +146,9 @@
+                 if (peer.Tag is Player player)
+                 {
+                     player.Disconnected();
+-                    lock (game.ConnectedPlayers)
+-                    {
+-                        game.ConnectedPlayers.Remove(player);
+-                    }
++                    if (!player.TransferInProgress)
++                        lock (game.ConnectedPlayers)
++                            game.ConnectedPlayers.Remove(player);
+                 }
+             };
+             broadcastListener.ConnectionRequestEvent += request => request.RejectForce();

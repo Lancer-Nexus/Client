@@ -1,0 +1,1120 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index bd997025..97b8b342 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -26,10 +26,12 @@ Maintain the Lancer Nexus client fork while preserving compatibility with upstre
+ 
+ - This repository is the existing LibreLancer fork, not an empty .NET service repository. Preserve its upstream layout, submodules and native dependencies.
+ - The supported entry point is `./build.sh`, which validates `build.config`, checks native dependencies and submodules, then runs `scripts/BuildLL/BuildLL.csproj`.
++- `BuildLL` emits the Windows and Linux engine/SDK release archives as single-root `tar.zst` packages; the packager uses the .NET Zstandard stream and preserves Linux executable modes.
+ - The main solution is `LibreLancer.sln`; it contains the client, server, editor, launcher, tests and native-integrated projects. Do not invent a second solution or packaging path for MMO work.
+ - The primary automated test project is `src/LibreLancer.Tests/LibreLancer.Tests.csproj`. Run the relevant test subset after client changes; use the full solution build when the change crosses shared engine or project boundaries.
+ - Native components are configured through the existing `CMakeLists.txt` and dependencies checked by `scripts/depcheck_unix`; do not replace this with a service-style `dotnet restore`-only workflow.
+ - The current project files target `net10.0`. Keep cluster functionality optional and isolated behind existing configuration/capability boundaries while upstream synchronization remains possible.
++- `src/LibreLancer/LibreLancer.csproj` references the shared `Protocol` submodule for the optional Gateway version handshake; initialize that submodule before building the client.
+ 
+ ## Working-model escalation
+ 
+@@ -42,3 +44,4 @@ Maintain the Lancer Nexus client fork while preserving compatibility with upstre
+ 2. Keep the smallest possible patch against the upstream fork.
+ 3. Build the client and run the relevant UI and protocol tests.
+ 4. Document any upstream conflict or compatibility assumption.
++5. Keep every client change in the patch series under `patches/series`; the patch applier runs before the supported build entrypoints and skips patches already applied.
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index 64dc1094..cf809780 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -1,24 +1,12 @@
+-# Contributing to Librelancer
+-
+-We're happy to see you're interested in contributing to Librelancer, whether it be through issues or pull requests. Please keep in mind a few key guidelines when preparing to contribute:
+-
+-1. **Submissions should be your own work**
+-
+-Librelancer does not accept issues or pull requests where it is evident that the main author of the description, comments, or code is an LLM or AI-assisted tool. **Issues and PRs where LLM-isms are evident will be closed automatically.**
+-
+-Code must also be able to be licensed under the MIT license, and cannot come from other projects with more restricitive license terms.
+-
+-2. **Check against vanilla Freelancer, and don't assume it is logical**
+-
+-Freelancer has a particularly quirky game engine, and all of us have fallen into the trap of thinking certain strings or functions behave in a way that would be logically consistent, particularly in a modern context where a lot of these features are common across games.
+-
+-Freelancer's approach to several things can be unorthodox, and it is best to check behaviour with the original game before committing.
+-
+-3. **Be concise**
+-
+-Where possible, try to keep PRs touching one thing at a time. Sometimes certain bugfixes can be merged immediately while others need extra work. Keeping these separate means more work can be merged faster.
+-
+-4. **Keep in touch**
+-
+-When it comes to larger changesets, it is best to have a chat before opening a PR. This makes reviews easier, and helps make sure a change is something that can be upstreamable and in the right direction before a big set of changes is to be reviewed.
+-
++**Contributing to Librelancer**  
++We're happy to see you're interested in contributing to Librelancer, whether it be through issues or pull requests. Please keep in mind a few key guidelines when preparing to contribute:  
++1. **Submissions should be your own work**  
++Librelancer does not accept issues or pull requests where it is evident that the main author of the description, comments, or code.  
++Code must also be able to be licensed under the MIT license, and cannot come from other projects with more restricitive license terms.  
++1. **Check against vanilla Freelancer, and don't assume it is logical**  
++Freelancer has a particularly quirky game engine, and all of us have fallen into the trap of thinking certain strings or functions behave in a way that would be logically consistent, particularly in a modern context where a lot of these features are common across games.  
++Freelancer's approach to several things can be unorthodox, and it is best to check behaviour with the original game before committing.  
++1. **Be concise**  
++Where possible, try to keep PRs touching one thing at a time. Sometimes certain bugfixes can be merged immediately while others need extra work. Keeping these separate means more work can be merged faster.  
++1. **Keep in touch**  
++When it comes to larger changesets, it is best to have a chat before opening a PR. This makes reviews easier, and helps make sure a change is something that can be upstreamable and in the right direction before a big set of changes is to be reviewed.  
+diff --git a/README.md b/README.md
+index 25e71696..a470a280 100644
+--- a/README.md
++++ b/README.md
+@@ -32,8 +32,18 @@ git submodule update --init --remote --merge Protocol
+ 
+ CI performs the same update before the existing LibreLancer build. Standalone client builds remain possible when the cluster integration is disabled.
+ 
++Lancer Nexus client changes are carried by the patch series in `patches/series`. The root build orchestrator applies it before building; direct `./build.sh` runs the same idempotent patch applier when the overlay is present. The applier rejects partial or conflicting patch states instead of forcing them.
++
++The `LibreLancer` project references the shared `Protocol` submodule for its optional Gateway version exchange. Set `cluster_gateway_url` to a trusted HTTPS Gateway in `[Librelancer]` to enter the Gateway login screen at startup; `cluster_target_system` (default `li01`) and `cluster_region` (default `eu`) control the first placement request. An empty Gateway URL keeps the standalone menu and server discovery.
++
++The Lancer Nexus collector stages Linux client builds with the `lancer` apphost and its dependencies at the client root, with Freelancer `DATA` contents under `data/`. Its generated root `librelancer.ini` points to that directory. The package keeps only the resource DLLs, `content.dll`, and the two `.fl` start files used by LibreLancer; the original Freelancer and server executables are not required. LibreLancer still accepts the conventional `EXE/` and `DLLS/BIN/` paths for existing installations.
++
++`BuildLL` packages Linux and Windows engine and SDK releases as one-root-directory `tar.zst` archives. The packager preserves Unix modes and fails if a release tree contains symbolic links, which are not accepted by the updater's safe extractor.
++
++`NexusGatewayLogin` reads `client-version.json` from the running client release directory, POSTs `ClientVersionHello` before credentials, then requests placement with the authenticated session. The client connects to the assigned endpoint with the Gateway JoinTicket. A required update displays a prompt and exits with code 42 after acknowledgement. Missing or damaged local version metadata requests repair with exit code 43. The updater can stage and atomically activate a verified client-only release, then launch its `lancer` executable. Required data packages block activation until their installer is implemented; automatic rollback after an unhealthy startup remains pending.
++
+ ## Dedicated server runtime status
+ 
+-`LLServer` can optionally publish an atomic JSON runtime snapshot for the host Agent. Set `RuntimeStatusFile`, `InstanceId`, `SystemId`, `InstanceEndpoint`, and `MaxPlayers` in its server configuration. `MaxPlayers` controls the listener limit and must match the Agent's `Agent__Instance__MaxPlayers`. The snapshot reports the actual listener running state and connected peers; it contains no credentials. Leave these fields unset for standalone deployments. The Agent treats missing or stale snapshots as not ready; LLServer removes the snapshot on a clean stop.
++`LLServer` can optionally publish an atomic JSON runtime snapshot for the host Agent. Set `RuntimeStatusFile`, `InstanceId`, `SystemId`, `InstanceEndpoint`, and `MaxPlayers` in its server configuration. `MaxPlayers` controls the listener limit and must match the Agent's `Agent__Instance__MaxPlayers`. The snapshot reports the actual listener running state and connected peers; it contains no credentials. Optionally set `DrainFlagFile` to a host-local path; while that file exists, the snapshot reports `IsDraining=true`, and the Coordinator stops assigning new sessions while existing sessions remain connected. The host lifecycle controller can enter or leave drain by creating or removing the flag file. Leave these fields unset for standalone deployments. The Agent treats missing or stale snapshots as not ready; LLServer removes the snapshot on a clean stop.
+ 
+ When `LoginUrl` points at the Gateway, the existing LLServer connection challenge verifies the client's short-lived `JoinTicket` through `POST /api/v1/game/verify-ticket`; legacy `/verifytoken` servers remain supported as a fallback. The ticket must be obtained from Gateway placement and is never logged or stored in client configuration.
+diff --git a/appveyor.yml b/appveyor.yml
+index 03767885..d5fa31ae 100644
+--- a/appveyor.yml
++++ b/appveyor.yml
+@@ -28,14 +28,14 @@ for:
+     test: off
+       
+     artifacts:
+-      - path: packaging/packages/librelancer-daily-ubuntu-amd64.tar.gz
+-        name: librelancer-daily-ubuntu-amd64.tar.gz
+-      - path: packaging/packages/librelancer-sdk-daily-ubuntu-amd64.tar.gz
+-        name: librelancer-sdk-daily-ubuntu-amd64.tar.gz
+-      - path: packaging/packages/librelancer-daily-win64.zip
+-        name: librelancer-daily-win64.zip
+-      - path: packaging/packages/librelancer-sdk-daily-win64.zip
+-        name: librelancer-sdk-daily-win64.zip
++      - path: packaging/packages/librelancer-daily-ubuntu-amd64.tar.zst
++        name: librelancer-daily-ubuntu-amd64.tar.zst
++      - path: packaging/packages/librelancer-sdk-daily-ubuntu-amd64.tar.zst
++        name: librelancer-sdk-daily-ubuntu-amd64.tar.zst
++      - path: packaging/packages/librelancer-daily-win64.tar.zst
++        name: librelancer-daily-win64.tar.zst
++      - path: packaging/packages/librelancer-sdk-daily-win64.tar.zst
++        name: librelancer-sdk-daily-win64.tar.zst
+ 
+ 
+     deploy:
+diff --git a/build.sh b/build.sh
+index 13ae23fe..d647844f 100755
+--- a/build.sh
++++ b/build.sh
+@@ -24,6 +24,11 @@ elif [ -f "$SCRIPT_DIR/.git/index" ]; then
+     ( cd "$SCRIPT_DIR" ; git submodule update --recursive )
+ fi
+ 
++# Apply the Lancer Nexus overlay before any managed/native projects are built.
++if [ -x "$SCRIPT_DIR/scripts/apply-lancer-nexus-patches.sh" ]; then
++    "$SCRIPT_DIR/scripts/apply-lancer-nexus-patches.sh"
++fi
++
+ ere_quote() {
+     sed 's/[][\.|$(){}?+*^]/\\&/g' <<< "$*"
+ }
+diff --git a/scripts/BuildLL/BuildLL.csproj b/scripts/BuildLL/BuildLL.csproj
+index 3a1b62c1..a4d3c065 100644
+--- a/scripts/BuildLL/BuildLL.csproj
++++ b/scripts/BuildLL/BuildLL.csproj
+@@ -16,6 +16,7 @@
+         <PackageReference Include="McMaster.Extensions.CommandLineUtils" Version="3.1.0" />
+         <PackageReference Include="Newtonsoft.Json" Version="13.0.1" />
+         <PackageReference Include="Pek.Markdig.HighlightJs" Version="0.5.1" />
++        <PackageReference Include="ZstdSharp.Port" Version="0.8.8" />
+         <PackageReference Include="XmlDocMarkdown.Core" Version="2.9.0" />
+     </ItemGroup>
+ 
+diff --git a/scripts/BuildLL/Program.cs b/scripts/BuildLL/Program.cs
+index 28b7f61a..7a188543 100644
+--- a/scripts/BuildLL/Program.cs
++++ b/scripts/BuildLL/Program.cs
+@@ -413,7 +413,7 @@ namespace BuildLL
+             });
+ 
+ 
+-            Target("BuildEngine", DependsOn("GenerateVersion", "BuildNatives", "ShaderDependencies"), async () =>
++            Target("BuildEngine", DependsOn("GenerateVersion", "GenerateInterface", "BuildNatives", "ShaderDependencies"), async () =>
+             {
+                 if(withWin32)
+                     await FullBuild("win-x86", false);
+@@ -449,14 +449,52 @@ namespace BuildLL
+                 Dotnet.Run("./src/Editor/lleditscript/lleditscript.csproj", "./obj/artifacts", args);
+             });
+ 
+-            static void TarDirectory(string file, string dir)
++            static void TarZstdDirectory(string file, string dir)
+             {
+-                Bash($"tar -I 'gzip -9' -cf {Quote(file)} -C {Quote(dir)} --xform s:'./':: .", true);
+-            }
++                using var output = File.Create(file);
++                using var compressed = new ZstdSharp.CompressionStream(output, 6);
++                using var tar = new TarWriter(compressed, TarEntryFormat.Pax, leaveOpen: true);
+ 
+-            static void ZipDirectory(string file, string dir)
+-            {
+-                Bash($"cd {Quote(dir)} && zip -qq -r -9 - . > {Quote(Path.GetFullPath(file))}", true);
++                void AddEntry(string sourcePath, string archivePath)
++                {
++                    var attributes = File.GetAttributes(sourcePath);
++                    if ((attributes & FileAttributes.ReparsePoint) != 0)
++                        throw new InvalidDataException($"Releasepaket enthält einen Link: {sourcePath}");
++                    if ((attributes & FileAttributes.Directory) != 0)
++                    {
++                        var directoryEntry = new PaxTarEntry(TarEntryType.Directory, archivePath)
++                        {
++                            Mode = GetArchiveMode(sourcePath, directory: true)
++                        };
++                        tar.WriteEntry(directoryEntry);
++                        foreach (var child in Directory.EnumerateFileSystemEntries(sourcePath)
++                                     .OrderBy(Path.GetFileName, StringComparer.Ordinal))
++                            AddEntry(child, archivePath + "/" + Path.GetFileName(child));
++                        return;
++                    }
++
++                    var fileEntry = new PaxTarEntry(TarEntryType.RegularFile, archivePath)
++                    {
++                        Mode = GetArchiveMode(sourcePath, directory: false),
++                        DataStream = File.OpenRead(sourcePath)
++                    };
++                    using (fileEntry.DataStream)
++                        tar.WriteEntry(fileEntry);
++                }
++
++                static UnixFileMode GetArchiveMode(string path, bool directory)
++                {
++                    if (!OperatingSystem.IsWindows())
++                        return File.GetUnixFileMode(path);
++                    return directory
++                        ? UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
++                        : UnixFileMode.UserRead | UnixFileMode.UserWrite;
++                }
++
++                var topLevel = Directory.EnumerateFileSystemEntries(dir).ToArray();
++                if (topLevel.Length != 1 || (File.GetAttributes(topLevel[0]) & FileAttributes.Directory) == 0)
++                    throw new InvalidDataException("Clientrelease muss genau einen Stammordner enthalten.");
++                AddEntry(topLevel[0], Path.GetFileName(topLevel[0]));
+             }
+ 
+             Target("BuildAndTest", DependsOn("BuildAll", "Test"));
+@@ -480,7 +518,7 @@ namespace BuildLL
+                 var linuxEngine = Task.Run(() =>
+                 {
+                     CopyDirContents("bin/librelancer-" + GetLinuxRid(), "packaging/packages/a/" + name, true);
+-                    TarDirectory("packaging/packages/librelancer-daily-ubuntu-amd64.tar.gz", "packaging/packages/a");
++                    TarZstdDirectory("packaging/packages/librelancer-daily-ubuntu-amd64.tar.zst", "packaging/packages/a");
+                     RmDir("packaging/packages/a");
+                 });
+                 //Sdk
+@@ -488,7 +526,7 @@ namespace BuildLL
+                 var linuxSdk = Task.Run(() =>
+                 {
+                     CopyDirContents("bin/librelancer-sdk-" + GetLinuxRid(), "packaging/packages/b/" + name, true);
+-                    TarDirectory("packaging/packages/librelancer-sdk-daily-ubuntu-amd64.tar.gz",
++                    TarZstdDirectory("packaging/packages/librelancer-sdk-daily-ubuntu-amd64.tar.zst",
+                         "packaging/packages/b");
+                     RmDir("packaging/packages/b");
+                 });
+@@ -506,7 +544,7 @@ namespace BuildLL
+                     var winEngine = Task.Run(() =>
+                     {
+                         CopyDirContents("bin/librelancer-win-x64", "packaging/packages/c/" + name, true);
+-                        ZipDirectory("packaging/packages/librelancer-daily-win64.zip", "packaging/packages/c");
++                        TarZstdDirectory("packaging/packages/librelancer-daily-win64.tar.zst", "packaging/packages/c");
+                         RmDir("packaging/packages/c");
+                     });
+                     //Sdk
+@@ -514,7 +552,7 @@ namespace BuildLL
+                     var winSdk = Task.Run(() =>
+                     {
+                         CopyDirContents("bin/librelancer-sdk-win-x64", "packaging/packages/d/" + name, true);
+-                        ZipDirectory("packaging/packages/librelancer-sdk-daily-win64.zip", "packaging/packages/d");
++                        TarZstdDirectory("packaging/packages/librelancer-sdk-daily-win64.tar.zst", "packaging/packages/d");
+                         RmDir("packaging/packages/d");
+                     });
+                     await winEngine;
+diff --git a/src/BindingsGen/GLBindingsGen/GLBindingsGen/GLBindingsGen.csproj b/src/BindingsGen/GLBindingsGen/GLBindingsGen/GLBindingsGen.csproj
+index 16c12072..531f4f96 100644
+--- a/src/BindingsGen/GLBindingsGen/GLBindingsGen/GLBindingsGen.csproj
++++ b/src/BindingsGen/GLBindingsGen/GLBindingsGen/GLBindingsGen.csproj
+@@ -3,10 +3,7 @@
+     <PropertyGroup>
+         <OutputType>Exe</OutputType>
+         <TargetFramework>net10.0</TargetFramework>
+-    </PropertyGroup>
+-
+-    <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
+-      <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
++        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+     </PropertyGroup>
+ 
+     <ItemGroup>
+diff --git a/src/LLServer.Core/ServerApp.cs b/src/LLServer.Core/ServerApp.cs
+index 7700eb3a..aa407d35 100644
+--- a/src/LLServer.Core/ServerApp.cs
++++ b/src/LLServer.Core/ServerApp.cs
+@@ -41,6 +41,12 @@ public class ServerApp(ServerConfig config)
+         var ctxFactory = new SqlDesignTimeFactory(Config.DatabasePath);
+         using (var ctx = ctxFactory.CreateDbContext([]))
+         {
++            if (!ctx.Database.CanConnect())
++            {
++                FLLog.Error("Server", "Local SQLite database connection failed");
++                return false;
++            }
++            FLLog.Info("Server", "Local SQLite database connection established");
+             if (ctx.Database.GetPendingMigrations().Any())
+             {
+                 FLLog.Info("Server", "Migrating database");
+@@ -54,13 +60,11 @@ public class ServerApp(ServerConfig config)
+             ServerName = Config.ServerName,
+             ServerDescription = Config.ServerDescription,
+             ScriptsFolder = Path.Combine(GetBasePath(), "scripts"),
+-            LoginUrl = Config.LoginUrl,
+-            Listener =
+-            {
+-                Port = Config.Port > 0 ? Config.Port : LNetConst.DEFAULT_PORT,
+-                MaxConnections = Config.MaxPlayers > 0 ? Config.MaxPlayers : 200
+-            }
++            LoginUrl = Config.LoginUrl
+         };
++        var listener = Server.Listener ?? throw new InvalidOperationException("Game server listener was not initialized.");
++        listener.Port = Config.Port > 0 ? Config.Port : LNetConst.DEFAULT_PORT;
++        listener.MaxConnections = Config.MaxPlayers > 0 ? Config.MaxPlayers : 200;
+         if(Config.ThreadCount > 0)
+             Server.ThreadCount = Config.ThreadCount;
+         Server.Start();
+@@ -71,7 +75,9 @@ public class ServerApp(ServerConfig config)
+             File.Delete(statusPath);
+             statusCancellation = new CancellationTokenSource();
+             statusWriter = WriteRuntimeStatusAsync(statusCancellation.Token);
++            FLLog.Info("Server", $"Instance status reporting enabled for {Config.InstanceId} on system {Config.SystemId}");
+         }
++        FLLog.Info("Server", $"Game server startup initiated on port {listener.Port} with capacity {listener.MaxConnections}");
+         return true;
+     }
+ 
+@@ -123,6 +129,8 @@ public class ServerApp(ServerConfig config)
+                 InstanceId = Config.InstanceId!,
+                 SystemId = Config.SystemId!,
+                 IsReady = network?.IsRunning == true,
++                IsDraining = !string.IsNullOrWhiteSpace(Config.DrainFlagFile) &&
++                             File.Exists(Path.GetFullPath(Config.DrainFlagFile, Platform.GetBasePath())),
+                 CurrentPlayers = network?.ConnectedPeersCount ?? 0,
+                 MaxPlayers = listener?.MaxConnections ?? 0,
+                 Endpoint = Config.InstanceEndpoint!
+@@ -148,6 +156,7 @@ public sealed class InstanceRuntimeStatus
+     public string InstanceId { get; init; } = "";
+     public string SystemId { get; init; } = "";
+     public bool IsReady { get; init; }
++    public bool IsDraining { get; init; }
+     public int CurrentPlayers { get; init; }
+     public int MaxPlayers { get; init; }
+     public string Endpoint { get; init; } = "";
+diff --git a/src/LLServer.Core/ServerConfig.cs b/src/LLServer.Core/ServerConfig.cs
+index 287b7499..f6d9212e 100644
+--- a/src/LLServer.Core/ServerConfig.cs
++++ b/src/LLServer.Core/ServerConfig.cs
+@@ -13,6 +13,7 @@ public class ServerConfig
+     public int MaxPlayers = 200;
+     public int ThreadCount = 0;
+     public string? RuntimeStatusFile;
++    public string? DrainFlagFile;
+     public string? InstanceId;
+     public string? SystemId;
+     public string? InstanceEndpoint;
+@@ -27,6 +28,7 @@ public class ServerConfig
+         Port = other.Port;
+         MaxPlayers = other.MaxPlayers;
+         RuntimeStatusFile = other.RuntimeStatusFile;
++        DrainFlagFile = other.DrainFlagFile;
+         InstanceId = other.InstanceId;
+         SystemId = other.SystemId;
+         InstanceEndpoint = other.InstanceEndpoint;
+diff --git a/src/LibreLancer.Data/GameItemDb.cs b/src/LibreLancer.Data/GameItemDb.cs
+index c6b895f9..a9365640 100644
+--- a/src/LibreLancer.Data/GameItemDb.cs
++++ b/src/LibreLancer.Data/GameItemDb.cs
+@@ -116,7 +116,11 @@ public class GameItemDb
+         VFS = vfs;
+         var flini = new FreelancerIni(VFS);
+         flData = new FreelancerData(flini, VFS);
+-        ThornReadCallback = (file) => VFS.ReadAllBytes("EXE/" + file);
++        ThornReadCallback = (file) =>
++        {
++            var legacyPath = "EXE/" + file;
++            return VFS.ReadAllBytes(VFS.FileExists(legacyPath) ? legacyPath : file);
++        };
+     }
+ 
+     public string? DataPath(string? input)
+diff --git a/src/LibreLancer.Data/Schema/FreelancerData.cs b/src/LibreLancer.Data/Schema/FreelancerData.cs
+index f4ec92d0..97392c9b 100644
+--- a/src/LibreLancer.Data/Schema/FreelancerData.cs
++++ b/src/LibreLancer.Data/Schema/FreelancerData.cs
+@@ -432,8 +432,11 @@ public class FreelancerData
+         Run(() =>
+         {
+             ContentDll = new ContentDll();
+-            if (VFS.FileExists("DLLS\\BIN\\content.dll"))
+-                ContentDll.Load(VFS.ReadAllBytes("DLLS\\BIN\\content.dll"));
++            var contentDllPath = VFS.FileExists("content.dll")
++                ? "content.dll"
++                : "DLLS\\BIN\\content.dll";
++            if (VFS.FileExists(contentDllPath))
++                ContentDll.Load(VFS.ReadAllBytes(contentDllPath));
+             if (!string.IsNullOrEmpty(Freelancer.DataVersion))
+                 DataVersion = Freelancer.DataVersion;
+             else
+diff --git a/src/LibreLancer.Data/Schema/FreelancerIni.cs b/src/LibreLancer.Data/Schema/FreelancerIni.cs
+index 7d635a7f..d6ed7032 100644
+--- a/src/LibreLancer.Data/Schema/FreelancerIni.cs
++++ b/src/LibreLancer.Data/Schema/FreelancerIni.cs
+@@ -103,6 +103,8 @@ public class FreelancerIni
+         if (IsLibrelancer)
+         {
+             DacomPath = null;
++            NewPlayerPath = "newplayer.fl";
++            MpNewCharacterPath = "mpnewcharacter.fl";
+         }
+ 
+         EquipmentPaths = [];
+diff --git a/src/LibreLancer/GameConfig.cs b/src/LibreLancer/GameConfig.cs
+index c5be1dc5..4b162c8e 100644
+--- a/src/LibreLancer/GameConfig.cs
++++ b/src/LibreLancer/GameConfig.cs
+@@ -25,6 +25,12 @@ namespace LibreLancer
+ 		public int BufferHeight = 768;
+         [Entry("uuid")]
+ 		public Guid UUID = Guid.Empty;
++        [Entry("cluster_gateway_url")]
++        public string ClusterGatewayUrl = "";
++        [Entry("cluster_target_system")]
++        public string ClusterTargetSystem = "li01";
++        [Entry("cluster_region")]
++        public string ClusterRegion = "eu";
+ 
+         [XmlIgnore]
+ 		public Func<FreelancerGame, GameState>? CustomState;
+@@ -124,6 +130,9 @@ namespace LibreLancer
+             writer.WriteLine($"res_width = {BufferWidth}");
+             writer.WriteLine($"res_height = {BufferHeight}");
+             writer.WriteLine($"uuid = {UUID:D}");
++            writer.WriteLine($"cluster_gateway_url = {ClusterGatewayUrl}");
++            writer.WriteLine($"cluster_target_system = {ClusterTargetSystem}");
++            writer.WriteLine($"cluster_region = {ClusterRegion}");
+             writer.WriteLine();
+             Settings.Write(writer);
+         }
+@@ -134,4 +143,3 @@ namespace LibreLancer
+ 		}
+ 	}
+ }
+-
+diff --git a/src/LibreLancer/GameStates/LuaMenu.cs b/src/LibreLancer/GameStates/LuaMenu.cs
+index 3f303985..de9eb2d9 100644
+--- a/src/LibreLancer/GameStates/LuaMenu.cs
++++ b/src/LibreLancer/GameStates/LuaMenu.cs
+@@ -6,8 +6,11 @@ using System;
+ using System.Collections.Generic;
+ using System.IO;
+ using System.Linq;
++using System.Net.Http;
+ using System.Runtime;
+ using System.Runtime.InteropServices;
++using System.Threading;
++using System.Threading.Tasks;
+ using LibreLancer.Client;
+ using LibreLancer.Data.GameData;
+ using LibreLancer.ImUI.NodeEditor;
+@@ -69,6 +72,8 @@ namespace LibreLancer
+             // Set low latency GC mode only once everything has been loaded in
+             GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency;
+             FadeIn(0.1, 0.3);
++            if (!string.IsNullOrWhiteSpace(g.Config.ClusterGatewayUrl))
++                ui.OpenScene("serverlist");
+         }
+ 
+         private void TryRunScript(List<ResolvedThn> thnScripts)
+@@ -237,10 +242,12 @@ namespace LibreLancer
+             }
+ 
+             public SaveGameFolder SaveGames() => state.Game.Saves;
++            public bool GatewayEnabled() => !string.IsNullOrWhiteSpace(state.Game.Config.ClusterGatewayUrl);
+             public void DeleteSelectedGame() => state.Game.Saves.TryDelete(state.Game.Saves.Selected);
+ 
+             public void LoadSelectedGame()
+             {
++                if (GatewayEnabled()) return;
+                 state.FadeOut(0.2, () =>
+                 {
+                     var embeddedServer = new EmbeddedServer(state.Game.GameData, state.Game.ResourceManager,
+@@ -254,13 +261,15 @@ namespace LibreLancer
+ 
+             public override void NewGame()
+             {
++                if (GatewayEnabled()) return;
+                 state.FadeOut(0.2, () =>
+                 {
+                     var embeddedServer = new EmbeddedServer(state.Game.GameData, state.Game.ResourceManager,
+                         state.Game.GetSaveFolder());
+                     var session = new CGameSession(state.Game, embeddedServer);
+-                    embeddedServer.StartFromSave("EXE\\newplayer.fl",
+-                        state.Game.GameData.VFS.ReadAllBytes("EXE\\newplayer.fl"));
++                    var newPlayerPath = state.Game.GameData.Items.Ini.Freelancer.NewPlayerPath;
++                    embeddedServer.StartFromSave(newPlayerPath,
++                        state.Game.GameData.VFS.ReadAllBytes(newPlayerPath));
+                     state.Game.ChangeState(new NetWaitState(session, state.Game));
+                 });
+             }
+@@ -332,6 +341,7 @@ namespace LibreLancer
+             }
+ 
+             private GameNetClient? netClient;
++            private CancellationTokenSource? gatewayLoginCancellation;
+             private CGameSession netSession = null!;
+             private ServerList serverList = new();
+             private CharacterSelectInfo cselInfo = null!;
+@@ -349,7 +359,8 @@ namespace LibreLancer
+                 netClient.Disconnected += NetClientOnDisconnected;
+                 netClient.AuthenticationRequired += NetClientOnAuthenticationRequired;
+                 netClient.Start();
+-                RefreshServers();
++                if (!GatewayEnabled())
++                    RefreshServers();
+             }
+ 
+             private void NetClientOnAuthenticationRequired(bool retry)
+@@ -360,7 +371,71 @@ namespace LibreLancer
+ 
+             public void Login(string username, string password)
+             {
+-                netClient?.Login(username, password);
++                if (!GatewayEnabled())
++                    netClient?.Login(username, password);
++                else
++                    _ = LoginToGatewayAsync(username, password);
++            }
++
++            private async Task LoginToGatewayAsync(string email, string password)
++            {
++                gatewayLoginCancellation?.Cancel();
++                gatewayLoginCancellation?.Dispose();
++                gatewayLoginCancellation = new CancellationTokenSource();
++                var cancellation = gatewayLoginCancellation.Token;
++                var client = netClient;
++                if (client is null)
++                    return;
++                try
++                {
++                    using var gateway = new NexusGatewayLogin(
++                        new Uri(state.Game.Config.ClusterGatewayUrl, UriKind.Absolute));
++                    var result = await gateway.LoginAndPlaceAsync(email, password,
++                        state.Game.Config.ClusterTargetSystem, state.Game.Config.ClusterRegion,
++                        cancellation);
++                    state.Game.QueueUIThread(() =>
++                    {
++                        if (netClient != client || cancellation.IsCancellationRequested)
++                            return;
++                        if (result.RequestedExitCode is not null)
++                        {
++                            state.ui.Event("UpdateRequired", result.VersionDecision.MessageKey);
++                        }
++                        else if (result.Assigned)
++                            client.ConnectWithTicket(result.GameEndpoint!, result.JoinTicket!);
++                        else
++                            state.ui.Event("Disconnect", "AssignmentFailed");
++                    });
++                }
++                catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
++                {
++                }
++                catch (UnauthorizedAccessException)
++                {
++                    state.Game.QueueUIThread(() =>
++                    {
++                        if (netClient == client)
++                            state.ui.Event("IncorrectPassword");
++                    });
++                }
++                catch (ClientVersionMetadataException)
++                {
++                    state.Game.QueueUIThread(() =>
++                    {
++                        if (netClient == client)
++                            state.ui.Event("RepairRequired");
++                    });
++                }
++                catch (Exception exception) when (exception is HttpRequestException or
++                    InvalidDataException or ArgumentException or FormatException)
++                {
++                    FLLog.Error("Gateway", exception.Message);
++                    state.Game.QueueUIThread(() =>
++                    {
++                        if (netClient == client)
++                            state.ui.Event("Disconnect", "ConnectionError");
++                    });
++                }
+             }
+ 
+             public void RequestNewCharacter()
+@@ -416,19 +491,37 @@ namespace LibreLancer
+ 
+             public void RefreshServers()
+             {
++                if (GatewayEnabled()) return;
+                 serverList.Reset();
+                 netClient!.DiscoverLocalPeers();
+             }
+ 
+             public void ConnectSelection()
+             {
++                if (GatewayEnabled()) return;
+                 if (serverList.Selected != -1)
+                 {
+                     netClient!.Connect(serverList.Servers[serverList.Selected].EndPoint);
+                 }
+             }
+ 
+-            public void ConnectAddress(string address) => netClient!.Connect(address);
++            public void ConnectAddress(string address)
++            {
++                if (!GatewayEnabled())
++                    netClient!.Connect(address);
++            }
++
++            public void ExitForUpdate()
++            {
++                Environment.ExitCode = 42;
++                state.FadeOut(0.2, () => state.Game.Exit());
++            }
++
++            public void ExitForRepair()
++            {
++                Environment.ExitCode = 43;
++                state.FadeOut(0.2, () => state.Game.Exit());
++            }
+ 
+             public void NewCharacter(string name, int index, Closure onError)
+             {
+@@ -441,6 +534,9 @@ namespace LibreLancer
+ 
+             public void StopNetworking()
+             {
++                gatewayLoginCancellation?.Cancel();
++                gatewayLoginCancellation?.Dispose();
++                gatewayLoginCancellation = null;
+                 netClient?.Shutdown();
+                 netClient = null;
+             }
+diff --git a/src/LibreLancer/LibreLancer.csproj b/src/LibreLancer/LibreLancer.csproj
+index f17e3f1c..62b3db23 100644
+--- a/src/LibreLancer/LibreLancer.csproj
++++ b/src/LibreLancer/LibreLancer.csproj
+@@ -28,7 +28,8 @@
+     <ProjectReference Include="..\LibreLancer.Entities\LibreLancer.Entities.csproj" />
+     <ProjectReference Include="..\LibreLancer.Media\LibreLancer.Media.csproj" />
+     <ProjectReference Include="..\LibreLancer.Physics\LibreLancer.Physics.csproj" />
+-    <ProjectReference Include="..\LibreLancer.Thorn\LibreLancer.Thorn.csproj" />
++    <ProjectReference Include="..\LibreLancer.Thorn\LibreLancer.Thorn.csproj" />
++    <ProjectReference Include="..\..\Protocol\src\LancerNexus.Protocol\LancerNexus.Protocol.csproj" />
+   </ItemGroup>
+ 
+   <ItemGroup>
+diff --git a/src/LibreLancer/Net/GameNetClient.cs b/src/LibreLancer/Net/GameNetClient.cs
+index 7e09afee..c5514bb4 100644
+--- a/src/LibreLancer/Net/GameNetClient.cs
++++ b/src/LibreLancer/Net/GameNetClient.cs
+@@ -203,6 +203,21 @@ namespace LibreLancer.Net
+             });
+         }
+ 
++        public void ConnectWithTicket(string endpoint, string ticket)
++        {
++            if (string.IsNullOrWhiteSpace(ticket))
++                throw new ArgumentException("Join ticket is required.", nameof(ticket));
++            Task.Run(() =>
++            {
++                if (!running)
++                    return;
++                if (ParseEP(endpoint, out var ep))
++                    ConnectInternal(ep, ticket);
++                else
++                    mainThread.QueueUIThread(() => Disconnected?.Invoke(DisconnectReason.InvalidEndpoint));
++            });
++        }
++
+         private static bool ParseEP(string str, out IPEndPoint endpoint)
+         {
+             endpoint = new IPEndPoint(IPAddress.None, 0);
+diff --git a/src/LibreLancer/Server/GameServer.cs b/src/LibreLancer/Server/GameServer.cs
+index e6d6cce5..c74f6744 100644
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -90,8 +90,8 @@ namespace LibreLancer.Server
+             // TODO: initial_rep = %%FACTION%%
+             // does this have any effect in FL?
+ 
+-            var src = new StringBuilder(
+-                Encoding.UTF8.GetString(FlCodec.DecodeBytes(GameData.VFS.ReadAllBytes("EXE\\mpnewcharacter.fl"))));
++            var src = new StringBuilder(Encoding.UTF8.GetString(FlCodec.DecodeBytes(
++                GameData.VFS.ReadAllBytes(GameData.Items.Ini.Freelancer.MpNewCharacterPath))));
+ 
+             src.Replace("%%NAME%%", SavePlayer.EncodeName(name));
+             src.Replace("%%BASE_COSTUME%%", pilot.Body);
+diff --git a/uixml/serverlist.lua b/uixml/serverlist.lua
+index 1e3256a4..436daa25 100644
+--- a/uixml/serverlist.lua
++++ b/uixml/serverlist.lua
+@@ -10,17 +10,26 @@ class serverlist : serverlist_Designer
+ 		e.refreshlist.OnClick(() => Game.RefreshServers());
+ 		e.connect.OnClick(() => this.TryConnect());
+ 		e.directip.OnClick(() => OpenModal(new ipentry(this)));
++		if (Game.GatewayEnabled()) {
++			e.listtable.Visible = false;
++			e.refreshlist.Visible = false;
++			e.connect.Visible = false;
++			e.directip.Visible = false;
++			e.descriptiontext.Visible = false;
++		}
+ 		PlaySound('ui_motion_swish')
+ 		e.animgroupA.Animate('flyinleft', 0, 0.8)
+ 		e.animgroupB.Animate('flyinright', 0, 0.8)
+ 		this.InitNetwork();
++		if (Game.GatewayEnabled()) Timer(0.01, () => this.Login());
+ 	}
+ 
+     Leave()
+     {
+         this.ExitAnimation(() => {
+             Game.StopNetworking();
+-            OpenScene("mainmenu");
++            if (Game.GatewayEnabled()) Game.Exit();
++            else OpenScene("mainmenu");
+         });
+     }
+ 	TryConnect()
+@@ -33,7 +42,7 @@ class serverlist : serverlist_Designer
+ 	InitNetwork()
+ 	{
+ 		Game.StartNetworking();
+-		this.Elements.listtable.SetData(Game.ServerList());
++		if (!Game.GatewayEnabled()) this.Elements.listtable.SetData(Game.ServerList());
+ 	}
+ 
+ 	ExitAnimation(f)
+@@ -55,6 +64,7 @@ class serverlist : serverlist_Designer
+ 
+ 	Update()
+ 	{
++		if (Game.GatewayEnabled()) return;
+ 		local scn = this.Elements
+ 		local sv = Game.ServerList()
+ 		scn.connect.Enabled = sv.ValidSelection()
+@@ -86,11 +96,36 @@ class serverlist : serverlist_Designer
+ 			this.connecting = nil;
+ 		}
+ 		var id = (reason == "Banned" ? STRID_BANNED : STRID_DISCONNECT);
+-        OpenModal(new popup(0, id, "ok", () => this.InitNetwork()));
++        OpenModal(new popup(0, id, "ok", () => {
++            this.InitNetwork();
++            if (Game.GatewayEnabled()) this.Login();
++        }));
+     }
+-}
+ 
++	UpdateRequired(messageKey)
++	{
++		if(this.connecting != nil) {
++			this.connecting.Close();
++			this.connecting = nil;
++		}
++		local prompt = new popup(0, STRID_DISCONNECT, "ok", () => Game.ExitForUpdate());
++		prompt.Elements.contents.SetString(messageKey == "client_protocol_unsupported"
++			? "This client protocol is no longer supported. An update is required."
++			: "A client update is required before login.");
++		OpenModal(prompt);
++	}
+ 
++	RepairRequired()
++	{
++		if(this.connecting != nil) {
++			this.connecting.Close();
++			this.connecting = nil;
++		}
++		local prompt = new popup(0, STRID_DISCONNECT, "ok", () => Game.ExitForRepair());
++		prompt.Elements.contents.SetString("Client installation data is missing or damaged. The updater will repair it.");
++		OpenModal(prompt);
++	}
++}
+ 
+ 
+ 
+diff --git a/src/LibreLancer.Tests/FreelancerIniTests.cs b/src/LibreLancer.Tests/FreelancerIniTests.cs
+new file mode 100644
+index 00000000..a4ca9f49
+--- /dev/null
++++ b/src/LibreLancer.Tests/FreelancerIniTests.cs
+@@ -0,0 +1,33 @@
++using System;
++using System.IO;
++using LibreLancer.Data.IO;
++using LibreLancer.Data.Schema;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class FreelancerIniTests
++{
++    [Fact]
++    public void LibrelancerIniUsesFlatPackageSupportFiles()
++    {
++        var directory = Path.Combine(Path.GetTempPath(), "librelancer-ini-" + Guid.NewGuid().ToString("N"));
++        Directory.CreateDirectory(directory);
++        try
++        {
++            File.WriteAllText(Path.Combine(directory, "librelancer.ini"),
++                "[Freelancer]\ndata path = data\n");
++
++            var ini = new FreelancerIni(FileSystem.FromPath(directory));
++
++            Assert.Equal("data" + Path.DirectorySeparatorChar, ini.DataPath);
++            Assert.Equal("newplayer.fl", ini.NewPlayerPath);
++            Assert.Equal("mpnewcharacter.fl", ini.MpNewCharacterPath);
++            Assert.Null(ini.DacomPath);
++        }
++        finally
++        {
++            Directory.Delete(directory, true);
++        }
++    }
++}
+diff --git a/src/LibreLancer.Tests/NexusGatewayLoginTests.cs b/src/LibreLancer.Tests/NexusGatewayLoginTests.cs
+new file mode 100644
+index 00000000..5f407f93
+--- /dev/null
++++ b/src/LibreLancer.Tests/NexusGatewayLoginTests.cs
+@@ -0,0 +1,147 @@
++using System;
++using System.Collections.Generic;
++using System.IO;
++using System.Net;
++using System.Net.Http;
++using System.Text;
++using System.Text.Json;
++using System.Threading;
++using System.Threading.Tasks;
++using LibreLancer.Net;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class NexusGatewayLoginTests
++{
++    [Fact]
++    public async Task SupportedVersionIsSentBeforeCredentials()
++    {
++        var folder = CreateMetadata();
++        try
++        {
++            var handler = new FakeHandler(false);
++            using var client = new NexusGatewayLogin(new Uri("https://gateway.example.test"), folder, handler);
++            var result = await client.LoginAsync("pilot@example.net", "secret",
++                TestContext.Current.CancellationToken);
++
++            Assert.True(result.LoggedIn);
++            Assert.Equal(2, handler.Requests.Count);
++            Assert.Equal("/api/v1/client/version", handler.Requests[0].Path);
++            Assert.Equal("/api/v1/auth/login", handler.Requests[1].Path);
++            Assert.DoesNotContain("secret", handler.Requests[0].Body);
++            Assert.Contains("proof", handler.Requests[1].Body);
++        }
++        finally { Directory.Delete(folder, true); }
++    }
++
++    [Fact]
++    public async Task MissingInstalledMetadataStopsBeforeNetworkAndCredentials()
++    {
++        var folder = Path.Combine(Path.GetTempPath(), $"nexus-gateway-{Guid.NewGuid():N}");
++        Directory.CreateDirectory(folder);
++        try
++        {
++            var handler = new FakeHandler(false);
++            using var client = new NexusGatewayLogin(new Uri("https://gateway.example.test"), folder, handler);
++            await Assert.ThrowsAsync<ClientVersionMetadataException>(() =>
++                client.LoginAsync("pilot@example.net", "secret", TestContext.Current.CancellationToken));
++            Assert.Empty(handler.Requests);
++        }
++        finally { Directory.Delete(folder, true); }
++    }
++
++    [Fact]
++    public async Task PlacementUsesSessionAfterHandshakeAndLogin()
++    {
++        var folder = CreateMetadata();
++        try
++        {
++            var handler = new FakeHandler(false);
++            using var client = new NexusGatewayLogin(new Uri("https://gateway.example.test"), folder, handler);
++            var result = await client.LoginAndPlaceAsync("pilot@example.net", "secret",
++                "li01", "eu", TestContext.Current.CancellationToken);
++
++            Assert.True(result.Assigned);
++            Assert.Equal("game.example.test:2300", result.GameEndpoint);
++            Assert.Equal("join-ticket", result.JoinTicket);
++            Assert.Equal(3, handler.Requests.Count);
++            Assert.Equal("/api/v1/placement/request", handler.Requests[2].Path);
++            Assert.Contains("\"targetSystem\":\"li01\"", handler.Requests[2].Body);
++            Assert.Equal("Bearer access", handler.PlacementAuthorization);
++        }
++        finally { Directory.Delete(folder, true); }
++    }
++
++    [Fact]
++    public async Task RequiredUpdateStopsBeforeSendingCredentials()
++    {
++        var folder = CreateMetadata();
++        try
++        {
++            var handler = new FakeHandler(true);
++            using var client = new NexusGatewayLogin(new Uri("https://gateway.example.test"), folder, handler);
++            var result = await client.LoginAsync("pilot@example.net", "secret",
++                TestContext.Current.CancellationToken);
++
++            Assert.False(result.LoggedIn);
++            Assert.Equal(42, result.RequestedExitCode);
++            Assert.Single(handler.Requests);
++            Assert.DoesNotContain("secret", handler.Requests[0].Body);
++        }
++        finally { Directory.Delete(folder, true); }
++    }
++
++    private static string CreateMetadata()
++    {
++        var folder = Path.Combine(Path.GetTempPath(), $"nexus-gateway-{Guid.NewGuid():N}");
++        Directory.CreateDirectory(folder);
++        File.WriteAllText(Path.Combine(folder, "client-version.json"),
++            """{"clientVersion":"1.0.0","buildId":"20260923.1","protocolVersion":1,"dataManifestId":"data-2026-09-22","platform":"linux-x64","channel":"stable","capabilities":["transfer-v1"]}""");
++        return folder;
++    }
++
++    private sealed class FakeHandler(bool updateRequired) : HttpMessageHandler
++    {
++        public List<(string Path, string Body)> Requests { get; } = [];
++        public string? PlacementAuthorization { get; private set; }
++
++        protected override async Task<HttpResponseMessage> SendAsync(
++            HttpRequestMessage request, CancellationToken cancellationToken)
++        {
++            var body = await request.Content!.ReadAsStringAsync(cancellationToken);
++            Requests.Add((request.RequestUri!.AbsolutePath, body));
++            var payload = request.RequestUri.AbsolutePath == "/api/v1/client/version"
++                ? updateRequired
++                    ? """{"status":"update_required","sessionAllowed":false,"serverProtocolVersion":1,"messageKey":"client_update_required"}"""
++                    : """{"status":"supported","sessionAllowed":true,"serverProtocolVersion":1,"messageKey":"client_version_supported","handshakeToken":"proof"}"""
++                : request.RequestUri.AbsolutePath == "/api/v1/placement/request"
++                    ? PlacementPayload(request, body)
++                : JsonSerializer.Serialize(new
++                {
++                    accessToken = "access", refreshToken = "refresh",
++                    accountId = Guid.NewGuid(), sessionId = Guid.NewGuid(),
++                    expiresAtUtc = DateTime.UtcNow.AddMinutes(10)
++                });
++            return new HttpResponseMessage(HttpStatusCode.OK)
++            {
++                Content = new StringContent(payload, Encoding.UTF8, "application/json")
++            };
++        }
++
++        private string PlacementPayload(HttpRequestMessage request, string body)
++        {
++            PlacementAuthorization = request.Headers.Authorization?.ToString();
++            var requestId = JsonDocument.Parse(body).RootElement.GetProperty("requestId").GetGuid();
++            return JsonSerializer.Serialize(new
++            {
++                decision = new
++                {
++                    requestId, accepted = true, endpoint = "game.example.test:2300",
++                    joinTicket = "join-ticket", expiresUtc = DateTime.UtcNow.AddMinutes(2)
++                },
++                duplicate = false
++            });
++        }
++    }
++}
+diff --git a/src/LibreLancer/Net/NexusGatewayLogin.cs b/src/LibreLancer/Net/NexusGatewayLogin.cs
+new file mode 100644
+index 00000000..667a1e5b
+--- /dev/null
++++ b/src/LibreLancer/Net/NexusGatewayLogin.cs
+@@ -0,0 +1,155 @@
++using System;
++using System.IO;
++using System.Net.Http;
++using System.Net.Http.Json;
++using System.Net.Http.Headers;
++using System.Net;
++using System.Text.Json;
++using System.Threading;
++using System.Threading.Tasks;
++using LancerNexus.Protocol;
++
++namespace LibreLancer.Net;
++
++public sealed class ClientVersionMetadataException(string message, Exception innerException)
++    : Exception(message, innerException);
++
++public sealed record NexusGatewayLoginResult(
++    ClientVersionDecision VersionDecision, string? AccessToken, string? RefreshToken,
++    Guid? SessionId, string? GameEndpoint = null, string? JoinTicket = null)
++{
++    public bool LoggedIn => AccessToken is not null && SessionId.HasValue;
++    public bool Assigned => GameEndpoint is not null && JoinTicket is not null;
++    public int? RequestedExitCode => VersionDecision.Status is
++        ClientVersionStatus.UpdateRequired or ClientVersionStatus.ProtocolUnsupported ? 42 : null;
++}
++
++public sealed class NexusGatewayLogin : IDisposable
++{
++    private readonly HttpClient http;
++    private readonly Uri gateway;
++    private readonly string installDirectory;
++
++    public NexusGatewayLogin(Uri gateway)
++        : this(gateway, AppContext.BaseDirectory, new HttpClientHandler { AllowAutoRedirect = false })
++    {
++    }
++
++    internal NexusGatewayLogin(Uri gateway, string installDirectory, HttpMessageHandler handler)
++    {
++        if (!gateway.IsAbsoluteUri || gateway.Scheme != Uri.UriSchemeHttps ||
++            !string.IsNullOrEmpty(gateway.UserInfo) || !string.IsNullOrEmpty(gateway.Query) ||
++            !string.IsNullOrEmpty(gateway.Fragment))
++            throw new ArgumentException("Gateway endpoint must be an HTTPS origin.", nameof(gateway));
++        this.gateway = gateway;
++        this.installDirectory = installDirectory;
++        http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(15) };
++    }
++
++    public Task<NexusGatewayLoginResult> LoginAsync(
++        string email, string password, CancellationToken cancellationToken = default) =>
++        LoginWithHelloAsync(LoadInstalledHello(), email, password, cancellationToken);
++
++    private async Task<NexusGatewayLoginResult> LoginWithHelloAsync(
++        ClientVersionHello hello, string email, string password, CancellationToken cancellationToken)
++    {
++        using var versionResponse = await http.PostAsJsonAsync(
++            new Uri(gateway, "/api/v1/client/version"), hello, cancellationToken);
++        versionResponse.EnsureSuccessStatusCode();
++        var decision = await versionResponse.Content.ReadFromJsonAsync<ClientVersionDecision>(
++            cancellationToken: cancellationToken)
++            ?? throw new InvalidDataException("Gateway version response is empty.");
++        if (!decision.SessionAllowed)
++        {
++            if (decision.Status is not (ClientVersionStatus.UpdateRequired or ClientVersionStatus.ProtocolUnsupported))
++                throw new InvalidDataException("Gateway version response is contradictory.");
++            return new NexusGatewayLoginResult(decision, null, null, null);
++        }
++        if (decision.Status is not (ClientVersionStatus.Supported or ClientVersionStatus.UpdateRecommended) ||
++            string.IsNullOrWhiteSpace(decision.HandshakeToken))
++            throw new InvalidDataException("Gateway version response has no valid handshake proof.");
++
++        using var loginResponse = await http.PostAsJsonAsync(
++            new Uri(gateway, "/api/v1/auth/login"),
++            new GatewayCredentials(email, password, decision.HandshakeToken), cancellationToken);
++        if (loginResponse.StatusCode == HttpStatusCode.Unauthorized)
++            throw new UnauthorizedAccessException("Gateway credentials were rejected.");
++        if (!loginResponse.IsSuccessStatusCode)
++            throw new HttpRequestException($"Gateway login failed with HTTP {(int)loginResponse.StatusCode}.");
++        var login = await loginResponse.Content.ReadFromJsonAsync<GatewayLoginResponse>(
++            cancellationToken: cancellationToken)
++            ?? throw new InvalidDataException("Gateway login response is empty.");
++        if (string.IsNullOrWhiteSpace(login.AccessToken) || login.SessionId == Guid.Empty)
++            throw new InvalidDataException("Gateway login response is incomplete.");
++        return new NexusGatewayLoginResult(decision, login.AccessToken, login.RefreshToken, login.SessionId);
++    }
++
++    public async Task<NexusGatewayLoginResult> LoginAndPlaceAsync(
++        string email, string password, string targetSystem, string region,
++        CancellationToken cancellationToken = default)
++    {
++        var hello = LoadInstalledHello();
++        var login = await LoginWithHelloAsync(hello, email, password, cancellationToken);
++        if (!login.LoggedIn)
++            return login;
++        if (string.IsNullOrWhiteSpace(targetSystem))
++            throw new ArgumentException("Target system is required.", nameof(targetSystem));
++        var requestId = Guid.NewGuid();
++        var placement = new PlacementRequest
++        {
++            RequestId = requestId,
++            SessionId = login.SessionId!.Value,
++            TargetSystem = targetSystem,
++            ClientBuild = hello.BuildId,
++            Region = region,
++            IdempotencyKey = requestId.ToString("N")
++        };
++        using var message = new HttpRequestMessage(HttpMethod.Post,
++            new Uri(gateway, "/api/v1/placement/request"));
++        message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", login.AccessToken);
++        message.Content = JsonContent.Create(placement);
++        using var response = await http.SendAsync(message, cancellationToken);
++        if (!response.IsSuccessStatusCode)
++            throw new HttpRequestException($"Gateway placement failed with HTTP {(int)response.StatusCode}.");
++        var envelope = await response.Content.ReadFromJsonAsync<GatewayPlacementEnvelope>(
++            cancellationToken: cancellationToken)
++            ?? throw new InvalidDataException("Gateway placement response is empty.");
++        var decision = envelope.Decision;
++        if (decision is null || decision.RequestId != requestId || !decision.Accepted ||
++            string.IsNullOrWhiteSpace(decision.Endpoint) || string.IsNullOrWhiteSpace(decision.JoinTicket) ||
++            decision.ExpiresUtc.Kind != DateTimeKind.Utc || decision.ExpiresUtc <= DateTime.UtcNow)
++            throw new InvalidDataException("Gateway placement response is invalid.");
++        return login with { GameEndpoint = decision.Endpoint, JoinTicket = decision.JoinTicket };
++    }
++
++    internal ClientVersionHello LoadInstalledHello()
++    {
++        try
++        {
++            var path = Path.Combine(installDirectory, "client-version.json");
++            using var stream = File.OpenRead(path);
++            if (stream.Length is 0 or > 16_384)
++                throw new InvalidDataException("Installed client version metadata has an invalid size.");
++            var hello = JsonSerializer.Deserialize<ClientVersionHello>(stream,
++                new JsonSerializerOptions(JsonSerializerDefaults.Web))
++                ?? throw new InvalidDataException("Installed client version metadata is empty.");
++            if (string.IsNullOrWhiteSpace(hello.ClientVersion) || string.IsNullOrWhiteSpace(hello.BuildId) ||
++                hello.ProtocolVersion < 1 || string.IsNullOrWhiteSpace(hello.DataManifestId) ||
++                string.IsNullOrWhiteSpace(hello.Platform) || string.IsNullOrWhiteSpace(hello.Channel) ||
++                hello.Capabilities is null)
++                throw new InvalidDataException("Installed client version metadata is incomplete.");
++            return hello;
++        }
++        catch (Exception error) when (error is IOException or JsonException or UnauthorizedAccessException)
++        {
++            throw new ClientVersionMetadataException("Installed client version metadata requires repair.", error);
++        }
++    }
++
++    public void Dispose() => http.Dispose();
++
++    private sealed record GatewayCredentials(string Email, string Password, string HandshakeToken);
++    private sealed record GatewayLoginResponse(
++        string AccessToken, string RefreshToken, Guid AccountId, Guid SessionId, DateTime ExpiresAtUtc);
++    private sealed record GatewayPlacementEnvelope(PlacementDecision Decision, bool Duplicate);
++}
