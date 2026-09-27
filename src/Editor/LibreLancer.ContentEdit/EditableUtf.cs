@@ -135,6 +135,13 @@ namespace LibreLancer.ContentEdit
                     }
                 }
 
+                int strOff = 0;
+                foreach (var str in strings)
+                {
+                    stringOffsets[str] = strOff;
+                    strOff += Encoding.ASCII.GetByteCount(str) + 1;
+                }
+
                 byte[] nodeBlock;
                 using (var mem = new MemoryStream())
                 {
@@ -162,7 +169,6 @@ namespace LibreLancer.ContentEdit
                     {
                         foreach (var str in strings)
                         {
-                            stringOffsets.Add(str, (int)mem.Position);
                             var strx = str;
                             if (strx == "/")
                                 strx = "\\";
