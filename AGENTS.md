@@ -19,6 +19,7 @@ Maintain the Lancer Nexus client fork while preserving compatibility with upstre
 - Keep cluster functionality disabled by default for standalone builds.
 - Put shared wire contracts in `Protocol`; do not duplicate MessagePack models here.
 - Never store passwords, refresh tokens or private keys in logs or client configuration.
+- For local Debug E2E runs, start the client with automated Gateway login using `--credentials-file=/path/to/private-test-account.txt`; keep that file mode 0600. This avoids putting the password in process arguments. Do not paste credentials into commands, commit them, or include them in captured output; do not automate login in Release builds.
 - Treat Gateway responses and transfer tickets as untrusted input and validate them.
 - Do not let the client decide authoritative placement, ownership, credits or inventory.
 - Preserve the existing game simulation unless a change is explicitly part of the MMO integration.

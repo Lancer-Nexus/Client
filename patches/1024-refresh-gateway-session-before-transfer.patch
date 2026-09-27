@@ -1,0 +1,142 @@
+diff --git a/src/LibreLancer/Net/GameNetClient.cs b/src/LibreLancer/Net/GameNetClient.cs
+--- a/src/LibreLancer/Net/GameNetClient.cs
++++ b/src/LibreLancer/Net/GameNetClient.cs
+@@ -33,6 +33,7 @@
+         public string ClusterEndpoint { get; set; } = "";
+         public string ClusterGatewayUrl { get; set; } = "";
+         public string ClusterAccessToken { get; set; } = "";
++        public string ClusterRefreshToken { get; set; } = "";
+         public Guid ClusterSessionId { get; set; }
+         private (IPEndPoint Endpoint, string Ticket)? pendingTransferReconnect;
+ 
+diff --git a/src/LibreLancer/GameStates/LuaMenu.cs b/src/LibreLancer/GameStates/LuaMenu.cs
+--- a/src/LibreLancer/GameStates/LuaMenu.cs
++++ b/src/LibreLancer/GameStates/LuaMenu.cs
+@@ -448,6 +448,7 @@
+                         {
+                             client.ClusterGatewayUrl = state.Game.Config.ClusterGatewayUrl;
+                             client.ClusterAccessToken = result.AccessToken ?? "";
++                            client.ClusterRefreshToken = result.RefreshToken ?? "";
+                             client.ClusterSessionId = result.SessionId ?? Guid.Empty;
+                             client.ClusterInstanceId = result.InstanceId ?? "";
+                             client.ClusterSystemId = result.SystemId ?? "";
+diff --git a/src/LibreLancer/Client/CGameSession.cs b/src/LibreLancer/Client/CGameSession.cs
+--- a/src/LibreLancer/Client/CGameSession.cs
++++ b/src/LibreLancer/Client/CGameSession.cs
+@@ -237,6 +237,9 @@
+                 var id = Guid.NewGuid();
+                 var expiry = DateTime.UtcNow.AddMinutes(1);
+                 using var gateway = new NexusGatewayLogin(new Uri(client.ClusterGatewayUrl, UriKind.Absolute));
++                var refreshed = await gateway.RefreshAsync(client.ClusterSessionId, client.ClusterRefreshToken);
++                client.ClusterAccessToken = refreshed.AccessToken;
++                client.ClusterRefreshToken = refreshed.RefreshToken;
+                 var transfer = await gateway.StartTransferAsync(client.ClusterAccessToken, new LancerNexus.Protocol.TransferStartRequest
+                 {
+                     TransferId = id,
+diff --git a/src/LibreLancer/Net/NexusGatewayLogin.cs b/src/LibreLancer/Net/NexusGatewayLogin.cs
+--- a/src/LibreLancer/Net/NexusGatewayLogin.cs
++++ b/src/LibreLancer/Net/NexusGatewayLogin.cs
+@@ -24,6 +24,9 @@
+     public int? RequestedExitCode => VersionDecision.Status is
+         ClientVersionStatus.UpdateRequired or ClientVersionStatus.ProtocolUnsupported ? 42 : null;
+ }
++
++public sealed record NexusGatewayRefreshResult(
++    string AccessToken, string RefreshToken, Guid SessionId, DateTime ExpiresAtUtc);
+ 
+ public sealed class NexusGatewayLogin : IDisposable
+ {
+@@ -176,6 +179,27 @@
+         return result;
+     }
+ 
++    public async Task<NexusGatewayRefreshResult> RefreshAsync(
++        Guid sessionId, string refreshToken, CancellationToken cancellationToken = default)
++    {
++        if (sessionId == Guid.Empty || string.IsNullOrWhiteSpace(refreshToken))
++            throw new ArgumentException("Gateway refresh session and token are required.");
++        using var response = await http.PostAsJsonAsync(
++            new Uri(gateway, "/api/v1/auth/refresh"),
++            new GatewayRefreshRequest(sessionId, refreshToken), cancellationToken);
++        if (response.StatusCode == HttpStatusCode.Unauthorized)
++            throw new UnauthorizedAccessException("Gateway session expired or refresh token was rejected.");
++        if (!response.IsSuccessStatusCode)
++            throw new HttpRequestException($"Gateway token refresh failed with HTTP {(int)response.StatusCode}.");
++        var login = await response.Content.ReadFromJsonAsync<GatewayLoginResponse>(cancellationToken: cancellationToken)
++            ?? throw new InvalidDataException("Gateway refresh response is empty.");
++        if (string.IsNullOrWhiteSpace(login.AccessToken) || string.IsNullOrWhiteSpace(login.RefreshToken) ||
++            login.SessionId != sessionId || login.ExpiresAtUtc.Kind != DateTimeKind.Utc ||
++            login.ExpiresAtUtc <= DateTime.UtcNow)
++            throw new InvalidDataException("Gateway refresh response is invalid.");
++        return new NexusGatewayRefreshResult(login.AccessToken, login.RefreshToken, sessionId, login.ExpiresAtUtc);
++    }
++
+     internal ClientVersionHello LoadInstalledHello()
+     {
+         try
+@@ -203,6 +227,7 @@
+     public void Dispose() => http.Dispose();
+ 
+     private sealed record GatewayCredentials(string Email, string Password, string HandshakeToken);
++    private sealed record GatewayRefreshRequest(Guid SessionId, string RefreshToken);
+     private sealed record GatewayLoginResponse(
+         string AccessToken, string RefreshToken, Guid AccountId, Guid SessionId, DateTime ExpiresAtUtc);
+     private sealed record GatewayPlacementEnvelope(PlacementDecision Decision, bool Duplicate);
+diff --git a/src/LibreLancer.Tests/NexusGatewayLoginTests.cs b/src/LibreLancer.Tests/NexusGatewayLoginTests.cs
+--- a/src/LibreLancer.Tests/NexusGatewayLoginTests.cs
++++ b/src/LibreLancer.Tests/NexusGatewayLoginTests.cs
+@@ -133,6 +133,27 @@
+     }
+ 
+     [Fact]
++    public async Task RefreshRotatesTokensForTheSameSession()
++    {
++        var folder = CreateMetadata();
++        try
++        {
++            var sessionId = Guid.NewGuid();
++            var handler = new FakeHandler(false);
++            using var client = new NexusGatewayLogin(new Uri("https://gateway.example.test"), folder, handler);
++            var result = await client.RefreshAsync(sessionId, "old-refresh-token", TestContext.Current.CancellationToken);
++
++            Assert.Equal(sessionId, result.SessionId);
++            Assert.Equal("new-access", result.AccessToken);
++            Assert.Equal("new-refresh", result.RefreshToken);
++            Assert.Equal("/api/v1/auth/refresh", handler.Requests[^1].Path);
++            Assert.Contains(sessionId.ToString(), handler.Requests[^1].Body);
++            Assert.Contains("old-refresh-token", handler.Requests[^1].Body);
++        }
++        finally { Directory.Delete(folder, true); }
++    }
++
++    [Fact]
+     public async Task RequiredUpdateStopsBeforeSendingCredentials()
+     {
+         var folder = CreateMetadata();
+@@ -179,7 +200,9 @@
+                     ? PlacementPayload(request, body)
+                 : request.RequestUri.AbsolutePath == "/api/v1/transfers/start"
+                     ? TransferPayload(request, body)
+-                    : JsonSerializer.Serialize(new
++                    : request.RequestUri.AbsolutePath == "/api/v1/auth/refresh"
++                    ? RefreshPayload(body)
++                : JsonSerializer.Serialize(new
+                 {
+                     accessToken = "access", refreshToken = "refresh",
+                     accountId = Guid.NewGuid(), sessionId = Guid.NewGuid(),
+@@ -227,6 +250,14 @@
+             });
+         }
+ 
+-
++        private static string RefreshPayload(string body)
++        {
++            var sessionId = JsonDocument.Parse(body).RootElement.GetProperty("sessionId").GetGuid();
++            return JsonSerializer.Serialize(new
++            {
++                accessToken = "new-access", refreshToken = "new-refresh",
++                accountId = Guid.NewGuid(), sessionId, expiresAtUtc = DateTime.UtcNow.AddMinutes(10)
++            });
++        }
+     }
+ }

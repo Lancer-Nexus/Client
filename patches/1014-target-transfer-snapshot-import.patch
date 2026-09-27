@@ -1,0 +1,880 @@
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -336,6 +336,134 @@
+             return output.ToArray();
+         }
+ 
++        /// <summary>
++        /// Verifies the target ticket, durably imports the source save into the local database,
++        /// then asks Gateway to accept and commit the transfer. Repeated calls are idempotent.
++        /// </summary>
++        public async Task<TransferSnapshotTargetReadyResult> ImportTransferSnapshotAndAcceptAsync(
++            Guid transferId, string transferTicket, string targetLeaseToken,
++            CancellationToken cancellationToken = default)
++        {
++            if (transferId == Guid.Empty || string.IsNullOrWhiteSpace(transferTicket) ||
++                string.IsNullOrWhiteSpace(targetLeaseToken))
++                throw new ArgumentException("Transfer acceptance data is incomplete.");
++
++            var status = await GetTransferStatusAsync(transferId, cancellationToken).ConfigureAwait(false);
++            if (!string.Equals(status.TargetInstanceId, InstanceId, StringComparison.Ordinal))
++                throw new InvalidDataException("Transfer is assigned to another target instance.");
++
++            var ticketHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(transferTicket)));
++            var import = await Database.GetTransferSnapshotImportAsync(transferId).ConfigureAwait(false);
++            if (status.State == LancerNexus.Protocol.TransferState.SourceFrozen)
++            {
++                if (import == null)
++                {
++                    var claims = await VerifyTransferTicketAsync(transferId, transferTicket, cancellationToken)
++                        .ConfigureAwait(false);
++                    if (claims.TransferId != transferId || claims.Guid == Guid.Empty || claims.CharacterId <= 0 ||
++                        claims.LeaseVersion != status.LeaseVersion ||
++                        !string.Equals(claims.InstanceId, InstanceId, StringComparison.Ordinal) ||
++                        !string.Equals(claims.SystemId, status.TargetSystemId, StringComparison.Ordinal) ||
++                        !string.Equals(claims.SourceInstanceId, status.SourceInstanceId, StringComparison.Ordinal))
++                        throw new InvalidDataException("Gateway transfer ticket claims do not match the target transfer.");
++
++                    await Database.RecordTransferSnapshotImportAsync(transferId, claims.Guid, claims.CharacterId,
++                        claims.SourceInstanceId, claims.InstanceId, claims.SystemId, claims.LeaseVersion, ticketHash)
++                        .ConfigureAwait(false);
++                    import = await Database.GetTransferSnapshotImportAsync(transferId).ConfigureAwait(false)
++                        ?? throw new InvalidOperationException("Transfer import could not be recorded durably.");
++                }
++                else if (!string.Equals(import.TicketHash, ticketHash, StringComparison.Ordinal))
++                {
++                    throw new InvalidDataException("Transfer retry supplied a different ticket.");
++                }
++
++                if (!import.Imported)
++                {
++                    var snapshot = await DownloadTransferSnapshotAsync(transferId, cancellationToken)
++                        .ConfigureAwait(false);
++                    try
++                    {
++                        var snapshotHash = Convert.ToHexString(SHA256.HashData(snapshot));
++                        var text = new UTF8Encoding(false, true).GetString(snapshot);
++                        var save = SaveGame.FromString($"transfer-{transferId:N}.fl", text);
++                        await Database.ApplyTransferSnapshotImportAsync(transferId, snapshotHash, save)
++                            .ConfigureAwait(false);
++                    }
++                    finally
++                    {
++                        CryptographicOperations.ZeroMemory(snapshot);
++                    }
++                }
++            }
++            else if (status.State is LancerNexus.Protocol.TransferState.TargetAccepted or
++                     LancerNexus.Protocol.TransferState.Committed)
++            {
++                if (import is not { Imported: true } ||
++                    !string.Equals(import.TicketHash, ticketHash, StringComparison.Ordinal))
++                    throw new InvalidOperationException("Transfer cannot be accepted before its snapshot is durably imported.");
++            }
++            else if (status.State == LancerNexus.Protocol.TransferState.SourceReleased)
++            {
++                if (import is not { Imported: true } ||
++                    !string.Equals(import.TicketHash, ticketHash, StringComparison.Ordinal) ||
++                    status.LeaseVersion != import.LeaseVersion + 1)
++                    throw new InvalidOperationException("Released transfer has no matching committed target import.");
++                return new TransferSnapshotTargetReadyResult(transferId, import.CharacterId,
++                    status.LeaseVersion, true);
++            }
++            else
++            {
++                throw new InvalidOperationException($"Transfer cannot be imported in state {status.State}.");
++            }
++
++            import ??= await Database.GetTransferSnapshotImportAsync(transferId).ConfigureAwait(false);
++            if (import is not { Imported: true } ||
++                !string.Equals(import.TicketHash, ticketHash, StringComparison.Ordinal))
++                throw new InvalidOperationException("Transfer snapshot import did not reach its durable state.");
++
++            var accepted = await AcceptTransferAsync(transferTicket, targetLeaseToken, cancellationToken)
++                .ConfigureAwait(false);
++            if (accepted.TransferId != transferId ||
++                !string.Equals(accepted.InstanceId, InstanceId, StringComparison.Ordinal) ||
++                accepted.LeaseVersion != import.LeaseVersion + 1)
++                throw new InvalidDataException("Gateway transfer commit response does not match the imported snapshot.");
++            return new TransferSnapshotTargetReadyResult(transferId, import.CharacterId,
++                accepted.LeaseVersion, false);
++        }
++
++        private async Task<TransferTicketVerificationResponse> VerifyTransferTicketAsync(
++            Guid transferId, string ticket, CancellationToken cancellationToken)
++        {
++            using var request = new HttpRequestMessage(HttpMethod.Post,
++                GetTransferGatewayUrl("/api/v1/game/verify-transfer-ticket"));
++            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", TransferInstanceKey!);
++            request.Content = JsonContent.Create(new TransferTicketVerificationRequestBody(ticket, InstanceId!));
++            using var response = await transferHttp.SendAsync(request, cancellationToken).ConfigureAwait(false);
++            if (!response.IsSuccessStatusCode)
++                throw new HttpRequestException($"Gateway transfer ticket verification failed with HTTP {(int)response.StatusCode}.");
++            var claims = await response.Content.ReadFromJsonAsync<TransferTicketVerificationResponse>(
++                cancellationToken: cancellationToken).ConfigureAwait(false);
++            return claims is { TransferId: var verifiedId } && verifiedId == transferId
++                ? claims
++                : throw new InvalidDataException("Gateway transfer ticket verification response is invalid.");
++        }
++
++        private async Task<TransferAcceptanceResponse> AcceptTransferAsync(
++            string ticket, string targetLeaseToken, CancellationToken cancellationToken)
++        {
++            using var request = new HttpRequestMessage(HttpMethod.Post,
++                GetTransferGatewayUrl("/api/v1/game/accept-transfer"));
++            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", TransferInstanceKey!);
++            request.Content = JsonContent.Create(new TransferTargetAcceptanceRequestBody(ticket, targetLeaseToken));
++            using var response = await transferHttp.SendAsync(request, cancellationToken).ConfigureAwait(false);
++            if (!response.IsSuccessStatusCode)
++                throw new HttpRequestException($"Gateway transfer acceptance failed with HTTP {(int)response.StatusCode}.");
++            return await response.Content.ReadFromJsonAsync<TransferAcceptanceResponse>(
++                       cancellationToken: cancellationToken).ConfigureAwait(false)
++                   ?? throw new InvalidDataException("Gateway transfer acceptance response is empty.");
++        }
++
+         public async Task<LancerNexus.Protocol.TransferStatusResponse> GetTransferStatusAsync(Guid transferId,
+             CancellationToken cancellationToken = default)
+         {
+@@ -519,4 +647,6 @@
+         }
+     }
+ 
++    public sealed record TransferSnapshotTargetReadyResult(
++        Guid TransferId, long CharacterId, long LeaseVersion, bool AlreadyCompleted);
+ }
+--- a/src/LibreLancer/Server/ServerDatabase.cs
++++ b/src/LibreLancer/Server/ServerDatabase.cs
+@@ -20,6 +20,11 @@
+ namespace LibreLancer.Server
+ {
+ 
++    public sealed record TransferSnapshotImportRecord(
++        Guid TransferId, Guid AccountId, long CharacterId, string SourceInstanceId,
++        string TargetInstanceId, string TargetSystemId, long LeaseVersion, string TicketHash,
++        string? SnapshotHash, bool Imported);
++
+     public class DatabaseCharacter
+     {
+         public long Id;
+@@ -383,6 +388,113 @@
+             });
+         }
+ 
++        public Task<TransferSnapshotImportRecord?> GetTransferSnapshotImportAsync(Guid transferId) =>
++            Run(async () =>
++            {
++                await using var ctx = CreateDbContext();
++                var record = await ctx.TransferSnapshotImports.AsNoTracking()
++                    .FirstOrDefaultAsync(x => x.TransferId == transferId);
++                return record == null ? null : ToImportRecord(record);
++            });
++
++        public Task RecordTransferSnapshotImportAsync(
++            Guid transferId, Guid accountId, long characterId, string sourceInstanceId,
++            string targetInstanceId, string targetSystemId, long leaseVersion, string ticketHash)
++        {
++            return Run(async () =>
++            {
++                await using var ctx = CreateDbContext();
++                var existing = await ctx.TransferSnapshotImports
++                    .FirstOrDefaultAsync(x => x.TransferId == transferId);
++                if (existing != null)
++                {
++                    if (existing.AccountId != accountId || existing.CharacterId != characterId ||
++                        existing.LeaseVersion != leaseVersion ||
++                        !string.Equals(existing.SourceInstanceId, sourceInstanceId, StringComparison.Ordinal) ||
++                        !string.Equals(existing.TargetInstanceId, targetInstanceId, StringComparison.Ordinal) ||
++                        !string.Equals(existing.TargetSystemId, targetSystemId, StringComparison.Ordinal) ||
++                        !string.Equals(existing.TicketHash, ticketHash, StringComparison.Ordinal))
++                        throw new InvalidOperationException("Transfer ID is already bound to different import claims.");
++                    return;
++                }
++
++                ctx.TransferSnapshotImports.Add(new TransferSnapshotImport
++                {
++                    TransferId = transferId,
++                    AccountId = accountId,
++                    CharacterId = characterId,
++                    SourceInstanceId = sourceInstanceId,
++                    TargetInstanceId = targetInstanceId,
++                    TargetSystemId = targetSystemId,
++                    LeaseVersion = leaseVersion,
++                    TicketHash = ticketHash
++                });
++                await ctx.SaveChangesAsync();
++            });
++        }
++
++        public Task<bool> ApplyTransferSnapshotImportAsync(Guid transferId, string snapshotHash, SaveGame save)
++        {
++            return Run(async () =>
++            {
++                await using var ctx = CreateDbContext();
++                await using var transaction = await ctx.Database.BeginTransactionAsync();
++                var import = await ctx.TransferSnapshotImports
++                    .FirstOrDefaultAsync(x => x.TransferId == transferId)
++                    ?? throw new InvalidOperationException("Transfer import claims have not been recorded.");
++                if (import.Imported)
++                {
++                    if (!string.Equals(import.SnapshotHash, snapshotHash, StringComparison.Ordinal))
++                        throw new InvalidOperationException("Transfer snapshot changed after it was imported.");
++                    await transaction.CommitAsync();
++                    return false;
++                }
++
++                if (save.Player == null || string.IsNullOrWhiteSpace(save.Player.Name) ||
++                    !string.Equals(save.Player.System, import.TargetSystemId, StringComparison.OrdinalIgnoreCase) ||
++                    !string.IsNullOrWhiteSpace(save.Player.Base))
++                    throw new InvalidDataException("Transfer snapshot character is not valid for the target system.");
++
++                var account = await ctx.Accounts.FirstOrDefaultAsync(x => x.AccountIdentifier == import.AccountId);
++                if (account == null)
++                {
++                    account = new Account { AccountIdentifier = import.AccountId, LastLogin = DateTime.UtcNow };
++                    ctx.Accounts.Add(account);
++                }
++
++                var character = await ctx.Characters
++                    .Include(x => x.Account)
++                    .Include(x => x.Items)
++                    .Include(x => x.Reputations)
++                    .Include(x => x.VisitEntries)
++                    .Include(x => x.VisitHistoryEntries)
++                    .AsSplitQuery()
++                    .FirstOrDefaultAsync(x => x.Id == import.CharacterId);
++                if (character == null)
++                {
++                    character = new Character { Id = import.CharacterId, Account = account };
++                    ctx.Characters.Add(character);
++                }
++                else if (character.Account.AccountIdentifier != import.AccountId ||
++                         !string.Equals(character.Name, save.Player.Name, StringComparison.OrdinalIgnoreCase))
++                {
++                    throw new InvalidOperationException("Target character identity does not match the transfer.");
++                }
++
++                NetCharacter.SaveToDbCharacter(server, save, character);
++                import.SnapshotHash = snapshotHash;
++                import.Imported = true;
++                await ctx.SaveChangesAsync();
++                await transaction.CommitAsync();
++                return true;
++            });
++        }
++
++        private static TransferSnapshotImportRecord ToImportRecord(TransferSnapshotImport record) => new(
++            record.TransferId, record.AccountId, record.CharacterId, record.SourceInstanceId,
++            record.TargetInstanceId, record.TargetSystemId, record.LeaseVersion, record.TicketHash,
++            record.SnapshotHash, record.Imported);
++
+         public void Dispose()
+         {
+             actions.Complete();
+--- a/src/LibreLancer/Server/NetCharacter.cs
++++ b/src/LibreLancer/Server/NetCharacter.cs
+@@ -239,6 +239,7 @@
+ 
+             public void AddCargo(Equipment equip, string? hardpoint, int count, bool isMissionItem = false)
+             {
++                cargoDirty = true;
+                 if (equip.Good?.Ini.Combinable ?? false)
+                 {
+                     if (!string.IsNullOrEmpty(hardpoint))
+@@ -417,6 +418,15 @@
+             var stats = new NetPlayerStatistics();
+             using var c = new CharacterTransaction(nc, db);
+ 
++            if (db != null)
++            {
++                db.Items.Clear();
++                db.Reputations.Clear();
++                db.VisitEntries.Clear();
++                db.VisitHistoryEntries.Clear();
++                c.ClearAllCargo();
++            }
++
+             c.UpdateName(sg.Player!.Name!);
+             c.UpdateCredits(sg.Player.Money);
+             c.UpdateShip(game.GameData.Items.Ships.Get(sg.Player.ShipArchetype));
+--- a/src/Librelancer.Database/LibreLancerContext.cs
++++ b/src/Librelancer.Database/LibreLancerContext.cs
+@@ -24,6 +24,7 @@
+ 
+         public DbSet<Character> Characters { get; set; }
+         public DbSet<Account> Accounts { get; set; }
++        public DbSet<TransferSnapshotImport> TransferSnapshotImports { get; set; }
+ 
+         protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
+         {
+@@ -39,6 +40,7 @@
+             modelBuilder.Entity<Reputation>().Property(x => x.RepGroup).HasColumnType("TEXT COLLATE NOCASE");
+             // Indexes
+             modelBuilder.Entity<Account>().HasIndex(x => x.AccountIdentifier);
++            modelBuilder.Entity<TransferSnapshotImport>().HasKey(x => x.TransferId);
+ 
+             modelBuilder.Entity<VisitEntry>().HasIndex(x => new { x.CharacterId, x.Hash }).IsUnique();
+             modelBuilder.Entity<VisitEntry>().HasIndex(x => x.CharacterId);
+--- a/src/Librelancer.Database/Migrations/LibreLancerContextModelSnapshot.cs
++++ b/src/Librelancer.Database/Migrations/LibreLancerContextModelSnapshot.cs
+@@ -45,6 +45,47 @@
+                     b.ToTable("Accounts");
+                 });
+ 
++            modelBuilder.Entity("LibreLancer.Entities.Character.TransferSnapshotImport", b =>
++                {
++                    b.Property<Guid>("TransferId")
++                        .HasColumnType("TEXT");
++
++                    b.Property<Guid>("AccountId")
++                        .HasColumnType("TEXT");
++
++                    b.Property<long>("CharacterId")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<bool>("Imported")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<long>("LeaseVersion")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<string>("SnapshotHash")
++                        .HasColumnType("TEXT");
++
++                    b.Property<string>("SourceInstanceId")
++                        .IsRequired()
++                        .HasColumnType("TEXT");
++
++                    b.Property<string>("TargetInstanceId")
++                        .IsRequired()
++                        .HasColumnType("TEXT");
++
++                    b.Property<string>("TargetSystemId")
++                        .IsRequired()
++                        .HasColumnType("TEXT");
++
++                    b.Property<string>("TicketHash")
++                        .IsRequired()
++                        .HasColumnType("TEXT");
++
++                    b.HasKey("TransferId");
++
++                    b.ToTable("TransferSnapshotImports");
++                });
++
+             modelBuilder.Entity("LibreLancer.Entities.Character.CargoItem", b =>
+                 {
+                     b.Property<long>("Id")
+--- a/src/LibreLancer.Entities/Character/TransferSnapshotImport.cs
++++ b/src/LibreLancer.Entities/Character/TransferSnapshotImport.cs
+@@ -0,0 +1,18 @@
++using System;
++
++namespace LibreLancer.Entities.Character;
++
++/// <summary>Durable target-side state for an idempotent character transfer import.</summary>
++public sealed class TransferSnapshotImport
++{
++    public Guid TransferId { get; set; }
++    public Guid AccountId { get; set; }
++    public long CharacterId { get; set; }
++    public string SourceInstanceId { get; set; } = "";
++    public string TargetInstanceId { get; set; } = "";
++    public string TargetSystemId { get; set; } = "";
++    public long LeaseVersion { get; set; }
++    public string TicketHash { get; set; } = "";
++    public string? SnapshotHash { get; set; }
++    public bool Imported { get; set; }
++}
+--- a/src/Librelancer.Database/Migrations/20260926120000_TransferSnapshotImports.cs
++++ b/src/Librelancer.Database/Migrations/20260926120000_TransferSnapshotImports.cs
+@@ -0,0 +1,32 @@
++using System;
++using Microsoft.EntityFrameworkCore.Migrations;
++
++#nullable disable
++
++namespace LibreLancer.Database.Migrations;
++
++public partial class TransferSnapshotImports : Migration
++{
++    protected override void Up(MigrationBuilder migrationBuilder)
++    {
++        migrationBuilder.CreateTable(
++            name: "TransferSnapshotImports",
++            columns: table => new
++            {
++                TransferId = table.Column<Guid>(type: "TEXT", nullable: false),
++                AccountId = table.Column<Guid>(type: "TEXT", nullable: false),
++                CharacterId = table.Column<long>(type: "INTEGER", nullable: false),
++                SourceInstanceId = table.Column<string>(type: "TEXT", nullable: false),
++                TargetInstanceId = table.Column<string>(type: "TEXT", nullable: false),
++                TargetSystemId = table.Column<string>(type: "TEXT", nullable: false),
++                LeaseVersion = table.Column<long>(type: "INTEGER", nullable: false),
++                TicketHash = table.Column<string>(type: "TEXT", nullable: false),
++                SnapshotHash = table.Column<string>(type: "TEXT", nullable: true),
++                Imported = table.Column<bool>(type: "INTEGER", nullable: false)
++            },
++            constraints: table => table.PrimaryKey("PK_TransferSnapshotImports", x => x.TransferId));
++    }
++
++    protected override void Down(MigrationBuilder migrationBuilder) =>
++        migrationBuilder.DropTable(name: "TransferSnapshotImports");
++}
+--- a/src/Librelancer.Database/Migrations/20260926120000_TransferSnapshotImports.Designer.cs
++++ b/src/Librelancer.Database/Migrations/20260926120000_TransferSnapshotImports.Designer.cs
+@@ -0,0 +1,402 @@
++// <auto-generated />
++// <auto-generated />
++using System;
++using LibreLancer.Database;
++using Microsoft.EntityFrameworkCore;
++using Microsoft.EntityFrameworkCore.Infrastructure;
++using Microsoft.EntityFrameworkCore.Migrations;
++using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
++
++#nullable disable
++
++namespace LibreLancer.Database.Migrations
++{
++    [DbContext(typeof(LibreLancerContext))]
++    [Migration("20260926120000_TransferSnapshotImports")]
++    partial class TransferSnapshotImports : Migration
++    {
++        protected override void BuildTargetModel(ModelBuilder modelBuilder)
++        {
++#pragma warning disable 612, 618
++            modelBuilder.HasAnnotation("ProductVersion", "10.0.0");
++
++            modelBuilder.Entity("LibreLancer.Entities.Character.Account", b =>
++                {
++                    b.Property<long>("Id")
++                        .ValueGeneratedOnAdd()
++                        .HasColumnType("INTEGER");
++
++                    b.Property<Guid>("AccountIdentifier")
++                        .HasColumnType("TEXT");
++
++                    b.Property<double?>("BanExpiry")
++                        .HasColumnType("REAL");
++
++                    b.Property<double>("CreationDate")
++                        .HasColumnType("REAL");
++
++                    b.Property<double>("LastLogin")
++                        .HasColumnType("REAL");
++
++                    b.Property<double?>("UpdateDate")
++                        .HasColumnType("REAL");
++
++                    b.HasKey("Id");
++
++                    b.HasIndex("AccountIdentifier");
++
++                    b.ToTable("Accounts");
++                });
++
++            modelBuilder.Entity("LibreLancer.Entities.Character.TransferSnapshotImport", b =>
++                {
++                    b.Property<Guid>("TransferId")
++                        .HasColumnType("TEXT");
++
++                    b.Property<Guid>("AccountId")
++                        .HasColumnType("TEXT");
++
++                    b.Property<long>("CharacterId")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<bool>("Imported")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<long>("LeaseVersion")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<string>("SnapshotHash")
++                        .HasColumnType("TEXT");
++
++                    b.Property<string>("SourceInstanceId")
++                        .IsRequired()
++                        .HasColumnType("TEXT");
++
++                    b.Property<string>("TargetInstanceId")
++                        .IsRequired()
++                        .HasColumnType("TEXT");
++
++                    b.Property<string>("TargetSystemId")
++                        .IsRequired()
++                        .HasColumnType("TEXT");
++
++                    b.Property<string>("TicketHash")
++                        .IsRequired()
++                        .HasColumnType("TEXT");
++
++                    b.HasKey("TransferId");
++
++                    b.ToTable("TransferSnapshotImports");
++                });
++
++            modelBuilder.Entity("LibreLancer.Entities.Character.CargoItem", b =>
++                {
++                    b.Property<long>("Id")
++                        .ValueGeneratedOnAdd()
++                        .HasColumnType("INTEGER");
++
++                    b.Property<long?>("CharacterId")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<double>("CreationDate")
++                        .HasColumnType("REAL");
++
++                    b.Property<string>("Hardpoint")
++                        .HasColumnType("TEXT");
++
++                    b.Property<float>("Health")
++                        .HasColumnType("REAL");
++
++                    b.Property<bool>("IsMissionItem")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<long>("ItemCount")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<string>("ItemName")
++                        .HasColumnType("TEXT");
++
++                    b.Property<double?>("UpdateDate")
++                        .HasColumnType("REAL");
++
++                    b.HasKey("Id");
++
++                    b.HasIndex("CharacterId");
++
++                    b.ToTable("CargoItem");
++                });
++
++            modelBuilder.Entity("LibreLancer.Entities.Character.Character", b =>
++                {
++                    b.Property<long>("Id")
++                        .ValueGeneratedOnAdd()
++                        .HasColumnType("INTEGER");
++
++                    b.Property<long>("AccountId")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<string>("Affiliation")
++                        .HasColumnType("TEXT");
++
++                    b.Property<bool>("AffiliationLocked")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<string>("Base")
++                        .HasColumnType("TEXT");
++
++                    b.Property<long>("CapitalKills")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<string>("ComCostume")
++                        .HasColumnType("TEXT");
++
++                    b.Property<string>("Costume")
++                        .HasColumnType("TEXT");
++
++                    b.Property<double>("CreationDate")
++                        .HasColumnType("REAL");
++
++                    b.Property<string>("Description")
++                        .HasColumnType("TEXT");
++
++                    b.PrimitiveCollection<string>("DestroyedParts")
++                        .IsRequired()
++                        .HasColumnType("TEXT");
++
++                    b.Property<long>("FightersKilled")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<long>("FreightersKilled")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<bool>("IsAdmin")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<long>("MissionsCompleted")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<long>("MissionsFailed")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<long>("Money")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<string>("Name")
++                        .HasColumnType("TEXT COLLATE NOCASE");
++
++                    b.Property<long>("PlayersKilled")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<uint>("Rank")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<float>("RotationW")
++                        .HasColumnType("REAL");
++
++                    b.Property<float>("RotationX")
++                        .HasColumnType("REAL");
++
++                    b.Property<float>("RotationY")
++                        .HasColumnType("REAL");
++
++                    b.Property<float>("RotationZ")
++                        .HasColumnType("REAL");
++
++                    b.Property<string>("Ship")
++                        .HasColumnType("TEXT");
++
++                    b.Property<string>("System")
++                        .HasColumnType("TEXT");
++
++                    b.Property<double>("Time")
++                        .HasColumnType("REAL");
++
++                    b.Property<long>("TransportsKilled")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<double?>("UpdateDate")
++                        .HasColumnType("REAL");
++
++                    b.Property<string>("Voice")
++                        .HasColumnType("TEXT");
++
++                    b.Property<float>("X")
++                        .HasColumnType("REAL");
++
++                    b.Property<float>("Y")
++                        .HasColumnType("REAL");
++
++                    b.Property<float>("Z")
++                        .HasColumnType("REAL");
++
++                    b.HasKey("Id");
++
++                    b.HasIndex("AccountId");
++
++                    b.ToTable("Characters");
++                });
++
++            modelBuilder.Entity("LibreLancer.Entities.Character.Reputation", b =>
++                {
++                    b.Property<long>("Id")
++                        .ValueGeneratedOnAdd()
++                        .HasColumnType("INTEGER");
++
++                    b.Property<long>("CharacterId")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<double>("CreationDate")
++                        .HasColumnType("REAL");
++
++                    b.Property<string>("RepGroup")
++                        .HasColumnType("TEXT COLLATE NOCASE");
++
++                    b.Property<float>("ReputationValue")
++                        .HasColumnType("REAL");
++
++                    b.Property<double?>("UpdateDate")
++                        .HasColumnType("REAL");
++
++                    b.HasKey("Id");
++
++                    b.HasIndex("CharacterId");
++
++                    b.HasIndex("CharacterId", "RepGroup")
++                        .IsUnique();
++
++                    b.ToTable("Reputation");
++                });
++
++            modelBuilder.Entity("LibreLancer.Entities.Character.VisitEntry", b =>
++                {
++                    b.Property<long>("Id")
++                        .ValueGeneratedOnAdd()
++                        .HasColumnType("INTEGER");
++
++                    b.Property<long>("CharacterId")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<double>("CreationDate")
++                        .HasColumnType("REAL");
++
++                    b.Property<uint>("Hash")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<double?>("UpdateDate")
++                        .HasColumnType("REAL");
++
++                    b.Property<int>("VisitValue")
++                        .HasColumnType("INTEGER");
++
++                    b.HasKey("Id");
++
++                    b.HasIndex("CharacterId");
++
++                    b.HasIndex("CharacterId", "Hash")
++                        .IsUnique();
++
++                    b.ToTable("VisitEntry");
++                });
++
++            modelBuilder.Entity("LibreLancer.Entities.Character.VisitHistoryEntry", b =>
++                {
++                    b.Property<long>("Id")
++                        .ValueGeneratedOnAdd()
++                        .HasColumnType("INTEGER");
++
++                    b.Property<long>("CharacterId")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<double>("CreationDate")
++                        .HasColumnType("REAL");
++
++                    b.Property<uint>("Hash")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<int>("Kind")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<double?>("UpdateDate")
++                        .HasColumnType("REAL");
++
++                    b.HasKey("Id");
++
++                    b.HasIndex("CharacterId");
++
++                    b.HasIndex("CharacterId", "Kind", "Hash")
++                        .IsUnique();
++
++                    b.ToTable("VisitHistoryEntry");
++                });
++
++            modelBuilder.Entity("LibreLancer.Entities.Character.CargoItem", b =>
++                {
++                    b.HasOne("LibreLancer.Entities.Character.Character", null)
++                        .WithMany("Items")
++                        .HasForeignKey("CharacterId")
++                        .OnDelete(DeleteBehavior.Cascade);
++                });
++
++            modelBuilder.Entity("LibreLancer.Entities.Character.Character", b =>
++                {
++                    b.HasOne("LibreLancer.Entities.Character.Account", "Account")
++                        .WithMany("Characters")
++                        .HasForeignKey("AccountId")
++                        .OnDelete(DeleteBehavior.Cascade)
++                        .IsRequired();
++
++                    b.Navigation("Account");
++                });
++
++            modelBuilder.Entity("LibreLancer.Entities.Character.Reputation", b =>
++                {
++                    b.HasOne("LibreLancer.Entities.Character.Character", "Character")
++                        .WithMany("Reputations")
++                        .HasForeignKey("CharacterId")
++                        .OnDelete(DeleteBehavior.Cascade)
++                        .IsRequired();
++
++                    b.Navigation("Character");
++                });
++
++            modelBuilder.Entity("LibreLancer.Entities.Character.VisitEntry", b =>
++                {
++                    b.HasOne("LibreLancer.Entities.Character.Character", "Character")
++                        .WithMany("VisitEntries")
++                        .HasForeignKey("CharacterId")
++                        .OnDelete(DeleteBehavior.Cascade)
++                        .IsRequired();
++
++                    b.Navigation("Character");
++                });
++
++            modelBuilder.Entity("LibreLancer.Entities.Character.VisitHistoryEntry", b =>
++                {
++                    b.HasOne("LibreLancer.Entities.Character.Character", "Character")
++                        .WithMany("VisitHistoryEntries")
++                        .HasForeignKey("CharacterId")
++                        .OnDelete(DeleteBehavior.Cascade)
++                        .IsRequired();
++
++                    b.Navigation("Character");
++                });
++
++            modelBuilder.Entity("LibreLancer.Entities.Character.Account", b =>
++                {
++                    b.Navigation("Characters");
++                });
++
++            modelBuilder.Entity("LibreLancer.Entities.Character.Character", b =>
++                {
++                    b.Navigation("Items");
++
++                    b.Navigation("Reputations");
++
++                    b.Navigation("VisitEntries");
++
++                    b.Navigation("VisitHistoryEntries");
++                });
++#pragma warning restore 612, 618
++        }
++    }
++}
+--- a/src/LibreLancer.Tests/TransferSnapshotImportMigrationTests.cs
++++ b/src/LibreLancer.Tests/TransferSnapshotImportMigrationTests.cs
+@@ -0,0 +1,50 @@
++using System;
++using System.Threading.Tasks;
++using LibreLancer.Database;
++using LibreLancer.Entities.Character;
++using Microsoft.Data.Sqlite;
++using Microsoft.EntityFrameworkCore;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class TransferSnapshotImportMigrationTests
++{
++    [Fact]
++    public async Task MigrationCreatesDurableImportReceiptTable()
++    {
++        var cancellationToken = TestContext.Current.CancellationToken;
++        await using var connection = new SqliteConnection("Data Source=:memory:");
++        await connection.OpenAsync(cancellationToken);
++        var options = new DbContextOptionsBuilder<LibreLancerContext>()
++            .UseSqlite(connection)
++            .Options;
++        await using var context = new LibreLancerContext(options);
++
++        await context.Database.MigrateAsync(cancellationToken);
++
++        Assert.Contains("20260926120000_TransferSnapshotImports",
++            await context.Database.GetAppliedMigrationsAsync(cancellationToken));
++
++        var transferId = Guid.NewGuid();
++        context.TransferSnapshotImports.Add(new TransferSnapshotImport
++        {
++            TransferId = transferId,
++            AccountId = Guid.NewGuid(),
++            CharacterId = 42,
++            SourceInstanceId = "li01-instance",
++            TargetInstanceId = "li02-instance",
++            TargetSystemId = "li02",
++            LeaseVersion = 8,
++            TicketHash = new string('A', 64),
++            SnapshotHash = new string('B', 64),
++            Imported = true
++        });
++        await context.SaveChangesAsync(cancellationToken);
++
++        var saved = await context.TransferSnapshotImports.SingleAsync(
++            x => x.TransferId == transferId, cancellationToken);
++        Assert.Equal(42, saved.CharacterId);
++        Assert.True(saved.Imported);
++    }
++}

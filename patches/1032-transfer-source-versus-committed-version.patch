@@ -1,0 +1,106 @@
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -394,7 +394,9 @@
+                     var claims = await VerifyTransferTicketAsync(transferId, transferTicket, cancellationToken)
+                         .ConfigureAwait(false);
+                     if (claims.TransferId != transferId || claims.Guid == Guid.Empty || claims.CharacterId <= 0 ||
+-                        claims.LeaseVersion != status.LeaseVersion ||
++                        // Status.LeaseVersion is the committed version; before commit it is unset (0).
++                        // Gateway verifies the signed source version and fences the atomic lease commit.
++                        claims.LeaseVersion < 0 ||
+                         !string.Equals(claims.InstanceId, InstanceId, StringComparison.Ordinal) ||
+                         !string.Equals(claims.SystemId, status.TargetSystemId, StringComparison.Ordinal) ||
+                         !string.Equals(claims.SourceInstanceId, status.SourceInstanceId, StringComparison.Ordinal))
+--- /dev/null
++++ b/src/LibreLancer.Tests/TransferSourceVersionTests.cs
+@@ -0,0 +1,90 @@
++using System;
++using System.IO;
++using System.Net;
++using System.Net.Http;
++using System.Net.Http.Json;
++using System.Reflection;
++using System.Threading;
++using System.Threading.Tasks;
++using LibreLancer.Database;
++using LibreLancer.Data.IO;
++using LibreLancer.Server;
++using Microsoft.Data.Sqlite;
++using Microsoft.EntityFrameworkCore;
++using Microsoft.EntityFrameworkCore.Design;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class TransferSourceVersionTests
++{
++    [Theory]
++    [InlineData(0)]
++    [InlineData(1)]
++    [InlineData(8)]
++    public async Task FrozenTransferImportsVerifiedSourceVersionBeforeCommittedVersionExists(long version)
++    {
++        await using var connection = new SqliteConnection("Data Source=:memory:");
++        await connection.OpenAsync();
++        var options = new DbContextOptionsBuilder<LibreLancerContext>().UseSqlite(connection).Options;
++        await using (var context = new LibreLancerContext(options))
++            await context.Database.MigrateAsync();
++        var game = new GameServer(new FileSystem(new EmptyFileSystem()))
++        {
++            InstanceId = "li01", SystemId = "li01", LoginUrl = "https://gateway.example",
++            TransferInstanceKey = new string('k', 32), DbContextFactory = new Factory(options)
++        };
++        using var database = new ServerDatabase(game);
++        game.Database = database;
++        var transfer = Guid.NewGuid();
++        using var http = new HttpClient(new Handler(transfer, version));
++        var field = typeof(GameServer).GetField("transferHttp", BindingFlags.Instance | BindingFlags.NonPublic)!;
++        var original = (HttpClient)field.GetValue(game)!;
++        field.SetValue(game, http);
++        original.Dispose();
++        // Stop at snapshot download: the verified receipt must already have been durably written.
++        await Assert.ThrowsAsync<HttpRequestException>(() =>
++            game.ImportTransferSnapshotAndAcceptAsync(transfer, "test-ticket", "test-target-token"));
++        var receipt = await database.GetTransferSnapshotImportAsync(transfer);
++        Assert.NotNull(receipt);
++        Assert.Equal(version, receipt.LeaseVersion);
++        Assert.False(receipt.Imported);
++    }
++
++    private sealed class Factory(DbContextOptions<LibreLancerContext> options) : IDesignTimeDbContextFactory<LibreLancerContext>
++    {
++        public LibreLancerContext CreateDbContext(string[] args) => new(options);
++    }
++    private sealed class Handler(Guid transfer, long version) : HttpMessageHandler
++    {
++        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
++        {
++            if (request.RequestUri!.AbsolutePath.EndsWith("verify-transfer-ticket"))
++                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(new {
++                    TransferId = transfer, Guid = Guid.NewGuid(), CharacterId = 1,
++                    SourceInstanceId = "li02", InstanceId = "li01", SystemId = "Li01", LeaseVersion = version
++                }) });
++            if (request.RequestUri.AbsolutePath.EndsWith("/snapshot"))
++                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
++            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(new {
++                TransferId = transfer, State = 4, SourceInstanceId = "li02", TargetInstanceId = "li01",
++                TargetSystemId = "Li01", LeaseVersion = 0
++            }) });
++        }
++    }
++    private sealed class EmptyFileSystem : BaseFileSystemProvider
++    {
++        public EmptyFileSystem() => Refresh();
++        public override void Refresh()
++        {
++            Root = new VfsDirectory();
++            var exe = new VfsDirectory { Name = "EXE", Parent = Root };
++            Root.Items["EXE"] = exe;
++            exe.Items.Add("freelancer.ini", new EmptyFile { Name = "freelancer.ini" });
++        }
++        private sealed class EmptyFile : VfsFile
++        {
++            public override Stream OpenRead() => new MemoryStream();
++        }
++    }
++}
