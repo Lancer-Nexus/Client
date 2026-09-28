@@ -1,0 +1,69 @@
+--- a/src/LLServer.Core/ServerConfig.cs
++++ b/src/LLServer.Core/ServerConfig.cs
+@@ -10,6 +10,7 @@
+     public string? LoginUrl;
+     public string DatabasePath = "";
+     public int Port = LNetConst.DEFAULT_PORT;
++    public string? BindAddress;
+     public int MaxPlayers = 200;
+     public int ThreadCount = 0;
+     public string? RuntimeStatusFile;
+@@ -28,6 +29,7 @@
+         LoginUrl = other.LoginUrl;
+         DatabasePath = other.DatabasePath;
+         Port = other.Port;
++        BindAddress = other.BindAddress;
+         MaxPlayers = other.MaxPlayers;
+         RuntimeStatusFile = other.RuntimeStatusFile;
+         DrainFlagFile = other.DrainFlagFile;
+--- a/src/LLServer.Core/ServerApp.cs
++++ b/src/LLServer.Core/ServerApp.cs
+@@ -84,6 +84,7 @@
+             FLLog.Info("Server", $"Test new-character rank override enabled: {testRank}");
+         var listener = Server.Listener ?? throw new InvalidOperationException("Game server listener was not initialized.");
+         listener.Port = Config.Port > 0 ? Config.Port : LNetConst.DEFAULT_PORT;
++        listener.BindAddress = Config.BindAddress;
+         listener.MaxConnections = Config.MaxPlayers > 0 ? Config.MaxPlayers : 200;
+         if(Config.ThreadCount > 0)
+             Server.ThreadCount = Config.ThreadCount;
+--- a/src/LibreLancer/Net/GameListener.cs
++++ b/src/LibreLancer/Net/GameListener.cs
+@@ -7,6 +7,7 @@
+ using System.Diagnostics;
+ using System.Linq;
+ using System.Net.Http;
++using System.Net;
+ using System.Threading;
+ using System.Threading.Tasks;
+ using LibreLancer.Net.Protocol;
+@@ -28,6 +29,7 @@
+         private static readonly object TagConnecting = new();
+ 
+         public int Port = LNetConst.DEFAULT_PORT;
++        public string? BindAddress;
+         public int MaxConnections = 200;
+         public string AppIdentifier = LNetConst.DEFAULT_APP_IDENT;
+ 
+@@ -287,15 +289,19 @@
+             broadcastServer.IPv6Enabled = true;
+             broadcastServer.BroadcastReceiveEnabled = true;
+             broadcastServer.UnsyncedEvents = true;
+-            broadcastServer.Start(LNetConst.BROADCAST_PORT);
++            if (!game.ClusterTransfersEnabled)
++                broadcastServer.Start(LNetConst.BROADCAST_PORT);
+             Server = new NetManager(listener)
+             {
+-                IPv6Enabled = true,
++                IPv6Enabled = string.IsNullOrWhiteSpace(BindAddress),
+                 UnconnectedMessagesEnabled = true,
+                 ChannelsCount = 3,
+                 UnsyncedEvents = true
+             };
+-            Server.Start(Port);
++            var started = string.IsNullOrWhiteSpace(BindAddress) ? Server.Start(Port) :
++                Server.Start(IPAddress.Parse(BindAddress), IPAddress.IPv6Any, Port);
++            if (!started)
++                throw new InvalidOperationException("Game listener could not bind the configured address and port.");
+             FLLog.Info("Server", "Listening on port " + Port);
+             stopHandle.WaitOne();
+             http.Dispose();

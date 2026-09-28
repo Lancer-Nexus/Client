@@ -43,8 +43,21 @@ Maintain the Lancer Nexus client fork while preserving compatibility with upstre
 
 ## Change process
 
+Cluster `/admin` chat must be intercepted before logging/broadcast, including styled fragments. Keep replies private. Gateway admission supplies account/session or transfer identity server-side; current Gateway leases and Administration SQL roles/scopes authorize access, never local admin flags. Shared query contracts belong in Protocol; maintain engine changes only in patches.
+
+Permission changes use typed Gateway requests and are authorized centrally by Administration. Do not use LLServer's legacy admin/deadmin flags as clustered permissions. The local UUID operator fallback is console-managed and only active when Gateway/cluster login is disabled; it must never bypass Nexus authorization. All related LibreLancer source changes remain patch-only.
+
+Every player-facing server command that is currently guarded by `Character.Admin` must receive its own `command.<name>` permission and be checked fail-closed through Gateway with the account, session, character lease, instance and system context before execution. Keep the command-to-permission catalog in [Administration's permission guide](../Administration/docs/permission-system.md#permissions-fuer-bestehende-librelancer-adminbefehle). Do not silently retain the legacy flag as a clustered fallback; standalone OP fallback must remain explicitly isolated.
+
+See [the Administration permission system guide](../Administration/docs/permission-system.md) for the command syntax, local operator boundaries, and the fact that LLServer revision-sync startup is still pending.
+
 1. Identify whether the change belongs in the client or in Gateway/Protocol/Cluster.
 2. Keep the smallest possible patch against the upstream fork.
 3. Build the client and run the relevant UI and protocol tests.
 4. Document any upstream conflict or compatibility assumption.
 5. Keep every client change in the patch series under `patches/series`; the patch applier runs before the supported build entrypoints and skips patches already applied. Patch files are the maintained implementation; applied source changes are build workspace state only.
+
+## Nexus baseline system groups
+
+The base Nexus topology uses eight game instances, one per group: BR01-BR06 (`br-01`), BW01-BW10 (`bw-01`), EW01-EW05 (`ew-01`), IW01-IW06 (`iw-01`), KU01-KU06 (`ku-01`), LI01-LI05 (`li-01`), RH01-RH05 (`rh-01`), and `mixed-01` for all remaining registered systems. System nicknames are compared case insensitively and emitted lowercase. Folder names are not always world nicknames: `fp7` contains `fp7_system`; `intro` and `miners` are asset directories, not registered worlds.
+LLServer SystemIds defines owned worlds; SystemId is the primary fallback. Travel within the owned set remains a local system jump; travel to another group uses the fenced Gateway transfer. Runtime status must publish the entire set. The new BindAddress setting binds the game listener privately; cluster servers do not open the legacy discovery listener. Keep these changes patch-only.

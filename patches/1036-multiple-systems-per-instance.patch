@@ -1,0 +1,89 @@
+--- a/src/LLServer.Core/ServerConfig.cs
++++ b/src/LLServer.Core/ServerConfig.cs
+@@ -16,6 +16,7 @@
+     public string? DrainFlagFile;
+     public string? InstanceId;
+     public string? SystemId;
++    public string[] SystemIds = [];
+     public string? InstanceEndpoint;
+     public int? TestNewCharacterRank;
+ 
+@@ -32,6 +33,7 @@
+         DrainFlagFile = other.DrainFlagFile;
+         InstanceId = other.InstanceId;
+         SystemId = other.SystemId;
++        SystemIds = (string[])other.SystemIds.Clone();
+         InstanceEndpoint = other.InstanceEndpoint;
+         TestNewCharacterRank = other.TestNewCharacterRank;
+     }
+--- a/src/LLServer.Core/ServerApp.cs
++++ b/src/LLServer.Core/ServerApp.cs
+@@ -45,6 +45,11 @@
+             (string.IsNullOrWhiteSpace(Config.InstanceId) || string.IsNullOrWhiteSpace(Config.SystemId) ||
+              string.IsNullOrWhiteSpace(Config.InstanceEndpoint)))
+             throw new InvalidOperationException("Runtime status requires InstanceId, SystemId and InstanceEndpoint.");
++        if (Config.SystemIds is null || Config.SystemIds.Length > 128 ||
++            Config.SystemIds.Any(string.IsNullOrWhiteSpace) ||
++            Config.SystemIds.Distinct(StringComparer.OrdinalIgnoreCase).Count() != Config.SystemIds.Length ||
++            (Config.SystemIds.Length > 0 && !Config.SystemIds.Contains(Config.SystemId, StringComparer.OrdinalIgnoreCase)))
++            throw new InvalidOperationException("SystemIds must be unique and include the primary SystemId.");
+         var ctxFactory = new SqlDesignTimeFactory(Config.DatabasePath);
+         using (var ctx = ctxFactory.CreateDbContext([]))
+         {
+@@ -71,6 +76,7 @@
+             LoginUrl = Config.LoginUrl,
+             InstanceId = Config.InstanceId,
+             SystemId = Config.SystemId,
++            SystemIds = Config.SystemIds,
+             TransferInstanceKey = transferInstanceKey,
+             TestNewCharacterRank = Config.TestNewCharacterRank
+         };
+@@ -179,6 +185,7 @@
+                 WrittenAtUtc = DateTimeOffset.UtcNow,
+                 InstanceId = Config.InstanceId!,
+                 SystemId = Config.SystemId!,
++                SystemIds = Config.SystemIds,
+                 IsReady = network?.IsRunning == true,
+                 IsDraining = !string.IsNullOrWhiteSpace(Config.DrainFlagFile) &&
+                              File.Exists(Path.GetFullPath(Config.DrainFlagFile, Platform.GetBasePath())),
+@@ -206,6 +213,7 @@
+     public DateTimeOffset WrittenAtUtc { get; init; }
+     public string InstanceId { get; init; } = "";
+     public string SystemId { get; init; } = "";
++    public string[] SystemIds { get; init; } = [];
+     public bool IsReady { get; init; }
+     public bool IsDraining { get; init; }
+     public int CurrentPlayers { get; init; }
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -40,6 +40,10 @@
+     public string? LoginUrl = null;
+     public string? InstanceId { get; set; }
+     public string? SystemId { get; set; }
++    public string[] SystemIds { get; set; } = [];
++    public bool OwnsSystem(string system) =>
++        SystemIds.Length > 0 ? SystemIds.Contains(system, StringComparer.OrdinalIgnoreCase) :
++        string.Equals(SystemId, system, StringComparison.OrdinalIgnoreCase);
+     public string? TransferInstanceKey { private get; set; }
+         public bool ClusterTransfersEnabled => !string.IsNullOrWhiteSpace(InstanceId) &&
+         !string.IsNullOrWhiteSpace(SystemId) && !string.IsNullOrWhiteSpace(TransferInstanceKey) &&
+@@ -382,7 +386,7 @@
+             var status = await GetTransferStatusAsync(transferId, cancellationToken).ConfigureAwait(false);
+             if (!string.Equals(status.TargetInstanceId, InstanceId, StringComparison.Ordinal))
+                 throw new InvalidDataException("Transfer is assigned to another target instance.");
+-            if (!string.Equals(status.TargetSystemId, SystemId, StringComparison.OrdinalIgnoreCase))
++            if (!OwnsSystem(status.TargetSystemId))
+                 throw new InvalidDataException("Transfer is assigned to another target system.");
+ 
+             var ticketHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(transferTicket)));
+--- a/src/LibreLancer/Server/Player.cs
++++ b/src/LibreLancer/Server/Player.cs
+@@ -1934,7 +1934,7 @@
+                 return;
+             }
+ 
+-            if (Game.ClusterTransfersEnabled && !string.Equals(Game.SystemId, system, StringComparison.OrdinalIgnoreCase))
++            if (Game.ClusterTransfersEnabled && !Game.OwnsSystem(system))
+             {
+                 if (Character == null)
+                     return;

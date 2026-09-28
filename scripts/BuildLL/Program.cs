@@ -413,7 +413,7 @@ namespace BuildLL
             });
 
 
-            Target("BuildEngine", DependsOn("GenerateVersion", "BuildNatives", "ShaderDependencies"), async () =>
+            Target("BuildEngine", DependsOn("GenerateVersion", "GenerateInterface", "BuildNatives", "ShaderDependencies"), async () =>
             {
                 if(withWin32)
                     await FullBuild("win-x86", false);
@@ -449,14 +449,52 @@ namespace BuildLL
                 Dotnet.Run("./src/Editor/lleditscript/lleditscript.csproj", "./obj/artifacts", args);
             });
 
-            static void TarDirectory(string file, string dir)
+            static void TarZstdDirectory(string file, string dir)
             {
-                Bash($"tar -I 'gzip -9' -cf {Quote(file)} -C {Quote(dir)} --xform s:'./':: .", true);
-            }
+                using var output = File.Create(file);
+                using var compressed = new ZstdSharp.CompressionStream(output, 6);
+                using var tar = new TarWriter(compressed, TarEntryFormat.Pax, leaveOpen: true);
 
-            static void ZipDirectory(string file, string dir)
-            {
-                Bash($"cd {Quote(dir)} && zip -qq -r -9 - . > {Quote(Path.GetFullPath(file))}", true);
+                void AddEntry(string sourcePath, string archivePath)
+                {
+                    var attributes = File.GetAttributes(sourcePath);
+                    if ((attributes & FileAttributes.ReparsePoint) != 0)
+                        throw new InvalidDataException($"Releasepaket enthält einen Link: {sourcePath}");
+                    if ((attributes & FileAttributes.Directory) != 0)
+                    {
+                        var directoryEntry = new PaxTarEntry(TarEntryType.Directory, archivePath)
+                        {
+                            Mode = GetArchiveMode(sourcePath, directory: true)
+                        };
+                        tar.WriteEntry(directoryEntry);
+                        foreach (var child in Directory.EnumerateFileSystemEntries(sourcePath)
+                                     .OrderBy(Path.GetFileName, StringComparer.Ordinal))
+                            AddEntry(child, archivePath + "/" + Path.GetFileName(child));
+                        return;
+                    }
+
+                    var fileEntry = new PaxTarEntry(TarEntryType.RegularFile, archivePath)
+                    {
+                        Mode = GetArchiveMode(sourcePath, directory: false),
+                        DataStream = File.OpenRead(sourcePath)
+                    };
+                    using (fileEntry.DataStream)
+                        tar.WriteEntry(fileEntry);
+                }
+
+                static UnixFileMode GetArchiveMode(string path, bool directory)
+                {
+                    if (!OperatingSystem.IsWindows())
+                        return File.GetUnixFileMode(path);
+                    return directory
+                        ? UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+                        : UnixFileMode.UserRead | UnixFileMode.UserWrite;
+                }
+
+                var topLevel = Directory.EnumerateFileSystemEntries(dir).ToArray();
+                if (topLevel.Length != 1 || (File.GetAttributes(topLevel[0]) & FileAttributes.Directory) == 0)
+                    throw new InvalidDataException("Clientrelease muss genau einen Stammordner enthalten.");
+                AddEntry(topLevel[0], Path.GetFileName(topLevel[0]));
             }
 
             Target("BuildAndTest", DependsOn("BuildAll", "Test"));
@@ -480,7 +518,7 @@ namespace BuildLL
                 var linuxEngine = Task.Run(() =>
                 {
                     CopyDirContents("bin/librelancer-" + GetLinuxRid(), "packaging/packages/a/" + name, true);
-                    TarDirectory("packaging/packages/librelancer-daily-ubuntu-amd64.tar.gz", "packaging/packages/a");
+                    TarZstdDirectory("packaging/packages/librelancer-daily-ubuntu-amd64.tar.zst", "packaging/packages/a");
                     RmDir("packaging/packages/a");
                 });
                 //Sdk
@@ -488,7 +526,7 @@ namespace BuildLL
                 var linuxSdk = Task.Run(() =>
                 {
                     CopyDirContents("bin/librelancer-sdk-" + GetLinuxRid(), "packaging/packages/b/" + name, true);
-                    TarDirectory("packaging/packages/librelancer-sdk-daily-ubuntu-amd64.tar.gz",
+                    TarZstdDirectory("packaging/packages/librelancer-sdk-daily-ubuntu-amd64.tar.zst",
                         "packaging/packages/b");
                     RmDir("packaging/packages/b");
                 });
@@ -506,7 +544,7 @@ namespace BuildLL
                     var winEngine = Task.Run(() =>
                     {
                         CopyDirContents("bin/librelancer-win-x64", "packaging/packages/c/" + name, true);
-                        ZipDirectory("packaging/packages/librelancer-daily-win64.zip", "packaging/packages/c");
+                        TarZstdDirectory("packaging/packages/librelancer-daily-win64.tar.zst", "packaging/packages/c");
                         RmDir("packaging/packages/c");
                     });
                     //Sdk
@@ -514,7 +552,7 @@ namespace BuildLL
                     var winSdk = Task.Run(() =>
                     {
                         CopyDirContents("bin/librelancer-sdk-win-x64", "packaging/packages/d/" + name, true);
-                        ZipDirectory("packaging/packages/librelancer-sdk-daily-win64.zip", "packaging/packages/d");
+                        TarZstdDirectory("packaging/packages/librelancer-sdk-daily-win64.tar.zst", "packaging/packages/d");
                         RmDir("packaging/packages/d");
                     });
                     await winEngine;

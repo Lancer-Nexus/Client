@@ -1,0 +1,152 @@
+diff --git a/src/LibreLancer/Server/PermissionChatCommand.cs b/src/LibreLancer/Server/PermissionChatCommand.cs
+new file mode 100644
+index 0000000..ce3a751
+--- /dev/null
++++ b/src/LibreLancer/Server/PermissionChatCommand.cs
+@@ -0,0 +1,66 @@
++using LancerNexus.Protocol;
++
++namespace LibreLancer.Server;
++
++public sealed record GamePermissionMutationRequest(Guid AccountId, Guid SessionId, long CharacterId,
++    Guid TransferId, PermissionCommandRequest Request);
++public sealed record PermissionCommandRequest(Guid CorrelationId, string IdempotencyKey,
++    PermissionCommandMutation Mutation);
++public sealed record PermissionCommandMutation(int Kind, Guid? AccountId = null, string? GroupName = null,
++    string? Ladder = null, string? Pattern = null, int PatternKind = 1, bool Allowed = true,
++    string? InstanceId = null);
++public sealed record PermissionCommandResponse(string Status, long? Revision);
++
++internal static class PermissionChatCommand
++{
++    public static bool IsCommand(string text) => text.TrimStart().StartsWith("/admin permission", StringComparison.OrdinalIgnoreCase) &&
++        (text.TrimStart().Length == 17 || char.IsWhiteSpace(text.TrimStart()[17]));
++
++    public static bool TryParse(string text, string? instanceId, out PermissionCommandRequest? request)
++    {
++        request = null;
++        if (text.Length > 512 || !IsCommand(text)) return false;
++        var parts = text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
++        if (parts.Length < 5) return false;
++        PermissionCommandMutation mutation;
++        if (parts.Length is 7 or 8 && parts[2].Equals("node", StringComparison.OrdinalIgnoreCase))
++        {
++            if (!Guid.TryParse(parts[3], out var accountId) || accountId == Guid.Empty) return false;
++            var allowed = parts[4].ToLowerInvariant() switch { "allow" => true, "deny" => false, _ => (bool?)null };
++            var kind = parts[5].ToLowerInvariant() switch { "exact" => 0, "wildcard" => 1, "regex" => 2, _ => -1 };
++            if (allowed is null || kind < 0 || parts[6].Length is 0 or > 256 ||
++                (parts.Length == 8 && !ValidScope(parts[7]))) return false;
++            mutation = new PermissionCommandMutation(4, AccountId: accountId, Pattern: parts[6], PatternKind: kind,
++                Allowed: allowed.Value, InstanceId: Scope(parts, 7, instanceId));
++        }
++        else if (parts.Length is 6 or 7 && parts[2].Equals("group", StringComparison.OrdinalIgnoreCase))
++        {
++            if (!Guid.TryParse(parts[4], out var accountId) || accountId == Guid.Empty ||
++                (parts.Length == 7 && !ValidScope(parts[6]))) return false;
++            if (parts[5].Length is 0 or > 64) return false;
++            var scope = Scope(parts, 6, instanceId);
++            switch (parts[3].ToLowerInvariant())
++            {
++                case "assign": mutation = new PermissionCommandMutation(2, AccountId: accountId, GroupName: parts[5], InstanceId: scope); break;
++                case "remove": mutation = new PermissionCommandMutation(3, AccountId: accountId, GroupName: parts[5], InstanceId: scope); break;
++                case "promote": mutation = new PermissionCommandMutation(6, AccountId: accountId, Ladder: parts[5], InstanceId: scope); break;
++                case "demote": mutation = new PermissionCommandMutation(7, AccountId: accountId, Ladder: parts[5], InstanceId: scope); break;
++                default: return false;
++            }
++        }
++        else return false;
++        var id = Guid.NewGuid();
++        request = new PermissionCommandRequest(id, id.ToString("N"), mutation);
++        return true;
++    }
++
++    private static string? Scope(string[] parts, int index, string? instanceId)
++    {
++        if (parts.Length <= index) return instanceId;
++        if (parts[index].Equals("global", StringComparison.OrdinalIgnoreCase)) return null;
++        return parts[index].Equals("instance", StringComparison.OrdinalIgnoreCase) ? instanceId : null;
++    }
++
++    private static bool ValidScope(string value) => value.Equals("global", StringComparison.OrdinalIgnoreCase) ||
++        value.Equals("instance", StringComparison.OrdinalIgnoreCase);
++}
+diff --git a/src/LibreLancer/Server/GameServer.cs b/src/LibreLancer/Server/GameServer.cs
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -85,4 +85,20 @@ public class GameServer
+             return result;
+         }
++
++        public async Task<PermissionCommandResponse> MutateAdministrationPermissionAsync(GamePermissionMutationRequest body)
++        {
++            if (!ClusterTransfersEnabled || body.AccountId == Guid.Empty ||
++                (body.SessionId == Guid.Empty && body.TransferId == Guid.Empty) ||
++                body.CharacterId <= 0 || body.Request.CorrelationId == Guid.Empty)
++                throw new InvalidOperationException("Cluster permission administration is not configured.");
++            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
++            using var request = new HttpRequestMessage(HttpMethod.Post,
++                GetTransferGatewayUrl("/api/v1/game/admin/permissions/mutations"));
++            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", TransferInstanceKey!);
++            request.Content = JsonContent.Create(body);
++            using var response = await transferHttp.SendAsync(request, timeout.Token);
++            var result = await response.Content.ReadFromJsonAsync<PermissionCommandResponse>(timeout.Token);
++            return result ?? new PermissionCommandResponse("unavailable", null);
++        }
+ 
+         public bool SendDebugInfo = false;
+diff --git a/src/LibreLancer/Server/Player.cs b/src/LibreLancer/Server/Player.cs
+--- a/src/LibreLancer/Server/Player.cs
++++ b/src/LibreLancer/Server/Player.cs
+@@ -119,3 +119,52 @@ public class Player
+         private void HandleAdminQuery(string text)
+         {
++            if (PermissionChatCommand.IsCommand(text))
++            {
++                HandlePermissionCommand(text);
++                return;
++            }
++            void HandlePermissionCommand(string permissionText)
++            {
++                if (!PermissionChatCommand.TryParse(permissionText, Game.InstanceId, out var query) || query is null)
++                {
++                    rpcClient.OnConsoleMessage("Admin: /admin permission node <UUID> <allow|deny> <exact|wildcard|regex> <node> [global|instance]");
++                    rpcClient.OnConsoleMessage("Admin: /admin permission group <assign|remove|promote|demote> <UUID> <group|ladder> [global|instance]");
++                    return;
++                }
++                if (Interlocked.CompareExchange(ref adminQueryRunning, 1, 0) != 0)
++                {
++                    rpcClient.OnConsoleMessage("Admin: Anfrage läuft bereits.");
++                    return;
++                }
++                var now = Environment.TickCount64;
++                if (lastAdminQuery != 0 && now - lastAdminQuery < 2000)
++                {
++                    Interlocked.Exchange(ref adminQueryRunning, 0);
++                    rpcClient.OnConsoleMessage("Admin: Bitte kurz warten.");
++                    return;
++                }
++                lastAdminQuery = now;
++                _ = Task.Run(async () =>
++                {
++                    try
++                    {
++                        var result = await Game.MutateAdministrationPermissionAsync(new GamePermissionMutationRequest(
++                            AccountId, GatewaySessionId, Character?.ID ?? 0, GatewayTransferId, query));
++                        rpcClient.OnConsoleMessage(result.Status switch
++                        {
++                            "ok" => "Admin: Rechteänderung synchronisiert.",
++                            "sync_pending" => $"Admin: Rechteänderung gespeichert (Revision {result.Revision}); Instanzen gleichen ab.",
++                            "denied" => "Admin: Keine Berechtigung permissions.manage.",
++                            "conflict" => "Admin: Änderung steht im Konflikt mit dem aktuellen Gruppenmodell.",
++                            _ => "Admin: Permissions-Dienst derzeit nicht verfügbar."
++                        });
++                    }
++                    catch (Exception e)
++                    {
++                        FLLog.Warning("Administration", $"Permission command unavailable ({e.GetType().Name})");
++                        rpcClient.OnConsoleMessage("Admin: Permissions-Dienst derzeit nicht erreichbar.");
++                    }
++                    finally { Interlocked.Exchange(ref adminQueryRunning, 0); }
++                });
++            }
+             var query = LancerNexus.Protocol.AdminQuery.ParseChat(text);

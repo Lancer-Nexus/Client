@@ -1,0 +1,205 @@
+--- a/src/LibreLancer/Server/ConsoleCommands/ConsoleCommands.cs
++++ b/src/LibreLancer/Server/ConsoleCommands/ConsoleCommands.cs
+@@ -4,6 +4,7 @@
+ using System.Globalization;
+ using System.Linq;
+ using System.Reflection;
++using System.Threading.Tasks;
+ 
+ namespace LibreLancer.Server.ConsoleCommands
+ {
+@@ -46,15 +47,39 @@
+                 return;
+             }
+ 
+-            if (command.Admin && !(player.Character?.Admin ?? false))
++            if (command.Permission is { Length: > 0 } permission)
+             {
+-                player.RpcClient.OnConsoleMessage($"Permission denied.");
++                _ = RunAuthorizedAsync(player, command, args, permission, player.Character, player.GatewaySessionId);
+                 return;
+             }
+ 
+             command.Run(player, args);
+         }
+ 
++        private static async Task RunAuthorizedAsync(Player player, IConsoleCommand command, string args,
++            string permission, NetCharacter? character, Guid sessionId)
++        {
++            bool allowed;
++            try { allowed = await player.Game.HasCommandPermissionAsync(player, permission); }
++            catch (Exception e)
++            {
++                FLLog.Warning("Permissions", $"Command permission check failed ({e.GetType().Name})");
++                player.RpcClient.OnConsoleMessage("Permission service unavailable; command denied.");
++                return;
++            }
++            if (!allowed)
++            {
++                player.RpcClient.OnConsoleMessage($"Permission denied: {permission}.");
++                return;
++            }
++            lock (player.Game.ConnectedPlayers)
++            {
++                if (!player.Game.ConnectedPlayers.Contains(player) || player.Character != character ||
++                    player.GatewaySessionId != sessionId) return;
++            }
++            command.Run(player, args);
++        }
++
+         public static bool ParseString<T>(string args, [MaybeNullWhen(false)] out T value)
+         {
+             if (ParseString(args, out var values, typeof(T)))
+--- a/src/LibreLancer/Server/ConsoleCommands/HelpCommand.cs
++++ b/src/LibreLancer/Server/ConsoleCommands/HelpCommand.cs
+@@ -11,7 +11,6 @@
+         {
+             var commandList = string.Join(", ",
+                 ConsoleCommands.AllCommands
+-                    .Where(x => !x.Admin || (player.Character?.Admin ?? false))
+                     .Select(x => x.Name)
+                     .OrderBy(x => x));
+             player.RpcClient.OnConsoleMessage($"Available Commands: pos, ping, debug, {commandList}");
+--- a/src/LibreLancer/Server/ConsoleCommands/IConsoleCommand.cs
++++ b/src/LibreLancer/Server/ConsoleCommands/IConsoleCommand.cs
+@@ -4,6 +4,7 @@
+     {
+         string Name { get; }
+         bool Admin { get; }
++        string? Permission => Admin ? $"command.{Name}" : null;
+         void Run(Player player, string arguments);
+     }
+-}
+\ No newline at end of file
++}
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -118,6 +118,25 @@
+             return result ?? new PermissionCommandResponse("unavailable", null);
+         }
+ 
++        public async Task<bool> HasCommandPermissionAsync(Player player, string permission)
++        {
++            if (string.IsNullOrWhiteSpace(LoginUrl))
++                return IsLocalOperator(player.AccountId);
++            if (!ClusterTransfersEnabled || player.AccountId == Guid.Empty || player.Character is null ||
++                (player.GatewaySessionId == Guid.Empty && player.GatewayTransferId == Guid.Empty) ||
++                permission is not { Length: > 0 and <= 256 } || !OwnsSystem(player.System)) return false;
++            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
++            using var request = new HttpRequestMessage(HttpMethod.Post,
++                GetTransferGatewayUrl("/api/v1/game/admin/permissions/check"));
++            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", TransferInstanceKey!);
++            request.Content = JsonContent.Create(new GamePermissionCheckRequest(player.AccountId,
++                player.GatewaySessionId, player.Character.ID, player.GatewayTransferId, permission, player.System));
++            using var response = await transferHttp.SendAsync(request, timeout.Token);
++            if (!response.IsSuccessStatusCode) return false;
++            var result = await response.Content.ReadFromJsonAsync<GamePermissionCheckResponse>(timeout.Token);
++            return result?.Allowed == true;
++        }
++
+         public bool SendDebugInfo = false;
+         public string DebugInfo { get; private set; } = null!;
+ 
+--- a/src/LibreLancer/Server/PermissionChatCommand.cs
++++ b/src/LibreLancer/Server/PermissionChatCommand.cs
+@@ -11,17 +11,41 @@
+     string? Ladder = null, string? Pattern = null, int PatternKind = 1, bool Allowed = true,
+     string? InstanceId = null);
+ public sealed record PermissionCommandResponse(string Status, long? Revision);
++public sealed record GamePermissionCheckRequest(Guid AccountId, Guid SessionId, long CharacterId,
++    Guid TransferId, string Permission, string? SystemId = null);
++public sealed record GamePermissionCheckResponse(bool Allowed);
+ 
+ internal static class PermissionChatCommand
+ {
+-    public static bool IsCommand(string text) => text.TrimStart().StartsWith("/admin permission", StringComparison.OrdinalIgnoreCase) &&
+-        (text.TrimStart().Length == 17 || char.IsWhiteSpace(text.TrimStart()[17]));
++    public static bool IsCommand(string text)
++    {
++        var trimmed = text.TrimStart();
++        return IsSubcommand(trimmed, "/admin permission") || IsSubcommand(trimmed, "/admin op") ||
++               IsSubcommand(trimmed, "/admin deop");
++    }
++
++    private static bool IsSubcommand(string text, string prefix) =>
++        text.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) &&
++        (text.Length == prefix.Length || char.IsWhiteSpace(text[prefix.Length]));
+ 
+     public static bool TryParse(string text, string? instanceId, out PermissionCommandRequest? request)
+     {
+         request = null;
+         if (text.Length > 512 || !IsCommand(text)) return false;
+         var parts = text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
++        if (parts.Length is 3 or 4 &&
++            (parts[1].Equals("op", StringComparison.OrdinalIgnoreCase) ||
++             parts[1].Equals("deop", StringComparison.OrdinalIgnoreCase)))
++        {
++            if (!Guid.TryParse(parts[2], out var target) || target == Guid.Empty ||
++                (parts.Length == 4 && !ValidScope(parts[3]))) return false;
++            var assign = parts[1].Equals("op", StringComparison.OrdinalIgnoreCase);
++            var operatorMutation = new PermissionCommandMutation(assign ? 2 : 3, AccountId: target,
++                GroupName: "operator", InstanceId: Scope(parts, 3, instanceId));
++            var operatorId = Guid.NewGuid();
++            request = new PermissionCommandRequest(operatorId, operatorId.ToString("N"), operatorMutation);
++            return true;
++        }
+         if (parts.Length < 5) return false;
+         PermissionCommandMutation mutation;
+         if (parts.Length is 7 or 8 && parts[2].Equals("node", StringComparison.OrdinalIgnoreCase))
+--- a/src/LibreLancer/Server/Player.cs
++++ b/src/LibreLancer/Server/Player.cs
+@@ -131,6 +131,7 @@
+                 {
+                     rpcClient.OnConsoleMessage("Admin: /admin permission node <UUID> <allow|deny> <exact|wildcard|regex> <node> [global|instance]");
+                     rpcClient.OnConsoleMessage("Admin: /admin permission group <assign|remove|promote|demote> <UUID> <group|ladder> [global|instance]");
++                    rpcClient.OnConsoleMessage("Admin: /admin op <UUID> [global|instance] | /admin deop <UUID> [global|instance]");
+                     return;
+                 }
+                 if (Interlocked.CompareExchange(ref adminQueryRunning, 1, 0) != 0)
+--- a/src/LLServer/Program.cs
++++ b/src/LLServer/Program.cs
+@@ -136,7 +136,7 @@
+                         if (app.Server?.SetLocalOperator(accountId, enabled) == true)
+                             Console.WriteLine($"Local operator {(enabled ? "enabled" : "removed")} for {accountId:D}.");
+                         else
+-                            Console.WriteLine("Local OP is available only when Gateway login is not configured.");
++                            Console.WriteLine("Local OP is available only without Gateway. In Nexus, use /admin op or /admin deop <account-uuid> in-game with permissions.manage.");
+                         break;
+                     }
+                     case "admin":
+--- /dev/null
++++ b/src/LibreLancer.Tests/CommandPermissionTests.cs
+@@ -0,0 +1,33 @@
++using System;
++using LibreLancer.Server;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class CommandPermissionTests
++{
++    private static readonly Guid Target = Guid.Parse("22222222-2222-4222-8222-222222222222");
++
++    [Theory]
++    [InlineData("/admin op 22222222-2222-4222-8222-222222222222 global", 2, null)]
++    [InlineData("/admin op 22222222-2222-4222-8222-222222222222", 2, "li-01")]
++    [InlineData("/admin deop 22222222-2222-4222-8222-222222222222 instance", 3, "li-01")]
++    [InlineData("/admin deop 22222222-2222-4222-8222-222222222222 global", 3, null)]
++    public void OperatorAliasesMapToScopedOperatorMembership(string command, int kind, string? instance)
++    {
++        Assert.True(PermissionChatCommand.IsCommand(command));
++        Assert.True(PermissionChatCommand.TryParse(command, "li-01", out var parsed));
++        Assert.NotNull(parsed);
++        Assert.Equal(kind, parsed.Mutation.Kind);
++        Assert.Equal(Target, parsed.Mutation.AccountId);
++        Assert.Equal("operator", parsed.Mutation.GroupName);
++        Assert.Equal(instance, parsed.Mutation.InstanceId);
++    }
++
++    [Theory]
++    [InlineData("/admin op not-a-uuid")]
++    [InlineData("/admin deop 00000000-0000-0000-0000-000000000000")]
++    [InlineData("/admin op 22222222-2222-4222-8222-222222222222 remote")]
++    public void InvalidOperatorAliasesAreRejected(string command) =>
++        Assert.False(PermissionChatCommand.TryParse(command, "li-01", out _));
++}
