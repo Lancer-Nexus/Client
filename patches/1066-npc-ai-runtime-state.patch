@@ -1,0 +1,349 @@
+diff --git a/src/LibreLancer/Server/Components/SNPCComponent.cs b/src/LibreLancer/Server/Components/SNPCComponent.cs
+--- a/src/LibreLancer/Server/Components/SNPCComponent.cs
++++ b/src/LibreLancer/Server/Components/SNPCComponent.cs
+@@ -1,6 +1,8 @@
+ using System;
+ using System.Collections.Generic;
++using System.IO;
+ using System.Numerics;
++using System.Text.Json;
+ using LibreLancer.Data.GameData;
+ using LibreLancer.Data.Schema.Pilots;
+ using LibreLancer.Data.Schema.Ships;
+@@ -148,6 +150,104 @@
+             stayInRangeObject = null;
+             stayInRangePoint = Vector3.Zero;
+             stayInRangeRadius = 0;
++        }
++
++        internal NpcAiTransferExtensionV1 CaptureTransferState()
++        {
++            var directiveTarget = CurrentDirective switch
++            {
++                AiAttackState attack => attack.Target,
++                AiDockState dock => dock.Target,
++                _ => null
++            };
++            return new NpcAiTransferExtensionV1
++            {
++                DirectiveTarget = CaptureObjectReference(directiveTarget),
++                GotoKind = CurrentDirective is AiDockState dockDirective ? (int)dockDirective.GotoKind : null,
++                CurrentState = currentState.ToString(),
++                PreviousState = previousState.ToString(),
++                TimeInState = timeInState,
++                MissileTimer = missileTimer,
++                FireTimer = fireTimer,
++                BurstTimer = burstTimer,
++                InBurst = inBurst,
++                FireCycle = fireCycle,
++                WeaponGroupIndex = weaponGroupIndex,
++                DamageTimer = damageTimer,
++                DamageTaken = damageTaken,
++                EvadeX = evadeX,
++                EvadeY = evadeY,
++                EvadeZ = evadeZ,
++                EvadeThrust = evadeThrust,
++                BuzzDirection = new NpcTransferVectorV1(buzzDirection.X, buzzDirection.Y, buzzDirection.Z),
++                StayInRangeTarget = CaptureObjectReference(stayInRangeObject),
++                StayInRangePoint = new NpcTransferVectorV1(stayInRangePoint.X, stayInRangePoint.Y, stayInRangePoint.Z),
++                StayInRangeRadius = stayInRangeRadius
++            };
++        }
++
++        internal void RestoreTransferState(NpcAiTransferExtensionV1 state,
++            Func<NpcTransferObjectReferenceV1, GameObject?> resolveReference)
++        {
++            if (state.SchemaVersion != 1 || !Enum.TryParse<StateGraphEntry>(state.CurrentState, out var restoredCurrent) ||
++                !Enum.IsDefined(restoredCurrent) || !Enum.TryParse<StateGraphEntry>(state.PreviousState, out var restoredPrevious) ||
++                !Enum.IsDefined(restoredPrevious) || !double.IsFinite(state.TimeInState) || state.TimeInState < 0 ||
++                !double.IsFinite(state.MissileTimer) || !float.IsFinite(state.FireTimer) ||
++                !float.IsFinite(state.BurstTimer) || state.FireCycle < 0 || state.WeaponGroupIndex < 0 ||
++                !double.IsFinite(state.DamageTimer) || !float.IsFinite(state.DamageTaken) || state.DamageTaken < 0 ||
++                !float.IsFinite(state.EvadeX) || !float.IsFinite(state.EvadeY) || !float.IsFinite(state.EvadeZ) ||
++                state.BuzzDirection is null || !float.IsFinite(state.BuzzDirection.X) ||
++                !float.IsFinite(state.BuzzDirection.Y) || !float.IsFinite(state.BuzzDirection.Z) ||
++                state.StayInRangePoint is null || !float.IsFinite(state.StayInRangePoint.X) ||
++                !float.IsFinite(state.StayInRangePoint.Y) || !float.IsFinite(state.StayInRangePoint.Z) ||
++                !float.IsFinite(state.StayInRangeRadius) || state.StayInRangeRadius < 0)
++                throw new InvalidDataException("NPC AI transfer state is invalid or unsupported.");
++
++            var stayTarget = state.StayInRangeTarget is null ? null : resolveReference(state.StayInRangeTarget)
++                ?? throw new InvalidDataException("NPC stay-in-range target could not be resolved.");
++            if ((CurrentDirective is AiAttackState or AiDockState) && state.DirectiveTarget is null)
++                throw new InvalidDataException("NPC directive target reference is missing.");
++
++            currentState = restoredCurrent;
++            previousState = restoredPrevious;
++            timeInState = state.TimeInState;
++            missileTimer = state.MissileTimer;
++            fireTimer = state.FireTimer;
++            burstTimer = state.BurstTimer;
++            inBurst = state.InBurst;
++            fireCycle = state.FireCycle;
++            weaponGroupIndex = state.WeaponGroupIndex;
++            damageTimer = state.DamageTimer;
++            damageTaken = state.DamageTaken;
++            evadeX = state.EvadeX;
++            evadeY = state.EvadeY;
++            evadeZ = state.EvadeZ;
++            evadeThrust = state.EvadeThrust;
++            buzzDirection = new Vector3(state.BuzzDirection.X, state.BuzzDirection.Y, state.BuzzDirection.Z);
++            stayInRangeObject = stayTarget;
++            stayInRangePoint = new Vector3(state.StayInRangePoint.X, state.StayInRangePoint.Y, state.StayInRangePoint.Z);
++            stayInRangeRadius = state.StayInRangeRadius;
++        }
++
++        private static NpcTransferObjectReferenceV1? CaptureObjectReference(GameObject? target)
++        {
++            if (target is null)
++                return null;
++            if (target.TryGetComponent<SNPCComponent>(out var npc))
++            {
++                if (npc.NpcId == Guid.Empty)
++                    throw new InvalidDataException("NPC AI target has no Coordinator-issued NPC identity.");
++                return new NpcTransferObjectReferenceV1("npc", NpcId: npc.NpcId);
++            }
++            if (target.TryGetComponent<SPlayerComponent>(out var player))
++            {
++                if (player.Player.Character is not { ID: > 0 } character)
++                    throw new InvalidDataException("NPC AI player target has no stable character identity.");
++                return new NpcTransferObjectReferenceV1("character", CharacterId: character.ID);
++            }
++            if (!string.IsNullOrWhiteSpace(target.Nickname))
++                return new NpcTransferObjectReferenceV1("nickname", Nickname: target.Nickname);
++            throw new InvalidDataException("NPC AI target has no stable transfer identity.");
+         }
+ 
+         private bool TryGetStayInRangeCenter(out Vector3 center)
+diff --git a/src/LibreLancer/Server/NpcEquipmentTransferState.cs b/src/LibreLancer/Server/NpcEquipmentTransferState.cs
+--- a/src/LibreLancer/Server/NpcEquipmentTransferState.cs
++++ b/src/LibreLancer/Server/NpcEquipmentTransferState.cs
+@@ -4,9 +4,51 @@
+ 
+ internal sealed record NpcEquipmentTransferExtensionV1
+ {
++    public NpcEquipmentTransferExtensionV1() { }
+     public int SchemaVersion { get; init; } = 1;
+     public NpcShieldTransferStateV1? Shield { get; init; }
+ }
+ 
+ internal sealed record NpcShieldTransferStateV1(float Health, double SuppressionRemainingSeconds,
+-    float SuppressedRestoreHealth);
++    float SuppressedRestoreHealth)
++{
++    public NpcShieldTransferStateV1() : this(0, 0, 0) { }
++}
++
++internal sealed record NpcAiTransferExtensionV1
++{
++    public NpcAiTransferExtensionV1() { }
++    public int SchemaVersion { get; init; } = 1;
++    public NpcTransferObjectReferenceV1? DirectiveTarget { get; init; }
++    public int? GotoKind { get; init; }
++    public string CurrentState { get; init; } = "NULL";
++    public string PreviousState { get; init; } = "NULL";
++    public double TimeInState { get; init; }
++    public double MissileTimer { get; init; }
++    public float FireTimer { get; init; }
++    public float BurstTimer { get; init; }
++    public bool InBurst { get; init; }
++    public int FireCycle { get; init; }
++    public int WeaponGroupIndex { get; init; }
++    public double DamageTimer { get; init; }
++    public float DamageTaken { get; init; }
++    public float EvadeX { get; init; }
++    public float EvadeY { get; init; }
++    public float EvadeZ { get; init; }
++    public bool EvadeThrust { get; init; }
++    public NpcTransferVectorV1 BuzzDirection { get; init; } = new(0, 0, 0);
++    public NpcTransferObjectReferenceV1? StayInRangeTarget { get; init; }
++    public NpcTransferVectorV1 StayInRangePoint { get; init; } = new(0, 0, 0);
++    public float StayInRangeRadius { get; init; }
++}
++
++internal sealed record NpcTransferObjectReferenceV1(string Kind, Guid? NpcId = null,
++    long? CharacterId = null, string? Nickname = null)
++{
++    public NpcTransferObjectReferenceV1() : this("") { }
++}
++
++internal sealed record NpcTransferVectorV1(float X, float Y, float Z)
++{
++    public NpcTransferVectorV1() : this(0, 0, 0) { }
++}
+diff --git a/src/LibreLancer/Server/JumperNpc.cs b/src/LibreLancer/Server/JumperNpc.cs
+--- a/src/LibreLancer/Server/JumperNpc.cs
++++ b/src/LibreLancer/Server/JumperNpc.cs
+@@ -164,9 +164,7 @@
+                 StateElapsedSeconds = snpc?.TransferDirectiveElapsedSeconds ?? 0,
+                 Timers = [Math.Max(0, snpc?.TransferMissileTimer ?? 0)],
+                 RandomState = snpc?.TransferRandomState ?? 0,
+-                ExtensionData = directiveTarget == null ? [] : JsonSerializer.SerializeToUtf8Bytes(
+-                    new AiTransferExtension(directiveTarget.Nickname,
+-                        snpc?.CurrentDirective is LibreLancer.Server.Ai.AiDockState dockDirective ? (int)dockDirective.GotoKind : null))
++                ExtensionData = snpc is null ? [] : JsonSerializer.SerializeToUtf8Bytes(snpc.CaptureTransferState())
+             },
+             CurrentTargetNpcId = aiTargetId,
+             Nickname = npc.Nickname,
+@@ -194,6 +192,5 @@
+ 
+     private static NpcVector3 ToProtocol(Vector3 value) => new() { X = value.X, Y = value.Y, Z = value.Z };
+ 
+-    private sealed record AiTransferExtension(string? TargetNickname, int? GotoKind);
+     private sealed record MissionNpcTransferContext(long CharacterId, string MissionNickname);
+ }
+diff --git a/src/LibreLancer/Server/NPCManager.cs b/src/LibreLancer/Server/NPCManager.cs
+--- a/src/LibreLancer/Server/NPCManager.cs
++++ b/src/LibreLancer/Server/NPCManager.cs
+@@ -423,37 +423,29 @@
+                 restored.Add((identity, state, obj));
+             }
+ 
+-            var directives = new List<(GameObject Object, SNPCComponent Component, AiState Directive)>();
++            var aiStates = new Dictionary<GameObject, NpcAiTransferExtensionV1>();
+             foreach (var entry in restored)
+             {
++                if (entry.State.Ai.ExtensionData.Length == 0)
++                    throw new InvalidDataException("NPC AI transfer extension is missing.");
++                var aiState = JsonSerializer.Deserialize<NpcAiTransferExtensionV1>(entry.State.Ai.ExtensionData)
++                    ?? throw new InvalidDataException("NPC AI transfer extension is empty.");
++                if (aiState.SchemaVersion != 1)
++                    throw new InvalidDataException("NPC AI transfer extension version is unsupported.");
++                aiStates.Add(entry.Object, aiState);
++                if (entry.State.Ai.StateId is not ("none" or nameof(AiAttackState) or nameof(AiDockState)))
++                {
++                    throw new InvalidDataException($"NPC AI state '{entry.State.Ai.StateId}' is not supported by this restore version.");
++                }
+                 if (entry.State.Ai.StateId is nameof(AiAttackState) or nameof(AiDockState))
+                 {
+-                    var extension = JsonSerializer.Deserialize<NpcAiTransferExtension>(entry.State.Ai.ExtensionData)
+-                        ?? throw new InvalidDataException("NPC directive extension is empty.");
+-                    GameObject? target = null;
+-                    if (entry.State.Ai.StateId == nameof(AiAttackState))
+-                    {
+-                        var targetId = entry.State.CurrentTargetNpcId
+-                            ?? throw new InvalidDataException("NPC attack snapshot has no stable target ID.");
+-                        target = restored.FirstOrDefault(candidate => candidate.Identity.NpcId == targetId).Object ??
+-                            World.GameWorld.Objects.FirstOrDefault(candidate =>
+-                            candidate.TryGetComponent<SNPCComponent>(out var npc) && npc.NpcId == targetId);
+-                    }
+-                    else if (entry.State.Ai.StateId == nameof(AiDockState) && !string.IsNullOrWhiteSpace(extension.TargetNickname))
+-                    {
+-                        target = World.GameWorld.GetObject(extension.TargetNickname);
+-                    }
+-                    if (target is null)
++                    if (aiState.DirectiveTarget is null || aiState.GotoKind is null && entry.State.Ai.StateId == nameof(AiDockState))
++                        throw new InvalidDataException("NPC directive target or dock behavior is missing.");
++                    if (entry.State.Ai.StateId == nameof(AiAttackState) &&
++                        aiState.DirectiveTarget.Kind == "npc" && aiState.DirectiveTarget.NpcId != entry.State.CurrentTargetNpcId)
++                        throw new InvalidDataException("NPC attack target reference does not match the stable NPC target ID.");
++                    if (ResolveTransferReference(aiState.DirectiveTarget, restored) is null)
+                         throw new InvalidDataException("NPC directive target could not be resolved after restore.");
+-                    AiState directive = entry.State.Ai.StateId == nameof(AiAttackState)
+-                        ? new AiAttackState(target)
+-                        : new AiDockState(target, (GotoKind)(extension.GotoKind ?? 0));
+-                    var component = entry.Object.GetComponent<SNPCComponent>()!;
+-                    directives.Add((entry.Object, component, directive));
+-                }
+-                else if (entry.State.Ai.StateId != "none")
+-                {
+-                    throw new InvalidDataException($"NPC AI state '{entry.State.Ai.StateId}' is not supported by this restore version.");
+                 }
+             }
+             foreach (var entry in restored)
+@@ -469,12 +461,24 @@
+                     }
+                 }
+             }
+-            foreach (var (obj, component, directive) in directives)
+-            {
+-                var state = restored.First(entry => entry.Object == obj).State.Ai;
++            foreach (var entry in restored)
++            {
++                var component = entry.Object.GetComponent<SNPCComponent>()!;
++                var ai = entry.State.Ai;
++                var extension = aiStates[entry.Object];
++                AiState? directive = null;
++                if (ai.StateId is nameof(AiAttackState) or nameof(AiDockState))
++                {
++                    var target = ResolveTransferReference(extension.DirectiveTarget!, restored)!;
++                    directive = ai.StateId == nameof(AiAttackState)
++                        ? new AiAttackState(target)
++                        : new AiDockState(target, (GotoKind)extension.GotoKind!.Value);
++                }
+                 component.SetState(directive, World.GameWorld);
+-                component.RestoreTransferTimers(state.PreviousStateId, state.StateElapsedSeconds,
+-                    state.Timers.FirstOrDefault());
++                component.RestoreTransferTimers(ai.PreviousStateId, ai.StateElapsedSeconds,
++                    ai.Timers.FirstOrDefault());
++                component.RestoreTransferState(extension,
++                    reference => ResolveTransferReference(reference, restored));
+             }
+             return restored.Select(entry => entry.Object).ToArray();
+         }
+@@ -482,6 +486,19 @@
+         private static Vector3 ToVector(NpcVector3 value) => new(value.X, value.Y, value.Z);
+         private static Quaternion ToQuaternion(NpcQuaternion value) => Quaternion.Normalize(new(value.X, value.Y, value.Z, value.W));
+ 
+-        private sealed record NpcAiTransferExtension(string? TargetNickname, int? GotoKind);
++        private GameObject? ResolveTransferReference(NpcTransferObjectReferenceV1 reference,
++            List<(NpcRuntimeSnapshot Identity, NpcRuntimeStateV1 State, GameObject Object)> restored) =>
++            reference.Kind switch
++            {
++                "npc" when reference.NpcId is Guid npcId =>
++                    restored.FirstOrDefault(candidate => candidate.Identity.NpcId == npcId).Object ??
++                    World.GameWorld.Objects.FirstOrDefault(candidate =>
++                        candidate.TryGetComponent<SNPCComponent>(out var npc) && npc.NpcId == npcId),
++                "character" when reference.CharacterId is long characterId =>
++                    World.Players.FirstOrDefault(candidate => candidate.Key.Character?.ID == characterId).Value,
++                "nickname" when !string.IsNullOrWhiteSpace(reference.Nickname) =>
++                    World.GameWorld.GetObject(reference.Nickname),
++                _ => null
++            };
+     }
+ }
+diff --git a/src/LibreLancer/Server/GameServer.cs b/src/LibreLancer/Server/GameServer.cs
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -381,10 +381,13 @@
+                 var runtime = MessagePackSerializer.Deserialize<NpcRuntimeStateV1>(jumper.RuntimeSnapshot.RuntimeState);
+                 if (runtime.Ai.StateId is not ("none" or "AiAttackState" or "AiDockState") ||
+                     runtime.Autopilot.Behavior is not ("None" or "Goto") || runtime.Autopilot.ExtensionData.Length == 0 ||
+-                    runtime.Ai.StateId == "AiAttackState" && runtime.CurrentTargetNpcId is null ||
+-                    runtime.Ai.StateId == "AiDockState" && runtime.Ai.ExtensionData.Length == 0 ||
++                    runtime.Ai.ExtensionData.Length == 0 ||
+                     runtime.MissionState.Length == 0)
+                     throw new InvalidDataException($"NPC '{runtime.Nickname}' has runtime state that this GameServer cannot restore safely.");
++                var aiExtension = JsonSerializer.Deserialize<NpcAiTransferExtensionV1>(runtime.Ai.ExtensionData);
++                if (aiExtension is not { SchemaVersion: 1 } ||
++                    (runtime.Ai.StateId is "AiAttackState" or "AiDockState") && aiExtension.DirectiveTarget is null)
++                    throw new InvalidDataException($"NPC '{runtime.Nickname}' has unsupported or incomplete AI runtime state.");
+                 var missionContext = JsonSerializer.Deserialize<NpcMissionTransferContext>(runtime.MissionState);
+                 if (missionContext is not { CharacterId: > 0 } || string.IsNullOrWhiteSpace(missionContext.MissionNickname))
+                     throw new InvalidDataException($"NPC '{runtime.Nickname}' has no recoverable mission context.");
+diff --git a/src/LibreLancer/Server/Player.cs b/src/LibreLancer/Server/Player.cs
+--- a/src/LibreLancer/Server/Player.cs
++++ b/src/LibreLancer/Server/Player.cs
+@@ -1015,6 +1015,12 @@
+                             Client.Disconnect(DisconnectReason.LoginError);
+                             return;
+                         }
++                    }
++                    rpcClient.SpawnPlayer(ID, System, world.GameWorld.CrcTranslation.ToArray(), Objective, Position,
++                        Orientation, Character!.GetDestroyedParts(), world.CurrentTick);
++                    var pship = world.SpawnPlayer(this, Position, Orientation);
++                    if (transferLoginNpcSnapshot != null)
++                    {
+                         try
+                         {
+                             world.NPCs.RestoreTransfer(transferLoginNpcSnapshot, MissionRuntime);
+@@ -1026,9 +1032,6 @@
+                             return;
+                         }
+                     }
+-                    rpcClient.SpawnPlayer(ID, System, world.GameWorld.CrcTranslation.ToArray(), Objective, Position,
+-                        Orientation, Character!.GetDestroyedParts(), world.CurrentTick);
+-                    var pship = world.SpawnPlayer(this, Position, Orientation);
+                     world.Population.PopulateInitialAroundPlayer(pship);
+ 
+                     // Ensure mission runtime is properly initialized when spawning in space

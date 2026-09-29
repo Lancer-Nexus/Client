@@ -1,0 +1,69 @@
+diff --git a/src/LibreLancer/Server/GameServer.cs b/src/LibreLancer/Server/GameServer.cs
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -151,5 +151,31 @@
+             await WriteNpcSnapshotAtomicallyAsync(sourcePath, MessagePackSerializer.Serialize(initialSnapshot),
+                 cancellationToken).ConfigureAwait(false);
++
++            var coordinator = new Uri(NpcCoordinatorUrl);
++            using var prepareRequest = new HttpRequestMessage(HttpMethod.Post,
++                new Uri(coordinator, "/internal/v1/npc-transfers/prepare"))
++            {
++                Content = JsonContent.Create(new NpcTransferPrepareRequest
++                {
++                    TransferId = transferId,
++                    SourceInstanceId = InstanceId,
++                    TargetInstanceId = targetInstanceId,
++                    TargetSystemId = targetSystemId,
++                    NpcIds = initialSnapshot.NpcIds,
++                    MissionRuntimeId = transferId,
++                    ExpiresUtc = DateTime.UtcNow.AddSeconds(90),
++                    IdempotencyKey = $"{transferId:N}:mission-npcs"
++                })
++            };
++            prepareRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", npcCoordinatorApiKey);
++            using var prepareResponse = await npcTransferHttp.SendAsync(prepareRequest, cancellationToken).ConfigureAwait(false);
++            if (!prepareResponse.IsSuccessStatusCode)
++                throw new HttpRequestException($"Coordinator rejected NPC transfer reservation with HTTP {(int)prepareResponse.StatusCode}.");
++            var prepared = await prepareResponse.Content.ReadFromJsonAsync<NpcTransferPrepared>(cancellationToken)
++                .ConfigureAwait(false);
++            if (prepared is not { Accepted: true } || prepared.TransferId != transferId ||
++                string.IsNullOrWhiteSpace(prepared.TargetEndpoint))
++                throw new InvalidDataException("Coordinator returned an invalid NPC transfer reservation.");
+ 
+             var frozenJumpers = await sourceWorld.FreezeJumpersAsync(jumpers, missionRuntime,
+                     triggerMissionExit: false, beforeFreeze: drainMissionActions)
+@@ -162,33 +189,6 @@
+             var snapshot = BuildNpcTransferSnapshot(transferId, targetSystemId, missionRuntime, frozenJumpers);
+-            var npcIds = snapshot.NpcIds;
+             var snapshotBytes = MessagePackSerializer.Serialize(snapshot);
+             await WriteNpcSnapshotAtomicallyAsync(sourcePath, snapshotBytes, cancellationToken, replaceExisting: true)
+                 .ConfigureAwait(false);
+-
+-            var coordinator = new Uri(NpcCoordinatorUrl);
+-            using var prepareRequest = new HttpRequestMessage(HttpMethod.Post,
+-                new Uri(coordinator, "/internal/v1/npc-transfers/prepare"))
+-            {
+-                Content = JsonContent.Create(new NpcTransferPrepareRequest
+-                {
+-                    TransferId = transferId,
+-                    SourceInstanceId = InstanceId,
+-                    TargetInstanceId = targetInstanceId,
+-                    TargetSystemId = targetSystemId,
+-                    NpcIds = npcIds,
+-                    MissionRuntimeId = transferId,
+-                    ExpiresUtc = DateTime.UtcNow.AddSeconds(90),
+-                    IdempotencyKey = $"{transferId:N}:mission-npcs"
+-                })
+-            };
+-            prepareRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", npcCoordinatorApiKey);
+-            using var prepareResponse = await npcTransferHttp.SendAsync(prepareRequest, cancellationToken).ConfigureAwait(false);
+-            if (!prepareResponse.IsSuccessStatusCode)
+-                throw new HttpRequestException($"Coordinator rejected NPC transfer reservation with HTTP {(int)prepareResponse.StatusCode}.");
+-            var prepared = await prepareResponse.Content.ReadFromJsonAsync<NpcTransferPrepared>(cancellationToken)
+-                .ConfigureAwait(false);
+-            if (prepared is not { Accepted: true } || prepared.TransferId != transferId ||
+-                string.IsNullOrWhiteSpace(prepared.TargetEndpoint))
+-                throw new InvalidDataException("Coordinator returned an invalid NPC transfer reservation.");
+ 
+             await AdvanceNpcTransferAsync(transferId, NpcTransferState.SourceFrozen, snapshot, cancellationToken)

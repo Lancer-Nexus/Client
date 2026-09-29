@@ -1,0 +1,226 @@
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -67,6 +67,23 @@
+ 
+         public void ConfigureNpcIdentityAllocation(string? apiKey) => npcCoordinatorApiKey = apiKey;
+ 
++        public void MarkNpcTransferActivated(Guid transferId)
++        {
++            var directory = NpcTransferStagingDirectory
++                ?? throw new InvalidOperationException("NPC transfer staging is not configured.");
++            NpcTransferActivationReceipt.Record(directory, transferId);
++            var stagedSnapshot = Path.Combine(directory, $"{transferId:N}.msgpack");
++            try { File.Delete(stagedSnapshot); }
++            catch (IOException exception)
++            {
++                FLLog.Warning("NPC Transfer", $"Activation was recorded but staged snapshot cleanup failed: {exception.Message}");
++            }
++            catch (UnauthorizedAccessException exception)
++            {
++                FLLog.Warning("NPC Transfer", $"Activation was recorded but staged snapshot cleanup failed: {exception.Message}");
++            }
++        }
++
+         /// <summary>Durably stages an authenticated incoming NPC snapshot without activating simulation.</summary>
+         public async ValueTask<NpcPeerSnapshotTransferAck> StageIncomingNpcTransferAsync(
+             NpcPeerSnapshotTransfer request, CancellationToken cancellationToken)
+@@ -74,6 +91,13 @@
+             if (string.IsNullOrWhiteSpace(NpcTransferStagingDirectory) ||
+                 !string.Equals(request.TargetInstanceId, InstanceId, StringComparison.Ordinal))
+                 return new NpcPeerSnapshotTransferAck { TransferId = request.TransferId, ReasonCode = "target_not_configured" };
++            if (NpcTransferActivationReceipt.IsRecorded(NpcTransferStagingDirectory, request.TransferId))
++                return new NpcPeerSnapshotTransferAck
++                {
++                    TransferId = request.TransferId,
++                    Accepted = true,
++                    ReasonCode = "already_activated"
++                };
+ 
+             Directory.CreateDirectory(NpcTransferStagingDirectory);
+             var finalPath = Path.Combine(NpcTransferStagingDirectory, $"{request.TransferId:N}.msgpack");
+@@ -468,6 +492,11 @@
+                     continue;
+                 try
+                 {
++                    if (NpcTransferActivationReceipt.IsRecorded(NpcTransferStagingDirectory, transferId))
++                    {
++                        npcTransferCompleted.TryAdd(transferId, 0);
++                        continue;
++                    }
+                     await RestoreCommittedNpcTransferAsync(transferId, path, cancellationToken).ConfigureAwait(false);
+                 }
+                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+@@ -487,6 +516,8 @@
+ 
+         private async Task RestoreCommittedNpcTransferAsync(Guid transferId, string path, CancellationToken cancellationToken)
+         {
++            if (NpcTransferActivationReceipt.IsRecorded(NpcTransferStagingDirectory!, transferId))
++                return;
+             var url = new Uri(new Uri(NpcCoordinatorUrl!),
+                 $"/internal/v1/npc-transfers/{transferId:D}/recovery?instanceId={Uri.EscapeDataString(InstanceId!)}");
+             using var response = await npcTransferHttp.GetAsync(url, cancellationToken).ConfigureAwait(false);
+@@ -518,6 +549,9 @@
+                     player.GatewayTransferId == missionTransferId && player.MissionRuntime != null)?.MissionRuntime;
+                 if (missionRuntime is null)
+                     return;
++                var missionPlayer = GetConnectedPlayers().FirstOrDefault(player => player.MissionRuntime == missionRuntime);
++                if (missionPlayer?.Space is null || !missionPlayer.Space.World.Players.ContainsKey(missionPlayer))
++                    return;
+             }
+             var system = GameData.Items.Systems.Get(recovery.TargetSystemId)
+                 ?? throw new InvalidDataException($"NPC transfer target system '{recovery.TargetSystemId}' is unknown.");
+@@ -526,7 +560,13 @@
+             {
+                 try
+                 {
++                    if (NpcTransferActivationReceipt.IsRecorded(NpcTransferStagingDirectory!, transferId))
++                    {
++                        restored.TrySetResult();
++                        return;
++                    }
+                     world.NPCs.RestoreTransfer(snapshot, missionRuntime);
++                    MarkNpcTransferActivated(transferId);
+                     npcTransferCompleted.TryAdd(transferId, 0);
+                     restored.TrySetResult();
+                 }
+@@ -1078,6 +1118,8 @@
+         {
+             if (string.IsNullOrWhiteSpace(NpcCoordinatorUrl) || string.IsNullOrWhiteSpace(npcCoordinatorApiKey) ||
+                 string.IsNullOrWhiteSpace(NpcTransferStagingDirectory))
++                return null;
++            if (NpcTransferActivationReceipt.IsRecorded(NpcTransferStagingDirectory, transferId))
+                 return null;
+             while (true)
+             {
+--- a/src/LibreLancer/Server/Player.cs
++++ b/src/LibreLancer/Server/Player.cs
+@@ -1033,6 +1033,18 @@
+ 
+                     // Ensure mission runtime is properly initialized when spawning in space
+                     HandleSpaceEntry();
++                    if (transferLoginNpcSnapshot != null)
++                    {
++                        try
++                        {
++                            Game.MarkNpcTransferActivated(transferLoginNpcSnapshot.TransferId);
++                        }
++                        catch (Exception error)
++                        {
++                            FLLog.Error("NPC Transfer", $"Could not persist activation receipt: {error.Message}");
++                            Client.Disconnect(DisconnectReason.LoginError);
++                        }
++                    }
+                 });
+             }, msnPreload);
+         }
+--- /dev/null
++++ b/src/LibreLancer/Server/NpcTransferActivationReceipt.cs
+@@ -0,0 +1,57 @@
++using System;
++using System.IO;
++using System.Text;
++
++namespace LibreLancer.Server;
++
++/// <summary>Durably records that a committed NPC snapshot has entered the live simulation.</summary>
++public static class NpcTransferActivationReceipt
++{
++    public static bool IsRecorded(string directory, Guid transferId)
++    {
++        var path = GetPath(directory, transferId);
++        if (!File.Exists(path))
++            return false;
++        var content = File.ReadAllText(path, Encoding.ASCII);
++        if (!string.Equals(content, transferId.ToString("N"), StringComparison.Ordinal))
++            throw new InvalidDataException("NPC transfer activation receipt is corrupt.");
++        return true;
++    }
++
++    public static void Record(string directory, Guid transferId)
++    {
++        var path = GetPath(directory, transferId);
++        Directory.CreateDirectory(directory);
++        if (IsRecorded(directory, transferId))
++            return;
++
++        var temporary = $"{path}.{Guid.NewGuid():N}.tmp";
++        try
++        {
++            var bytes = Encoding.ASCII.GetBytes(transferId.ToString("N"));
++            using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None,
++                       4096, FileOptions.WriteThrough))
++            {
++                output.Write(bytes);
++                output.Flush(flushToDisk: true);
++            }
++            try { File.Move(temporary, path); }
++            catch (IOException) when (File.Exists(path))
++            {
++                if (!IsRecorded(directory, transferId))
++                    throw;
++            }
++        }
++        finally
++        {
++            try { File.Delete(temporary); } catch (IOException) { }
++        }
++    }
++
++    private static string GetPath(string directory, Guid transferId)
++    {
++        if (string.IsNullOrWhiteSpace(directory) || transferId == Guid.Empty)
++            throw new ArgumentException("NPC activation receipt identity is invalid.");
++        return Path.Combine(directory, $"{transferId:N}.activated");
++    }
++}
+--- /dev/null
++++ b/src/LibreLancer.Tests/NpcTransferActivationReceiptTests.cs
+@@ -0,0 +1,48 @@
++using System;
++using System.IO;
++using LibreLancer.Server;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class NpcTransferActivationReceiptTests
++{
++    [Fact]
++    public void ActivationReceiptSurvivesNewReaderAndIsIdempotent()
++    {
++        var directory = Path.Combine(Path.GetTempPath(), $"npc-transfer-receipt-{Guid.NewGuid():N}");
++        var transferId = Guid.NewGuid();
++        try
++        {
++            Assert.False(NpcTransferActivationReceipt.IsRecorded(directory, transferId));
++            NpcTransferActivationReceipt.Record(directory, transferId);
++            NpcTransferActivationReceipt.Record(directory, transferId);
++
++            Assert.True(NpcTransferActivationReceipt.IsRecorded(directory, transferId));
++        }
++        finally
++        {
++            if (Directory.Exists(directory))
++                Directory.Delete(directory, recursive: true);
++        }
++    }
++
++    [Fact]
++    public void CorruptActivationReceiptFailsClosed()
++    {
++        var directory = Path.Combine(Path.GetTempPath(), $"npc-transfer-receipt-{Guid.NewGuid():N}");
++        var transferId = Guid.NewGuid();
++        try
++        {
++            Directory.CreateDirectory(directory);
++            File.WriteAllText(Path.Combine(directory, $"{transferId:N}.activated"), "wrong-transfer");
++
++            Assert.Throws<InvalidDataException>(() => NpcTransferActivationReceipt.IsRecorded(directory, transferId));
++        }
++        finally
++        {
++            if (Directory.Exists(directory))
++                Directory.Delete(directory, recursive: true);
++        }
++    }
++}

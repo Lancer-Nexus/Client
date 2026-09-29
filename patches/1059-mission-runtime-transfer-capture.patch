@@ -1,0 +1,38 @@
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -130,12 +130,12 @@
+                 throw new InvalidOperationException("NPC peer transfer is not configured on this instance.");
+ 
+             var sourcePath = GetNpcSourceSnapshotPath(transferId);
+-            var initialSnapshot = BuildNpcTransferSnapshot(transferId, targetSystemId, jumpers);
++            var initialSnapshot = BuildNpcTransferSnapshot(transferId, targetSystemId, missionRuntime, jumpers);
+             await WriteNpcSnapshotAtomicallyAsync(sourcePath, MessagePackSerializer.Serialize(initialSnapshot),
+                 cancellationToken).ConfigureAwait(false);
+             var frozenJumpers = await sourceWorld.FreezeJumpersAsync(jumpers, missionRuntime)
+                 .WaitAsync(cancellationToken).ConfigureAwait(false);
+-            var snapshot = BuildNpcTransferSnapshot(transferId, targetSystemId, frozenJumpers);
++            var snapshot = BuildNpcTransferSnapshot(transferId, targetSystemId, missionRuntime, frozenJumpers);
+             var npcIds = snapshot.NpcIds;
+             var snapshotBytes = MessagePackSerializer.Serialize(snapshot);
+             await WriteNpcSnapshotAtomicallyAsync(sourcePath, snapshotBytes, cancellationToken, replaceExisting: true)
+@@ -343,8 +343,10 @@
+             Path.Combine(NpcTransferStagingDirectory!, $"{transferId:N}.source.msgpack");
+ 
+         private static NpcTransferSnapshot BuildNpcTransferSnapshot(Guid transferId, string targetSystemId,
+-            JumperNpc[] jumpers)
+-        {
++            MissionRuntime? missionRuntime, JumperNpc[] jumpers)
++        {
++            if (missionRuntime == null)
++                throw new InvalidDataException("Mission NPC transfer has no active player mission runtime.");
+             var npcIds = jumpers.Select(jumper => jumper.NpcId).ToArray();
+             if (npcIds.Any(id => id == Guid.Empty) || npcIds.Distinct().Count() != npcIds.Length ||
+                 jumpers.Any(jumper => jumper.RuntimeSnapshot is null || jumper.OwnershipVersion <= 0))
+@@ -369,6 +371,7 @@
+                 MissionRuntimeId = transferId,
+                 Npcs = jumpers.Select(jumper => jumper.RuntimeSnapshot).ToArray(),
+                 TargetSystemId = targetSystemId,
++                MissionRuntimeState = MessagePackSerializer.Serialize(missionRuntime.CaptureTransferState())
+             };
+             NpcTransferContractValidator.Validate(snapshot);
+             return snapshot;

@@ -1,0 +1,121 @@
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -958,6 +958,8 @@
+ 
+             var ticketHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(transferTicket)));
+             var import = await Database.GetTransferSnapshotImportAsync(transferId).ConfigureAwait(false);
++            SaveGame? transferSave = null;
++            var alreadyCompleted = status.State == LancerNexus.Protocol.TransferState.SourceReleased;
+             if (status.State == LancerNexus.Protocol.TransferState.SourceFrozen)
+             {
+                 if (import == null)
+@@ -993,6 +995,7 @@
+                         var snapshotHash = Convert.ToHexString(SHA256.HashData(snapshot));
+                         var text = new UTF8Encoding(false, true).GetString(snapshot);
+                         var save = SaveGame.FromString($"transfer-{transferId:N}.fl", text);
++                        transferSave = save;
+                         await Database.ApplyTransferSnapshotImportAsync(transferId, snapshotHash, save)
+                             .ConfigureAwait(false);
+                     }
+@@ -1015,8 +1018,6 @@
+                     !string.Equals(import.TicketHash, ticketHash, StringComparison.Ordinal) ||
+                     status.LeaseVersion != import.LeaseVersion + 1)
+                     throw new InvalidOperationException("Released transfer has no matching committed target import.");
+-                return new TransferSnapshotTargetReadyResult(transferId, import.AccountId, import.CharacterId,
+-                    status.LeaseVersion, true);
+             }
+             else
+             {
+@@ -1028,17 +1029,77 @@
+                 !string.Equals(import.TicketHash, ticketHash, StringComparison.Ordinal))
+                 throw new InvalidOperationException("Transfer snapshot import did not reach its durable state.");
+ 
+-            var accepted = await AcceptTransferAsync(transferTicket, targetLeaseToken, cancellationToken)
+-                .ConfigureAwait(false);
+-            if (accepted.TransferId != transferId ||
++            if (transferSave is null)
++            {
++                var snapshot = await DownloadTransferSnapshotAsync(transferId, cancellationToken).ConfigureAwait(false);
++                try
++                {
++                    var snapshotHash = Convert.ToHexString(SHA256.HashData(snapshot));
++                    if (!string.Equals(import.SnapshotHash, snapshotHash, StringComparison.Ordinal))
++                        throw new InvalidDataException("Gateway transfer snapshot changed after it was imported.");
++                    var text = new UTF8Encoding(false, true).GetString(snapshot);
++                    transferSave = SaveGame.FromString($"transfer-{transferId:N}.fl", text);
++                }
++                finally
++                {
++                    CryptographicOperations.ZeroMemory(snapshot);
++                }
++            }
++
++            var acceptedLeaseVersion = status.LeaseVersion;
++            if (!alreadyCompleted)
++            {
++                var accepted = await AcceptTransferAsync(transferTicket, targetLeaseToken, cancellationToken)
++                    .ConfigureAwait(false);
++                if (accepted.TransferId != transferId ||
+                 !string.Equals(accepted.InstanceId, InstanceId, StringComparison.Ordinal) ||
+                 accepted.LeaseVersion != import.LeaseVersion + 1)
+-                throw new InvalidDataException("Gateway transfer commit response does not match the imported snapshot.");
++                    throw new InvalidDataException("Gateway transfer commit response does not match the imported snapshot.");
++                acceptedLeaseVersion = accepted.LeaseVersion;
++            }
++            var npcSnapshot = await WaitForNpcTransferCommitAsync(transferId, cancellationToken)
++                .ConfigureAwait(false);
+             var acceptedPlayer = GetConnectedPlayers().SingleOrDefault(player => player.Character?.ID == import.CharacterId);
+             if (acceptedPlayer != null)
+                 acceptedPlayer.GatewayTransferId = transferId;
+             return new TransferSnapshotTargetReadyResult(transferId, import.AccountId, import.CharacterId,
+-                accepted.LeaseVersion, false);
++                acceptedLeaseVersion, alreadyCompleted, transferSave, npcSnapshot);
++        }
++
++        private async Task<NpcTransferSnapshot?> WaitForNpcTransferCommitAsync(Guid transferId,
++            CancellationToken cancellationToken)
++        {
++            if (string.IsNullOrWhiteSpace(NpcCoordinatorUrl) || string.IsNullOrWhiteSpace(npcCoordinatorApiKey) ||
++                string.IsNullOrWhiteSpace(NpcTransferStagingDirectory))
++                return null;
++            while (true)
++            {
++                var recovery = await ReadNpcTransferRecoveryAsync(transferId, cancellationToken).ConfigureAwait(false);
++                if (recovery is null)
++                    return null;
++                if (recovery.State == NpcTransferState.Aborted)
++                    throw new InvalidOperationException("NPC transfer was aborted after the character lease committed.");
++                if (recovery.State is NpcTransferState.Committed or NpcTransferState.SourceReleased)
++                {
++                    if (recovery.TargetInstanceId != InstanceId || !OwnsSystem(recovery.TargetSystemId))
++                        throw new InvalidDataException("Committed NPC transfer belongs to another target.");
++                    var path = Path.Combine(NpcTransferStagingDirectory, $"{transferId:N}.msgpack");
++                    var payload = await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
++                    if (string.IsNullOrWhiteSpace(recovery.SnapshotSha256) ||
++                        !CryptographicOperations.FixedTimeEquals(Convert.FromHexString(recovery.SnapshotSha256),
++                            SHA256.HashData(payload)))
++                        throw new InvalidDataException("Staged NPC snapshot does not match the committed Coordinator record.");
++                    var snapshot = MessagePackSerializer.Deserialize<NpcTransferSnapshot>(payload,
++                        MessagePackSerializerOptions.Standard.WithSecurity(MessagePackSecurity.UntrustedData));
++                    NpcTransferContractValidator.Validate(snapshot);
++                    if (snapshot.TransferId != transferId ||
++                        !string.Equals(snapshot.TargetSystemId, recovery.TargetSystemId, StringComparison.OrdinalIgnoreCase) ||
++                        !snapshot.NpcIds.Order().SequenceEqual(recovery.NpcIds.Order()))
++                        throw new InvalidDataException("Committed NPC snapshot identity does not match its Coordinator record.");
++                    return snapshot;
++                }
++                await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken).ConfigureAwait(false);
++            }
+         }
+ 
+         private async Task<TransferTicketVerificationResponse> VerifyTransferTicketAsync(
+@@ -1336,7 +1397,8 @@
+     }
+ 
+     public sealed record TransferSnapshotTargetReadyResult(
+-        Guid TransferId, Guid AccountId, long CharacterId, long LeaseVersion, bool AlreadyCompleted);
++        Guid TransferId, Guid AccountId, long CharacterId, long LeaseVersion, bool AlreadyCompleted,
++        SaveGame SaveGame, NpcTransferSnapshot? NpcSnapshot);
+ 
+     public sealed record TransferSourceResolutionResult(
+         Guid TransferId, LancerNexus.Protocol.TransferState State, bool Completed);

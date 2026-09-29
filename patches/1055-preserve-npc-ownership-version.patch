@@ -1,0 +1,201 @@
+diff --git a/src/LibreLancer/Server/NpcIdentityAllocator.cs b/src/LibreLancer/Server/NpcIdentityAllocator.cs
+--- a/src/LibreLancer/Server/NpcIdentityAllocator.cs
++++ b/src/LibreLancer/Server/NpcIdentityAllocator.cs
+@@ -23,8 +23,8 @@
+     private const int RefillThreshold = 32;
+     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(4);
+     private readonly object sync = new();
+-    private readonly Queue<Guid> available = new();
+-    private readonly Queue<Action<Guid>> waiting = new();
++    private readonly Queue<NpcOwnershipLease> available = new();
++    private readonly Queue<Action<NpcOwnershipLease>> waiting = new();
+     private readonly Channel<byte> refill = Channel.CreateBounded<byte>(new BoundedChannelOptions(1)
+     {
+         FullMode = BoundedChannelFullMode.DropWrite,
+@@ -75,35 +75,52 @@
+ 
+     public bool TryTake(out Guid npcId)
+     {
++        if (TryTakeLease(out var lease))
++        {
++            npcId = lease.NpcId;
++            return true;
++        }
++        npcId = Guid.Empty;
++        return false;
++    }
++
++    public bool TryTakeLease(out NpcOwnershipLease lease)
++    {
+         var shouldRefill = false;
+         lock (sync)
+         {
+-            if (available.TryDequeue(out npcId))
++            if (available.TryDequeue(out lease!))
+             {
+                 shouldRefill = available.Count <= RefillThreshold;
+             }
+             else
+             {
+                 shouldRefill = true;
+-                npcId = Guid.Empty;
++                lease = null!;
+             }
+         }
+         if (shouldRefill)
+             SignalRefill();
+-        return npcId != Guid.Empty;
++        return lease is not null;
+     }
+ 
+     /// <summary>Queues a non-blocking continuation for a spawn that arrived during pool refill.</summary>
+     public void WhenAvailable(Action<Guid> continuation)
+     {
+         ArgumentNullException.ThrowIfNull(continuation);
+-        Guid allocated = Guid.Empty;
++        WhenLeaseAvailable(lease => continuation(lease.NpcId));
++    }
++
++    public void WhenLeaseAvailable(Action<NpcOwnershipLease> continuation)
++    {
++        ArgumentNullException.ThrowIfNull(continuation);
++        NpcOwnershipLease? allocated = null;
+         lock (sync)
+         {
+             if (!available.TryDequeue(out allocated))
+                 waiting.Enqueue(continuation);
+         }
+-        if (allocated != Guid.Empty)
++        if (allocated is not null)
+         {
+             continuation(allocated);
+             SignalRefillIfLow();
+@@ -137,22 +154,22 @@
+                     }
+ 
+                     var leases = await RequestBatchWithRetryAsync(count, shutdown.Token);
+-                    List<(Action<Guid> Continuation, Guid Id)> callbacks = [];
++                    List<(Action<NpcOwnershipLease> Continuation, NpcOwnershipLease Lease)> callbacks = [];
+                     lock (sync)
+                     {
+                         foreach (var lease in leases)
+                         {
+                             if (waiting.TryDequeue(out var continuation))
+-                                callbacks.Add((continuation, lease.NpcId));
++                                callbacks.Add((continuation, lease));
+                             else
+-                                available.Enqueue(lease.NpcId);
++                                available.Enqueue(lease);
+                         }
+                     }
+                     foreach (var callback in callbacks)
+                     {
+                         try
+                         {
+-                            callback.Continuation(callback.Id);
++                            callback.Continuation(callback.Lease);
+                         }
+                         catch (Exception exception)
+                         {
+diff --git a/src/LibreLancer/Server/NPCManager.cs b/src/LibreLancer/Server/NPCManager.cs
+--- a/src/LibreLancer/Server/NPCManager.cs
++++ b/src/LibreLancer/Server/NPCManager.cs
+@@ -12,6 +12,7 @@
+ using LibreLancer.Server.Components;
+ using LibreLancer.World;
+ using LibreLancer.World.Components;
++using LancerNexus.Protocol;
+ using Pilot = LibreLancer.Data.GameData.Pilot;
+ 
+ namespace LibreLancer.Server
+@@ -124,7 +125,8 @@
+                 orient,
+                 null, 0,
+                 msn,
+-                stableNpcId: jumper.NpcId);
++                stableNpcId: jumper.NpcId,
++                stableNpcOwnershipVersion: jumper.OwnershipVersion);
+             msn.SystemEnter(World.System.Nickname, jumper.Nickname);
+             return newObj;
+         }
+@@ -145,13 +147,23 @@
+             bool registerNpc = true,
+             bool arrivalIndexReserved = false,
+             IEnumerable<GameObject>? neutralTo = null,
+-            Guid? stableNpcId = null
++            Guid? stableNpcId = null,
++            long stableNpcOwnershipVersion = 0
+             )
+         {
+             var identityAllocator = stableNpcId.HasValue ? null : World.Server.GetNpcIdentityAllocator(World.System.Nickname);
+-            var npcId = stableNpcId ?? (identityAllocator == null
+-                ? Guid.NewGuid()
+-                : identityAllocator.TryTake(out var allocatedId) ? allocatedId : Guid.Empty);
++            NpcOwnershipLease? lease = null;
++            var npcId = stableNpcId ?? Guid.NewGuid();
++            if (!stableNpcId.HasValue && identityAllocator != null &&
++                identityAllocator.TryTakeLease(out var assignedLease))
++            {
++                lease = assignedLease;
++                npcId = assignedLease.NpcId;
++            }
++            else if (!stableNpcId.HasValue && identityAllocator != null)
++            {
++                npcId = Guid.Empty;
++            }
+             var ship = World.Server.GameData.Items.Ships.Get(loadout.Archetype);
+             GameObject spawnPoint = World.GameWorld.GetObject(arrivalObj)!;
+             SDockableComponent? sdock = null;
+@@ -213,7 +225,8 @@
+             {
+                 MissionRuntime = msn,
+                 Faction = affiliation,
+-                NpcId = npcId
++                NpcId = npcId,
++                OwnershipVersion = stableNpcOwnershipVersion > 0 ? stableNpcOwnershipVersion : lease?.OwnershipVersion ?? 0
+             };
+             npcComponent.SetPilot(pilot);
+             npcComponent.CommHead = costume?.Head;
+@@ -248,9 +261,10 @@
+             }
+             if (npcId == Guid.Empty)
+             {
+-                identityAllocator!.WhenAvailable(assignedId => World.EnqueueAction(() =>
++                identityAllocator!.WhenLeaseAvailable(assignedLease => World.EnqueueAction(() =>
+                 {
+-                    npcComponent.NpcId = assignedId;
++                    npcComponent.NpcId = assignedLease.NpcId;
++                    npcComponent.OwnershipVersion = assignedLease.OwnershipVersion;
+                     ActivateNpc();
+                 }));
+             }
+diff --git a/src/LibreLancer/Server/JumperNpc.cs b/src/LibreLancer/Server/JumperNpc.cs
+--- a/src/LibreLancer/Server/JumperNpc.cs
++++ b/src/LibreLancer/Server/JumperNpc.cs
+@@ -15,6 +15,7 @@
+ public class JumperNpc
+ {
+     public Guid NpcId;
++    public long OwnershipVersion;
+     public string Nickname = null!;
+     public ObjectName Name = null!;
+     public Faction Faction = null!;
+@@ -34,6 +35,7 @@
+         var npc = new JumperNpc
+         {
+             NpcId = npcComponent.NpcId,
++            OwnershipVersion = npcComponent.OwnershipVersion,
+             Nickname = go.Nickname!,
+             Name = go.Name!,
+             SpaceCostume = new()
+diff --git a/src/LibreLancer/Server/Components/SNPCComponent.cs b/src/LibreLancer/Server/Components/SNPCComponent.cs
+--- a/src/LibreLancer/Server/Components/SNPCComponent.cs
++++ b/src/LibreLancer/Server/Components/SNPCComponent.cs
+@@ -27,6 +27,7 @@
+         public StateGraph? StateGraph;
+ 
+         public Guid NpcId { get; set; }
++        public long OwnershipVersion { get; set; }
+ 
+         private readonly SnapshotableRandom random = new();
+ 

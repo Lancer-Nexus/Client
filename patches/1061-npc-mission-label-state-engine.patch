@@ -1,0 +1,131 @@
+--- a/src/LibreLancer/Missions/MissionLabel.cs
++++ b/src/LibreLancer/Missions/MissionLabel.cs
+@@ -1,5 +1,6 @@
+ using System.Collections.Generic;
+ using System.Linq;
++using LancerNexus.Protocol;
+ 
+ namespace LibreLancer.Missions;
+ 
+@@ -24,6 +25,29 @@
+     public bool AnyAlive() => states.Values.Any(x => x == NpcState.Alive);
+ 
+     public int DestroyedCount() => states.Values.Count(x => x == NpcState.Dead);
++
++    public NpcMissionLabelState CaptureTransferState() => new()
++    {
++        Nickname = Name,
++        Alive = states.Where(x => x.Value == NpcState.Alive).Select(x => x.Key).OrderBy(x => x, System.StringComparer.OrdinalIgnoreCase).ToArray(),
++        Destroyed = states.Where(x => x.Value == NpcState.Dead).Select(x => x.Key).OrderBy(x => x, System.StringComparer.OrdinalIgnoreCase).ToArray()
++    };
++
++    public void RestoreTransferState(NpcMissionLabelState state)
++    {
++        foreach (var name in state.Alive)
++        {
++            if (!states.ContainsKey(name) || states[name] != NpcState.NotSpawned)
++                throw new System.IO.InvalidDataException($"Mission label '{Name}' contains an invalid alive object '{name}'.");
++            states[name] = NpcState.Alive;
++        }
++        foreach (var name in state.Destroyed)
++        {
++            if (!states.ContainsKey(name) || states[name] != NpcState.NotSpawned)
++                throw new System.IO.InvalidDataException($"Mission label '{Name}' contains an invalid destroyed object '{name}'.");
++            states[name] = NpcState.Dead;
++        }
++    }
+ 
+     public MissionLabel(string name, IEnumerable<string> ships)
+     {
+--- a/src/LibreLancer/Missions/MissionRuntime.cs
++++ b/src/LibreLancer/Missions/MissionRuntime.cs
+@@ -130,7 +130,9 @@
+                 LastSaveTrigger = lastSave,
+                 CompletedTriggers = completed,
+                 ActiveTriggers = active,
+-                PendingLines = pending
++                PendingLines = pending,
++                Labels = Labels.Values.OrderBy(label => label.Name, StringComparer.OrdinalIgnoreCase)
++                    .Select(label => label.CaptureTransferState()).ToArray()
+             };
+         }
+ 
+@@ -150,6 +152,15 @@
+                 !Script.AvailableTriggers.ContainsKey(state.LastSaveTrigger))
+                 throw new InvalidDataException($"NPC mission save trigger '{state.LastSaveTrigger}' is unavailable.");
+             lastSaveTrigger = state.LastSaveTrigger;
++            if (state.Labels.Length != Labels.Count || state.Labels.Select(label => label.Nickname)
++                    .Distinct(StringComparer.OrdinalIgnoreCase).Count() != state.Labels.Length)
++                throw new InvalidDataException("NPC mission label snapshot is incomplete or duplicated.");
++            foreach (var labelState in state.Labels)
++            {
++                if (!Labels.TryGetValue(labelState.Nickname, out var label))
++                    throw new InvalidDataException($"NPC mission label '{labelState.Nickname}' is unavailable.");
++                label.RestoreTransferState(labelState);
++            }
+             foreach (var triggerName in state.CompletedTriggers)
+             {
+                 if (!Script.AvailableTriggers.ContainsKey(triggerName) || !completedTriggers.Add(triggerName))
+--- a/src/LibreLancer/Server/ServerWorld.cs
++++ b/src/LibreLancer/Server/ServerWorld.cs
+@@ -328,13 +328,14 @@
+ 
+         /// <summary>Captures the latest runtime state and removes a group on the simulation thread.</summary>
+         public Task<JumperNpc[]> FreezeJumpersAsync(JumperNpc[] jumpers, MissionRuntime? missionRuntime,
+-            bool triggerMissionExit = true)
++            bool triggerMissionExit = true, Action? beforeFreeze = null)
+         {
+             var completion = new TaskCompletionSource<JumperNpc[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+             EnqueueAction(() =>
+             {
+                 try
+                 {
++                    beforeFreeze?.Invoke();
+                     var objects = new List<(JumperNpc Jumper, GameObject Object)>();
+                     foreach (var jumper in jumpers)
+                     {
+--- a/src/LibreLancer/Server/Player.cs
++++ b/src/LibreLancer/Server/Player.cs
+@@ -1227,6 +1227,12 @@
+             worldActions.Enqueue(a);
+         }
+ 
++        internal void DrainMissionWorldActionsForTransfer()
++        {
++            while (worldActions.Count > 0)
++                worldActions.Dequeue()();
++        }
++
+         public async Task OnLoggedIn()
+         {
+             try
+@@ -1322,7 +1328,7 @@
+                 try
+                 {
+                     await Game.PrepareAndSendNpcTransferAsync(id, targetInstanceId, targetEndpoint, targetSystem,
+-                        jumpers, sourceWorld, MissionRuntime).ConfigureAwait(false);
++                        jumpers, sourceWorld, MissionRuntime, DrainMissionWorldActionsForTransfer).ConfigureAwait(false);
+                     await Game.StageCharacterTransferSnapshotAsync(id, characterId, leaseVersion,
+                         targetSystem, target).ConfigureAwait(false);
+                     rpcClient.TransferSnapshotStaged(transferId, true);
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -117,7 +117,7 @@
+         /// <summary>Reserves, freezes and sends mission jumpers while leaving lease commit to the character transfer.</summary>
+         public async Task PrepareAndSendNpcTransferAsync(Guid transferId, string targetInstanceId,
+             string targetEndpoint, string targetSystemId, JumperNpc[] jumpers,
+-            ServerWorld? sourceWorld, MissionRuntime? missionRuntime,
++            ServerWorld? sourceWorld, MissionRuntime? missionRuntime, Action? drainMissionActions = null,
+             CancellationToken cancellationToken = default)
+         {
+             if (jumpers.Length == 0)
+@@ -133,7 +133,8 @@
+             var initialSnapshot = BuildNpcTransferSnapshot(transferId, targetSystemId, missionRuntime, jumpers);
+             await WriteNpcSnapshotAtomicallyAsync(sourcePath, MessagePackSerializer.Serialize(initialSnapshot),
+                 cancellationToken).ConfigureAwait(false);
+-            var frozenJumpers = await sourceWorld.FreezeJumpersAsync(jumpers, missionRuntime, triggerMissionExit: false)
++            var frozenJumpers = await sourceWorld.FreezeJumpersAsync(jumpers, missionRuntime,
++                    triggerMissionExit: false, beforeFreeze: drainMissionActions)
+                 .WaitAsync(cancellationToken).ConfigureAwait(false);
+             var snapshot = BuildNpcTransferSnapshot(transferId, targetSystemId, missionRuntime, frozenJumpers);
+             var npcIds = snapshot.NpcIds;

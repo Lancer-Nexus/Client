@@ -1,0 +1,52 @@
+diff --git a/src/LibreLancer/Server/JumperNpc.cs b/src/LibreLancer/Server/JumperNpc.cs
+--- a/src/LibreLancer/Server/JumperNpc.cs
++++ b/src/LibreLancer/Server/JumperNpc.cs
+@@ -126,7 +126,15 @@ public class JumperNpc
+                 .Select(equipment => new NpcEquipmentState
+                 {
+                     EquipmentId = equipment.Equipment.Nickname,
+                     Hardpoint = equipment.Parent.Attachment?.Name ?? "internal",
+-                    Health = 1,
+-                    Energy = 1
++                    Health = equipment.Parent.Attachment != null &&
++                             equipment.Parent.TryGetComponent<SHealthComponent>(out var equipmentHealth) &&
++                             equipmentHealth.MaxHealth > 0
++                        ? Math.Clamp(equipmentHealth.CurrentHealth / equipmentHealth.MaxHealth, 0, 1)
++                        : 1,
++                    Energy = equipment.Equipment is LibreLancer.Data.GameData.Items.PowerEquipment powerEquipment &&
++                             equipment.Parent.TryGetComponent<PowerCoreComponent>(out var powerCore) &&
++                             powerEquipment.Def.Capacity > 0
++                        ? Math.Clamp(powerCore.CurrentEnergy / powerEquipment.Def.Capacity, 0, 1)
++                        : 1
+                 }).ToArray(),
+diff --git a/src/LibreLancer/Server/NPCManager.cs b/src/LibreLancer/Server/NPCManager.cs
+--- a/src/LibreLancer/Server/NPCManager.cs
++++ b/src/LibreLancer/Server/NPCManager.cs
+@@ -372,6 +372,27 @@ public class NPCManager
+                 npc.TransferRandomState = state.Ai.RandomState;
+                 if (obj.TryGetComponent<SHealthComponent>(out var health))
+                     health.CurrentHealth = Math.Clamp(state.Health, 0, health.MaxHealth);
++                var equipmentComponents = obj.GetComponents<EquipmentComponent>()
++                    .Concat(obj.GetChildComponents<EquipmentComponent>()).ToList();
++                foreach (var equipmentState in state.Equipment)
++                {
++                    var equipment = equipmentComponents.FirstOrDefault(candidate =>
++                            string.Equals(candidate.Equipment.Nickname, equipmentState.EquipmentId, StringComparison.OrdinalIgnoreCase) &&
++                            string.Equals(candidate.Parent.Attachment?.Name ?? "internal", equipmentState.Hardpoint,
++                                StringComparison.OrdinalIgnoreCase));
++                    if (equipment is null)
++                        throw new InvalidDataException($"NPC equipment '{equipmentState.EquipmentId}' at '{equipmentState.Hardpoint}' could not be restored.");
++                    equipmentComponents.Remove(equipment);
++                    if (equipment.Parent.Attachment != null && equipment.Parent.TryGetComponent<SHealthComponent>(out var equipmentHealth))
++                    {
++                        equipmentHealth.CurrentHealth = Math.Clamp(equipmentState.Health, 0, 1) * equipmentHealth.MaxHealth;
++                        if (equipment.Parent.Attachment is { } hardpoint && equipmentState.Health < 1)
++                            health?.EquipmentHealths.TryAdd(hardpoint, Math.Clamp(equipmentState.Health, 0, 1));
++                    }
++                    if (equipment.Equipment is LibreLancer.Data.GameData.Items.PowerEquipment powerEquipment &&
++                        equipment.Parent.TryGetComponent<PowerCoreComponent>(out var powerCore))
++                        powerCore.CurrentEnergy = Math.Clamp(equipmentState.Energy, 0, 1) * powerEquipment.Def.Capacity;
++                }
+                 obj.PhysicsComponent?.Body.SetTransform(new Transform3D(ToVector(state.Position), ToQuaternion(state.Orientation)));
+                 if (obj.PhysicsComponent is { } physics)
+                 {
