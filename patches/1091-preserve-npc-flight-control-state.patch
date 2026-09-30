@@ -1,0 +1,277 @@
+--- a/src/LibreLancer/World/Components/ShipPhysicsComponent.cs
++++ b/src/LibreLancer/World/Components/ShipPhysicsComponent.cs
+@@ -3,6 +3,7 @@
+ // LICENSE, which is part of this source code package
+ 
+ using System;
++using System.IO;
+ using System.Numerics;
+ using LibreLancer.Data.GameData;
+ using LibreLancer.Physics;
+@@ -74,6 +75,54 @@
+             throw new InvalidOperationException("Cannot force EngineState on sim object");
+         }
+ 
++        internal LibreLancer.Server.NpcShipPhysicsTransferStateV1 CaptureNpcTransferState()
++        {
++            var engine = Parent.GetComponent<SEngineComponent>() ??
++                throw new InvalidOperationException("NPC ship physics has no engine component.");
++            return new LibreLancer.Server.NpcShipPhysicsTransferStateV1
++            {
++                Active = Active,
++                EngineState = EngineState,
++                ThrustRequested = ThrustRequested,
++                ThrustDepleted = thrustDepleted,
++                CruiseEnabled = cruiseEnabled,
++                PreviousCruiseEnabled = previousCruiseEnabled,
++                CruiseSpeedOffset = CruiseSpeedOffset,
++                EngineKillEnabled = EngineKillEnabled,
++                ChargePercent = ChargePercent,
++                CruiseAccelPercent = CruiseAccelPct,
++                EnginePower = EnginePower,
++                Steering = new LibreLancer.Server.NpcTransferVectorV1(Steering.X, Steering.Y, Steering.Z),
++                Strafe = CurrentStrafe,
++                EngineSpeed = engine.Speed,
++                EngineKill = engine.EngineKill,
++                CruiseThrust = engine.CruiseThrust
++            };
++        }
++
++        internal void RestoreNpcTransferState(LibreLancer.Server.NpcShipPhysicsTransferStateV1 state)
++        {
++            state.Validate();
++            var engine = Parent.GetComponent<SEngineComponent>() ??
++                throw new InvalidDataException("NPC ship physics has no engine component during restore.");
++            Active = state.Active;
++            EngineState = state.EngineState;
++            ThrustRequested = state.ThrustRequested;
++            thrustDepleted = state.ThrustDepleted;
++            cruiseEnabled = state.CruiseEnabled;
++            previousCruiseEnabled = state.PreviousCruiseEnabled;
++            CruiseSpeedOffset = state.CruiseSpeedOffset;
++            EngineKillEnabled = state.EngineKillEnabled;
++            ChargePercent = state.ChargePercent;
++            CruiseAccelPct = state.CruiseAccelPercent;
++            EnginePower = state.EnginePower;
++            Steering = new Vector3(state.Steering.X, state.Steering.Y, state.Steering.Z);
++            CurrentStrafe = state.Strafe;
++            engine.Speed = state.EngineSpeed;
++            engine.EngineKill = state.EngineKill;
++            engine.CruiseThrust = state.CruiseThrust;
++        }
++
+         // TODO: Engine Kill
+ 
+         private void StartCruiseCharge()
+--- a/src/LibreLancer/World/Components/ShipSteeringComponent.cs
++++ b/src/LibreLancer/World/Components/ShipSteeringComponent.cs
+@@ -33,6 +33,34 @@
+         internal void RestoreRollControllerTransferState(PIDControllerTransferState state) =>
+             rollPID.RestoreTransferState(state);
+ 
++        internal LibreLancer.Server.NpcShipSteeringTransferStateV1 CaptureNpcTransferState() => new()
++        {
++            Pitch = InPitch,
++            Yaw = InYaw,
++            Roll = InRoll,
++            Throttle = InThrottle,
++            Cruise = Cruise,
++            CruiseSpeedOffset = CruiseSpeedOffset,
++            Thrust = Thrust,
++            Strafe = CurrentStrafe,
++            EngineKill = EngineKill
++        };
++
++        internal void RestoreNpcTransferState(LibreLancer.Server.NpcShipSteeringTransferStateV1 state)
++        {
++            state.Validate();
++            InPitch = state.Pitch;
++            InYaw = state.Yaw;
++            InRoll = state.Roll;
++            InThrottle = state.Throttle;
++            Cruise = state.Cruise;
++            CruiseSpeedOffset = state.CruiseSpeedOffset;
++            Thrust = state.Thrust;
++            CurrentStrafe = state.Strafe;
++            EngineKill = state.EngineKill;
++            PlayerInput = false;
++        }
++
+         public ShipSteeringComponent(GameObject parent) : base(parent) { }
+ 
+         public Vector3 OutputSteering;
+--- a/src/LibreLancer/Server/NpcEquipmentTransferState.cs
++++ b/src/LibreLancer/Server/NpcEquipmentTransferState.cs
+@@ -1,4 +1,5 @@
+ using System;
++using System.IO;
+ using LibreLancer.World;
+ 
+ namespace LibreLancer.Server;
+@@ -21,10 +22,12 @@
+ internal sealed record NpcAiTransferExtensionV1
+ {
+     public NpcAiTransferExtensionV1() { }
+-    public int SchemaVersion { get; init; } = 2;
++    public int SchemaVersion { get; init; } = 3;
+     public NpcTransferObjectReferenceV1? DirectiveTarget { get; init; }
+     public NpcTransferObjectReferenceV1? SelectedTarget { get; init; }
+     public PIDControllerTransferState? SteeringRollController { get; init; }
++    public NpcShipSteeringTransferStateV1? Steering { get; init; }
++    public NpcShipPhysicsTransferStateV1? Physics { get; init; }
+     public int? GotoKind { get; init; }
+     public string CurrentState { get; init; } = "NULL";
+     public string PreviousState { get; init; } = "NULL";
+@@ -47,6 +50,74 @@
+     public float StayInRangeRadius { get; init; }
+ }
+ 
++internal sealed record NpcShipSteeringTransferStateV1
++{
++    public float Pitch { get; init; }
++    public float Yaw { get; init; }
++    public float Roll { get; init; }
++    public float Throttle { get; init; }
++    public bool Cruise { get; init; }
++    public float CruiseSpeedOffset { get; init; }
++    public bool Thrust { get; init; }
++    public LibreLancer.World.Components.StrafeControls Strafe { get; init; }
++    public bool EngineKill { get; init; }
++
++    public void Validate()
++    {
++        const LibreLancer.World.Components.StrafeControls allControls = LibreLancer.World.Components.StrafeControls.Left |
++            LibreLancer.World.Components.StrafeControls.Right | LibreLancer.World.Components.StrafeControls.Up |
++            LibreLancer.World.Components.StrafeControls.Down;
++        if (!float.IsFinite(Pitch) || !float.IsFinite(Yaw) || !float.IsFinite(Roll) ||
++            !float.IsFinite(Throttle) || !float.IsFinite(CruiseSpeedOffset) ||
++            Pitch is < -1 or > 1 || Yaw is < -1 or > 1 || Roll is < -1 or > 1 ||
++            Throttle is < -1 or > 1 || (Strafe & ~allControls) != 0 ||
++            (Strafe & (LibreLancer.World.Components.StrafeControls.Left | LibreLancer.World.Components.StrafeControls.Right)) ==
++                (LibreLancer.World.Components.StrafeControls.Left | LibreLancer.World.Components.StrafeControls.Right) ||
++            (Strafe & (LibreLancer.World.Components.StrafeControls.Up | LibreLancer.World.Components.StrafeControls.Down)) ==
++                (LibreLancer.World.Components.StrafeControls.Up | LibreLancer.World.Components.StrafeControls.Down))
++            throw new InvalidDataException("NPC ship steering transfer state is invalid.");
++    }
++}
++
++internal sealed record NpcShipPhysicsTransferStateV1
++{
++    public bool Active { get; init; }
++    public LibreLancer.World.Components.EngineStates EngineState { get; init; }
++    public bool ThrustRequested { get; init; }
++    public bool ThrustDepleted { get; init; }
++    public bool CruiseEnabled { get; init; }
++    public bool PreviousCruiseEnabled { get; init; }
++    public float CruiseSpeedOffset { get; init; }
++    public bool EngineKillEnabled { get; init; }
++    public float ChargePercent { get; init; }
++    public float CruiseAccelPercent { get; init; }
++    public float EnginePower { get; init; }
++    public NpcTransferVectorV1 Steering { get; init; } = new(0, 0, 0);
++    public LibreLancer.World.Components.StrafeControls Strafe { get; init; }
++    public float EngineSpeed { get; init; }
++    public bool EngineKill { get; init; }
++    public LibreLancer.Net.Protocol.CruiseThrustState CruiseThrust { get; init; }
++
++    public void Validate()
++    {
++        const LibreLancer.World.Components.StrafeControls allControls = LibreLancer.World.Components.StrafeControls.Left |
++            LibreLancer.World.Components.StrafeControls.Right | LibreLancer.World.Components.StrafeControls.Up |
++            LibreLancer.World.Components.StrafeControls.Down;
++        if (!Enum.IsDefined(EngineState) || !Enum.IsDefined(CruiseThrust) ||
++            !float.IsFinite(CruiseSpeedOffset) || !float.IsFinite(ChargePercent) ||
++            ChargePercent is < 0 or > 1 || !float.IsFinite(CruiseAccelPercent) ||
++            CruiseAccelPercent is < 0 or > 1 || !float.IsFinite(EnginePower) ||
++            !float.IsFinite(Steering.X) || !float.IsFinite(Steering.Y) || !float.IsFinite(Steering.Z) ||
++            !float.IsFinite(EngineSpeed) || (Strafe & ~allControls) != 0 ||
++            (Strafe & (LibreLancer.World.Components.StrafeControls.Left | LibreLancer.World.Components.StrafeControls.Right)) ==
++                (LibreLancer.World.Components.StrafeControls.Left | LibreLancer.World.Components.StrafeControls.Right) ||
++            (Strafe & (LibreLancer.World.Components.StrafeControls.Up | LibreLancer.World.Components.StrafeControls.Down)) ==
++                (LibreLancer.World.Components.StrafeControls.Up | LibreLancer.World.Components.StrafeControls.Down) ||
++            Steering.X is < -1 or > 1 || Steering.Y is < -1 or > 1 || Steering.Z is < -1 or > 1)
++            throw new InvalidDataException("NPC ship physics transfer state is invalid.");
++    }
++}
++
+ internal sealed record NpcTransferObjectReferenceV1(string Kind, Guid? NpcId = null,
+     long? CharacterId = null, string? Nickname = null)
+ {
+--- a/src/LibreLancer/Server/Components/SNPCComponent.cs
++++ b/src/LibreLancer/Server/Components/SNPCComponent.cs
+@@ -167,6 +167,10 @@
+                 SelectedTarget = CaptureObjectReference(selectedTarget),
+                 SteeringRollController = Parent.GetComponent<ShipSteeringComponent>()?.CaptureRollControllerTransferState()
+                     ?? throw new InvalidDataException("NPC steering controller is missing during transfer capture."),
++                Steering = Parent.GetComponent<ShipSteeringComponent>()?.CaptureNpcTransferState()
++                    ?? throw new InvalidDataException("NPC steering component is missing during transfer capture."),
++                Physics = Parent.GetComponent<ShipPhysicsComponent>()?.CaptureNpcTransferState()
++                    ?? throw new InvalidDataException("NPC physics component is missing during transfer capture."),
+                 GotoKind = CurrentDirective is AiDockState dockDirective ? (int)dockDirective.GotoKind : null,
+                 CurrentState = currentState.ToString(),
+                 PreviousState = previousState.ToString(),
+@@ -204,6 +208,14 @@
+             (Parent.GetComponent<ShipSteeringComponent>() ??
+                 throw new InvalidDataException("NPC steering component is missing during transfer restore."))
+                 .RestoreRollControllerTransferState(state.SteeringRollController);
++            (Parent.GetComponent<ShipSteeringComponent>() ??
++                throw new InvalidDataException("NPC steering component is missing during transfer restore."))
++                .RestoreNpcTransferState(state.Steering ??
++                    throw new InvalidDataException("NPC steering runtime state is missing."));
++            (Parent.GetComponent<ShipPhysicsComponent>() ??
++                throw new InvalidDataException("NPC physics component is missing during transfer restore."))
++                .RestoreNpcTransferState(state.Physics ??
++                    throw new InvalidDataException("NPC physics runtime state is missing."));
+             if ((CurrentDirective is AiAttackState or AiDockState) && state.DirectiveTarget is null)
+                 throw new InvalidDataException("NPC directive target reference is missing.");
+ 
+@@ -231,7 +243,8 @@
+ 
+         internal static void ValidateTransferState(NpcAiTransferExtensionV1 state)
+         {
+-            if (state.SchemaVersion != 2 || state.SteeringRollController is null ||
++            if (state.SchemaVersion != 3 || state.SteeringRollController is null ||
++                state.Steering is null || state.Physics is null ||
+                 !Enum.TryParse<StateGraphEntry>(state.CurrentState, out var restoredCurrent) ||
+                 !Enum.IsDefined(restoredCurrent) || !Enum.TryParse<StateGraphEntry>(state.PreviousState, out var restoredPrevious) ||
+                 !Enum.IsDefined(restoredPrevious) || !double.IsFinite(state.TimeInState) || state.TimeInState < 0 ||
+@@ -246,6 +259,8 @@
+                 !float.IsFinite(state.StayInRangeRadius) || state.StayInRangeRadius < 0)
+                 throw new InvalidDataException("NPC AI transfer state is invalid or unsupported.");
+             state.SteeringRollController.Validate();
++            state.Steering.Validate();
++            state.Physics.Validate();
+             if (state.DirectiveTarget is not null && !IsValidTransferReference(state.DirectiveTarget) ||
+                 state.SelectedTarget is not null && !IsValidTransferReference(state.SelectedTarget) ||
+                 state.StayInRangeTarget is not null && !IsValidTransferReference(state.StayInRangeTarget))
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -216,7 +216,7 @@
+                     state.Ai.ExtensionData.Length == 0)
+                     throw new InvalidDataException($"NPC '{state.Nickname}' has an unsupported AI state.");
+                 var ai = JsonSerializer.Deserialize<NpcAiTransferExtensionV1>(state.Ai.ExtensionData);
+-                if (ai is not { SchemaVersion: 2 })
++                if (ai is not { SchemaVersion: 3 })
+                     throw new InvalidDataException("NPC AI transfer extension is unsupported.");
+                 LibreLancer.Server.Components.SNPCComponent.ValidateTransferState(ai);
+                 if (state.Ai.StateId == "AiDockState" &&
+@@ -619,7 +619,7 @@
+                         member.NpcId == jumper.NpcId && !member.IsLeader)))
+                     throw new InvalidDataException($"NPC '{runtime.Nickname}' has inconsistent autopilot transfer state.");
+                 var aiExtension = JsonSerializer.Deserialize<NpcAiTransferExtensionV1>(runtime.Ai.ExtensionData);
+-                if (aiExtension is not { SchemaVersion: 2 } ||
++                if (aiExtension is not { SchemaVersion: 3 } ||
+                     (runtime.Ai.StateId is "AiAttackState" or "AiDockState") && aiExtension.DirectiveTarget is null)
+                     throw new InvalidDataException($"NPC '{runtime.Nickname}' has unsupported or incomplete AI runtime state.");
+                 var missionContext = JsonSerializer.Deserialize<NpcMissionTransferContext>(runtime.MissionState);
+--- a/src/LibreLancer/Server/NPCManager.cs
++++ b/src/LibreLancer/Server/NPCManager.cs
+@@ -455,7 +455,7 @@
+                     throw new InvalidDataException("NPC AI transfer extension is missing.");
+                 var aiState = JsonSerializer.Deserialize<NpcAiTransferExtensionV1>(entry.State.Ai.ExtensionData)
+                     ?? throw new InvalidDataException("NPC AI transfer extension is empty.");
+-                if (aiState.SchemaVersion != 2)
++                if (aiState.SchemaVersion != 3)
+                     throw new InvalidDataException("NPC AI transfer extension version is unsupported.");
+                 aiStates.Add(entry.Object, aiState);
+                 if (entry.State.Ai.StateId is not ("none" or nameof(AiAttackState) or nameof(AiDockState)))
