@@ -1,0 +1,86 @@
+--- a/src/LLServer.Core/ServerConfig.cs
++++ b/src/LLServer.Core/ServerConfig.cs
+@@ -27,6 +27,7 @@
+     public string[] SystemIds = [];
+     public string? InstanceEndpoint;
+     public int? TestNewCharacterRank;
++    public string? TestMissionNickname;
+ 
+     public void CopyFrom(ServerConfig other)
+     {
+@@ -52,5 +53,6 @@
+         SystemIds = (string[])other.SystemIds.Clone();
+         InstanceEndpoint = other.InstanceEndpoint;
+         TestNewCharacterRank = other.TestNewCharacterRank;
++        TestMissionNickname = other.TestMissionNickname;
+     }
+ }
+--- a/src/LLServer.Core/ServerApp.cs
++++ b/src/LLServer.Core/ServerApp.cs
+@@ -43,6 +43,11 @@
+             FLLog.Error("Config", "TestNewCharacterRank must be between 0 and 100");
+             return false;
+         }
++        if (Config.TestMissionNickname is { Length: > 128 })
++        {
++            FLLog.Error("Config", "TestMissionNickname must be no longer than 128 characters");
++            return false;
++        }
+         if (!GameConfig.CheckFLDirectory(Config.FreelancerPath))
+         {
+             FLLog.Error("Config", $"'{Config.FreelancerPath ?? "NULL"}' is not a valid game folder");
+@@ -102,7 +107,8 @@
+             SystemId = Config.SystemId,
+             SystemIds = Config.SystemIds,
+             TransferInstanceKey = transferInstanceKey,
+-            TestNewCharacterRank = Config.TestNewCharacterRank
++            TestNewCharacterRank = Config.TestNewCharacterRank,
++            TestMissionNickname = Config.TestMissionNickname
+         };
+         Server.ConfigureNpcIdentityAllocation(npcCoordinatorApiKey);
+         if (Config.NpcTransferPort != 0)
+@@ -134,6 +140,8 @@
+         Server.ConfigureLocalOperators(Path.GetFullPath(Config.LocalOperatorsFile, GetBasePath()));
+         if (Config.TestNewCharacterRank is int testRank)
+             FLLog.Info("Server", $"Test new-character rank override enabled: {testRank}");
++        if (!string.IsNullOrWhiteSpace(Config.TestMissionNickname))
++            FLLog.Info("Server", $"Test mission runtime injection enabled: {Config.TestMissionNickname}");
+         var listener = Server.Listener ?? throw new InvalidOperationException("Game server listener was not initialized.");
+         listener.Port = Config.Port > 0 ? Config.Port : LNetConst.DEFAULT_PORT;
+         listener.BindAddress = Config.BindAddress;
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -666,6 +666,7 @@
+                 .TrimEnd('=').Replace('+', '-').Replace('/', '_');
+         }
+     public int? TestNewCharacterRank { get; set; }
++    public string? TestMissionNickname { get; set; }
+ 
+     public const int MaxTransferSnapshotBytes = 16 * 1024 * 1024;
+     private readonly HttpClient transferHttp = new(new HttpClientHandler { AllowAutoRedirect = false })
+--- a/src/LibreLancer/Server/Player.cs
++++ b/src/LibreLancer/Server/Player.cs
+@@ -1538,7 +1538,22 @@
+                     return false;
+                 }
+ 
+-                BeginGame(await NetCharacter.FromDb(sc.Id, Game), null);
++                SaveGame? testMission = null;
++#if DEBUG
++                if (!string.IsNullOrWhiteSpace(Game.TestMissionNickname))
++                {
++                    testMission = new SaveGame
++                    {
++                        StoryInfo = new StoryInfo
++                        {
++                            Mission = Game.TestMissionNickname,
++                            MissionNum = 0,
++                            DeltaWorth = -1
++                        }
++                    };
++                }
++#endif
++                BeginGame(await NetCharacter.FromDb(sc.Id, Game), testMission);
+                 return true;
+             }
+             else

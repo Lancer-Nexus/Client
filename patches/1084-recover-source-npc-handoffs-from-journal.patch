@@ -1,0 +1,223 @@
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -336,45 +336,47 @@
+                 return;
+             try
+             {
+-            var path = GetNpcSourceSnapshotPath(transferId);
+-            if (!File.Exists(path))
+-                return;
+-            var payload = await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
+-            var snapshot = MessagePackSerializer.Deserialize<NpcTransferSnapshot>(payload,
+-                MessagePackSerializerOptions.Standard.WithSecurity(MessagePackSecurity.UntrustedData));
+-            if (snapshot.MissionRuntimeId.HasValue && missionRuntime is null)
+-                missionRuntime = FindNpcMissionRuntime(snapshot);
+-            if (snapshot.MissionRuntimeId.HasValue && missionRuntime is null)
+-                return;
+-            var recovery = await ReadNpcTransferRecoveryAsync(transferId, cancellationToken).ConfigureAwait(false);
+-            if (recovery is { State: NpcTransferState.Committed or NpcTransferState.SourceReleased })
+-                throw new InvalidOperationException("Committed NPC ownership cannot be rolled back.");
+-            try
+-            {
+-                if (recovery is not null && recovery.State != NpcTransferState.Aborted)
+-                    await AdvanceNpcTransferAsync(transferId, NpcTransferState.Aborted, null, cancellationToken)
+-                        .ConfigureAwait(false);
+-            }
+-            catch (HttpRequestException exception)
+-            {
+-                FLLog.Warning("NPC Transfer", $"Coordinator abort will be retried for {transferId:D}: {exception.Message}");
+-                throw;
+-            }
+-            if (sourceWorld is null)
+-                sourceWorld = await RequestNpcWorldAsync(snapshot.Npcs[0].SystemId, cancellationToken).ConfigureAwait(false);
+-            var restored = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+-            sourceWorld.EnqueueAction(() =>
+-            {
++                var path = GetNpcSourceSnapshotPath(transferId);
++                var recovery = await ReadNpcTransferRecoveryAsync(transferId, cancellationToken).ConfigureAwait(false);
++                if (recovery is { State: NpcTransferState.Committed or NpcTransferState.SourceReleased })
++                    throw new InvalidOperationException("Committed NPC ownership cannot be rolled back.");
++                var payload = await ReadNpcSourceSnapshotPayloadAsync(transferId, recovery, path, cancellationToken)
++                    .ConfigureAwait(false);
++                if (payload.Length == 0)
++                    return;
++                var snapshot = MessagePackSerializer.Deserialize<NpcTransferSnapshot>(payload,
++                    MessagePackSerializerOptions.Standard.WithSecurity(MessagePackSecurity.UntrustedData));
++                NpcTransferContractValidator.Validate(snapshot);
++                if (snapshot.MissionRuntimeId.HasValue && missionRuntime is null)
++                    missionRuntime = FindNpcMissionRuntime(snapshot);
++                if (snapshot.MissionRuntimeId.HasValue && missionRuntime is null)
++                    return;
+                 try
+                 {
+-                    sourceWorld.NPCs.RestoreTransfer(snapshot, missionRuntime, incrementOwnershipVersion: false,
+-                        expectedSystemId: snapshot.Npcs[0].SystemId, emitMissionSystemTransition: false);
+-                    File.Delete(path);
+-                    restored.TrySetResult();
++                    if (recovery is not null && recovery.State != NpcTransferState.Aborted)
++                        await AdvanceNpcTransferAsync(transferId, NpcTransferState.Aborted, null, cancellationToken)
++                            .ConfigureAwait(false);
+                 }
+-                catch (Exception exception) { restored.TrySetException(exception); }
+-            });
+-            await restored.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
++                catch (HttpRequestException exception)
++                {
++                    FLLog.Warning("NPC Transfer", $"Coordinator abort will be retried for {transferId:D}: {exception.Message}");
++                    throw;
++                }
++                if (sourceWorld is null)
++                    sourceWorld = await RequestNpcWorldAsync(snapshot.Npcs[0].SystemId, cancellationToken).ConfigureAwait(false);
++                var restored = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
++                sourceWorld.EnqueueAction(() =>
++                {
++                    try
++                    {
++                        sourceWorld.NPCs.RestoreTransfer(snapshot, missionRuntime, incrementOwnershipVersion: false,
++                            expectedSystemId: snapshot.Npcs[0].SystemId, emitMissionSystemTransition: false);
++                        File.Delete(path);
++                        restored.TrySetResult();
++                    }
++                    catch (Exception exception) { restored.TrySetException(exception); }
++                });
++                await restored.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+             }
+             finally { npcSourceTransferResolutions.TryRemove(transferId, out _); }
+         }
+@@ -386,8 +388,6 @@
+             try
+             {
+             var path = GetNpcSourceSnapshotPath(transferId);
+-            if (!File.Exists(path))
+-                return;
+             var result = await ReadNpcTransferRecoveryAsync(transferId, cancellationToken).ConfigureAwait(false);
+             if (result is null)
+                 throw new InvalidDataException("Coordinator lost the prepared NPC transfer journal.");
+@@ -398,7 +398,8 @@
+             result = await ReadNpcTransferRecoveryAsync(transferId, cancellationToken).ConfigureAwait(false);
+             if (result?.State == NpcTransferState.Committed)
+                 await AdvanceNpcTransferAsync(transferId, NpcTransferState.SourceReleased, null, cancellationToken).ConfigureAwait(false);
+-            File.Delete(path);
++            if (File.Exists(path))
++                File.Delete(path);
+             }
+             finally { npcSourceTransferResolutions.TryRemove(transferId, out _); }
+         }
+@@ -407,14 +408,55 @@
+         public async Task ResolvePendingSourceNpcTransfersAsync(CancellationToken cancellationToken = default)
+         {
+             if (string.IsNullOrWhiteSpace(TransferInstanceKey) || string.IsNullOrWhiteSpace(NpcTransferStagingDirectory) ||
+-                !Directory.Exists(NpcTransferStagingDirectory))
++                string.IsNullOrWhiteSpace(NpcCoordinatorUrl) || string.IsNullOrWhiteSpace(npcCoordinatorApiKey))
+                 return;
++            Directory.CreateDirectory(NpcTransferStagingDirectory);
++            var transferIds = new HashSet<Guid>();
+             foreach (var path in Directory.EnumerateFiles(NpcTransferStagingDirectory, "*.source.msgpack"))
+             {
+-                cancellationToken.ThrowIfCancellationRequested();
+                 var idText = Path.GetFileName(path)[..^".source.msgpack".Length];
+-                if (!Guid.TryParseExact(idText, "N", out var transferId))
+-                    continue;
++                if (Guid.TryParseExact(idText, "N", out var transferId))
++                    transferIds.Add(transferId);
++            }
++
++            try
++            {
++                Guid? cursor = null;
++                do
++                {
++                    var query = $"/internal/v1/npc-transfers/source-recovery?instanceId={Uri.EscapeDataString(InstanceId!)}&limit=128" +
++                                (cursor is Guid after ? $"&afterTransferId={after:D}" : "");
++                    using var request = new HttpRequestMessage(HttpMethod.Get,
++                        new Uri(new Uri(NpcCoordinatorUrl), query));
++                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", npcCoordinatorApiKey);
++                    using var response = await npcTransferHttp.SendAsync(request, cancellationToken).ConfigureAwait(false);
++                    response.EnsureSuccessStatusCode();
++                    var page = await response.Content.ReadFromJsonAsync<NpcTransferRecoveryPageV1>(cancellationToken)
++                        .ConfigureAwait(false) ?? throw new InvalidDataException("Coordinator source recovery page is empty.");
++                    if (page.TransferIds.Any(id => id == Guid.Empty) ||
++                        page.TransferIds.Zip(page.TransferIds.Skip(1), (left, right) => IsNpcTransferCursorAfter(left, right))
++                            .Any(isOutOfOrder => isOutOfOrder) ||
++                        (cursor is Guid previous && page.TransferIds.Any(id => !IsNpcTransferCursorAfter(id, previous))) ||
++                        (page.NextAfterTransferId is Guid next &&
++                         ((cursor is Guid cursorValue && !IsNpcTransferCursorAfter(next, cursorValue)) ||
++                          page.TransferIds.Any(id => IsNpcTransferCursorAfter(id, next)))) )
++                        throw new InvalidDataException("Coordinator source recovery page cursor is invalid.");
++                    transferIds.UnionWith(page.TransferIds);
++                    cursor = page.NextAfterTransferId;
++                } while (cursor is not null);
++            }
++            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
++            {
++                throw;
++            }
++            catch (Exception exception)
++            {
++                FLLog.Warning("NPC Transfer", $"Could not enumerate pending source NPC transfers: {exception.Message}");
++            }
++
++            foreach (var transferId in transferIds)
++            {
++                cancellationToken.ThrowIfCancellationRequested();
+                 try
+                 {
+                     var status = await GetTransferStatusAsync(transferId, cancellationToken).ConfigureAwait(false);
+@@ -447,6 +489,57 @@
+             }
+         }
+ 
++        private async Task<byte[]> ReadNpcSourceSnapshotPayloadAsync(Guid transferId,
++            NpcTransferRecoveryWireRecord? recovery, string path, CancellationToken cancellationToken)
++        {
++            byte[] payload = File.Exists(path)
++                ? await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false)
++                : [];
++            if (recovery is null)
++            {
++                if (payload.Length == 0)
++                    throw new InvalidDataException("NPC source snapshot is missing locally and from Coordinator recovery.");
++                return payload;
++            }
++            if (recovery.TransferId != transferId || recovery.SourceInstanceId != InstanceId)
++                throw new InvalidDataException("NPC source recovery record belongs to another transfer or instance.");
++            if (string.IsNullOrWhiteSpace(recovery.SnapshotSha256))
++            {
++                if (payload.Length == 0)
++                    throw new InvalidDataException("NPC source snapshot has not reached the Coordinator journal.");
++                return payload;
++            }
++
++            byte[] expectedHash;
++            try { expectedHash = Convert.FromHexString(recovery.SnapshotSha256); }
++            catch (FormatException exception)
++            {
++                throw new InvalidDataException("NPC source journal snapshot hash is malformed.", exception);
++            }
++            if (expectedHash.Length != SHA256.HashSizeInBytes)
++                throw new InvalidDataException("NPC source journal snapshot hash has an invalid size.");
++            if (CryptographicOperations.FixedTimeEquals(expectedHash, SHA256.HashData(payload)))
++                return payload;
++
++            var authoritative = await ReadNpcTransferRecoveryAsync(transferId, cancellationToken, includeSnapshot: true)
++                .ConfigureAwait(false);
++            if (authoritative?.Snapshot is not { } snapshot || authoritative.TransferId != transferId ||
++                authoritative.SourceInstanceId != InstanceId ||
++                authoritative.State is not (NpcTransferState.SourceFrozen or NpcTransferState.TargetAccepted or NpcTransferState.Aborted) ||
++                !string.Equals(authoritative.SnapshotSha256, recovery.SnapshotSha256, StringComparison.OrdinalIgnoreCase) ||
++                !authoritative.NpcIds.Order().SequenceEqual(recovery.NpcIds.Order()))
++                throw new InvalidDataException("Coordinator source recovery snapshot is missing or inconsistent.");
++            NpcTransferContractValidator.Validate(snapshot);
++            if (snapshot.TransferId != transferId || !snapshot.NpcIds.Order().SequenceEqual(recovery.NpcIds.Order()))
++                throw new InvalidDataException("Coordinator source recovery snapshot does not match its journal record.");
++            payload = MessagePackSerializer.Serialize(snapshot);
++            if (!CryptographicOperations.FixedTimeEquals(expectedHash, SHA256.HashData(payload)))
++                throw new InvalidDataException("Coordinator source recovery snapshot does not match its journal hash.");
++            await WriteNpcSnapshotAtomicallyAsync(path, payload, cancellationToken, replaceExisting: true)
++                .ConfigureAwait(false);
++            return payload;
++        }
++
+         private async Task<NpcTransferRecoveryWireRecord?> ReadNpcTransferRecoveryAsync(Guid transferId,
+             CancellationToken cancellationToken, bool includeSnapshot = false)
+         {

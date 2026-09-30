@@ -1,0 +1,107 @@
+--- a/src/LibreLancer/Server/NPCManager.cs
++++ b/src/LibreLancer/Server/NPCManager.cs
+@@ -455,19 +455,9 @@
+                 }
+             }
+             var resolvedFormations = ResolveFormations(snapshot.Formations, restored);
+-            foreach (var entry in restored)
+-            {
+-                World.OnNPCSpawn(entry.Object);
+-                if (missionRuntime != null && entry.State.Nickname is { Length: > 0 } nickname)
+-                {
+-                    missionNPCs[nickname] = entry.Object;
+-                    if (emitMissionSystemTransition)
+-                    {
+-                        missionRuntime.SystemExit(entry.Identity.SystemId, nickname);
+-                        missionRuntime.SystemEnter(World.System.Nickname, nickname);
+-                    }
+-                }
+-            }
++            var previousFormations = resolvedFormations.SelectMany(formation => formation.Members)
++                .GroupBy(member => member.Object)
++                .ToDictionary(group => group.Key, group => group.Key.Formation);
+             RestoreFormations(resolvedFormations);
+             foreach (var entry in restored)
+             {
+@@ -488,6 +478,40 @@
+                 component.RestoreTransferState(extension,
+                     reference => ResolveTransferReference(reference, restored));
+             }
++            var activated = new List<GameObject>(restored.Count);
++            try
++            {
++                foreach (var entry in restored)
++                {
++                    activated.Add(entry.Object);
++                    World.OnNPCSpawn(entry.Object);
++                }
++                foreach (var entry in restored)
++                {
++                    if (missionRuntime == null || entry.State.Nickname is not { Length: > 0 } nickname)
++                        continue;
++                    missionNPCs[nickname] = entry.Object;
++                    if (emitMissionSystemTransition)
++                    {
++                        missionRuntime.SystemExit(entry.Identity.SystemId, nickname);
++                        missionRuntime.SystemEnter(World.System.Nickname, nickname);
++                    }
++                }
++            }
++            catch
++            {
++                foreach (var entry in restored)
++                {
++                    if (entry.State.Nickname is { Length: > 0 } nickname &&
++                        missionNPCs.TryGetValue(nickname, out var registered) && registered == entry.Object)
++                        missionNPCs.Remove(nickname);
++                }
++                foreach (var previousFormation in previousFormations)
++                    previousFormation.Key.Formation = previousFormation.Value;
++                foreach (var obj in activated)
++                    World.RemoveSpawnedObjectImmediate(obj, false);
++                throw;
++            }
+             return restored.Select(entry => entry.Object).ToArray();
+         }
+ 
+--- a/src/LibreLancer/Server/ServerWorld.cs
++++ b/src/LibreLancer/Server/ServerWorld.cs
+@@ -949,20 +949,26 @@
+ 
+         public void RemoveSpawnedObject(GameObject obj, bool exploded)
+         {
+-            actions.Enqueue(() =>
+-            {
+-                if ((obj.Flags & GameObjectFlags.Exists) == 0)
+-                {
+-                    spawnedObjects.Remove(obj);
+-                    return;
+-                }
++            actions.Enqueue(() => RemoveSpawnedObjectInternal(obj, exploded));
++        }
++
++        /// <summary>Removes an NPC during an in-progress world action after an atomic restore fails.</summary>
++        internal void RemoveSpawnedObjectImmediate(GameObject obj, bool exploded) =>
++            RemoveSpawnedObjectInternal(obj, exploded);
+ 
+-                RemoveObjectInternal(obj);
++        private void RemoveSpawnedObjectInternal(GameObject obj, bool exploded)
++        {
++            if ((obj.Flags & GameObjectFlags.Exists) == 0)
++            {
+                 spawnedObjects.Remove(obj);
+-                if (obj.NetID != 0)
+-                    IdGenerator.Free(obj.NetID);
+-                foreach (var p in Players) p.Key.Despawn(obj.NetID, exploded);
+-            });
++                return;
++            }
++
++            RemoveObjectInternal(obj);
++            spawnedObjects.Remove(obj);
++            if (obj.NetID != 0)
++                IdGenerator.Free(obj.NetID);
++            foreach (var p in Players) p.Key.Despawn(obj.NetID, exploded);
+         }
+ 
+         public void InputsUpdate(Player player, InputUpdatePacket input)

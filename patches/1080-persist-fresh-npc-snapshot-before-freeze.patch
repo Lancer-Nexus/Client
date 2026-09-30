@@ -1,0 +1,116 @@
+--- a/src/LibreLancer/Server/ServerWorld.cs
++++ b/src/LibreLancer/Server/ServerWorld.cs
+@@ -327,7 +327,8 @@
+ 
+         /// <summary>Captures the latest runtime state and removes a group on the simulation thread.</summary>
+         public Task<JumperNpc[]> FreezeJumpersAsync(JumperNpc[] jumpers, MissionRuntime? missionRuntime,
+-            bool triggerMissionExit = true, Action? beforeFreeze = null)
++            bool triggerMissionExit = true, Action? beforeFreeze = null,
++            Action<JumperNpc[]>? beforeRemove = null)
+         {
+             var completion = new TaskCompletionSource<JumperNpc[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+             EnqueueAction(() =>
+@@ -344,12 +345,13 @@
+                         objects.Add((jumper, obj));
+                     }
+                     var captured = objects.Select(entry => JumperNpc.FromGameObject(entry.Object, this)).ToArray();
++                    beforeRemove?.Invoke(captured);
+                     foreach (var jumper in captured)
+                     {
+                         if (triggerMissionExit)
+                             missionRuntime?.SystemExit(System.Nickname, jumper.Nickname);
+                         var obj = objects.First(entry => entry.Jumper.NpcId == jumper.NpcId).Object;
+-                        RemoveSpawnedObject(obj, false);
++                        RemoveSpawnedObjectImmediate(obj, false);
+                     }
+                     completion.TrySetResult(captured);
+                 }
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -254,6 +254,10 @@
+                 throw new InvalidOperationException("NPC peer transfer is not configured on this instance.");
+ 
+             var sourcePath = GetNpcSourceSnapshotPath(transferId);
++            var npcIds = jumpers.Select(jumper => jumper.NpcId).ToArray();
++            if (npcIds.Any(id => id == Guid.Empty) || npcIds.Distinct().Count() != npcIds.Length ||
++                jumpers.Any(jumper => jumper.OwnershipVersion <= 0))
++                throw new InvalidDataException("A jumping NPC has no Coordinator identity or ownership version.");
+             var initialSnapshot = BuildNpcTransferSnapshot(transferId, targetSystemId, missionRuntime, jumpers);
+             await WriteNpcSnapshotAtomicallyAsync(sourcePath, MessagePackSerializer.Serialize(initialSnapshot),
+                 cancellationToken).ConfigureAwait(false);
+@@ -268,7 +272,7 @@
+                     SourceInstanceId = InstanceId,
+                     TargetInstanceId = targetInstanceId,
+                     TargetSystemId = targetSystemId,
+-                    NpcIds = initialSnapshot.NpcIds,
++                    NpcIds = npcIds,
+                     MissionRuntimeId = transferId,
+                     ExpiresUtc = DateTime.UtcNow.AddSeconds(90),
+                     IdempotencyKey = $"{transferId:N}:mission-npcs"
+@@ -284,13 +288,23 @@
+                 string.IsNullOrWhiteSpace(prepared.TargetEndpoint))
+                 throw new InvalidDataException("Coordinator returned an invalid NPC transfer reservation.");
+ 
+-            var frozenJumpers = await sourceWorld.FreezeJumpersAsync(jumpers, missionRuntime,
+-                    triggerMissionExit: false, beforeFreeze: drainMissionActions)
++            NpcTransferSnapshot? frozenSnapshot = null;
++            byte[]? frozenSnapshotBytes = null;
++            await sourceWorld.FreezeJumpersAsync(jumpers, missionRuntime,
++                    triggerMissionExit: false, beforeFreeze: drainMissionActions,
++                    beforeRemove: captured =>
++                    {
++                        var capturedSnapshot = BuildNpcTransferSnapshot(transferId, targetSystemId, missionRuntime, captured);
++                        frozenSnapshot = capturedSnapshot;
++                        var serialized = MessagePackSerializer.Serialize(capturedSnapshot);
++                        frozenSnapshotBytes = serialized;
++                        WriteNpcSnapshotAtomically(sourcePath, serialized, replaceExisting: true);
++                    })
+                 .WaitAsync(cancellationToken).ConfigureAwait(false);
+-            var snapshot = BuildNpcTransferSnapshot(transferId, targetSystemId, missionRuntime, frozenJumpers);
+-            var snapshotBytes = MessagePackSerializer.Serialize(snapshot);
+-            await WriteNpcSnapshotAtomicallyAsync(sourcePath, snapshotBytes, cancellationToken, replaceExisting: true)
+-                .ConfigureAwait(false);
++            var snapshot = frozenSnapshot
++                ?? throw new InvalidDataException("Source NPC freeze completed without a durable runtime snapshot.");
++            var snapshotBytes = frozenSnapshotBytes
++                ?? throw new InvalidDataException("Source NPC freeze completed without serialized runtime state.");
+ 
+             await AdvanceNpcTransferAsync(transferId, NpcTransferState.SourceFrozen, snapshot, cancellationToken)
+                 .ConfigureAwait(false);
+@@ -568,6 +582,36 @@
+             }
+             finally { try { File.Delete(tempPath); } catch (IOException) { } }
+         }
++
++        private static void WriteNpcSnapshotAtomically(string path, byte[] payload, bool replaceExisting)
++        {
++            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
++            if (File.Exists(path) && !replaceExisting)
++            {
++                var existing = File.ReadAllBytes(path);
++                if (!CryptographicOperations.FixedTimeEquals(SHA256.HashData(existing), SHA256.HashData(payload)))
++                    throw new InvalidDataException("A conflicting source NPC snapshot already exists for this transfer ID.");
++                return;
++            }
++            var tempPath = $"{path}.{Guid.NewGuid():N}.tmp";
++            try
++            {
++                using (var output = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None,
++                           81920, FileOptions.WriteThrough))
++                {
++                    output.Write(payload);
++                    output.Flush(flushToDisk: true);
++                }
++                try { File.Move(tempPath, path, overwrite: replaceExisting); }
++                catch (IOException) when (File.Exists(path))
++                {
++                    var existing = File.ReadAllBytes(path);
++                    if (!CryptographicOperations.FixedTimeEquals(SHA256.HashData(existing), SHA256.HashData(payload)))
++                        throw new InvalidDataException("A conflicting source NPC snapshot already exists for this transfer ID.");
++                }
++            }
++            finally { try { File.Delete(tempPath); } catch (IOException) { } }
++        }
+ 
+         private async Task<IPEndPoint> ResolveNpcPeerEndpointAsync(string targetEndpoint, int transferPort,
+             CancellationToken cancellationToken)
