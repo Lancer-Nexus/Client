@@ -1,0 +1,83 @@
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -1458,6 +1458,8 @@
+                 !string.Equals(import.TicketHash, ticketHash, StringComparison.Ordinal))
+                 throw new InvalidOperationException("Transfer snapshot import did not reach its durable state.");
+ 
++            await ValidatePreparedNpcTransferAsync(transferId, cancellationToken).ConfigureAwait(false);
++
+             if (transferSave is null)
+             {
+                 var snapshot = await DownloadTransferSnapshotAsync(transferId, cancellationToken).ConfigureAwait(false);
+@@ -1543,16 +1545,28 @@
+         private async Task<NpcTransferSnapshot?> WaitForNpcTransferCommitAsync(Guid transferId,
+             CancellationToken cancellationToken)
+         {
++            var stagedPath = string.IsNullOrWhiteSpace(NpcTransferStagingDirectory)
++                ? null
++                : Path.Combine(NpcTransferStagingDirectory, $"{transferId:N}.msgpack");
++            var npcTransferRequired = stagedPath is not null && File.Exists(stagedPath);
+             if (string.IsNullOrWhiteSpace(NpcCoordinatorUrl) || string.IsNullOrWhiteSpace(npcCoordinatorApiKey) ||
+                 string.IsNullOrWhiteSpace(NpcTransferStagingDirectory))
++            {
++                if (npcTransferRequired)
++                    throw new InvalidOperationException("A staged NPC transfer has no Coordinator recovery connection.");
+                 return null;
++            }
+             if (IsNpcTransferActivated(transferId))
+                 return null;
+             while (true)
+             {
+                 var recovery = await ReadNpcTransferRecoveryAsync(transferId, cancellationToken).ConfigureAwait(false);
+                 if (recovery is null)
++                {
++                    if (npcTransferRequired)
++                        throw new InvalidDataException("The staged NPC transfer is missing its Coordinator journal record.");
+                     return null;
++                }
+                 if (recovery.State == NpcTransferState.Aborted)
+                     throw new InvalidOperationException("NPC transfer was aborted after the character lease committed.");
+                 if (recovery.State is NpcTransferState.Committed or NpcTransferState.SourceReleased)
+@@ -1575,6 +1589,42 @@
+             }
+         }
+ 
++        private async Task ValidatePreparedNpcTransferAsync(Guid transferId, CancellationToken cancellationToken)
++        {
++            if (string.IsNullOrWhiteSpace(NpcTransferStagingDirectory))
++                return;
++            var path = Path.Combine(NpcTransferStagingDirectory, $"{transferId:N}.msgpack");
++            if (!File.Exists(path))
++                return;
++            if (string.IsNullOrWhiteSpace(NpcCoordinatorUrl) || string.IsNullOrWhiteSpace(npcCoordinatorApiKey))
++                throw new InvalidOperationException("A staged NPC transfer has no Coordinator recovery connection.");
++
++            var recovery = await ReadNpcTransferRecoveryAsync(transferId, cancellationToken).ConfigureAwait(false);
++            if (recovery is null || recovery.TransferId != transferId || recovery.TargetInstanceId != InstanceId ||
++                recovery.State is not (NpcTransferState.TargetAccepted or NpcTransferState.Committed or NpcTransferState.SourceReleased) ||
++                string.IsNullOrWhiteSpace(recovery.SnapshotSha256))
++                throw new InvalidDataException("The staged NPC transfer is not durably accepted by the Coordinator.");
++
++            var payload = await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
++            byte[] expectedHash;
++            try { expectedHash = Convert.FromHexString(recovery.SnapshotSha256); }
++            catch (FormatException exception)
++            {
++                throw new InvalidDataException("The Coordinator NPC snapshot hash is malformed.", exception);
++            }
++            if (expectedHash.Length != SHA256.HashSizeInBytes ||
++                !CryptographicOperations.FixedTimeEquals(expectedHash, SHA256.HashData(payload)))
++                throw new InvalidDataException("The staged NPC snapshot does not match the Coordinator journal.");
++
++            var snapshot = MessagePackSerializer.Deserialize<NpcTransferSnapshot>(payload,
++                MessagePackSerializerOptions.Standard.WithSecurity(MessagePackSecurity.UntrustedData));
++            NpcTransferContractValidator.Validate(snapshot);
++            if (snapshot.TransferId != transferId ||
++                !string.Equals(snapshot.TargetSystemId, recovery.TargetSystemId, StringComparison.OrdinalIgnoreCase) ||
++                !snapshot.NpcIds.Order().SequenceEqual(recovery.NpcIds.Order()))
++                throw new InvalidDataException("The staged NPC snapshot identity does not match the Coordinator journal.");
++        }
++
+         private async Task<TransferTicketVerificationResponse> VerifyTransferTicketAsync(
+             Guid transferId, string ticket, CancellationToken cancellationToken)
+         {
