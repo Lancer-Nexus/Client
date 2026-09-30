@@ -1,0 +1,108 @@
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -354,8 +354,8 @@
+         public async Task AbortNpcTransferAndRestoreAsync(Guid transferId, ServerWorld? sourceWorld,
+             MissionRuntime? missionRuntime, CancellationToken cancellationToken = default)
+         {
+-            if (!npcSourceTransferResolutions.TryAdd(transferId, 0))
+-                return;
++            while (!npcSourceTransferResolutions.TryAdd(transferId, 0))
++                await Task.Delay(TimeSpan.FromMilliseconds(25), cancellationToken).ConfigureAwait(false);
+             try
+             {
+                 var path = GetNpcSourceSnapshotPath(transferId);
+@@ -405,11 +405,10 @@
+ 
+         private async Task CommitNpcTransferAsync(Guid transferId, CancellationToken cancellationToken)
+         {
+-            if (!npcSourceTransferResolutions.TryAdd(transferId, 0))
+-                return;
++            while (!npcSourceTransferResolutions.TryAdd(transferId, 0))
++                await Task.Delay(TimeSpan.FromMilliseconds(25), cancellationToken).ConfigureAwait(false);
+             try
+             {
+-            var path = GetNpcSourceSnapshotPath(transferId);
+             var result = await ReadNpcTransferRecoveryAsync(transferId, cancellationToken).ConfigureAwait(false);
+             if (result is null)
+                 throw new InvalidDataException("Coordinator lost the prepared NPC transfer journal.");
+@@ -417,15 +416,26 @@
+                 await AdvanceNpcTransferAsync(transferId, NpcTransferState.Committed, null, cancellationToken).ConfigureAwait(false);
+             else if (result.State is not (NpcTransferState.Committed or NpcTransferState.SourceReleased))
+                 throw new InvalidOperationException($"NPC transfer cannot commit from state {result.State}.");
+-            result = await ReadNpcTransferRecoveryAsync(transferId, cancellationToken).ConfigureAwait(false);
+-            if (result?.State == NpcTransferState.Committed)
+-                await AdvanceNpcTransferAsync(transferId, NpcTransferState.SourceReleased, null, cancellationToken).ConfigureAwait(false);
+-            if (File.Exists(path))
+-                File.Delete(path);
+             }
+             finally { npcSourceTransferResolutions.TryRemove(transferId, out _); }
+         }
+ 
++        private async Task MarkNpcTransferSourceReleasedAsync(Guid transferId, CancellationToken cancellationToken)
++        {
++            var result = await ReadNpcTransferRecoveryAsync(transferId, cancellationToken).ConfigureAwait(false);
++            if (result is null)
++                throw new InvalidDataException("Coordinator lost the committed NPC transfer journal.");
++            if (result.State == NpcTransferState.Committed)
++                await AdvanceNpcTransferAsync(transferId, NpcTransferState.SourceReleased, null, cancellationToken)
++                    .ConfigureAwait(false);
++            else if (result.State != NpcTransferState.SourceReleased)
++                throw new InvalidOperationException($"NPC source cannot be released from state {result.State}.");
++
++            var path = GetNpcSourceSnapshotPath(transferId);
++            if (File.Exists(path))
++                File.Delete(path);
++        }
++
+         /// <summary>Recovers source-side NPC handoffs even when the player object was lost during a process restart.</summary>
+         public async Task ResolvePendingSourceNpcTransfersAsync(CancellationToken cancellationToken = default)
+         {
+@@ -487,8 +497,33 @@
+                     switch (status.State)
+                     {
+                         case LancerNexus.Protocol.TransferState.Committed:
++                            await CommitNpcTransferAsync(transferId, cancellationToken).ConfigureAwait(false);
++                            var sourcePlayer = GetConnectedPlayers().FirstOrDefault(candidate => candidate.GatewayTransferId == transferId);
++                            if (sourcePlayer?.TransferInProgress == true)
++                            {
++                                if (!sourcePlayer.ReleaseAfterTransferCommit(transferId))
++                                    throw new InvalidOperationException("Source character is not frozen for this transfer.");
++                            }
++                            else if (sourcePlayer?.Character != null)
++                            {
++                                throw new InvalidOperationException("Source character is still active after the target lease committed.");
++                            }
++                            await NotifyTransferSourceReleasedAsync(transferId, cancellationToken).ConfigureAwait(false);
++                            await MarkNpcTransferSourceReleasedAsync(transferId, cancellationToken).ConfigureAwait(false);
++                            break;
+                         case LancerNexus.Protocol.TransferState.SourceReleased:
+                             await CommitNpcTransferAsync(transferId, cancellationToken).ConfigureAwait(false);
++                            var releasedPlayer = GetConnectedPlayers().FirstOrDefault(candidate => candidate.GatewayTransferId == transferId);
++                            if (releasedPlayer?.TransferInProgress == true)
++                            {
++                                if (!releasedPlayer.ReleaseAfterTransferCommit(transferId))
++                                    throw new InvalidOperationException("Source character is not frozen for this transfer.");
++                            }
++                            else if (releasedPlayer?.Character != null)
++                            {
++                                throw new InvalidOperationException("Source character is still active after the target lease committed.");
++                            }
++                            await MarkNpcTransferSourceReleasedAsync(transferId, cancellationToken).ConfigureAwait(false);
+                             break;
+                         case LancerNexus.Protocol.TransferState.Aborted:
+                         case LancerNexus.Protocol.TransferState.Rejected:
+@@ -1726,12 +1761,14 @@
+                         if (sourcePlayer != null && !sourcePlayer.ReleaseAfterTransferCommit(transferId))
+                             throw new InvalidOperationException("Source character is not frozen for this transfer.");
+                         await NotifyTransferSourceReleasedAsync(transferId, cancellationToken).ConfigureAwait(false);
++                        await MarkNpcTransferSourceReleasedAsync(transferId, cancellationToken).ConfigureAwait(false);
+                         transferLeaseVersions.TryRemove(transferId, out _);
+                         return new TransferSourceResolutionResult(transferId,
+                             LancerNexus.Protocol.TransferState.SourceReleased, true);
+                     }
+                     if (sourcePlayer != null && !sourcePlayer.ReleaseAfterTransferCommit(transferId))
+                         throw new InvalidOperationException("Source character is not frozen for this transfer.");
++                    await MarkNpcTransferSourceReleasedAsync(transferId, cancellationToken).ConfigureAwait(false);
+                     transferLeaseVersions.TryRemove(transferId, out _);
+                     return new TransferSourceResolutionResult(transferId, status.State, true);
+ 
