@@ -1,0 +1,75 @@
+--- a/src/LibreLancer/Server/NpcEquipmentTransferState.cs
++++ b/src/LibreLancer/Server/NpcEquipmentTransferState.cs
+@@ -7,6 +7,7 @@
+     public NpcEquipmentTransferExtensionV1() { }
+     public int SchemaVersion { get; init; } = 1;
+     public NpcShieldTransferStateV1? Shield { get; init; }
++    public double? WeaponCooldownSeconds { get; init; }
+ }
+ 
+ internal sealed record NpcShieldTransferStateV1(float Health, double SuppressionRemainingSeconds,
+--- a/src/LibreLancer/Server/JumperNpc.cs
++++ b/src/LibreLancer/Server/JumperNpc.cs
+@@ -156,12 +156,7 @@
+                              powerEquipment.Def.Capacity > 0
+                         ? Math.Clamp(powerCore.CurrentEnergy / powerEquipment.Def.Capacity, 0, 1)
+                         : 1,
+-                    ExtensionData = equipment.Parent.TryGetComponent<SShieldComponent>(out var shield)
+-                        ? JsonSerializer.SerializeToUtf8Bytes(new NpcEquipmentTransferExtensionV1
+-                        {
+-                            Shield = shield.CaptureTransferState(world.GameWorld)
+-                        })
+-                        : []
++                    ExtensionData = CaptureEquipmentExtension(equipment, world.GameWorld)
+                 }).ToArray(),
+             Cargo = go.TryGetComponent<SNPCCargoComponent>(out var cargoComponent)
+                 ? cargoComponent.Cargo.Select(cargo => new NpcCargoState
+@@ -215,6 +210,19 @@
+         return npc;
+     }
+ 
++    private static byte[] CaptureEquipmentExtension(EquipmentComponent equipment, GameWorld world)
++    {
++        var hasShield = equipment.Parent.TryGetComponent<SShieldComponent>(out var shield);
++        var hasWeapon = equipment.Parent.TryGetComponent<WeaponComponent>(out var weapon);
++        if (!hasShield && !hasWeapon)
++            return [];
++        return JsonSerializer.SerializeToUtf8Bytes(new NpcEquipmentTransferExtensionV1
++        {
++            Shield = hasShield ? shield.CaptureTransferState(world) : null,
++            WeaponCooldownSeconds = hasWeapon ? weapon.CurrentCooldown : null
++        });
++    }
++
+     private static NpcVector3 ToProtocol(Vector3 value) => new() { X = value.X, Y = value.Y, Z = value.Z };
+ 
+     private static Guid? GetNpcId(GameObject obj) => obj.TryGetComponent<SNPCComponent>(out var npc)
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -171,7 +171,9 @@
+                     if (equipment.ExtensionData.Length > 0)
+                     {
+                         var extension = JsonSerializer.Deserialize<NpcEquipmentTransferExtensionV1>(equipment.ExtensionData);
+-                        if (extension is not { SchemaVersion: 1 })
++                        if (extension is not { SchemaVersion: 1 } ||
++                            extension.WeaponCooldownSeconds is { } cooldown &&
++                            (!double.IsFinite(cooldown) || cooldown < 0 || cooldown > 3600))
+                             throw new InvalidDataException("NPC equipment transfer extension is unsupported.");
+                     }
+                 }
+--- a/src/LibreLancer/Server/NPCManager.cs
++++ b/src/LibreLancer/Server/NPCManager.cs
+@@ -413,6 +413,13 @@
+                                 throw new InvalidDataException("NPC shield transfer state is invalid or the target shield is missing.");
+                             shield.RestoreTransferState(shieldState, World.GameWorld);
+                         }
++                        if (extension.WeaponCooldownSeconds is { } weaponCooldown)
++                        {
++                            if (!double.IsFinite(weaponCooldown) || weaponCooldown < 0 || weaponCooldown > 3600 ||
++                                !equipment.Parent.TryGetComponent<WeaponComponent>(out var weapon))
++                                throw new InvalidDataException("NPC weapon cooldown transfer state is invalid or the target weapon is missing.");
++                            weapon.CurrentCooldown = weaponCooldown;
++                        }
+                     }
+                 }
+                 obj.PhysicsComponent?.Body.SetTransform(new Transform3D(ToVector(state.Position), ToQuaternion(state.Orientation)));
