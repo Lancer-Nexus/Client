@@ -1,0 +1,62 @@
+--- a/src/LibreLancer/Server/NpcEquipmentTransferState.cs
++++ b/src/LibreLancer/Server/NpcEquipmentTransferState.cs
+@@ -8,6 +8,7 @@
+     public int SchemaVersion { get; init; } = 1;
+     public NpcShieldTransferStateV1? Shield { get; init; }
+     public double? WeaponCooldownSeconds { get; init; }
++    public float? ThrustCapacityFraction { get; init; }
+ }
+ 
+ internal sealed record NpcShieldTransferStateV1(float Health, double SuppressionRemainingSeconds,
+--- a/src/LibreLancer/Server/JumperNpc.cs
++++ b/src/LibreLancer/Server/JumperNpc.cs
+@@ -214,12 +214,18 @@
+     {
+         var hasShield = equipment.Parent.TryGetComponent<SShieldComponent>(out var shield);
+         var hasWeapon = equipment.Parent.TryGetComponent<WeaponComponent>(out var weapon);
++        var hasPowerCore = equipment.Parent.TryGetComponent<PowerCoreComponent>(out var powerCore);
+-        if (!hasShield && !hasWeapon)
++        if (!hasShield && !hasWeapon && !hasPowerCore)
+             return [];
+         return JsonSerializer.SerializeToUtf8Bytes(new NpcEquipmentTransferExtensionV1
+         {
+             Shield = hasShield ? shield.CaptureTransferState(world) : null,
+-            WeaponCooldownSeconds = hasWeapon ? weapon.CurrentCooldown : null
++            WeaponCooldownSeconds = hasWeapon ? weapon.CurrentCooldown : null,
++            ThrustCapacityFraction = hasPowerCore
++                ? powerCore.Equip.ThrustCapacity > 0
++                    ? Math.Clamp(powerCore.CurrentThrustCapacity / powerCore.Equip.ThrustCapacity, 0, 1)
++                    : 0
++                : null
+         });
+     }
+ 
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -173,7 +173,9 @@
+                         var extension = JsonSerializer.Deserialize<NpcEquipmentTransferExtensionV1>(equipment.ExtensionData);
+                         if (extension is not { SchemaVersion: 1 } ||
+                             extension.WeaponCooldownSeconds is { } cooldown &&
+-                            (!double.IsFinite(cooldown) || cooldown < 0 || cooldown > 3600))
++                            (!double.IsFinite(cooldown) || cooldown < 0 || cooldown > 3600) ||
++                            extension.ThrustCapacityFraction is { } thrustCapacity &&
++                            (!float.IsFinite(thrustCapacity) || thrustCapacity is < 0 or > 1))
+                             throw new InvalidDataException("NPC equipment transfer extension is unsupported.");
+                     }
+                 }
+--- a/src/LibreLancer/Server/NPCManager.cs
++++ b/src/LibreLancer/Server/NPCManager.cs
+@@ -420,6 +420,13 @@
+                                 throw new InvalidDataException("NPC weapon cooldown transfer state is invalid or the target weapon is missing.");
+                             weapon.CurrentCooldown = weaponCooldown;
+                         }
++                        if (extension.ThrustCapacityFraction is { } thrustCapacityFraction)
++                        {
++                            if (!float.IsFinite(thrustCapacityFraction) || thrustCapacityFraction is < 0 or > 1 ||
++                                !equipment.Parent.TryGetComponent<PowerCoreComponent>(out var restoredPowerCore))
++                                throw new InvalidDataException("NPC thrust capacity transfer state is invalid or the target power core is missing.");
++                            restoredPowerCore.CurrentThrustCapacity = thrustCapacityFraction * restoredPowerCore.Equip.ThrustCapacity;
++                        }
+                     }
+                 }
+                 obj.PhysicsComponent?.Body.SetTransform(new Transform3D(ToVector(state.Position), ToQuaternion(state.Orientation)));
