@@ -1,0 +1,300 @@
+--- a/src/LibreLancer/World/PIDController.cs
++++ b/src/LibreLancer/World/PIDController.cs
+@@ -4,6 +4,16 @@
+ 
+ namespace LibreLancer.World
+ {
++	public sealed record PIDControllerTransferState(double P, double I, double D, double Integral, double LastError)
++	{
++		public void Validate()
++		{
++			if (!double.IsFinite(P) || !double.IsFinite(I) || !double.IsFinite(D) ||
++				!double.IsFinite(Integral) || !double.IsFinite(LastError))
++				throw new System.IO.InvalidDataException("PID controller transfer state is invalid.");
++		}
++	}
++
+ 	public class PIDController
+ 	{
+ 		public double P;
+@@ -13,6 +23,19 @@
+         private double integral;
+         private double lastError;
+ 
++		public PIDControllerTransferState CaptureTransferState() =>
++			new(P, I, D, integral, lastError);
++
++		public void RestoreTransferState(PIDControllerTransferState state)
++		{
++			state.Validate();
++			P = state.P;
++			I = state.I;
++			D = state.D;
++			integral = state.Integral;
++			lastError = state.LastError;
++		}
++
+ 		public void Reset()
+ 		{
+ 			integral = lastError = 0;
+--- a/src/LibreLancer/World/Components/Autopilot/AutopilotObstacleAvoidance.cs
++++ b/src/LibreLancer/World/Components/Autopilot/AutopilotObstacleAvoidance.cs
+@@ -18,7 +18,22 @@
+         private StrafeControls avoidanceStrafe = StrafeControls.None;
+         private Vector2 avoidanceVector = Vector2.Zero;
+         private float avoidanceClearTimer = 0;
+-        private const float AvoidanceClearDelay = 1.0f;
++        internal const float AvoidanceClearDelay = 1.0f;
++
++        internal AutopilotAvoidanceTransferState CaptureTransferState() => new()
++        {
++            Strafe = avoidanceStrafe,
++            Vector = avoidanceVector,
++            ClearTimer = avoidanceClearTimer
++        };
++
++        internal void RestoreTransferState(AutopilotAvoidanceTransferState state)
++        {
++            state.Validate();
++            avoidanceStrafe = state.Strafe;
++            avoidanceVector = state.Vector;
++            avoidanceClearTimer = state.ClearTimer;
++        }
+ 
+         internal readonly struct AvoidancePlan(bool active, StrafeControls strafe, Vector2 strafeVector)
+         {
+--- a/src/LibreLancer/World/Components/Autopilot/AutopilotComponent.cs
++++ b/src/LibreLancer/World/Components/Autopilot/AutopilotComponent.cs
+@@ -133,8 +133,12 @@
+             var targetReference = state.GetTargetReference();
+             TargetObject = targetReference is null ? null : resolveReference?.Invoke(targetReference)
+                 ?? throw new InvalidDataException("Autopilot target reference could not be resolved after restore.");
++            avoidance.RestoreTransferState(state.Avoidance ??
++                throw new InvalidDataException("Autopilot avoidance transfer state is missing."));
+         }
+ 
++        internal AutopilotAvoidanceTransferState CaptureAvoidanceTransferState() => avoidance.CaptureTransferState();
++
+         public virtual AutopilotTransferState CaptureTransferState() =>
+             throw new NotSupportedException($"Autopilot behavior {Behavior} cannot be transferred yet.");
+ 
+@@ -1188,12 +1192,27 @@
+         }
+ 
+         /// <summary>Capture only behavior states that do not contain process-local object references.</summary>
+-        public AutopilotTransferState CaptureTransferState() => instance?.CaptureTransferState() ??
+-            new AutopilotTransferState { Behavior = AutopilotBehaviors.None };
++        public AutopilotTransferState CaptureTransferState()
++        {
++            var state = instance?.CaptureTransferState() ?? new AutopilotTransferState { Behavior = AutopilotBehaviors.None };
++            return CaptureControllerState(state);
++        }
+ 
+         internal AutopilotTransferState CaptureTransferState(
+-            Func<GameObject, LibreLancer.Server.NpcTransferObjectReferenceV1?> captureReference) =>
+-            instance?.CaptureTransferState(captureReference) ?? new AutopilotTransferState { Behavior = AutopilotBehaviors.None };
++            Func<GameObject, LibreLancer.Server.NpcTransferObjectReferenceV1?> captureReference)
++        {
++            var state = instance?.CaptureTransferState(captureReference) ??
++                        new AutopilotTransferState { Behavior = AutopilotBehaviors.None };
++            return CaptureControllerState(state);
++        }
++
++        private AutopilotTransferState CaptureControllerState(AutopilotTransferState state)
++        {
++            state.PitchController = PitchControl.CaptureTransferState();
++            state.YawController = YawControl.CaptureTransferState();
++            state.Avoidance = instance?.CaptureAvoidanceTransferState();
++            return state;
++        }
+ 
+         public void RestoreTransferState(AutopilotTransferState state) => RestoreTransferState(state, null);
+ 
+@@ -1202,6 +1221,8 @@
+         {
+             ArgumentNullException.ThrowIfNull(state);
+             state.Validate();
++            PitchControl.RestoreTransferState(state.PitchController!);
++            YawControl.RestoreTransferState(state.YawController!);
+             switch (state.Behavior)
+             {
+                 case AutopilotBehaviors.None:
+--- a/src/LibreLancer/World/Components/AutopilotTransferState.cs
++++ b/src/LibreLancer/World/Components/AutopilotTransferState.cs
+@@ -6,8 +6,11 @@
+ /// <summary>Process-independent subset of autopilot runtime state, mapped to Protocol at the transfer edge.</summary>
+ public sealed class AutopilotTransferState
+ {
+-    public ushort SchemaVersion { get; init; } = 1;
++    public ushort SchemaVersion { get; init; } = 2;
+     public AutopilotBehaviors Behavior { get; init; }
++    public PIDControllerTransferState? PitchController { get; set; }
++    public PIDControllerTransferState? YawController { get; set; }
++    public AutopilotAvoidanceTransferState? Avoidance { get; set; }
+     public bool CanCruise { get; init; }
+     public bool HasTriggeredCruise { get; init; }
+     public float MaxThrottle { get; init; }
+@@ -48,8 +51,9 @@
+         var targetReferenceCount = (TargetNpcId.HasValue ? 1 : 0) +
+                                    (TargetCharacterId.HasValue ? 1 : 0) +
+                                    (TargetNickname is not null ? 1 : 0);
+-        if (SchemaVersion != 1 || Behavior is not (AutopilotBehaviors.None or AutopilotBehaviors.Goto or
++        if (SchemaVersion != 2 || Behavior is not (AutopilotBehaviors.None or AutopilotBehaviors.Goto or
+                 AutopilotBehaviors.Dock or AutopilotBehaviors.Formation or AutopilotBehaviors.Undock) ||
++            PitchController is null || YawController is null ||
+             !float.IsFinite(MaxThrottle) || MaxThrottle is < 0 or > 1 ||
+             !float.IsFinite(GotoRadius) || GotoRadius < 0 ||
+             !float.IsFinite(TargetPosition.X) || !float.IsFinite(TargetPosition.Y) ||
+@@ -71,6 +75,8 @@
+             !IsFinite(FormationHeldSeparation) || FormationHeldSeparationNeighbor < 0 ||
+             !float.IsFinite(FormationSeparationHoldTimer) ||
+             FormationSeparationHoldTimer is < 0 or > FormationControl.SeparationHoldTime ||
++            Behavior == AutopilotBehaviors.None && Avoidance is not null ||
++            Behavior != AutopilotBehaviors.None && Avoidance is null ||
+             Behavior != AutopilotBehaviors.Dock &&
+             (DockIndex != 0 || DockLastTargetHardpoint != 0 || DockRingDocking || DockRingTime != 0 ||
+              DockTradelaneHardpoint is not null || DockTradelaneEntryPathActive || DockTradelaneEntryPathProgress != 0 ||
+@@ -83,8 +89,37 @@
+             (FormationHeldSeparation != Vector3.Zero || FormationHeldSeparationNeighbor != 0 ||
+              FormationSeparationHoldTimer != 0))
+             throw new ArgumentException("Invalid or unsupported autopilot transfer state.");
++        PitchController?.Validate();
++        YawController?.Validate();
++        Avoidance?.Validate();
+     }
+ 
+     private static bool IsFinite(Vector3 value) => float.IsFinite(value.X) && float.IsFinite(value.Y) &&
+                                                    float.IsFinite(value.Z);
+ }
++
++public sealed class AutopilotAvoidanceTransferState
++{
++    public StrafeControls Strafe { get; init; }
++    public Vector2 Vector { get; init; }
++    public float ClearTimer { get; init; }
++
++    public void Validate()
++    {
++        const StrafeControls allControls = StrafeControls.Left | StrafeControls.Right |
++                                           StrafeControls.Up | StrafeControls.Down;
++        var hasDirection = Vector.LengthSquared() > float.Epsilon;
++        if ((Strafe & ~allControls) != 0 || !float.IsFinite(Vector.X) || !float.IsFinite(Vector.Y) ||
++            !float.IsFinite(ClearTimer) || ClearTimer is < 0 or > AutopilotObstacleAvoidance.AvoidanceClearDelay ||
++            hasDirection != (Strafe != StrafeControls.None) || HasOpposingDirections(Strafe) ||
++            Vector.LengthSquared() > 1.001f ||
++            !hasDirection && ClearTimer != 0)
++            throw new ArgumentException("Invalid autopilot avoidance transfer state.");
++    }
++
++    private static bool HasOpposingDirections(StrafeControls strafe) =>
++        (strafe & (StrafeControls.Left | StrafeControls.Right)) ==
++        (StrafeControls.Left | StrafeControls.Right) ||
++        (strafe & (StrafeControls.Up | StrafeControls.Down)) ==
++        (StrafeControls.Up | StrafeControls.Down);
++}
+--- a/src/LibreLancer/World/Components/ShipSteeringComponent.cs
++++ b/src/LibreLancer/World/Components/ShipSteeringComponent.cs
+@@ -28,6 +28,11 @@
+ 
+         private PIDController rollPID = new() { P = 2 };
+ 
++        internal PIDControllerTransferState CaptureRollControllerTransferState() => rollPID.CaptureTransferState();
++
++        internal void RestoreRollControllerTransferState(PIDControllerTransferState state) =>
++            rollPID.RestoreTransferState(state);
++
+         public ShipSteeringComponent(GameObject parent) : base(parent) { }
+ 
+         public Vector3 OutputSteering;
+--- a/src/LibreLancer/Server/NpcEquipmentTransferState.cs
++++ b/src/LibreLancer/Server/NpcEquipmentTransferState.cs
+@@ -1,4 +1,5 @@
+ using System;
++using LibreLancer.World;
+ 
+ namespace LibreLancer.Server;
+ 
+@@ -20,9 +21,10 @@
+ internal sealed record NpcAiTransferExtensionV1
+ {
+     public NpcAiTransferExtensionV1() { }
+-    public int SchemaVersion { get; init; } = 1;
++    public int SchemaVersion { get; init; } = 2;
+     public NpcTransferObjectReferenceV1? DirectiveTarget { get; init; }
+     public NpcTransferObjectReferenceV1? SelectedTarget { get; init; }
++    public PIDControllerTransferState? SteeringRollController { get; init; }
+     public int? GotoKind { get; init; }
+     public string CurrentState { get; init; } = "NULL";
+     public string PreviousState { get; init; } = "NULL";
+--- a/src/LibreLancer/Server/Components/SNPCComponent.cs
++++ b/src/LibreLancer/Server/Components/SNPCComponent.cs
+@@ -165,6 +165,8 @@
+             {
+                 DirectiveTarget = CaptureObjectReference(directiveTarget),
+                 SelectedTarget = CaptureObjectReference(selectedTarget),
++                SteeringRollController = Parent.GetComponent<ShipSteeringComponent>()?.CaptureRollControllerTransferState()
++                    ?? throw new InvalidDataException("NPC steering controller is missing during transfer capture."),
+                 GotoKind = CurrentDirective is AiDockState dockDirective ? (int)dockDirective.GotoKind : null,
+                 CurrentState = currentState.ToString(),
+                 PreviousState = previousState.ToString(),
+@@ -197,6 +199,11 @@
+                 ?? throw new InvalidDataException("NPC stay-in-range target could not be resolved.");
+             var selectedTarget = state.SelectedTarget is null ? null : resolveReference(state.SelectedTarget)
+                 ?? throw new InvalidDataException("NPC selected target could not be resolved.");
++            if (state.SteeringRollController is null)
++                throw new InvalidDataException("NPC steering controller transfer state is missing.");
++            (Parent.GetComponent<ShipSteeringComponent>() ??
++                throw new InvalidDataException("NPC steering component is missing during transfer restore."))
++                .RestoreRollControllerTransferState(state.SteeringRollController);
+             if ((CurrentDirective is AiAttackState or AiDockState) && state.DirectiveTarget is null)
+                 throw new InvalidDataException("NPC directive target reference is missing.");
+ 
+@@ -224,7 +231,8 @@
+ 
+         internal static void ValidateTransferState(NpcAiTransferExtensionV1 state)
+         {
+-            if (state.SchemaVersion != 1 || !Enum.TryParse<StateGraphEntry>(state.CurrentState, out var restoredCurrent) ||
++            if (state.SchemaVersion != 2 || state.SteeringRollController is null ||
++                !Enum.TryParse<StateGraphEntry>(state.CurrentState, out var restoredCurrent) ||
+                 !Enum.IsDefined(restoredCurrent) || !Enum.TryParse<StateGraphEntry>(state.PreviousState, out var restoredPrevious) ||
+                 !Enum.IsDefined(restoredPrevious) || !double.IsFinite(state.TimeInState) || state.TimeInState < 0 ||
+                 !double.IsFinite(state.MissileTimer) || !float.IsFinite(state.FireTimer) ||
+@@ -237,6 +245,7 @@
+                 !float.IsFinite(state.StayInRangePoint.Y) || !float.IsFinite(state.StayInRangePoint.Z) ||
+                 !float.IsFinite(state.StayInRangeRadius) || state.StayInRangeRadius < 0)
+                 throw new InvalidDataException("NPC AI transfer state is invalid or unsupported.");
++            state.SteeringRollController.Validate();
+             if (state.DirectiveTarget is not null && !IsValidTransferReference(state.DirectiveTarget) ||
+                 state.SelectedTarget is not null && !IsValidTransferReference(state.SelectedTarget) ||
+                 state.StayInRangeTarget is not null && !IsValidTransferReference(state.StayInRangeTarget))
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -216,7 +216,7 @@
+                     state.Ai.ExtensionData.Length == 0)
+                     throw new InvalidDataException($"NPC '{state.Nickname}' has an unsupported AI state.");
+                 var ai = JsonSerializer.Deserialize<NpcAiTransferExtensionV1>(state.Ai.ExtensionData);
+-                if (ai is not { SchemaVersion: 1 })
++                if (ai is not { SchemaVersion: 2 })
+                     throw new InvalidDataException("NPC AI transfer extension is unsupported.");
+                 LibreLancer.Server.Components.SNPCComponent.ValidateTransferState(ai);
+                 if (state.Ai.StateId == "AiDockState" &&
+@@ -619,7 +619,7 @@
+                         member.NpcId == jumper.NpcId && !member.IsLeader)))
+                     throw new InvalidDataException($"NPC '{runtime.Nickname}' has inconsistent autopilot transfer state.");
+                 var aiExtension = JsonSerializer.Deserialize<NpcAiTransferExtensionV1>(runtime.Ai.ExtensionData);
+-                if (aiExtension is not { SchemaVersion: 1 } ||
++                if (aiExtension is not { SchemaVersion: 2 } ||
+                     (runtime.Ai.StateId is "AiAttackState" or "AiDockState") && aiExtension.DirectiveTarget is null)
+                     throw new InvalidDataException($"NPC '{runtime.Nickname}' has unsupported or incomplete AI runtime state.");
+                 var missionContext = JsonSerializer.Deserialize<NpcMissionTransferContext>(runtime.MissionState);
+--- a/src/LibreLancer/Server/NPCManager.cs
++++ b/src/LibreLancer/Server/NPCManager.cs
+@@ -455,7 +455,7 @@
+                     throw new InvalidDataException("NPC AI transfer extension is missing.");
+                 var aiState = JsonSerializer.Deserialize<NpcAiTransferExtensionV1>(entry.State.Ai.ExtensionData)
+                     ?? throw new InvalidDataException("NPC AI transfer extension is empty.");
+-                if (aiState.SchemaVersion != 1)
++                if (aiState.SchemaVersion != 2)
+                     throw new InvalidDataException("NPC AI transfer extension version is unsupported.");
+                 aiStates.Add(entry.Object, aiState);
+                 if (entry.State.Ai.StateId is not ("none" or nameof(AiAttackState) or nameof(AiDockState)))
