@@ -1,0 +1,160 @@
+diff --git a/src/LibreLancer/Server/GameServer.cs b/src/LibreLancer/Server/GameServer.cs
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -66,6 +66,7 @@ namespace LibreLancer.Server
+         private readonly ConcurrentDictionary<Guid, byte> npcTransferRestores = new();
+         private readonly ConcurrentDictionary<Guid, byte> npcTransferCompleted = new();
+         private readonly ConcurrentDictionary<Guid, byte> npcSourceTransferResolutions = new();
++        private readonly NpcTransferGroupReservations populationNpcTransferReservations = new();
+         private readonly Guid npcTransferActivationGeneration = Guid.NewGuid();
+ 
+         private bool IsNpcTransferActivated(Guid transferId) =>
+@@ -80,12 +81,18 @@ namespace LibreLancer.Server
+             var group = sourceWorld.Population.GatherPopulationTransferGroup(lead);
+             if (group.Length == 0)
+                 return false;
+-            _ = TransferPopulationNpcGroupAsync(group, sourceWorld, targetSystemId, targetArrivalObject);
++            var transferId = Guid.NewGuid();
++            var reservation = populationNpcTransferReservations.TryReserve(transferId,
++                group.Select(npc => npc.NpcId));
++            if (reservation == NpcTransferReservationResult.Conflict)
++                return true;
++            if (reservation == NpcTransferReservationResult.AlreadyReserved)
++                return true;
++            _ = TransferPopulationNpcGroupAsync(transferId, group, sourceWorld, targetSystemId, targetArrivalObject);
+             return true;
+         }
+ 
+-        private async Task TransferPopulationNpcGroupAsync(JumperNpc[] group, ServerWorld sourceWorld,
++        private async Task TransferPopulationNpcGroupAsync(Guid transferId, JumperNpc[] group, ServerWorld sourceWorld,
+             string targetSystemId, string targetArrivalObject)
+         {
+-            var transferId = Guid.NewGuid();
+             try
+@@ -132,5 +140,9 @@ namespace LibreLancer.Server
+                 {
+                     FLLog.Error("NPC Transfer", $"Population group recovery {transferId:D} is pending: {restoreException.Message}");
+                 }
++            }
++            finally
++            {
++                populationNpcTransferReservations.Release(transferId);
+             }
+         }
+ 
+diff --git a/src/LibreLancer/Server/NpcTransferGroupReservations.cs b/src/LibreLancer/Server/NpcTransferGroupReservations.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer/Server/NpcTransferGroupReservations.cs
+@@ -0,0 +1,53 @@
++using System;
++using System.Collections.Generic;
++using System.Linq;
++
++namespace LibreLancer.Server;
++
++internal enum NpcTransferReservationResult
++{
++    Reserved,
++    AlreadyReserved,
++    Conflict
++}
++
++/// <summary>Prevents escorts from starting duplicate transfers while their trade group is leaving.</summary>
++internal sealed class NpcTransferGroupReservations
++{
++    private readonly object sync = new();
++    private readonly Dictionary<Guid, Guid> npcTransfers = [];
++
++    public NpcTransferReservationResult TryReserve(Guid transferId, IEnumerable<Guid> npcIds)
++    {
++        if (transferId == Guid.Empty)
++            throw new ArgumentException("A transfer ID is required.", nameof(transferId));
++        var ids = npcIds.Distinct().ToArray();
++        if (ids.Length == 0 || ids.Any(id => id == Guid.Empty))
++            throw new ArgumentException("A transfer group must contain valid NPC IDs.", nameof(npcIds));
++
++        lock (sync)
++        {
++            var existing = ids.Where(npcTransfers.ContainsKey)
++                .Select(id => npcTransfers[id])
++                .Distinct()
++                .ToArray();
++            if (existing.Length > 0)
++                return existing.Length == 1 && existing[0] == transferId && ids.All(npcTransfers.ContainsKey)
++                    ? NpcTransferReservationResult.AlreadyReserved
++                    : NpcTransferReservationResult.Conflict;
++
++            foreach (var id in ids)
++                npcTransfers.Add(id, transferId);
++            return NpcTransferReservationResult.Reserved;
++        }
++    }
++
++    public void Release(Guid transferId)
++    {
++        lock (sync)
++        {
++            foreach (var id in npcTransfers.Where(pair => pair.Value == transferId).Select(pair => pair.Key).ToArray())
++                npcTransfers.Remove(id);
++        }
++    }
++}
+diff --git a/src/LibreLancer.Tests/NpcTransferGroupReservationsTests.cs b/src/LibreLancer.Tests/NpcTransferGroupReservationsTests.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Tests/NpcTransferGroupReservationsTests.cs
+@@ -0,0 +1,53 @@
++using System;
++using LibreLancer.Server;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class NpcTransferGroupReservationsTests
++{
++    [Fact]
++    public void ReservesWholeTraderAndEscortGroupAndTreatsRepeatedLeaderCallbackAsDuplicate()
++    {
++        var reservations = new NpcTransferGroupReservations();
++        var transferId = Guid.NewGuid();
++        var trader = Guid.NewGuid();
++        var escort = Guid.NewGuid();
++
++        Assert.Equal(NpcTransferReservationResult.Reserved,
++            reservations.TryReserve(transferId, [trader, escort]));
++        Assert.Equal(NpcTransferReservationResult.AlreadyReserved,
++            reservations.TryReserve(transferId, [trader, escort]));
++    }
++
++    [Fact]
++    public void RejectsOverlappingGroupWithoutReservingItsOtherMembers()
++    {
++        var reservations = new NpcTransferGroupReservations();
++        var trader = Guid.NewGuid();
++        var escort = Guid.NewGuid();
++        var unrelated = Guid.NewGuid();
++
++        Assert.Equal(NpcTransferReservationResult.Reserved,
++            reservations.TryReserve(Guid.NewGuid(), [trader, escort]));
++        Assert.Equal(NpcTransferReservationResult.Conflict,
++            reservations.TryReserve(Guid.NewGuid(), [escort, unrelated]));
++        Assert.Equal(NpcTransferReservationResult.Reserved,
++            reservations.TryReserve(Guid.NewGuid(), [unrelated]));
++    }
++
++    [Fact]
++    public void ReleasesAllMembersWhenTransferFinishesOrRollsBack()
++    {
++        var reservations = new NpcTransferGroupReservations();
++        var transferId = Guid.NewGuid();
++        var trader = Guid.NewGuid();
++        var escort = Guid.NewGuid();
++        reservations.TryReserve(transferId, [trader, escort]);
++
++        reservations.Release(transferId);
++
++        Assert.Equal(NpcTransferReservationResult.Reserved,
++            reservations.TryReserve(Guid.NewGuid(), [trader, escort]));
++    }
++}

@@ -110,10 +110,10 @@ for ((index = 0; index < ${#patch_files[@]}; index++)); do
         protocol) target_dir="$client_dir/Protocol" ;;
     esac
 
-    if git -C "$target_dir" apply --check "${patch_files[index]}" 2>/dev/null; then
-        git -C "$target_dir" apply "${patch_files[index]}"
+    if git -C "$target_dir" apply --check --ignore-space-change "${patch_files[index]}" 2>/dev/null; then
+        git -C "$target_dir" apply --ignore-space-change "${patch_files[index]}"
         printf 'Applied %s\n' "${patch_names[index]}"
-    elif git -C "$target_dir" apply --reverse --check "${patch_files[index]}"; then
+    elif git -C "$target_dir" apply --reverse --check --ignore-space-change "${patch_files[index]}"; then
         printf 'Already applied %s\n' "${patch_names[index]}"
     else
         printf 'Patch no longer applies cleanly: %s\n' "${patch_names[index]}" >&2

@@ -1,0 +1,190 @@
+diff --git a/src/LibreLancer/Server/GameServer.cs b/src/LibreLancer/Server/GameServer.cs
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -1280,8 +1280,17 @@ namespace LibreLancer.Server
+             {
+                 File.Delete(path);
+                 FLLog.Info("NPC Transfer", $"Removed staged snapshot for aborted transfer {transferId:D}.");
+                 return;
+             }
++            if (recovery.State == NpcTransferState.TargetAccepted)
++            {
++                if (!await TryCommitTargetAcceptedMissionNpcTransferAsync(transferId, recovery, cancellationToken)
++                        .ConfigureAwait(false))
++                    return;
++                recovery = await ReadNpcTransferRecoveryAsync(transferId, cancellationToken).ConfigureAwait(false);
++                if (recovery is null || recovery.TargetInstanceId != InstanceId)
++                    return;
++            }
+             if (recovery.State is not (NpcTransferState.Committed or NpcTransferState.SourceReleased) ||
+                 string.IsNullOrWhiteSpace(recovery.SnapshotSha256) || !OwnsSystem(recovery.TargetSystemId))
+                 return;
+@@ -1350,4 +1360,34 @@ namespace LibreLancer.Server
+             await restored.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+         }
++
++        private async Task<bool> TryCommitTargetAcceptedMissionNpcTransferAsync(Guid transferId,
++            NpcTransferRecoveryWireRecord recovery, CancellationToken cancellationToken)
++        {
++            if (recovery.State != NpcTransferState.TargetAccepted)
++                return false;
++            var journal = await ReadNpcTransferRecoveryAsync(transferId, cancellationToken, includeSnapshot: true)
++                .ConfigureAwait(false);
++            if (journal is not { State: NpcTransferState.TargetAccepted, Snapshot: { } snapshot } ||
++                journal.TransferId != transferId || journal.TargetInstanceId != InstanceId ||
++                !journal.NpcIds.Order().SequenceEqual(snapshot.NpcIds.Order()))
++                throw new InvalidDataException("Target-accepted mission NPC transfer has no matching durable snapshot.");
++            NpcTransferContractValidator.Validate(snapshot);
++            if (snapshot.MissionRuntimeId is null)
++                return false;
++            if (snapshot.MissionRuntimeId != transferId)
++                throw new InvalidDataException("Target-accepted mission NPC transfer has a mismatched mission runtime ID.");
++            var import = await Database.GetTransferSnapshotImportAsync(transferId).ConfigureAwait(false);
++            if (import is null)
++                return false;
++            var status = await GetTransferStatusAsync(transferId, cancellationToken).ConfigureAwait(false);
++            if (status.State is not (LancerNexus.Protocol.TransferState.Committed or
++                                     LancerNexus.Protocol.TransferState.SourceReleased))
++                return false;
++            if (!NpcMissionTransferCommitGate.IsCommittedByCharacterTransfer(transferId, InstanceId!, import,
++                    status, snapshot))
++                throw new InvalidDataException("Character lease commit does not match the target-accepted mission NPC transfer.");
++            await CommitNpcTransferAsync(transferId, cancellationToken).ConfigureAwait(false);
++            return true;
++        }
+ 
+         private static NpcTransferSnapshot RebaseNpcSnapshotAtArrival(NpcTransferSnapshot snapshot, ServerWorld world)
+@@ -2013,4 +2013,8 @@ namespace LibreLancer.Server
+                 if (recovery.State == NpcTransferState.Aborted)
+                     throw new InvalidOperationException("NPC transfer was aborted after the character lease committed.");
++                if (recovery.State == NpcTransferState.TargetAccepted &&
++                    await TryCommitTargetAcceptedMissionNpcTransferAsync(transferId, recovery, cancellationToken)
++                        .ConfigureAwait(false))
++                    continue;
+                 if (recovery.State is NpcTransferState.Committed or NpcTransferState.SourceReleased)
+                 {
+diff --git a/src/LibreLancer/Server/NpcMissionTransferCommitGate.cs b/src/LibreLancer/Server/NpcMissionTransferCommitGate.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer/Server/NpcMissionTransferCommitGate.cs
+@@ -0,0 +1,26 @@
++using System;
++using LancerNexus.Protocol;
++
++namespace LibreLancer.Server;
++
++internal static class NpcMissionTransferCommitGate
++{
++    public static bool IsCommittedByCharacterTransfer(Guid transferId, string targetInstanceId,
++        TransferSnapshotImportRecord? import, TransferStatusResponse status, NpcTransferSnapshot snapshot)
++    {
++        if (transferId == Guid.Empty || string.IsNullOrWhiteSpace(targetInstanceId) ||
++            import is not { Imported: true } || import.TransferId != transferId ||
++            import.LeaseVersion < 0 || import.LeaseVersion == long.MaxValue ||
++            snapshot.TransferId != transferId || snapshot.MissionRuntimeId != transferId ||
++            !string.Equals(snapshot.TargetSystemId, import.TargetSystemId, StringComparison.OrdinalIgnoreCase) ||
++            status.TransferId != transferId ||
++            !string.Equals(status.SourceInstanceId, import.SourceInstanceId, StringComparison.Ordinal) ||
++            !string.Equals(status.TargetInstanceId, targetInstanceId, StringComparison.Ordinal) ||
++            !string.Equals(status.TargetInstanceId, import.TargetInstanceId, StringComparison.Ordinal) ||
++            !string.Equals(status.TargetSystemId, import.TargetSystemId, StringComparison.OrdinalIgnoreCase) ||
++            status.LeaseVersion != import.LeaseVersion + 1)
++            return false;
++
++        return status.State is TransferState.Committed or TransferState.SourceReleased;
++    }
++}
+diff --git a/src/LibreLancer.Tests/NpcMissionTransferCommitGateTests.cs b/src/LibreLancer.Tests/NpcMissionTransferCommitGateTests.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Tests/NpcMissionTransferCommitGateTests.cs
+@@ -0,0 +1,89 @@
++using System;
++using LancerNexus.Protocol;
++using LibreLancer.Server;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class NpcMissionTransferCommitGateTests
++{
++    [Fact]
++    public void AllowsNpcCommitOnlyAfterMatchingCharacterLeaseCommit()
++    {
++        var transferId = Guid.NewGuid();
++        var import = new TransferSnapshotImportRecord(transferId, Guid.NewGuid(), 42,
++            "source-01", "target-01", "li03", 8, "ticket", "snapshot", true);
++        var snapshot = new NpcTransferSnapshot
++        {
++            TransferId = transferId,
++            MissionRuntimeId = transferId,
++            TargetSystemId = "LI03"
++        };
++        var status = new TransferStatusResponse
++        {
++            TransferId = transferId,
++            SourceInstanceId = "source-01",
++            TargetInstanceId = "target-01",
++            TargetSystemId = "li03",
++            State = TransferState.Committed,
++            LeaseVersion = 9
++        };
++
++        Assert.True(NpcMissionTransferCommitGate.IsCommittedByCharacterTransfer(
++            transferId, "target-01", import, status, snapshot));
++    }
++
++    [Theory]
++    [InlineData(TransferState.TargetAccepted, 9)]
++    [InlineData(TransferState.Committed, 8)]
++    [InlineData(TransferState.SourceReleased, 10)]
++    public void RejectsUncommittedOrMismatchedCharacterTransfer(TransferState state, long leaseVersion)
++    {
++        var transferId = Guid.NewGuid();
++        var import = new TransferSnapshotImportRecord(transferId, Guid.NewGuid(), 42,
++            "source-01", "target-01", "li03", 8, "ticket", "snapshot", true);
++        var snapshot = new NpcTransferSnapshot
++        {
++            TransferId = transferId,
++            MissionRuntimeId = transferId,
++            TargetSystemId = "li03"
++        };
++        var status = new TransferStatusResponse
++        {
++            TransferId = transferId,
++            SourceInstanceId = "source-01",
++            TargetInstanceId = "target-01",
++            TargetSystemId = "li03",
++            State = state,
++            LeaseVersion = leaseVersion
++        };
++
++        Assert.False(NpcMissionTransferCommitGate.IsCommittedByCharacterTransfer(
++            transferId, "target-01", import, status, snapshot));
++    }
++
++    [Fact]
++    public void AutonomousPopulationNpcTransferCannotPassCharacterCommitGate()
++    {
++        var transferId = Guid.NewGuid();
++        var import = new TransferSnapshotImportRecord(transferId, Guid.NewGuid(), 42,
++            "source-01", "target-01", "li03", 8, "ticket", "snapshot", true);
++        var snapshot = new NpcTransferSnapshot
++        {
++            TransferId = transferId,
++            TargetSystemId = "li03"
++        };
++        var status = new TransferStatusResponse
++        {
++            TransferId = transferId,
++            SourceInstanceId = "source-01",
++            TargetInstanceId = "target-01",
++            TargetSystemId = "li03",
++            State = TransferState.Committed,
++            LeaseVersion = 9
++        };
++
++        Assert.False(NpcMissionTransferCommitGate.IsCommittedByCharacterTransfer(
++            transferId, "target-01", import, status, snapshot));
++    }
++}
