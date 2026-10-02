@@ -1,0 +1,87 @@
+--- a/src/LibreLancer/Server/SpacePopulationBehavior.cs
++++ b/src/LibreLancer/Server/SpacePopulationBehavior.cs
+@@ -49,7 +49,7 @@
+         if (zones.Count == 0)
+         {
+             transferredGroups.Add(members);
+-            var dockable = FindDockable(position, arrivalObject);
++            var dockable = FindPopulationJumpGate(position, arrivalObject) ?? FindDockable(position, arrivalObject);
+             var transferredLeader = members.FirstOrDefault(x => x.Formation is null || x.Formation.LeadShip == x) ?? members[0];
+             if (!string.IsNullOrWhiteSpace(dockable?.Nickname))
+                 transferredLeader.GetComponent<DirectiveRunnerComponent>()?.SetDirectives(
+@@ -155,7 +155,8 @@
+
+     private MissionDirective[] BuildTradeDirectives(ZoneState state, Vector3 currentPosition, string? excludeDockable)
+     {
+-        var dockable = FindDockable(currentPosition, excludeDockable);
++        var dockable = FindPopulationJumpGate(currentPosition, excludeDockable) ??
++                       FindDockable(currentPosition, excludeDockable);
+         if (!string.IsNullOrWhiteSpace(dockable?.Nickname))
+         {
+             return
+@@ -370,6 +371,41 @@
+         return nearest;
+     }
+
++    private GameObject? FindPopulationJumpGate(Vector3 currentPosition, string? excludeNickname)
++    {
++        GameObject? nearest = null;
++        var nearestDistance = float.MaxValue;
++        foreach (var obj in world.GameWorld.Objects)
++        {
++            if (obj.SystemObject == null ||
++                string.IsNullOrWhiteSpace(obj.Nickname) ||
++                (obj.Flags & GameObjectFlags.Exists) != GameObjectFlags.Exists ||
++                !obj.TryGetComponent<SDockableComponent>(out var dockable) ||
++                !IsInterSystemPopulationJump(dockable.Action, world.System.Nickname) ||
++                world.Server.GameData.Items.Systems.Get(dockable.Action.Target!) is null)
++            {
++                continue;
++            }
++            if (!string.IsNullOrWhiteSpace(excludeNickname) &&
++                excludeNickname.Equals(obj.Nickname, StringComparison.OrdinalIgnoreCase))
++            {
++                continue;
++            }
++
++            var distance = Vector3.DistanceSquared(currentPosition, obj.WorldTransform.Position);
++            if (distance >= nearestDistance)
++                continue;
++
++            nearestDistance = distance;
++            nearest = obj;
++        }
++        return nearest;
++    }
++
++    internal static bool IsInterSystemPopulationJump(DockAction? action, string sourceSystemId) =>
++        action is { Kind: DockKinds.Jump, Target.Length: > 0, Exit.Length: > 0 } &&
++        !action.Target.Equals(sourceSystemId, StringComparison.OrdinalIgnoreCase);
++
+     private Vector3 GetFirstDirectiveTarget(ZoneState state, EncounterInfo info)
+     {
+         var behavior = info.FormationDefinition?.Behavior ?? EncounterBehavior.wander;
+--- a/src/LibreLancer.Tests/NpcPopulationTransferTests.cs
++++ b/src/LibreLancer.Tests/NpcPopulationTransferTests.cs
+@@ -23,4 +23,21 @@
+             isTransferred: false, behavior: null));
+     }
+
++    [Fact]
++    public void PopulationRouteSelectsOnlyInterSystemJumpActionsWithAnExit()
++    {
++        Assert.True(SpacePopulationManager.IsInterSystemPopulationJump(
++            new() { Kind = LibreLancer.Data.GameData.World.DockKinds.Jump, Target = "li03", Exit = "Li03_to_Li01" },
++            "li01"));
++        Assert.False(SpacePopulationManager.IsInterSystemPopulationJump(
++            new() { Kind = LibreLancer.Data.GameData.World.DockKinds.Jump, Target = "li01", Exit = "Li01_to_Li02" },
++            "LI01"));
++        Assert.False(SpacePopulationManager.IsInterSystemPopulationJump(
++            new() { Kind = LibreLancer.Data.GameData.World.DockKinds.Jump, Target = "li03", Exit = null },
++            "li01"));
++        Assert.False(SpacePopulationManager.IsInterSystemPopulationJump(
++            new() { Kind = LibreLancer.Data.GameData.World.DockKinds.Base, Target = "li03", Exit = "Li03_to_Li01" },
++            "li01"));
++    }
++
+ }
