@@ -54,3 +54,43 @@ lease commit and playerless target route activation. They do not yet prove a com
 return jump, continuous position progress of every escort, runtime duplicate counts,
 all source/target/Coordinator crash phases, full-instance rejection or coupled mission
 NPC handoffs. Those checks remain required for the complete transfer objective.
+
+## Follow-up: return transfer and restart
+
+With Client `7f5ab532`, Protocol `e8bae56`, Coordinator `391163d` and Agent
+`8e6c0b8`, the private peer endpoints are advertised independently of the game
+endpoint. LI01 uses `quic://127.0.0.2:26455/`, LI02 uses
+`quic://127.0.0.3:26456/`. Both mTLS probes succeeded in both directions. Using
+the same QUIC port for two local processes had allowed one direction while the
+other failed ALPN negotiation; separate ports resolved that observed failure.
+
+After LI02 was restarted, its recovery restored the four original groups from
+the committed journals and restarted their routes without a connected player.
+They then completed these LI02 → LI01 return handoffs:
+
+| Transfer ID | UTC completion | State |
+| --- | --- | --- |
+| `4de73552-d63b-495b-afdf-bc2aa0b89d01` | 09:01:12 | `SourceReleased` |
+| `a8082c81-6ceb-47c6-9458-8c09d127d6de` | 09:01:29 | `SourceReleased` |
+| `31624ac1-0dcc-40af-87cc-4bdafd52d6e6` | 09:01:30 | `SourceReleased` |
+| `eba587d6-d19d-4a4f-9148-bec0af37e5b7` | 09:01:52 | `SourceReleased` |
+
+All twelve original IDs were now leased to LI01 at ownership version 3.
+The three IDs listed above were individually verified with no active transfer.
+Source logs showed their leaders starting the next route toward `Li01_to_Li03`.
+Two further outbound groups had also committed by this observation.
+
+Patch 1114 fixes a live crash during ambient formation creation: recovered groups
+have no original EncounterInfo. The regression test covers both this null case
+and the normal simultaneous-formation exclusion. Fourteen focused Client tests,
+49 Protocol tests and 14 Agent tests passed. Coordinator reported 35 passing
+tests and one skipped integration test. The fresh full patch stack applied and
+the LLServer build finished with zero errors and 179 existing warnings.
+
+The return jump and committed-target restart are now observed. Runtime duplicate
+counts, all crash phases and coupled mission transfers remain unverified.
+An additional audit found that Coordinator's recovery ownership check currently
+matches the instance but not the snapshot's ownership version. A later complete
+round trip to the same instance could therefore make an older journal eligible
+again. This needs a version-fencing correction and regression test before full
+recovery acceptance.
