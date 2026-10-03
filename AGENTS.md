@@ -23,6 +23,7 @@ Maintain the Lancer Nexus client fork while preserving compatibility with upstre
 - Treat Gateway responses and transfer tickets as untrusted input and validate them.
 - Do not let the client decide authoritative placement, ownership, credits or inventory.
 - Preserve the existing game simulation unless a change is explicitly part of the MMO integration.
+- Transferred population groups must keep their world active without players until they dock, die or transfer again. Player-distance culling must not discard these leased NPCs; do not generate extra ambient population merely to keep an unobserved world active. Retain source worlds while population handoffs are pending.
 - Add tests for login state, reconnect, instance display and transfer failure paths.
 
 ## Existing LibreLancer build and test model

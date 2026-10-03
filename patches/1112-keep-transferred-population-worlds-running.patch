@@ -1,0 +1,151 @@
+diff --git a/src/LibreLancer/Server/SpacePopulationManager.cs b/src/LibreLancer/Server/SpacePopulationManager.cs
+--- a/src/LibreLancer/Server/SpacePopulationManager.cs
++++ b/src/LibreLancer/Server/SpacePopulationManager.cs
+@@ -48,6 +48,11 @@
+         InitializePaths();
+     }
+ 
++    // These groups remain authoritative traffic even when no player observes the system.
++    public bool HasActiveTransferredShips =>
++        transferredGroups.Any(group => group.Any(Alive)) ||
++        zones.Any(state => state.Groups.Any(group => group.IsTransferred && group.Ships.Any(Alive)));
++
+     public void Update(double delta)
+     {
+         var players = GetPlayerObjects();
+@@ -56,9 +61,6 @@
+ 
+         PruneAndDespawn(players);
+ 
+-        if (players.Length == 0)
+-            return;
+-
+         foreach (var state in zones)
+         {
+             foreach (var group in state.Groups)
+@@ -66,6 +68,9 @@
+ 
+             UpdateGroupCombat(state);
+             UpdateIdleGroupDirectives(state);
++            // Continue existing routes without creating unobserved ambient population.
++            if (players.Length == 0)
++                continue;
+             state.TimeUntilHeartbeat -= delta;
+             if (state.TimeUntilHeartbeat > 0)
+                 continue;
+diff --git a/src/LibreLancer/Server/SpacePopulationBattle.cs b/src/LibreLancer/Server/SpacePopulationBattle.cs
+--- a/src/LibreLancer/Server/SpacePopulationBattle.cs
++++ b/src/LibreLancer/Server/SpacePopulationBattle.cs
+@@ -218,8 +218,8 @@
+                 var persistDistance = state.InBattle || GroupInCombat(group, players)
+                     ? Math.Max(basePersistDistance, BattlePersistDistance)
+                     : basePersistDistance;
+-                if ((!group.IsTransferred && players.Length == 0) ||
+-                    (players.Length > 0 && group.Ships.All(x => DistanceToNearestPlayer(x.WorldTransform.Position, players) > persistDistance)))
++                if (!group.IsTransferred && (players.Length == 0 ||
++                    group.Ships.All(x => DistanceToNearestPlayer(x.WorldTransform.Position, players) > persistDistance)))
+                 {
+                     foreach (var ship in group.Ships)
+                     {
+@@ -239,12 +239,9 @@
+                 continue;
+             }
+             transferredGroups[i] = members;
+-            if (players.Length == 0 || members.Any(member =>
+-                    DistanceToNearestPlayer(member.WorldTransform.Position, players) <= DefaultPersistDistance))
+-                continue;
+-            foreach (var member in members)
+-                world.RemoveSpawnedObject(member, false);
+-            transferredGroups.RemoveAt(i);
++            // Transferred ships leave through their route, destruction or another handoff.
++            // Player distance must never discard a leased NPC.
++
+         }
+     }
+ }
+diff --git a/src/LibreLancer/Server/ServerWorld.cs b/src/LibreLancer/Server/ServerWorld.cs
+--- a/src/LibreLancer/Server/ServerWorld.cs
++++ b/src/LibreLancer/Server/ServerWorld.cs
+@@ -1324,6 +1324,11 @@
+ 
+         public uint CurrentTick { get; private set; }
+ 
++        private int pendingPopulationTransfers;
++
++        internal void RetainPopulationTransfer() => Interlocked.Increment(ref pendingPopulationTransfers);
++        internal void ReleasePopulationTransfer() => Interlocked.Decrement(ref pendingPopulationTransfers);
++
+         private double noPlayersTime;
+         private double maxNoPlayers = 2.0;
+ 
+@@ -1381,7 +1386,8 @@
+             }
+ 
+             // Despawn after 2 seconds of nothing
+-            if (PlayerCount == 0)
++            if (PlayerCount == 0 && !Population.HasActiveTransferredShips &&
++                Volatile.Read(ref pendingPopulationTransfers) == 0)
+             {
+                 noPlayersTime += delta;
+                 return (noPlayersTime < maxNoPlayers);
+diff --git a/src/LibreLancer/Server/GameServer.cs b/src/LibreLancer/Server/GameServer.cs
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -90,6 +90,7 @@
+                 return true;
+             if (reservation == NpcTransferReservationResult.AlreadyReserved)
+                 return true;
++            sourceWorld.RetainPopulationTransfer();
+             _ = TransferPopulationNpcGroupAsync(transferId, group, sourceWorld, targetSystemId, targetArrivalObject,
+                 sourceGate);
+             return true;
+@@ -146,6 +147,7 @@
+             finally
+             {
+                 populationNpcTransferReservations.Release(transferId);
++                sourceWorld.ReleasePopulationTransfer();
+             }
+         }
+ 
+diff --git a/src/LibreLancer.Tests/NpcPopulationTransferTests.cs b/src/LibreLancer.Tests/NpcPopulationTransferTests.cs
+--- a/src/LibreLancer.Tests/NpcPopulationTransferTests.cs
++++ b/src/LibreLancer.Tests/NpcPopulationTransferTests.cs
+@@ -1,3 +1,8 @@
++using System.Collections.Generic;
++using System.Reflection;
++using System.Runtime.CompilerServices;
++using LibreLancer.Data.GameData.World;
++using LibreLancer.World;
+ using LibreLancer.Data.Schema.Missions;
+ using LibreLancer.Server;
+ using Xunit;
+@@ -40,4 +45,29 @@
+             "li01"));
+     }
+ 
++    [Fact]
++    public void UnobservedTransferredShipsKeepTheirWorldAliveUntilTheyLeave()
++    {
++        // No resource/physics initialization is needed to exercise population lifetime.
++        var world = (ServerWorld)RuntimeHelpers.GetUninitializedObject(typeof(ServerWorld));
++        world.System = new StarSystem { SourceFile = "test.ini" };
++        world.Players = new();
++        var population = new SpacePopulationManager(world);
++        var groups = (List<GameObject[]>)typeof(SpacePopulationManager)
++            .GetField("transferredGroups", BindingFlags.Instance | BindingFlags.NonPublic)!
++            .GetValue(population)!;
++        var ship = new GameObject { Flags = GameObjectFlags.Exists };
++        groups.Add([ship]);
++
++        Assert.True(population.HasActiveTransferredShips);
++        population.Update(3);
++        Assert.True(population.HasActiveTransferredShips);
++        Assert.Single(groups);
++
++        ship.Flags = 0;
++        population.Update(3);
++        Assert.False(population.HasActiveTransferredShips);
++        Assert.Empty(groups);
++    }
++
+ }
