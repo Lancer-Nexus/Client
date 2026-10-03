@@ -141,3 +141,31 @@ These are automated component and runtime checks. Destruction of an imported NPC
 in a live game has not yet been exercised. The running test processes still use
 build 1123; patch 1124 takes effect on their next rebuild/deployment. Durable NPC
 retirement/checkpoints and mission reconnect recovery remain open.
+
+## Mission actor ownership at transfer boundaries (patch 1125)
+
+`GatherJumpers` previously selected ships by their global world nickname. Two
+players running the same mission can share scripted names, so that lookup could
+capture another player's NPC. The initial snapshot check matched only the mission
+nickname and did not compare the mission character ID.
+
+Patch 1125 resolves a jumper from the active objects of its exact MissionRuntime,
+with case-insensitive script nickname matching. Ambiguous duplicate actors within
+one runtime are rejected. Both source freeze paths recheck the live NPC's runtime
+before capture/removal. Snapshot construction requires the same character ID and
+mission nickname. Target restoration validates every NPC's context before creating
+any member, and refuses a mission group without its owning runtime.
+
+Eleven added cases cover competing runtimes with identical NPC names, inactive
+actors, duplicate actors, the source freeze guard, matching/mismatched character and
+mission context, and target rejection before any object is created. All 84 selected
+NPC/mission/entry regression tests passed. The maintained patch stack applied to a
+fresh checkout; the final test fixture correction was checked/applied there too.
+The full Solution build built the client and LLServer, but still failed on the two
+previously documented missing administration types in LLServerGui.
+
+This is transfer-boundary ownership protection. General mission actions that look
+up actors by world nickname still require an audit for concurrent missions; this
+patch does not establish complete mission actor namespacing. Live deployment and a
+multi-player mission transfer test remain pending, along with checkpoints,
+retirement, reconnect recovery and the remaining crash-phase acceptance cases.

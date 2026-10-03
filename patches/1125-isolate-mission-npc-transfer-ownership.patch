@@ -1,0 +1,239 @@
+--- a/src/LibreLancer/Server/ServerWorld.cs
++++ b/src/LibreLancer/Server/ServerWorld.cs
+@@ -312,7 +312,7 @@
+                     continue;
+                 }
+
+-                var go = GameWorld.GetObject(npc.Nickname);
++                var go = FindActiveMissionNpc(missionRuntime, npc.Nickname);
+
+                 if (go == null)
+                 {
+@@ -324,6 +324,12 @@
+
+             return jumpers.ToArray();
+         }
++
++        internal GameObject? FindActiveMissionNpc(MissionRuntime runtime, string nickname) =>
++            GameWorld.Objects.SingleOrDefault(obj =>
++                (obj.Flags & GameObjectFlags.Exists) != 0 &&
++                string.Equals(obj.Nickname, nickname, StringComparison.OrdinalIgnoreCase) &&
++                obj.TryGetComponent<SNPCComponent>(out var npc) && ReferenceEquals(npc.MissionRuntime, runtime));
+
+         // Internal names may collide with imported ships; ownership IDs are authoritative.
+         internal GameObject? FindActiveNpcById(Guid id) => id == Guid.Empty ? null :
+@@ -346,7 +352,8 @@
+                     foreach (var jumper in jumpers)
+                     {
+                         var obj = FindActiveNpcById(jumper.NpcId);
+-                        if (obj is null || !obj.TryGetComponent<SNPCComponent>(out var npc) || npc.NpcId != jumper.NpcId)
++                        if (obj is null || !obj.TryGetComponent<SNPCComponent>(out var npc) || npc.NpcId != jumper.NpcId ||
++                            !ReferenceEquals(npc.MissionRuntime, missionRuntime))
+                             throw new InvalidOperationException($"Jumping NPC '{jumper.Nickname}' is no longer active in the source world.");
+                         objects.Add((jumper, obj));
+                     }
+@@ -386,7 +393,8 @@
+                     foreach (var jumper in jumpers)
+                     {
+                         var obj = FindActiveNpcById(jumper.NpcId);
+-                        if (obj is null || !obj.TryGetComponent<SNPCComponent>(out var npc) || npc.NpcId != jumper.NpcId)
++                        if (obj is null || !obj.TryGetComponent<SNPCComponent>(out var npc) || npc.NpcId != jumper.NpcId ||
++                            !ReferenceEquals(npc.MissionRuntime, player.MissionRuntime))
+                             throw new InvalidOperationException($"Jumping NPC '{jumper.Nickname}' is no longer active in the source world.");
+                         objects.Add((jumper, obj));
+                     }
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -955,12 +955,7 @@
+                     throw new InvalidDataException($"NPC '{runtime.Nickname}' has unsupported or incomplete AI runtime state.");
+                 if (missionRuntime is not null)
+                 {
+-                    var missionContext = JsonSerializer.Deserialize<NpcMissionTransferContext>(runtime.MissionState);
+-                    if (missionContext is not { CharacterId: > 0 } || string.IsNullOrWhiteSpace(missionContext.MissionNickname))
+-                        throw new InvalidDataException($"NPC '{runtime.Nickname}' has no recoverable mission context.");
+-                    if (!string.Equals(missionRuntime.MissionNickname, missionContext.MissionNickname,
+-                            StringComparison.OrdinalIgnoreCase))
+-                        throw new InvalidDataException($"NPC '{runtime.Nickname}' belongs to a different mission runtime.");
++                    ValidateMissionNpcContext(missionRuntime, runtime);
+                 }
+             }
+             var snapshot = new NpcTransferSnapshot
+@@ -993,6 +988,18 @@
+                     $"{exception.Message} Formation details: {formationDetails}");
+             }
+             return snapshot;
++        }
++
++        internal static void ValidateMissionNpcContext(MissionRuntime missionRuntime, NpcRuntimeStateV1 state)
++        {
++            var context = state.MissionState.Length == 0 ? null :
++                JsonSerializer.Deserialize<NpcMissionTransferContext>(state.MissionState);
++            if (missionRuntime.Player.Character?.ID is not > 0 || context is not { CharacterId: > 0 } ||
++                context.CharacterId != missionRuntime.Player.Character.ID ||
++                string.IsNullOrWhiteSpace(context.MissionNickname) ||
++                !string.Equals(missionRuntime.MissionNickname, context.MissionNickname,
++                    StringComparison.OrdinalIgnoreCase))
++                throw new InvalidDataException($"NPC '{state.Nickname}' belongs to a different mission owner or runtime.");
+         }
+
+         private static string FormatVector(NpcVector3? value) => value is null
+--- a/src/LibreLancer/Server/NPCManager.cs
++++ b/src/LibreLancer/Server/NPCManager.cs
+@@ -307,6 +307,15 @@
+             expectedSystemId ??= snapshot.TargetSystemId;
+             if (!string.Equals(expectedSystemId, World.System.Nickname, StringComparison.OrdinalIgnoreCase))
+                 throw new InvalidDataException("NPC transfer snapshot targets a different world.");
++            if (snapshot.MissionRuntimeId.HasValue)
++            {
++                if (missionRuntime is null)
++                    throw new InvalidDataException("Mission NPC restoration requires its owning MissionRuntime.");
++                // Validate the whole group before creating or activating any member.
++                foreach (var identity in snapshot.Npcs)
++                    GameServer.ValidateMissionNpcContext(missionRuntime,
++                        MessagePackSerializer.Deserialize<NpcRuntimeStateV1>(identity.RuntimeState));
++            }
+             var existingNpcIds = World.GameWorld.Objects
+                 .Select(obj => obj.TryGetComponent<SNPCComponent>(out var npc) ? npc.NpcId : Guid.Empty)
+                 .Where(id => id != Guid.Empty).ToHashSet();
+--- /dev/null
++++ b/src/LibreLancer.Tests/NpcMissionOwnershipTests.cs
+@@ -0,0 +1,139 @@
++using System;
++using System.Collections.Concurrent;
++using System.IO;
++using System.Reflection;
++using System.Runtime.CompilerServices;
++using System.Text.Json;
++using System.Threading.Tasks;
++using LancerNexus.Protocol;
++using LibreLancer.Missions;
++using LibreLancer.Server;
++using LibreLancer.Server.Components;
++using LibreLancer.World;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class NpcMissionOwnershipTests
++{
++    private static MissionRuntime Runtime(long id)
++    {
++        var character = new NetCharacter();
++        typeof(NetCharacter).GetField("charId", BindingFlags.Instance | BindingFlags.NonPublic)!
++            .SetValue(character, id);
++        var player = new Player(null!, null!, Guid.Empty) { Character = character };
++        var script = new MissionScript();
++        script.Ships.Add("escort", new ScriptShip { Nickname = "escort", Jumper = true });
++        return new MissionRuntime(script, player, [], missionNickname: "fixture");
++    }
++
++    private static ServerWorld World(out ConcurrentQueue<Action> queue)
++    {
++        var world = (ServerWorld)RuntimeHelpers.GetUninitializedObject(typeof(ServerWorld));
++        world.GameWorld = new GameWorld(null, null, null, null, initPhys: false);
++        queue = new ConcurrentQueue<Action>();
++        typeof(ServerWorld).GetField("actions", BindingFlags.Instance | BindingFlags.NonPublic)!
++            .SetValue(world, queue);
++        return world;
++    }
++
++    private static GameObject Npc(ServerWorld world, MissionRuntime runtime, Guid id, bool active = true)
++    {
++        var obj = new GameObject { Nickname = "escort", Flags = active ? GameObjectFlags.Exists : 0 };
++        obj.AddComponent(new SNPCComponent(obj, null!, null!) { MissionRuntime = runtime, NpcId = id });
++        world.GameWorld.AddObject(obj);
++        return obj;
++    }
++
++    [Fact]
++    public void LookupSelectsOnlyActiveNpcFromTheExactRuntime()
++    {
++        var world = World(out _);
++        var first = Runtime(1);
++        var second = Runtime(2);
++        var wrong = Npc(world, second, Guid.NewGuid());
++        var inactive = Npc(world, first, Guid.NewGuid(), false);
++        var expected = Npc(world, first, Guid.NewGuid());
++        Assert.Same(expected, world.FindActiveMissionNpc(first, "ESCORT"));
++        Assert.Same(wrong, world.FindActiveMissionNpc(second, "escort"));
++        Assert.NotSame(inactive, world.FindActiveMissionNpc(first, "escort"));
++    }
++
++    [Fact]
++    public void GatherCannotSelectAnotherPlayersJumperWithTheSameNickname()
++    {
++        var world = World(out _);
++        Npc(world, Runtime(2), Guid.NewGuid());
++        Assert.Empty(world.GatherJumpers(Runtime(1)));
++    }
++
++    [Fact]
++    public void DuplicateActorsInTheSameRuntimeAreRejected()
++    {
++        var world = World(out _);
++        var runtime = Runtime(1);
++        Npc(world, runtime, Guid.NewGuid());
++        Npc(world, runtime, Guid.NewGuid());
++        Assert.Throws<InvalidOperationException>(() => world.FindActiveMissionNpc(runtime, "escort"));
++    }
++
++    [Fact]
++    public async Task FreezeRejectsAnotherRuntimeBeforeCapturingOrRemovingNpc()
++    {
++        var world = World(out var queue);
++        var id = Guid.NewGuid();
++        var npc = Npc(world, Runtime(2), id);
++        var freeze = world.FreezeJumpersAsync([new JumperNpc { NpcId = id, Nickname = "escort" }], Runtime(1));
++        Assert.True(queue.TryDequeue(out var action));
++        action();
++        await Assert.ThrowsAsync<InvalidOperationException>(() => freeze);
++        Assert.Same(npc, world.FindActiveNpcById(id));
++        Assert.Empty(queue);
++    }
++
++    [Theory]
++    [InlineData(true)]
++    [InlineData(false)]
++    public void RestoreRejectsWrongOrMissingMissionOwnerBeforeCreatingAnyNpc(bool provideRuntime)
++    {
++        var world = World(out _);
++        world.System = new LibreLancer.Data.GameData.World.StarSystem { SourceFile = "fixture.ini", Nickname = "li03" };
++        var manager = (NPCManager)RuntimeHelpers.GetUninitializedObject(typeof(NPCManager));
++        manager.World = world;
++        var owner = Runtime(1);
++        var id = Guid.NewGuid();
++        var transfer = Guid.NewGuid();
++        var state = new NpcRuntimeStateV1
++        {
++            Nickname = "escort", LoadoutArchetype = "fixture_ship",
++            Orientation = new NpcQuaternion { W = 1 },
++            Ai = new NpcAiState { StateId = "none", PreviousStateId = "none" },
++            MissionState = JsonSerializer.SerializeToUtf8Bytes(new { CharacterId = 2, MissionNickname = "fixture" })
++        };
++        var snapshot = new NpcTransferSnapshot
++        {
++            TransferId = transfer, MissionRuntimeId = transfer, TargetSystemId = "li03", NpcIds = [id],
++            MissionRuntimeState = MessagePack.MessagePackSerializer.Serialize(owner.CaptureTransferState()),
++            Npcs = [new NpcRuntimeSnapshot { NpcId = id, OwnershipVersion = 1, SystemId = "li01",
++                RuntimeState = MessagePack.MessagePackSerializer.Serialize(state) }]
++        };
++        Assert.Throws<InvalidDataException>(() => manager.RestoreTransfer(snapshot, provideRuntime ? owner : null));
++        Assert.Empty(world.GameWorld.Objects);
++    }
++
++    [Theory]
++    [InlineData(1, "fixture", true)]
++    [InlineData(1, "FIXTURE", true)]
++    [InlineData(2, "fixture", false)]
++    [InlineData(1, "other", false)]
++    [InlineData(0, "fixture", false)]
++    public void SnapshotContextRequiresTheSameCharacterAndMission(long id, string mission, bool accepted)
++    {
++        var state = new NpcRuntimeStateV1 { Nickname = "escort",
++            MissionState = JsonSerializer.SerializeToUtf8Bytes(new { CharacterId = id, MissionNickname = mission }) };
++        if (accepted)
++            GameServer.ValidateMissionNpcContext(Runtime(1), state);
++        else
++            Assert.Throws<InvalidDataException>(() => GameServer.ValidateMissionNpcContext(Runtime(1), state));
++    }
++}
