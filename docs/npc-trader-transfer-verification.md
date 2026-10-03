@@ -94,3 +94,49 @@ matches the instance but not the snapshot's ownership version. A later complete
 round trip to the same instance could therefore make an older journal eligible
 again. This needs a version-fencing correction and regression test before full
 recovery acceptance.
+
+## Follow-up: exact recovery fences and active simulation
+
+Coordinator `621f54b` now checks the exact expected lease versions for direct
+recovery and discovery pages. Target recovery requires the captured source
+version plus one; durable aborted-source recovery requires the captured version.
+The MySQL integration test performs multiple real round trips and rejects both
+old committed journals and old aborted rollback snapshots after returning to the
+same instance. All 36 Coordinator tests passed with the isolated MySQL server;
+none were skipped. On the live environment, the first group's leases were back
+on LI02 at version 6, while the original journal's recovery request returned 404.
+Current eligible journals still returned 200. No schema migration was required.
+
+Client `b626519d` adds stable-ID freeze lookup, namespaced population nicknames
+and local Debug-only `npc-state` diagnostics. Seventeen focused Client tests and
+five Scripts comparison tests passed. A fresh complete patch stack applied and
+the LLServer Debug build completed with zero errors and two existing warnings.
+Both servers were restarted with their journals and staging data preserved.
+
+The committed [source sample](evidence/npc-state-li01.json) and
+[target sample](evidence/npc-state-li02-before.json) contained 21 distinct active
+NPC IDs with no intersections. The original three IDs listed above appeared
+exactly once each, only on LI02 at version 10, matching their live MySQL leases.
+The lease versions remained unchanged across sampling. The
+[second target sample](evidence/npc-state-li02-after.json) verified movement:
+
+| NPC ID suffix | Distance moved |
+| --- | --- |
+| `1c2a55929a4e` (leader) | 19038.20 |
+| `c19ae4c3d923` (escort) | 19104.14 |
+| `e390b186dac2` (escort) | 18380.09 |
+
+Reproduce the selected-ID checks from the workspace root:
+
+```bash
+python3 Scripts/tools/compare-npc-state.py Client/docs/evidence/npc-state-li01.json Client/docs/evidence/npc-state-li02-before.json --npc 01a100ea-7e91-7ae2-a6d2-1c2a55929a4e
+python3 Scripts/tools/compare-npc-state.py Client/docs/evidence/npc-state-li02-before.json Client/docs/evidence/npc-state-li02-after.json --movement --npc 01a100ea-7e91-7ae2-a6d2-1c2a55929a4e
+```
+
+These are observations from separate simulation queues, not a global atomic
+snapshot. They provide active-copy and movement evidence for the tested interval.
+All crash phases and coupled mission handoffs still need acceptance testing.
+Another recovery boundary remains open: deaths and later runtime changes after a
+completed transfer are not checkpointed by the transfer journal. Recovery from
+that journal alone can replay state preceding such events; this needs explicit
+checkpoint or retirement handling before claiming exact recovery of ongoing NPCs.
