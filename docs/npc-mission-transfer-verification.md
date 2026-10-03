@@ -117,3 +117,27 @@ This proves the live idle mission fixture round trip, arrival translation and
 exact timer continuation. It does not prove all mission conditions, mission
 reconnect/process-failure recovery, runtime checkpoints/death retirement or every
 capacity/mTLS/crash-phase failure scenario. Those remain acceptance work.
+
+## Mission NPC destruction after restoration (patch 1124)
+
+Inspection found that `SpawnShipInWorld` installed the mission destruction callback
+only after `NPCManager.DoSpawn` returned. `RestoreTransfer` calls `DoSpawn` directly,
+so imported NPCs lacked that callback. Their destruction could leave mission labels
+alive and prevent `Cnd_Destroyed` from completing.
+
+Patch 1124 binds the callback in `SDestroyableComponent` construction when `DoSpawn`
+receives a MissionRuntime. This covers fresh spawns, local jumpers and transferred
+NPCs. The callback captures the owning runtime and nickname; ambient NPCs have no
+mission callback. The redundant assignment in the mission spawn action is removed.
+
+Three regression tests exercise the actual component `Destroy` path with a
+restored MissionRuntime, label and `Cnd_Destroyed` state; a second runtime sharing
+the nickname remains unaffected. Population NPCs retain no mission callback.
+Twelve focused tests and the broader 73-test NPC/mission/entry regression selection
+passed. LLServer built with zero errors and two warnings. The complete maintained
+patch series was applied to a fresh checkout for validation.
+
+These are automated component and runtime checks. Destruction of an imported NPC
+in a live game has not yet been exercised. The running test processes still use
+build 1123; patch 1124 takes effect on their next rebuild/deployment. Durable NPC
+retirement/checkpoints and mission reconnect recovery remain open.
