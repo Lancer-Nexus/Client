@@ -1,0 +1,40 @@
+--- a/src/LibreLancer/Server/NPCManager.cs
++++ b/src/LibreLancer/Server/NPCManager.cs
+@@ -71,6 +71,12 @@
+         }
+ 
+         private Dictionary<string, GameObject> missionNPCs = new(StringComparer.OrdinalIgnoreCase);
++
++        // DoSpawn can return an inert object while the Coordinator supplies its identity.
++        // Subsequent mission actions must wait for registration on the simulation queue.
++        public bool HasPendingMissionSpawns(MissionRuntime? runtime) => runtime != null &&
++            missionNPCs.Values.Any(obj => obj.NetID == 0 &&
++                obj.TryGetComponent<SNPCComponent>(out var npc) && npc.MissionRuntime == runtime);
+ 
+         private sealed record ResolvedNpcFormation(NpcFormationStateV1 State,
+             (NpcFormationMemberV1 Member, GameObject Object)[] Members);
+--- a/src/LibreLancer/Server/Player.cs
++++ b/src/LibreLancer/Server/Player.cs
+@@ -260,7 +260,7 @@
+ 
+             if (Space != null)
+             {
+-                while (worldActions.Count > 0)
++                while (worldActions.Count > 0 && !Space.World.NPCs.HasPendingMissionSpawns(msnRuntime))
+                     worldActions.Dequeue()();
+             }
+         }
+@@ -1276,7 +1276,13 @@
+         internal void DrainMissionWorldActionsForTransfer()
+         {
+             while (worldActions.Count > 0)
++            {
++                if (Space?.World.NPCs.HasPendingMissionSpawns(msnRuntime) == true)
++                    throw new InvalidOperationException("Mission NPC identity allocation is still pending.");
+                 worldActions.Dequeue()();
++            }
++            if (Space?.World.NPCs.HasPendingMissionSpawns(msnRuntime) == true)
++                throw new InvalidOperationException("Mission NPC identity allocation is still pending.");
+         }
+ 
+         public async Task OnLoggedIn()
