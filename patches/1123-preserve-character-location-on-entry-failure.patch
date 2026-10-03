@@ -1,0 +1,61 @@
+--- a/src/LibreLancer/Server/Player.cs
++++ b/src/LibreLancer/Server/Player.cs
+@@ -912,6 +912,12 @@
+
+         private void BeginGame(NetCharacter c, SaveGame? sg)
+         {
++            // Disconnect can save immediately if an initial RPC fails. Hydrate
++            // the location before exposing this character to that cleanup path.
++            Base = c.Base;
++            System = c.System!;
++            Position = c.Position;
++            Orientation = c.Orientation == Quaternion.Zero ? Quaternion.Identity : c.Orientation;
+             Character = c;
+             MPlayer = sg?.MPlayer ?? new() { CanDock = 1, CanTl = 1 };
+             StartTime = DateTime.UtcNow;
+@@ -931,15 +937,6 @@
+                 rpcClient.UpdateVisits(VisitBundle.Compress(c.GetAllVisitFlags()));
+             }
+
+-            Base = Character.Base;
+-            System = Character.System!;
+-            Position = Character.Position;
+-            Orientation = Character.Orientation;
+-
+-            if (Orientation == Quaternion.Zero)
+-            {
+-                Orientation = Quaternion.Identity;
+-            }
+
+             foreach (var player in Game.AllPlayers.Where(x => x != this))
+             {
+--- /dev/null
++++ b/src/LibreLancer.Tests/FailedCharacterEntryPositionTests.cs
+@@ -0,0 +1,27 @@
++using System;
++using System.Numerics;
++using System.Reflection;
++using LibreLancer.Server;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class FailedCharacterEntryPositionTests
++{
++    [Fact]
++    public void InitialRpcFailureCannotLeaveDisconnectWithAnEmptyLocation()
++    {
++        var player = new Player(null!, null!, Guid.Empty);
++        var character = new NetCharacter { Name = "fixture" };
++        using (var transaction = character.BeginTransaction())
++            transaction.UpdatePosition("Li01_01_Base", "li01", new Vector3(1, 2, 3), Quaternion.Zero);
++        // The missing transport intentionally fails the first initial RPC.
++        var begin = typeof(Player).GetMethod("BeginGame", BindingFlags.Instance | BindingFlags.NonPublic)!;
++        Assert.Throws<TargetInvocationException>(() => begin.Invoke(player, [character, null]));
++        Assert.Same(character, player.Character);
++        Assert.Equal("li01", player.System);
++        Assert.Equal("Li01_01_Base", player.Base);
++        Assert.Equal(new Vector3(1, 2, 3), player.Position);
++        Assert.Equal(Quaternion.Identity, player.Orientation);
++    }
++}
