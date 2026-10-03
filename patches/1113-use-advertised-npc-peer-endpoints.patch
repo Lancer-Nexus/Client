@@ -1,0 +1,105 @@
+diff --git a/src/LibreLancer/Server/GameServer.cs b/src/LibreLancer/Server/GameServer.cs
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -504,7 +504,7 @@
+ 
+             await AdvanceNpcTransferAsync(transferId, NpcTransferState.SourceFrozen, snapshot, cancellationToken)
+                 .ConfigureAwait(false);
+-            var endpoint = await ResolveNpcPeerEndpointAsync(prepared.TargetEndpoint, NpcTransferPort, cancellationToken)
++            var endpoint = await ResolveNpcPeerEndpointAsync(prepared.TargetEndpoint, NpcTransferPort, cancellationToken, prepared.NpcTransferEndpoint)
+                 .ConfigureAwait(false);
+             var peerRequest = new NpcPeerSnapshotTransfer
+             {
+@@ -802,7 +802,7 @@
+                     if (target is not { Found: true } || target.TargetInstanceId != recovery.TargetInstanceId ||
+                         string.IsNullOrWhiteSpace(target.TargetEndpoint))
+                         continue;
+-                    var endpoint = await ResolveNpcPeerEndpointAsync(target.TargetEndpoint, NpcTransferPort, cancellationToken)
++                    var endpoint = await ResolveNpcPeerEndpointAsync(target.TargetEndpoint, NpcTransferPort, cancellationToken, target.NpcTransferEndpoint)
+                         .ConfigureAwait(false);
+                     var acknowledgement = await NpcTransferQuicReceiver.SendAsync(endpoint, recovery.TargetInstanceId,
+                         NpcTransferCertificate!, NpcTransferCaCertificate!, new NpcPeerSnapshotTransfer
+@@ -1171,9 +1171,16 @@
+             finally { try { File.Delete(tempPath); } catch (IOException) { } }
+         }
+ 
+-        private async Task<IPEndPoint> ResolveNpcPeerEndpointAsync(string targetEndpoint, int transferPort,
+-            CancellationToken cancellationToken)
+-        {
++        internal static Uri ParseNpcPeerEndpoint(string targetEndpoint, int transferPort, string? privateEndpoint = null)
++        {
++            if (privateEndpoint is not null)
++            {
++                if (!NpcTransferContractValidator.IsValidPeerEndpoint(privateEndpoint))
++                    throw new InvalidDataException("Coordinator NPC peer endpoint is invalid.");
++                return new Uri(privateEndpoint, UriKind.Absolute);
++            }
++            if (transferPort is < 1 or > 65535)
++                throw new InvalidDataException("Legacy NPC transfer port is invalid.");
+             var endpointText = targetEndpoint.Contains("://", StringComparison.Ordinal)
+                 ? targetEndpoint
+                 : $"udp://{targetEndpoint}";
+@@ -1183,12 +1190,20 @@
+                 !string.IsNullOrEmpty(uri.Query) || !string.IsNullOrEmpty(uri.Fragment) ||
+                 uri.AbsolutePath is not ("" or "/"))
+                 throw new InvalidDataException("Coordinator target endpoint is invalid.");
++            // Old game endpoints (including quic:// game endpoints) never advertise a peer port.
++            return new UriBuilder(uri) { Port = transferPort }.Uri;
++        }
++
++        private async Task<IPEndPoint> ResolveNpcPeerEndpointAsync(string targetEndpoint, int transferPort,
++            CancellationToken cancellationToken, string? privateEndpoint = null)
++        {
++            var uri = ParseNpcPeerEndpoint(targetEndpoint, transferPort, privateEndpoint);
+             if (IPAddress.TryParse(uri.Host, out var address))
+-                return new IPEndPoint(address, transferPort);
++                return new IPEndPoint(address, uri.Port);
+             var addresses = await Dns.GetHostAddressesAsync(uri.Host, cancellationToken).ConfigureAwait(false);
+             if (addresses.Length == 0)
+                 throw new InvalidDataException("Coordinator target host did not resolve.");
+-            return new IPEndPoint(addresses[0], transferPort);
++            return new IPEndPoint(addresses[0], uri.Port);
+         }
+ 
+         private async Task<ServerWorld> RequestNpcWorldAsync(string systemId, CancellationToken cancellationToken)
+diff --git a/src/LLServer.Core/ServerApp.cs b/src/LLServer.Core/ServerApp.cs
+--- a/src/LLServer.Core/ServerApp.cs
++++ b/src/LLServer.Core/ServerApp.cs
+@@ -271,6 +271,8 @@
+                 CurrentPlayers = network?.ConnectedPeersCount ?? 0,
+                 MaxPlayers = listener?.MaxConnections ?? 0,
+                 Endpoint = Config.InstanceEndpoint!,
++                NpcTransferEndpoint = npcTransferReceiver is null ? null :
++                    new UriBuilder("quic", Config.NpcTransferListenAddress!, Config.NpcTransferPort).Uri.AbsoluteUri,
+                 Capabilities = npcTransferReceiver is null ? [] : [ClusterCapabilities.NpcTransferV1]
+             };
+             var tempPath = $"{path}.{Guid.NewGuid():N}.tmp";
+@@ -290,6 +292,7 @@
+ 
+ public sealed class InstanceRuntimeStatus
+ {
++    public string? NpcTransferEndpoint { get; init; }
+     public DateTimeOffset WrittenAtUtc { get; init; }
+     public string InstanceId { get; init; } = "";
+     public string SystemId { get; init; } = "";
+diff --git a/src/LibreLancer.Tests/NpcPopulationTransferTests.cs b/src/LibreLancer.Tests/NpcPopulationTransferTests.cs
+--- a/src/LibreLancer.Tests/NpcPopulationTransferTests.cs
++++ b/src/LibreLancer.Tests/NpcPopulationTransferTests.cs
+@@ -70,4 +70,17 @@
+         Assert.Empty(groups);
+     }
+ 
++    [Fact]
++    public void NpcPeerAddressUsesAdvertisedPortAndPreservesLegacyGamePortFallback()
++    {
++        var advertised = GameServer.ParseNpcPeerEndpoint("udp://127.0.0.3:25444", 26455,
++            "quic://127.0.0.3:26456");
++        Assert.Equal("127.0.0.3", advertised.Host);
++        Assert.Equal(26456, advertised.Port);
++        Assert.Equal(26455, GameServer.ParseNpcPeerEndpoint("quic://127.0.0.3:25444", 26455).Port);
++        Assert.Equal(26455, GameServer.ParseNpcPeerEndpoint("127.0.0.3:25444", 26455).Port);
++        Assert.Throws<System.IO.InvalidDataException>(() =>
++            GameServer.ParseNpcPeerEndpoint("127.0.0.3:25444", 26455, "quic://host"));
++    }
++
+ }
