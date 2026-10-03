@@ -213,3 +213,27 @@ The full Solution build still reports the two existing missing LLServerGui admin
 types while building the client and LLServer. Running test processes remain on
 build 1123; no new runtime deployment or whole-process crash test was performed
 for this infrastructure change.
+
+## Corrected build diagnosis and overlay integrity
+
+The previously reported LLServerGui failures were caused by local overlay drift,
+not by a missing fix in the maintained series. Patch 1098 already removes the
+obsolete GUI admin list/actions and event payload references. It was applied in
+the fresh validators but absent from the main working file. The local `build.sh`
+also lacked the error-propagation change already maintained in patch 1097.
+Applying these existing patches restored the intended build inputs.
+
+A clean reconstruction now matches all 113 files touched by the current series,
+allowing only CRLF/LF differences. The complete `LibreLancer.sln` build succeeded
+with zero errors and 317 warnings, including LLServerGui. Earlier failed-build
+entries above describe their actual historical outputs; their attribution to a
+separate preexisting GUI defect is superseded by this diagnosis.
+
+The reusable `scripts/verify-lancer-nexus-overlay.py` reconstructs HEAD plus the
+series in temporary directories and compares it with the applied source. It is
+now mandatory before `--record-current` writes fingerprints, preventing an
+incomplete overlay from being marked verified. Seven tests cover complete and
+reverted overlays, later patches changing earlier output, CRLF compatibility,
+unreconstructable patches and the record command's acceptance/rejection behavior.
+This build repair does not complete the pending checkpoint, terminal-event,
+reconnect or crash-phase acceptance work; running services were not redeployed.

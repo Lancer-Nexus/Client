@@ -76,3 +76,15 @@ LLServer SystemIds defines owned worlds; SystemId is the primary fallback. Trave
   also removes objects and must never retire their identities.
 - Survivor and MissionRuntime checkpoints must accompany terminal-event work.
   The current outbox infrastructure does not yet connect death/docking hooks.
+
+## Overlay integrity
+
+- Before recording a manually applied overlay, reconstruct and compare the full
+  series with `python3 scripts/verify-lancer-nexus-overlay.py`. The record command
+  enforces this check and requires Python 3. Only CRLF/LF differences are ignored.
+- A GUI compilation failure involving removed admin types can indicate unapplied
+  patch 1098. Inspect the local overlay against a fresh reconstruction before
+  adding replacement contracts or another patch. Patch 1097 also restores failure
+  propagation in the build entry point.
+- The integrity checker is read-only; preserve unrelated modifications and repair
+  identified overlay drift by applying the relevant maintained patch.

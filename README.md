@@ -91,3 +91,16 @@ Retirement requires Coordinator migration 003 and `npc_retirement_v1` support.
 Death/docking hooks and survivor/MissionRuntime checkpoints remain pending; the
 outbox alone does not establish complete NPC lifecycle recovery. See
 [the verification scope](docs/npc-mission-transfer-verification.md).
+
+## Verify the applied patch overlay
+
+`python3 scripts/verify-lancer-nexus-overlay.py` reconstructs all files touched by
+`patches/series` from each target repository's HEAD, applies the complete series
+in temporary directories and compares the result with the local build overlay.
+It accepts CRLF/LF differences and reports other drift without editing files.
+The checker requires Python 3 and Git; it does not initialize or fetch submodules.
+
+`./scripts/apply-lancer-nexus-patches.sh --record-current` now runs this checker
+before writing fingerprints. Use normal patch application for a fresh checkout;
+recording an incomplete overlay fails and preserves the previous marker. Checker
+tests run with `python3 -m unittest discover -s scripts/tests`.

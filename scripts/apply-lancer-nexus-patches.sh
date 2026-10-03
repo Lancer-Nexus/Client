@@ -16,6 +16,10 @@ else
     record_current=false
 fi
 
+if [[ "$record_current" == true ]]; then
+    python3 "$client_dir/scripts/verify-lancer-nexus-overlay.py"
+fi
+
 declare -a patch_targets=()
 declare -a patch_files=()
 declare -a patch_names=()
