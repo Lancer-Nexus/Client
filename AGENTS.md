@@ -64,3 +64,15 @@ See [the Administration permission system guide](../Administration/docs/permissi
 
 The base Nexus topology uses eight game instances, one per group: BR01-BR06 (`br-01`), BW01-BW10 (`bw-01`), EW01-EW05 (`ew-01`), IW01-IW06 (`iw-01`), KU01-KU06 (`ku-01`), LI01-LI05 (`li-01`), RH01-RH05 (`rh-01`), and `mixed-01` for all remaining registered systems. System nicknames are compared case insensitively and emitted lowercase. Folder names are not always world nicknames: `fp7` contains `fp7_system`; `intro` and `miners` are asset directories, not registered worlds.
 LLServer SystemIds defines owned worlds; SystemId is the primary fallback. Travel within the owned set remains a local system jump; travel to another group uses the fenced Gateway transfer. Runtime status must publish the entire set. The new BindAddress setting binds the game listener privately; cluster servers do not open the legacy discovery listener. Keep these changes patch-only.
+
+## NPC retirement integration
+
+- Queue retirement through the durable background outbox; do not perform file or
+  HTTP I/O on the simulation thread. Await durable intent and inspect every
+  Coordinator entry result before treating retirement as confirmed.
+- Keep pending and confirmed original ownership fences as restore barriers. A
+  corrupt outbox must prevent recovery readiness; never discard it on timeout.
+- Do not wire terminal hooks through generic object removal: transfer freezing
+  also removes objects and must never retire their identities.
+- Survivor and MissionRuntime checkpoints must accompany terminal-event work.
+  The current outbox infrastructure does not yet connect death/docking hooks.

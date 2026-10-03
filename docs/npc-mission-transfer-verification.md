@@ -169,3 +169,47 @@ up actors by world nickname still require an audit for concurrent missions; this
 patch does not establish complete mission actor namespacing. Live deployment and a
 multi-player mission transfer test remain pending, along with checkpoints,
 retirement, reconnect recovery and the remaining crash-phase acceptance cases.
+
+## Durable retirement outbox and recovery barrier (patch 1126)
+
+The Client Protocol submodule now uses `b97964e`, including the retirement contracts
+and the appended `NpcOwnershipLease.IsRetired` field. NPC ID allocation rejects
+retired leases. Engine changes remain maintained in patch 1126.
+
+`GameServer.QueueNpcRetirement` queues a bounded request without doing file or HTTP
+I/O on the calling simulation thread. Separate persistence and delivery workers
+write MessagePack intent with a flushed temporary file and atomic rename before
+sending the request. Each batch contains at most 256 NPCs; the intake queue holds
+at most 1024 batches and reports overload rather than dropping intent. HTTP uses
+HTTPS (or loopback development HTTP), no redirects, a four-second attempt timeout
+and bounded retry backoff. Unknown delivery outcomes keep the request ID and bytes.
+
+The API exposes separate durability and Coordinator-response tasks. A successful
+batch response still requires checking each result. Confirmed responses remain on
+disk and block replay at their original NPC ownership fence. Pending requests also
+block activation. Startup loads these records before readiness; malformed records
+fail closed. The server's restore path checks this barrier before creating any
+member. An index avoids scanning all queued records for each restored NPC.
+
+Tests cover persistence behind a blocked HTTP request, exact request replay after
+outbox recreation, rejection of mismatched replies, confirmed fences after another
+restart, corruption blocking readiness, and pending intent blocking the actual
+`RestoreTransfer` path before object creation. This establishes local process
+restart behavior; it does not claim whole-machine power-loss durability or shared
+storage coordination between multiple processes using the same staging directory.
+
+The terminal event hooks are not yet connected: `SDestroyableComponent.Destroy`
+and `SNPCComponent.Docked` currently keep their existing behavior. They must be
+coupled to survivor/MissionRuntime checkpoints before retiring a member of an old
+formation journal, since that journal no longer authorizes recovery of the whole
+group once one member's fence changes. Therefore this patch does not yet prove
+crash-safe death/docking or complete mission reconnect recovery.
+
+Final verification: all 90 selected NPC/mission/entry regression tests passed,
+including cancellation of a waiting caller during retry backoff. LLServer built
+with zero errors. The complete series applied in a fresh checkout; the final
+maintained patch was then reversed, checked and applied there after refinements.
+The full Solution build still reports the two existing missing LLServerGui admin
+types while building the client and LLServer. Running test processes remain on
+build 1123; no new runtime deployment or whole-process crash test was performed
+for this infrastructure change.
