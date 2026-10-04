@@ -1,0 +1,368 @@
+diff --git a/src/LibreLancer.Tests/NpcCheckpointOutboxTests.cs b/src/LibreLancer.Tests/NpcCheckpointOutboxTests.cs
+index 4f200f3f..81d0a012 100644
+--- a/src/LibreLancer.Tests/NpcCheckpointOutboxTests.cs
++++ b/src/LibreLancer.Tests/NpcCheckpointOutboxTests.cs
+@@ -84,6 +84,44 @@ public sealed class NpcCheckpointOutboxTests
+         finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
+     }
+ 
++    [Fact]
++    public async Task RecoveryLoadsOnlyCurrentSystemAndRestoresCheckpointRevision()
++    {
++        var directory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
++        try
++        {
++            var request = Request();
++            request = request with { ExpectedRevisions = [request.ExpectedRevisions[0] with
++                { NpcId = request.Npcs[0].NpcId }] };
++            var recovery = new NpcCheckpointRecoveryV1
++            {
++                Snapshot = request,
++                Result = new NpcCheckpointWriteResponseV1
++                {
++                    RequestId = request.RequestId,
++                    Accepted = true,
++                    Revisions = request.ExpectedRevisions.Select(expected => expected with
++                        { Revision = expected.Revision + 1 }).ToArray()
++                }
++            };
++            var handler = new RecoveryHandler(recovery);
++            await using var outbox = new NpcCheckpointOutbox(directory, new Uri("http://127.0.0.1"),
++                "test-key", "source", handler);
++            await outbox.Ready.WaitAsync(TimeSpan.FromSeconds(3));
++
++            var page = await outbox.GetRecoveryPageAsync("li01", null);
++            Assert.Equal(request.RequestId, Assert.Single(page.CheckpointIds));
++            var recovered = await outbox.GetRecoveryCheckpointAsync(request.RequestId, "li01");
++
++            Assert.NotNull(recovered);
++            Assert.Equal(request.RequestId, recovered.Snapshot.RequestId);
++            Assert.Equal(1, outbox.GetRevision(request.Npcs[0].NpcId, 4));
++            Assert.Equal(2, handler.Requests);
++            Assert.True(handler.AllRequestsAuthenticated);
++        }
++        finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
++    }
++
+     private sealed class Handler(bool blocked = false) : HttpMessageHandler
+     {
+         public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+@@ -103,4 +141,25 @@ public sealed class NpcCheckpointOutboxTests
+             return new(HttpStatusCode.OK) { Content = JsonContent.Create(response) };
+         }
+     }
++
++    private sealed class RecoveryHandler(NpcCheckpointRecoveryV1 recovery) : HttpMessageHandler
++    {
++        public int Requests { get; private set; }
++        public bool AllRequestsAuthenticated { get; private set; } = true;
++
++        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
++        {
++            Requests++;
++            AllRequestsAuthenticated &= request.Headers.Authorization?.Parameter == "test-key";
++            if (request.RequestUri!.AbsolutePath.EndsWith("/recovery", StringComparison.Ordinal) &&
++                request.RequestUri.AbsolutePath.Contains(recovery.Snapshot.RequestId.ToString("D"), StringComparison.Ordinal))
++                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
++                    { Content = JsonContent.Create(recovery) });
++            if (request.RequestUri.AbsolutePath.EndsWith("/recovery", StringComparison.Ordinal))
++                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
++                    { Content = JsonContent.Create(new NpcCheckpointRecoveryPageV1
++                        { CheckpointIds = [recovery.Snapshot.RequestId] }) });
++            throw new InvalidOperationException("Unexpected NPC recovery request.");
++        }
++    }
+ }
+diff --git a/src/LibreLancer/Server/GameServer.cs b/src/LibreLancer/Server/GameServer.cs
+index 8cde6731..11fea58f 100644
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -119,6 +119,57 @@ namespace LibreLancer.Server
+             (npcCheckpointOutbox ?? throw new InvalidOperationException("NPC checkpoint outbox is not initialized."))
+                 .Queue(request);
+ 
++        internal async Task RestoreNpcCheckpointsForWorldAsync(ServerWorld world,
++            CancellationToken cancellationToken = default)
++        {
++            if (string.IsNullOrWhiteSpace(NpcTransferStagingDirectory)) return;
++            await InitializeNpcRetirementOutboxAsync().ConfigureAwait(false);
++            var outbox = npcCheckpointOutbox ?? throw new InvalidOperationException("NPC checkpoint outbox is not initialized.");
++            await outbox.WaitForPendingWritesAsync(cancellationToken).ConfigureAwait(false);
++            Guid? after = null;
++            var seen = new HashSet<Guid>();
++            while (true)
++            {
++                var page = await outbox.GetRecoveryPageAsync(world.System.Nickname, after, cancellationToken)
++                    .ConfigureAwait(false);
++                foreach (var checkpointId in page.CheckpointIds)
++                {
++                    if (!seen.Add(checkpointId))
++                        throw new InvalidDataException("Coordinator repeated an NPC checkpoint across recovery pages.");
++                    var recovery = await outbox.GetRecoveryCheckpointAsync(checkpointId, world.System.Nickname,
++                        cancellationToken).ConfigureAwait(false);
++                    if (recovery is not null)
++                        RestoreNpcCheckpoint(world, recovery);
++                }
++                if (page.NextAfterCheckpointId is null) break;
++                after = page.NextAfterCheckpointId;
++            }
++        }
++
++        private static void RestoreNpcCheckpoint(ServerWorld world, NpcCheckpointRecoveryV1 recovery)
++        {
++            var checkpoint = recovery.Snapshot;
++            var snapshot = new NpcTransferSnapshot
++            {
++                TransferId = checkpoint.RequestId,
++                NpcIds = checkpoint.Npcs.Select(npc => npc.NpcId).ToArray(),
++                Npcs = checkpoint.Npcs,
++                TargetSystemId = checkpoint.SystemId,
++                Formations = checkpoint.Formations
++            };
++            NpcTransferContractValidator.Validate(snapshot);
++            world.NPCs.RestoreTransfer(snapshot, incrementOwnershipVersion: false,
++                expectedSystemId: world.System.Nickname);
++            var memberIds = snapshot.NpcIds.ToHashSet();
++            var members = world.GameWorld.Objects.Where(obj =>
++                    obj.TryGetComponent<Components.SNPCComponent>(out var npc) && memberIds.Contains(npc.NpcId))
++                .ToArray();
++            if (members.Length != memberIds.Count)
++                throw new InvalidDataException("NPC checkpoint recovery did not activate its complete member set.");
++            world.Population.AdoptRecoveredCheckpointGroup(members);
++            FLLog.Info("NPC Checkpoint", $"Restored checkpoint {checkpoint.RequestId:D} in {world.System.Nickname} ({members.Length} ships).");
++        }
++
+         internal bool TryQueueNpcTerminalCheckpoint(ServerWorld world, LibreLancer.World.GameObject terminal,
+             LancerNexus.Protocol.NpcRetirementReasonV1 reason, Action accepted)
+         {
+diff --git a/src/LibreLancer/Server/NpcCheckpointOutbox.cs b/src/LibreLancer/Server/NpcCheckpointOutbox.cs
+index da6ea08a..9588b540 100644
+--- a/src/LibreLancer/Server/NpcCheckpointOutbox.cs
++++ b/src/LibreLancer/Server/NpcCheckpointOutbox.cs
+@@ -57,6 +57,97 @@ internal sealed class NpcCheckpointOutbox : IAsyncDisposable
+ 
+     public bool IsPending(Guid npcId) => pendingNpcs.ContainsKey(npcId);
+ 
++    public void ApplyRecoveredCheckpoint(NpcCheckpointRecoveryV1 recovery)
++    {
++        ValidateRecord(recovery, $"{recovery.Snapshot.RequestId:N}.response", response: true);
++        if (!recovery.Result.Accepted)
++            throw new InvalidDataException("Coordinator returned an uncommitted NPC checkpoint as recoverable.");
++        ApplyResult(recovery);
++    }
++
++    public async Task WaitForPendingWritesAsync(CancellationToken cancellationToken = default)
++    {
++        await Ready.WaitAsync(cancellationToken).ConfigureAwait(false);
++        while (!pendingNpcs.IsEmpty)
++            await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken).ConfigureAwait(false);
++    }
++
++    public async Task<NpcCheckpointRecoveryPageV1> GetRecoveryPageAsync(string systemId, Guid? after,
++        CancellationToken cancellationToken = default)
++    {
++        if (string.IsNullOrWhiteSpace(systemId) || systemId.Length > 96)
++            throw new ArgumentException("NPC checkpoint recovery system is invalid.", nameof(systemId));
++        var url = $"{endpoint.AbsoluteUri.TrimEnd('/')}/recovery?instanceId={Uri.EscapeDataString(instance)}&systemId={Uri.EscapeDataString(systemId)}&limit=128" +
++                  (after.HasValue ? $"&afterCheckpointId={after.Value:D}" : "");
++        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
++        timeout.CancelAfter(TimeSpan.FromSeconds(4));
++        using var request = CreateAuthenticatedRequest(HttpMethod.Get, new Uri(url));
++        using var response = await http.SendAsync(request, timeout.Token).ConfigureAwait(false);
++        response.EnsureSuccessStatusCode();
++        var page = await ReadBoundedJsonAsync<NpcCheckpointRecoveryPageV1>(response, timeout.Token)
++            .ConfigureAwait(false) ?? throw new InvalidDataException("Coordinator returned an empty NPC recovery page.");
++        if (page.CheckpointIds is not { Length: <= 128 } ||
++            page.CheckpointIds.Any(id => id == Guid.Empty) ||
++            !page.CheckpointIds.Select(id => id.ToString("D")).SequenceEqual(
++                page.CheckpointIds.Select(id => id.ToString("D")).Order(StringComparer.Ordinal)) ||
++            after.HasValue && page.CheckpointIds.Any(id => string.CompareOrdinal(id.ToString("D"), after.Value.ToString("D")) <= 0) ||
++            page.NextAfterCheckpointId is { } next &&
++                (page.CheckpointIds.Length == 0 || next != page.CheckpointIds[^1] || next == after))
++            throw new InvalidDataException("Coordinator returned an invalid NPC checkpoint page.");
++        return page;
++    }
++
++    public async Task<NpcCheckpointRecoveryV1?> GetRecoveryCheckpointAsync(Guid checkpointId, string systemId,
++        CancellationToken cancellationToken = default)
++    {
++        if (checkpointId == Guid.Empty || string.IsNullOrWhiteSpace(systemId) || systemId.Length > 96)
++            throw new ArgumentException("NPC checkpoint recovery identity is invalid.");
++        var url = new Uri($"{endpoint.AbsoluteUri.TrimEnd('/')}/{checkpointId:D}/recovery?instanceId={Uri.EscapeDataString(instance)}");
++        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
++        timeout.CancelAfter(TimeSpan.FromSeconds(4));
++        using var request = CreateAuthenticatedRequest(HttpMethod.Get, url);
++        using var response = await http.SendAsync(request, timeout.Token).ConfigureAwait(false);
++        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
++            return null; // Ownership changed after page discovery; the Coordinator revalidates before disclosure.
++        response.EnsureSuccessStatusCode();
++        var recovery = await ReadBoundedJsonAsync<NpcCheckpointRecoveryV1>(response, timeout.Token)
++            .ConfigureAwait(false) ?? throw new InvalidDataException("Coordinator returned an empty NPC checkpoint.");
++        ValidateRecord(recovery, $"{checkpointId:N}.response", response: true);
++        if (!recovery.Result.Accepted ||
++            !string.Equals(recovery.Snapshot.SystemId, systemId, StringComparison.OrdinalIgnoreCase) ||
++            recovery.Snapshot.Mission is not null || recovery.Snapshot.Npcs.Length == 0)
++            throw new InvalidDataException("Coordinator returned an ineligible NPC checkpoint for recovery.");
++        ApplyRecoveredCheckpoint(recovery);
++        return recovery;
++    }
++
++    private HttpRequestMessage CreateAuthenticatedRequest(HttpMethod method, Uri uri)
++    {
++        var request = new HttpRequestMessage(method, uri);
++        request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", key);
++        return request;
++    }
++
++    private static async Task<T?> ReadBoundedJsonAsync<T>(HttpResponseMessage response,
++        CancellationToken cancellationToken) where T : class
++    {
++        const int maximumResponseBytes = NpcCheckpointContractValidator.MaximumPayloadBytes * 2;
++        if (response.Content.Headers.ContentLength is > maximumResponseBytes)
++            throw new InvalidDataException("NPC checkpoint recovery response exceeds its size limit.");
++        await using var input = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
++        using var output = new MemoryStream();
++        var buffer = new byte[81920];
++        while (true)
++        {
++            var read = await input.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
++            if (read == 0) break;
++            if (output.Length + read > maximumResponseBytes)
++                throw new InvalidDataException("NPC checkpoint recovery response exceeds its size limit.");
++            output.Write(buffer, 0, read);
++        }
++        return JsonSerializer.Deserialize<T>(output.ToArray(), new JsonSerializerOptions(JsonSerializerDefaults.Web));
++    }
++
+     public (Task Durable, Task<NpcCheckpointWriteResponseV1> Completed) Queue(NpcCheckpointWriteRequestV1 request)
+     {
+         NpcCheckpointContractValidator.Validate(request);
+@@ -159,9 +250,8 @@ internal sealed class NpcCheckpointOutbox : IAsyncDisposable
+                 {
+                     try
+                     {
+-                        using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
+-                            { Content = JsonContent.Create(item.Request) };
+-                        request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", key);
++                        using var request = CreateAuthenticatedRequest(HttpMethod.Post, endpoint);
++                        request.Content = JsonContent.Create(item.Request);
+                         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(stopping.Token);
+                         timeout.CancelAfter(TimeSpan.FromSeconds(4));
+                         using var reply = await http.SendAsync(request, timeout.Token);
+@@ -230,6 +320,14 @@ internal sealed class NpcCheckpointOutbox : IAsyncDisposable
+         if (record.Snapshot.InstanceId != instance || record.Result.RequestId != record.Snapshot.RequestId ||
+             response && Path.GetFileName(path) != $"{record.Snapshot.RequestId:N}.response")
+             throw new InvalidDataException("NPC checkpoint response record has invalid identity.");
++        if (response && record.Result.Accepted &&
++            (record.Result.Revisions is null || record.Result.Revisions.Length != record.Snapshot.ExpectedRevisions.Length ||
++             record.Result.Revisions.Any(result => result is null ||
++                 !record.Snapshot.ExpectedRevisions.Any(expected => expected.NpcId == result.NpcId &&
++                     result.Revision == expected.Revision + 1 &&
++                     result.OwnershipVersion == expected.OwnershipVersion +
++                         (record.Snapshot.Retirements.Any(retired => retired.NpcId == result.NpcId) ? 1 : 0)))))
++            throw new InvalidDataException("NPC checkpoint response revisions do not match its request.");
+     }
+ 
+     private static void WriteAtomic(string path, byte[] bytes)
+diff --git a/src/LibreLancer/Server/SpacePopulationBehavior.cs b/src/LibreLancer/Server/SpacePopulationBehavior.cs
+index 52ad3729..bf63878e 100644
+--- a/src/LibreLancer/Server/SpacePopulationBehavior.cs
++++ b/src/LibreLancer/Server/SpacePopulationBehavior.cs
+@@ -1,5 +1,6 @@
+ using System;
+ using System.Collections.Generic;
++using System.IO;
+ using System.Linq;
+ using System.Numerics;
+ using LibreLancer.Data.GameData.World;
+@@ -79,6 +80,20 @@ public partial class SpacePopulationManager
+             BuildTradeDirectives(state, leader.WorldTransform.Position, arrivalObject), world.GameWorld);
+     }
+ 
++    internal void AdoptRecoveredCheckpointGroup(GameObject[] ships)
++    {
++        var members = ships.Distinct().ToArray();
++        if (members.Length == 0 || members.Any(ship => !Alive(ship) ||
++                !ship.TryGetComponent<SNPCComponent>(out var npc) || npc.MissionRuntime is not null ||
++                npc.NpcId == Guid.Empty || npc.TerminalCheckpointPending))
++            throw new InvalidDataException("Recovered NPC checkpoint group is incomplete or ineligible.");
++        var ids = members.Select(ship => ship.GetComponent<SNPCComponent>()!.NpcId).ToHashSet();
++        if (transferredGroups.Any(group => group.Any(ship =>
++                ship.TryGetComponent<SNPCComponent>(out var npc) && ids.Contains(npc.NpcId))))
++            throw new InvalidDataException("Recovered NPC checkpoint group overlaps an active population group.");
++        transferredGroups.Add(members);
++    }
++
+     /// <summary>Returns a population group to local traffic after its gate transfer fails.</summary>
+     public void ResumeFailedTraderGroup(Guid[] npcIds, string failedGate)
+     {
+diff --git a/src/LibreLancer/Server/WorldProvider.cs b/src/LibreLancer/Server/WorldProvider.cs
+index 9bf5e020..1a26250e 100644
+--- a/src/LibreLancer/Server/WorldProvider.cs
++++ b/src/LibreLancer/Server/WorldProvider.cs
+@@ -1,5 +1,6 @@
+ using System;
+ using System.Collections.Concurrent;
++using System.Net.Http;
+ using System.Net.Security;
+ using System.Threading;
+ using System.Threading.Tasks;
+@@ -30,37 +31,39 @@ public class WorldProvider
+ 
+     private ConcurrentDictionary<StarSystem, WorldState> worlds = new();
+ 
+-    private void LoadWorld(StarSystem system, out WorldState ws, PreloadObject[] preloads)
++    private async Task LoadWorldAsync(StarSystem system, PreloadObject[] preloads)
+     {
+-        var x = new WorldState();
+-        if (worlds.TryAdd(system, new WorldState()))
++        if (!worlds.TryAdd(system, new WorldState())) return;
++        try
+         {
+-            x.World = new ServerWorld(system, server);
++            var world = new ServerWorld(system, server);
+             server.GameData.PreloadObjects(preloads, server.Resources);
+-            x.Ready = true;
+-            server.WorldReady(x.World);
+-            worlds.AddOrUpdate(
+-                system,
+-                _ => x,
+-                (_, _) => x
+-            );
++            await server.RestoreNpcCheckpointsForWorldAsync(world).ConfigureAwait(false);
++            server.WorldReady(world);
++            worlds[system] = new WorldState { Ready = true, World = world };
++        }
++        catch
++        {
++            worlds.TryRemove(system, out _);
++            throw;
+         }
+-        ws = x;
+     }
+     public void RequestWorld(StarSystem system, Action<ServerWorld> spunUp, PreloadObject[] preloads)
+     {
+         Task.Run(async () =>
+         {
+-            if (!worlds.TryGetValue(system, out var ws))
+-                LoadWorld(system, out ws, preloads);
+-            while (!ws.Ready)
++            while (true)
+             {
++                if (worlds.TryGetValue(system, out var ws) && ws.Ready)
++                {
++                    spunUp(ws.World);
++                    return;
++                }
++                try { await LoadWorldAsync(system, preloads); }
++                catch (HttpRequestException) { await Task.Delay(TimeSpan.FromSeconds(2)); }
++                catch (TaskCanceledException) { await Task.Delay(TimeSpan.FromSeconds(2)); }
+                 await Task.Delay(33);
+-                if (!worlds.TryGetValue(system, out ws))
+-                    LoadWorld(system, out ws, preloads);
+             }
+-
+-            spunUp(ws.World);
+         }).ContinueWith(x =>
+         {
+             if (x.Exception != null)

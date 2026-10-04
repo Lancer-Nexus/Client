@@ -100,3 +100,7 @@ LLServer SystemIds defines owned worlds; SystemId is the primary fallback. Trave
   staging/network I/O on outbox workers. Do not include MissionRuntime until
   Gateway lease arbitration is wired. Terminal death/dock must use a survivor
   checkpoint plus retirement as one write; do not hook generic removals.
+
+## Restart-time ambient NPC recovery
+
+- Before publishing a world or starting population simulation, drain pending checkpoint writes and restore that system's current ambient NPC checkpoints from Coordinator. Resolve stable NPC references and preserve the serialized AI/autopilot state. Keep recovery fail-closed when the checkpoint store is unavailable or corrupt; only a Coordinator 404 after listing means ownership changed and may be skipped.
