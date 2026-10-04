@@ -1,23 +1,25 @@
 --- a/src/LibreLancer/Server/GameServer.cs
 +++ b/src/LibreLancer/Server/GameServer.cs
 @@ -78,6 +78,7 @@
-
+ 
          private readonly object npcRetirementSync = new();
          private NpcRetirementOutbox? npcRetirementOutbox;
 +        private NpcCheckpointOutbox? npcCheckpointOutbox;
-
+ 
          private NpcRetirementOutbox EnsureNpcRetirementOutbox()
          {
-@@ -92,11 +93,38 @@
-                 return npcRetirementOutbox = new NpcRetirementOutbox(
+@@ -92,11 +93,39 @@
+-                return npcRetirementOutbox = new NpcRetirementOutbox(
++                npcRetirementOutbox = new NpcRetirementOutbox(
                      Path.Combine(NpcTransferStagingDirectory, "retirements"), new Uri(NpcCoordinatorUrl),
                      npcCoordinatorApiKey, InstanceId);
 +                npcCheckpointOutbox = new NpcCheckpointOutbox(
 +                    Path.Combine(NpcTransferStagingDirectory, "checkpoints"), new Uri(NpcCoordinatorUrl),
 +                    npcCoordinatorApiKey, InstanceId);
++                return npcRetirementOutbox;
              }
          }
-
+ 
 -        public Task InitializeNpcRetirementOutboxAsync() => string.IsNullOrWhiteSpace(NpcTransferStagingDirectory)
 -            ? Task.CompletedTask : EnsureNpcRetirementOutbox().Ready;
 +        public async Task InitializeNpcRetirementOutboxAsync()
@@ -46,13 +48,13 @@
 +            catch (Exception exception)
 +            { FLLog.Error("NPC Checkpoint", $"Could not persist terminal NPC event: {exception}"); }
 +        }
-
+ 
          internal bool BlocksNpcRetirementActivation(Guid npcId, long version)
          {
 @@ -1127,7 +1155,7 @@
              };
          }
-
+ 
 -        private static NpcFormationStateV1[] CaptureNpcFormations(Guid transferId, long? characterId,
 +        internal static NpcFormationStateV1[] CaptureNpcFormations(Guid transferId, long? characterId,
              JumperNpc[] jumpers)
@@ -80,7 +82,7 @@
 @@ -1009,6 +1011,123 @@
              return completion.Task;
          }
-
+ 
 +        private void QueueNpcPopulationCheckpoints()
 +        {
 +            if (Server is null || !Server.IsNpcCheckpointOutboxReady || spawnedObjects.Count == 0) return;
@@ -204,7 +206,7 @@
 @@ -1346,6 +1465,8 @@
          private double noPlayersTime;
          private double maxNoPlayers = 2.0;
-
+ 
 +        private double npcCheckpointElapsed;
 +
          public bool Update(double delta, double totalTime, uint currentTick, int step)
@@ -222,7 +224,7 @@
 +            }
              GameWorld.Update(delta);
              ApplyDamageZones(delta);
-
+ 
 --- /dev/null
 +++ b/src/LibreLancer/Server/NpcCheckpointOutbox.cs
 @@ -0,0 +1,260 @@
@@ -595,16 +597,3 @@
 +        }
 +    }
 +}
---- a/AGENTS.md
-+++ b/AGENTS.md
-@@ -88,3 +88,10 @@
-   propagation in the build entry point.
- - The integrity checker is read-only; preserve unrelated modifications and repair
-   identified overlay drift by applying the relevant maintained patch.
-+
-+- GameServer writes periodic checkpoints for active stable-ID ambient NPC groups
-+  from the simulation queue, then persists and delivers them through the bounded
-+  background outbox. Keep serialization capture on the simulation queue and all
-+  staging/network I/O on outbox workers. Do not include MissionRuntime until
-+  Gateway lease arbitration is wired. Terminal death/dock must use a survivor
-+  checkpoint plus retirement as one write; do not hook generic removals.
