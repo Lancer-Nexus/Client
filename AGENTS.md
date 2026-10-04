@@ -78,8 +78,9 @@ LLServer SystemIds defines owned worlds; SystemId is the primary fallback. Trave
   until the atomic survivor-checkpoint plus retirement write is accepted. Block
   population transfers and player-distance culling for that NPC while pending.
 - MissionRuntime terminal events remain excluded until Gateway character-lease
-  arbitration is implemented. Docking retirement and restart-time checkpoint
-  restoration are separate, required lifecycle work.
+  arbitration is implemented. Death and terminal docking now wait for a committed
+  group checkpoint before removal. Restart-time checkpoint restoration remains
+  required lifecycle work.
 
 ## Overlay integrity
 
