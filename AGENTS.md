@@ -74,8 +74,12 @@ LLServer SystemIds defines owned worlds; SystemId is the primary fallback. Trave
   corrupt outbox must prevent recovery readiness; never discard it on timeout.
 - Do not wire terminal hooks through generic object removal: transfer freezing
   also removes objects and must never retire their identities.
-- Survivor and MissionRuntime checkpoints must accompany terminal-event work.
-  The current outbox infrastructure does not yet connect death/docking hooks.
+- Death of an identified ambient NPC must keep the NPC and its group reserved
+  until the atomic survivor-checkpoint plus retirement write is accepted. Block
+  population transfers and player-distance culling for that NPC while pending.
+- MissionRuntime terminal events remain excluded until Gateway character-lease
+  arbitration is implemented. Docking retirement and restart-time checkpoint
+  restoration are separate, required lifecycle work.
 
 ## Overlay integrity
 
