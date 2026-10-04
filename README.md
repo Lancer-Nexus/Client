@@ -66,6 +66,10 @@ groups. Population names have a per-world namespace so imported names cannot
 collide with new encounter spawns. Debug LLServer's local console command
 `npc-state [NPC UUID]` captures active IDs, ownership versions, positions and
 formation leaders between simulation updates; it exposes no network endpoint.
+`npc-load-world <system nickname>` loads an unloaded world through the normal
+checkpoint-recovery path and prints `NPC_WORLD_READY` after restored state is
+applied. Use it with `npc-state` for server-only restart diagnostics without a
+game client.
 
 Each NPC runtime payload also preserves transform and velocity, health, equipment and shield state, cargo, AI graph timers and random state, and autopilot targets through stable NPC/character/world references. Goto, dock and undock autopilots retain their active phase, including docking-ring and tradelane-entry progress. The source writes the captured snapshot durably on the simulation thread before removing the NPCs; the target restores the full group inert and exposes it only after Coordinator ownership commit.
 
