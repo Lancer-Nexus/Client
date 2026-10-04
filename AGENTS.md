@@ -88,3 +88,10 @@ LLServer SystemIds defines owned worlds; SystemId is the primary fallback. Trave
   propagation in the build entry point.
 - The integrity checker is read-only; preserve unrelated modifications and repair
   identified overlay drift by applying the relevant maintained patch.
+
+- GameServer writes periodic checkpoints for active stable-ID ambient NPC groups
+  from the simulation queue, then persists and delivers them through the bounded
+  background outbox. Keep serialization capture on the simulation queue and all
+  staging/network I/O on outbox workers. Do not include MissionRuntime until
+  Gateway lease arbitration is wired. Terminal death/dock must use a survivor
+  checkpoint plus retirement as one write; do not hook generic removals.

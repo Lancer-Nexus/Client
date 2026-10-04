@@ -1,0 +1,610 @@
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -78,6 +78,7 @@
+
+         private readonly object npcRetirementSync = new();
+         private NpcRetirementOutbox? npcRetirementOutbox;
++        private NpcCheckpointOutbox? npcCheckpointOutbox;
+
+         private NpcRetirementOutbox EnsureNpcRetirementOutbox()
+         {
+@@ -92,11 +93,38 @@
+                 return npcRetirementOutbox = new NpcRetirementOutbox(
+                     Path.Combine(NpcTransferStagingDirectory, "retirements"), new Uri(NpcCoordinatorUrl),
+                     npcCoordinatorApiKey, InstanceId);
++                npcCheckpointOutbox = new NpcCheckpointOutbox(
++                    Path.Combine(NpcTransferStagingDirectory, "checkpoints"), new Uri(NpcCoordinatorUrl),
++                    npcCoordinatorApiKey, InstanceId);
+             }
+         }
+
+-        public Task InitializeNpcRetirementOutboxAsync() => string.IsNullOrWhiteSpace(NpcTransferStagingDirectory)
+-            ? Task.CompletedTask : EnsureNpcRetirementOutbox().Ready;
++        public async Task InitializeNpcRetirementOutboxAsync()
++        {
++            if (string.IsNullOrWhiteSpace(NpcTransferStagingDirectory)) return;
++            var outbox = EnsureNpcRetirementOutbox();
++            await Task.WhenAll(outbox.Ready, npcCheckpointOutbox!.Ready).ConfigureAwait(false);
++        }
++
++        internal bool IsNpcCheckpointOutboxReady => npcCheckpointOutbox?.Ready.IsCompletedSuccessfully == true;
++
++        internal long GetNpcCheckpointRevision(Guid npcId, long ownershipVersion) =>
++            npcCheckpointOutbox?.GetRevision(npcId, ownershipVersion) ?? 0;
++
++        internal bool IsNpcCheckpointPending(Guid npcId) => npcCheckpointOutbox?.IsPending(npcId) == true;
++
++        internal (Task Durable, Task<LancerNexus.Protocol.NpcCheckpointWriteResponseV1> Completed)
++            QueueNpcCheckpoint(LancerNexus.Protocol.NpcCheckpointWriteRequestV1 request) =>
++            (npcCheckpointOutbox ?? throw new InvalidOperationException("NPC checkpoint outbox is not initialized."))
++                .Queue(request);
++
++        internal void QueueNpcTerminalCheckpoint(ServerWorld world, LibreLancer.World.GameObject terminal,
++            LancerNexus.Protocol.NpcRetirementReasonV1 reason)
++        {
++            try { world.QueueNpcTerminalCheckpoint(terminal, reason); }
++            catch (Exception exception)
++            { FLLog.Error("NPC Checkpoint", $"Could not persist terminal NPC event: {exception}"); }
++        }
+
+         internal bool BlocksNpcRetirementActivation(Guid npcId, long version)
+         {
+@@ -1127,7 +1155,7 @@
+             };
+         }
+
+-        private static NpcFormationStateV1[] CaptureNpcFormations(Guid transferId, long? characterId,
++        internal static NpcFormationStateV1[] CaptureNpcFormations(Guid transferId, long? characterId,
+             JumperNpc[] jumpers)
+         {
+             var transferNpcIds = jumpers.Select(jumper => jumper.NpcId).ToHashSet();
+@@ -1804,6 +1832,7 @@
+                 allocator.Dispose();
+             npcIdentityAllocators.Clear();
+             npcRetirementOutbox?.DisposeAsync().AsTask().GetAwaiter().GetResult();
++            npcCheckpointOutbox?.DisposeAsync().AsTask().GetAwaiter().GetResult();
+             npcTransferHttp.Dispose();
+             updateRunner.Dispose();
+         }
+--- a/src/LibreLancer/Server/ServerWorld.cs
++++ b/src/LibreLancer/Server/ServerWorld.cs
+@@ -9,6 +9,8 @@
+ using System.IO;
+ using System.Linq;
+ using System.Numerics;
++using System.Security.Cryptography;
++using System.Text;
+ using System.Threading;
+ using System.Threading.Tasks;
+ using LibreLancer.Data;
+@@ -1009,6 +1011,123 @@
+             return completion.Task;
+         }
+
++        private void QueueNpcPopulationCheckpoints()
++        {
++            if (Server is null || !Server.IsNpcCheckpointOutboxReady || spawnedObjects.Count == 0) return;
++            var active = spawnedObjects.Where(obj => (obj.Flags & GameObjectFlags.Exists) != 0 &&
++                    obj.TryGetComponent<SNPCComponent>(out var npc) && npc.NpcId != Guid.Empty &&
++                    npc.OwnershipVersion > 0 && npc.MissionRuntime is null &&
++                    obj.TryGetComponent<ShipComponent>(out _))
++                .Distinct().ToHashSet();
++            var visited = new HashSet<GameObject>();
++            foreach (var candidate in active)
++            {
++                if (!visited.Add(candidate)) continue;
++                var npc = candidate.GetComponent<SNPCComponent>()!;
++                var objects = candidate.Formation is { } formation
++                    ? new[] { formation.LeadShip }.Concat(formation.Followers).Where(active.Contains).Distinct().ToArray()
++                    : [candidate];
++                if (objects.Any(obj => !obj.TryGetComponent<SNPCComponent>(out var member) ||
++                                       member.MissionRuntime is not null || member.NpcId == Guid.Empty))
++                    continue;
++                foreach (var obj in objects) visited.Add(obj);
++                QueueNpcCheckpointGroup(objects, null, null);
++            }
++        }
++
++        internal void QueueNpcTerminalCheckpoint(GameObject terminal, LancerNexus.Protocol.NpcRetirementReasonV1 reason)
++        {
++            if (Server is null || !terminal.TryGetComponent<SNPCComponent>(out var npc) ||
++                npc.NpcId == Guid.Empty || npc.OwnershipVersion <= 0 || npc.MissionRuntime is not null)
++                return;
++            var objects = terminal.Formation is { } formation
++                ? new[] { formation.LeadShip }.Concat(formation.Followers)
++                    .Where(obj => (obj.Flags & GameObjectFlags.Exists) != 0 &&
++                        obj.TryGetComponent<SNPCComponent>(out var member) && member.MissionRuntime is null &&
++                        member.NpcId != Guid.Empty && member.OwnershipVersion > 0)
++                    .Distinct().ToArray()
++                : [terminal];
++            QueueNpcCheckpointGroup(objects, terminal, reason);
++        }
++
++        private void QueueNpcCheckpointGroup(GameObject[] objects, GameObject? terminal,
++            LancerNexus.Protocol.NpcRetirementReasonV1? terminalReason)
++        {
++            if (Server is null || objects.Length == 0 || objects.Length > LancerNexus.Protocol.NpcTransferContractValidator.MaximumNpcsPerTransfer)
++                return;
++            try
++            {
++                var jumpers = objects.Select(obj => JumperNpc.FromGameObject(obj, this)).ToArray();
++                if (terminal is not null)
++                    jumpers = PrepareSurvivorFormationSnapshots(jumpers, terminal.GetComponent<SNPCComponent>()!.NpcId);
++                var terminalNpc = terminal?.GetComponent<SNPCComponent>();
++                var survivors = terminalNpc is null ? jumpers : jumpers.Where(jumper => jumper.NpcId != terminalNpc.NpcId).ToArray();
++                var members = jumpers.Select(jumper => jumper.RuntimeSnapshot).ToArray();
++                var revisions = members.Select(member => new LancerNexus.Protocol.NpcCheckpointRevisionV1
++                {
++                    NpcId = member.NpcId, OwnershipVersion = member.OwnershipVersion,
++                    Revision = Server.GetNpcCheckpointRevision(member.NpcId, member.OwnershipVersion)
++                }).ToArray();
++                if (members.Any(member => Server.IsNpcCheckpointPending(member.NpcId))) return;
++                LancerNexus.Protocol.NpcRetirementEntryV1[] retirements = terminalNpc is null ? [] : [new()
++                {
++                    NpcId = terminalNpc.NpcId, OwnershipVersion = terminalNpc.OwnershipVersion,
++                    Reason = terminalReason!.Value
++                }];
++                var groupId = StableCheckpointGroupId(members.Select(member => member.NpcId));
++                var formations = survivors.Any(jumper => jumper.FormationSnapshot is not null &&
++                        jumper.FormationSnapshot.Members.Any(member => member.CharacterId.HasValue))
++                    ? [] : GameServer.CaptureNpcFormations(groupId, null, survivors);
++                var request = new LancerNexus.Protocol.NpcCheckpointWriteRequestV1
++                {
++                    RequestId = Guid.NewGuid(), InstanceId = Server.InstanceId!, SystemId = System.Nickname,
++                    SimulationTick = CurrentTick, Npcs = survivors.Select(jumper => jumper.RuntimeSnapshot).ToArray(),
++                    Retirements = retirements, ExpectedRevisions = revisions, Formations = formations
++                };
++                var queued = Server.QueueNpcCheckpoint(request);
++                _ = queued.Durable.ContinueWith(task =>
++                {
++                    if (task.IsFaulted)
++                        FLLog.Warning("NPC Checkpoint", $"Checkpoint {request.RequestId:D} was not durably staged: {task.Exception?.GetBaseException().Message}");
++                }, TaskScheduler.Default);
++                _ = queued.Completed.ContinueWith(task =>
++                {
++                    if (task.IsFaulted || task.IsCanceled || task.Result is not { Accepted: true })
++                        FLLog.Warning("NPC Checkpoint", $"Checkpoint {request.RequestId:D} was not accepted: {task.Exception?.GetBaseException().Message ?? task.Result?.ReasonCode}");
++                }, TaskScheduler.Default);
++            }
++            catch (Exception exception)
++            {
++                FLLog.Warning("NPC Checkpoint", $"Could not capture NPC group checkpoint: {exception.Message}");
++            }
++        }
++
++        private static JumperNpc[] PrepareSurvivorFormationSnapshots(JumperNpc[] jumpers, Guid terminalNpcId)
++        {
++            var survivors = jumpers.Where(jumper => jumper.NpcId != terminalNpcId).ToArray();
++            foreach (var jumper in survivors)
++            {
++                if (jumper.FormationSnapshot is not { } source) continue;
++                var members = source.Members.Where(member => member.NpcId != terminalNpcId).ToArray();
++                if (members.Length < 2 || members.Any(member => member.CharacterId.HasValue))
++                { jumper.FormationSnapshot = null; continue; }
++                if (members.All(member => !member.IsLeader))
++                    members[0] = new() { IsLeader = true, NpcId = members[0].NpcId, Offset = members[0].Offset };
++                jumper.FormationSnapshot = new LancerNexus.Protocol.NpcFormationStateV1
++                {
++                    Members = members, PlayerPosition = source.PlayerPosition,
++                    PlayerTargetPosition = source.PlayerTargetPosition
++                };
++            }
++            return jumpers;
++        }
++
++        private static Guid StableCheckpointGroupId(IEnumerable<Guid> ids)
++        {
++            var identity = string.Join("|", ids.Order().Select(id => id.ToString("N")));
++            return new Guid(SHA256.HashData(Encoding.UTF8.GetBytes("npc-checkpoint-group:" + identity)).AsSpan(0, 16));
++        }
++
+         public void RemoveSpawnedObject(GameObject obj, bool exploded)
+         {
+             actions.Enqueue(() => RemoveSpawnedObjectInternal(obj, exploded));
+@@ -1346,6 +1465,8 @@
+         private double noPlayersTime;
+         private double maxNoPlayers = 2.0;
+
++        private double npcCheckpointElapsed;
++
+         public bool Update(double delta, double totalTime, uint currentTick, int step)
+         {
+             // Avoid locks during Update
+@@ -1374,6 +1495,12 @@
+             // Update
+             NPCs.FrameStart();
+             Population.Update(delta);
++            npcCheckpointElapsed += delta;
++            if (npcCheckpointElapsed >= 10)
++            {
++                npcCheckpointElapsed %= 10;
++                QueueNpcPopulationCheckpoints();
++            }
+             GameWorld.Update(delta);
+             ApplyDamageZones(delta);
+
+--- /dev/null
++++ b/src/LibreLancer/Server/NpcCheckpointOutbox.cs
+@@ -0,0 +1,260 @@
++using System;
++using System.Collections.Concurrent;
++using System.Collections.Generic;
++using System.IO;
++using System.Linq;
++using System.Net.Http;
++using System.Net.Http.Json;
++using System.Text.Json;
++using System.Threading;
++using System.Threading.Channels;
++using System.Threading.Tasks;
++using LancerNexus.Protocol;
++using MessagePack;
++
++namespace LibreLancer.Server;
++
++/// <summary>Durable, single-writer checkpoint delivery. File and network I/O stay off the simulation thread.</summary>
++internal sealed class NpcCheckpointOutbox : IAsyncDisposable
++{
++    private const int Capacity = 1024;
++    private const int MaximumRecordBytes = NpcCheckpointContractValidator.MaximumPayloadBytes + 64 * 1024;
++    private readonly string directory;
++    private readonly string instance;
++    private readonly HttpClient http;
++    private readonly Channel<Item> intake = Channel.CreateBounded<Item>(new BoundedChannelOptions(Capacity)
++        { FullMode = BoundedChannelFullMode.Wait, SingleReader = true, SingleWriter = false });
++    private readonly CancellationTokenSource stopping = new();
++    private readonly ConcurrentDictionary<Guid, long> pendingNpcs = new();
++    private readonly ConcurrentDictionary<Guid, (long Version, long Revision)> revisions = new();
++    private readonly TaskCompletionSource ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
++    private readonly Task persistence;
++    private readonly Task delivery;
++    private readonly Channel<Item> outgoing = Channel.CreateBounded<Item>(new BoundedChannelOptions(Capacity)
++        { FullMode = BoundedChannelFullMode.Wait, SingleReader = true, SingleWriter = true });
++    private readonly Uri endpoint;
++    private readonly string key;
++    private readonly string instanceId;
++
++    public Task Ready => ready.Task;
++
++    public NpcCheckpointOutbox(string directory, Uri coordinator, string apiKey, string instance,
++        HttpMessageHandler? handler = null)
++    {
++        http = new HttpClient(handler ?? new HttpClientHandler { AllowAutoRedirect = false }, disposeHandler: true)
++            { Timeout = Timeout.InfiniteTimeSpan };
++        this.directory = directory;
++        this.instance = instance;
++        instanceId = instance;
++        key = apiKey;
++        endpoint = new Uri(coordinator, "/internal/v1/npc-checkpoints");
++        persistence = Task.Run(PersistAsync);
++        delivery = Task.Run(DeliverAsync);
++    }
++
++    public long GetRevision(Guid npcId, long ownershipVersion) =>
++        revisions.TryGetValue(npcId, out var state) && state.Version == ownershipVersion ? state.Revision : 0;
++
++    public bool IsPending(Guid npcId) => pendingNpcs.ContainsKey(npcId);
++
++    public (Task Durable, Task<NpcCheckpointWriteResponseV1> Completed) Queue(NpcCheckpointWriteRequestV1 request)
++    {
++        NpcCheckpointContractValidator.Validate(request);
++        if (request.InstanceId != instance)
++            throw new ArgumentException("NPC checkpoint belongs to a different instance.");
++        foreach (var member in request.ExpectedRevisions)
++        {
++            var current = GetRevision(member.NpcId, member.OwnershipVersion);
++            if (current != member.Revision || !pendingNpcs.TryAdd(member.NpcId, 0))
++            {
++                foreach (var reserved in request.ExpectedRevisions.TakeWhile(value => value.NpcId != member.NpcId))
++                    pendingNpcs.TryRemove(reserved.NpcId, out _);
++                throw new InvalidOperationException("NPC checkpoint is stale or another write is pending for this member.");
++            }
++        }
++        var item = new Item(request, new(TaskCreationOptions.RunContinuationsAsynchronously),
++            new(TaskCreationOptions.RunContinuationsAsynchronously));
++        if (!intake.Writer.TryWrite(item))
++        {
++            foreach (var member in request.ExpectedRevisions) pendingNpcs.TryRemove(member.NpcId, out _);
++            throw new InvalidOperationException("NPC checkpoint persistence queue is full or closed.");
++        }
++        return (item.Durable.Task, item.Completed.Task);
++    }
++
++    private async Task PersistAsync()
++    {
++        try
++        {
++            Directory.CreateDirectory(directory);
++            foreach (var path in Directory.EnumerateFiles(directory, "*.response").Order())
++            {
++                if (new FileInfo(path).Length > MaximumRecordBytes)
++                    throw new InvalidDataException("NPC checkpoint response record exceeds its limit.");
++                var record = MessagePackSerializer.Deserialize<NpcCheckpointRecoveryV1>(File.ReadAllBytes(path),
++                    MessagePackSerializerOptions.Standard.WithSecurity(MessagePackSecurity.UntrustedData));
++                ValidateRecord(record, path, response: true);
++                ApplyResult(record);
++            }
++            foreach (var path in Directory.EnumerateFiles(directory, "*.pending").Order())
++            {
++                if (new FileInfo(path).Length > NpcCheckpointContractValidator.MaximumPayloadBytes)
++                    throw new InvalidDataException("NPC checkpoint request exceeds its limit.");
++                var request = MessagePackSerializer.Deserialize<NpcCheckpointWriteRequestV1>(File.ReadAllBytes(path),
++                    MessagePackSerializerOptions.Standard.WithSecurity(MessagePackSecurity.UntrustedData));
++                NpcCheckpointContractValidator.Validate(request);
++                if (request.InstanceId != instance || Path.GetFileName(path) != $"{request.RequestId:N}.pending")
++                    throw new InvalidDataException("NPC checkpoint request has invalid identity.");
++                MarkPending(request, true);
++                var item = new Item(request, new(TaskCreationOptions.RunContinuationsAsynchronously),
++                    new(TaskCreationOptions.RunContinuationsAsynchronously));
++                item.Durable.TrySetResult();
++                await outgoing.Writer.WriteAsync(item, stopping.Token);
++            }
++            ready.TrySetResult();
++            await foreach (var item in intake.Reader.ReadAllAsync(stopping.Token))
++            {
++                try
++                {
++                    var path = Path.Combine(directory, $"{item.Request.RequestId:N}.pending");
++                    var bytes = MessagePackSerializer.Serialize(item.Request);
++                    if (File.Exists(path) && !File.ReadAllBytes(path).AsSpan().SequenceEqual(bytes))
++                        throw new InvalidDataException("NPC checkpoint request ID conflicts with durable intent.");
++                    WriteAtomic(path, bytes);
++                    MarkPending(item.Request, true);
++                    item.Durable.TrySetResult();
++                    await outgoing.Writer.WriteAsync(item, stopping.Token);
++                }
++                catch (Exception exception)
++                {
++                    MarkPending(item.Request, false);
++                    item.Durable.TrySetException(exception);
++                    item.Completed.TrySetException(exception);
++                }
++            }
++        }
++        catch (Exception exception)
++        {
++            ready.TrySetException(exception);
++            intake.Writer.TryComplete(exception);
++            while (intake.Reader.TryRead(out var item))
++            {
++                MarkPending(item.Request, false);
++                item.Durable.TrySetException(exception);
++                item.Completed.TrySetException(exception);
++            }
++            throw;
++        }
++        finally { outgoing.Writer.TryComplete(); }
++    }
++
++    private async Task DeliverAsync()
++    {
++        try
++        {
++            await foreach (var item in outgoing.Reader.ReadAllAsync(stopping.Token))
++            {
++                var delay = 100;
++                while (!stopping.IsCancellationRequested)
++                {
++                    try
++                    {
++                        using var request = new HttpRequestMessage(HttpMethod.Post, endpoint)
++                            { Content = JsonContent.Create(item.Request) };
++                        request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", key);
++                        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(stopping.Token);
++                        timeout.CancelAfter(TimeSpan.FromSeconds(4));
++                        using var reply = await http.SendAsync(request, timeout.Token);
++                        var response = await reply.Content.ReadFromJsonAsync<NpcCheckpointWriteResponseV1>(timeout.Token);
++                        if (response is null || response.RequestId != item.Request.RequestId ||
++                            response.Accepted && (response.Revisions is null ||
++                                response.Revisions.Length != item.Request.ExpectedRevisions.Length ||
++                                response.Revisions.Any(result => result is null ||
++                                    !item.Request.ExpectedRevisions.Any(expected => expected.NpcId == result.NpcId &&
++                                        result.Revision == expected.Revision + 1 &&
++                                        result.OwnershipVersion == expected.OwnershipVersion +
++                                            (item.Request.Retirements.Any(retired => retired.NpcId == result.NpcId) ? 1 : 0)))))
++                            throw new InvalidDataException("NPC checkpoint response does not match its durable request.");
++                        var record = new NpcCheckpointRecoveryV1 { Snapshot = item.Request, Result = response };
++                        WriteAtomic(Path.Combine(directory, $"{item.Request.RequestId:N}.response"),
++                            MessagePackSerializer.Serialize(record));
++                        ApplyResult(record);
++                        File.Delete(Path.Combine(directory, $"{item.Request.RequestId:N}.pending"));
++                        MarkPending(item.Request, false);
++                        item.Completed.TrySetResult(response);
++                        break;
++                    }
++                    catch (OperationCanceledException) when (stopping.IsCancellationRequested)
++                    {
++                        item.Completed.TrySetCanceled(stopping.Token);
++                        return;
++                    }
++                    catch (Exception exception) when (exception is HttpRequestException or OperationCanceledException or
++                                                     InvalidDataException or IOException or JsonException)
++                    {
++                        await Task.Delay(delay, stopping.Token);
++                        delay = Math.Min(5000, delay * 2);
++                    }
++                }
++            }
++        }
++        catch (OperationCanceledException) when (stopping.IsCancellationRequested) { }
++        finally { while (outgoing.Reader.TryRead(out var item)) item.Completed.TrySetCanceled(); }
++    }
++
++    private void ApplyResult(NpcCheckpointRecoveryV1 record)
++    {
++        if (!record.Result.Accepted) return;
++        foreach (var revision in record.Result.Revisions)
++        {
++            if (record.Snapshot.Retirements.Any(entry => entry.NpcId == revision.NpcId))
++                revisions.TryRemove(revision.NpcId, out _);
++            else
++                revisions.AddOrUpdate(revision.NpcId, (revision.OwnershipVersion, revision.Revision),
++                    (_, current) => revision.OwnershipVersion > current.Version ||
++                                    revision.OwnershipVersion == current.Version && revision.Revision > current.Revision
++                        ? (revision.OwnershipVersion, revision.Revision) : current);
++        }
++    }
++
++    private void MarkPending(NpcCheckpointWriteRequestV1 request, bool value)
++    {
++        foreach (var member in request.ExpectedRevisions)
++            if (value) pendingNpcs[member.NpcId] = 0;
++            else pendingNpcs.TryRemove(member.NpcId, out _);
++    }
++
++    private void ValidateRecord(NpcCheckpointRecoveryV1 record, string path, bool response)
++    {
++        NpcCheckpointContractValidator.Validate(record.Snapshot);
++        if (record.Snapshot.InstanceId != instance || record.Result.RequestId != record.Snapshot.RequestId ||
++            response && Path.GetFileName(path) != $"{record.Snapshot.RequestId:N}.response")
++            throw new InvalidDataException("NPC checkpoint response record has invalid identity.");
++    }
++
++    private static void WriteAtomic(string path, byte[] bytes)
++    {
++        var temporary = path + $".{Guid.NewGuid():N}.tmp";
++        try
++        {
++            using (var file = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None,
++                       4096, FileOptions.WriteThrough))
++            { file.Write(bytes); file.Flush(true); }
++            File.Move(temporary, path, true);
++        }
++        finally { if (File.Exists(temporary)) File.Delete(temporary); }
++    }
++
++    public async ValueTask DisposeAsync()
++    {
++        intake.Writer.TryComplete();
++        try { await persistence.ConfigureAwait(false); } catch { }
++        stopping.Cancel();
++        try { await delivery.ConfigureAwait(false); } catch { }
++        http.Dispose();
++        stopping.Dispose();
++    }
++
++    private sealed record Item(NpcCheckpointWriteRequestV1 Request,
++        TaskCompletionSource Durable, TaskCompletionSource<NpcCheckpointWriteResponseV1> Completed);
++}
+--- /dev/null
++++ b/src/LibreLancer.Tests/NpcCheckpointOutboxTests.cs
+@@ -0,0 +1,106 @@
++using System;
++using System.IO;
++using System.Linq;
++using System.Net;
++using System.Net.Http;
++using System.Net.Http.Json;
++using System.Text.Json;
++using System.Threading;
++using System.Threading.Tasks;
++using LancerNexus.Protocol;
++using LibreLancer.Server;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class NpcCheckpointOutboxTests
++{
++    private static NpcCheckpointWriteRequestV1 Request() => new()
++    {
++        RequestId = Guid.NewGuid(),
++        InstanceId = "source",
++        SystemId = "li01",
++        Npcs = [new() { NpcId = Guid.NewGuid(), OwnershipVersion = 4, SystemId = "li01",
++            RuntimeState = MessagePack.MessagePackSerializer.Serialize(new NpcRuntimeStateV1
++            { Orientation = new() { W = 1 }, LoadoutArchetype = "freighter",
++                Ai = new() { StateId = "idle", PreviousStateId = "idle" } }) }],
++        ExpectedRevisions = [new() { NpcId = Guid.Empty, OwnershipVersion = 4 }]
++    };
++
++    [Fact]
++    public async Task DurableAsyncDeliveryPersistsResponseAndRevisionAcrossRestart()
++    {
++        var directory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
++        try
++        {
++            var request = Request();
++            request = request with { ExpectedRevisions = [request.ExpectedRevisions[0] with { NpcId = request.Npcs[0].NpcId }] };
++            await using (var outbox = new NpcCheckpointOutbox(directory, new Uri("http://127.0.0.1"), "test", "source",
++                             new Handler()))
++            {
++                await outbox.Ready.WaitAsync(TimeSpan.FromSeconds(3));
++                var queued = outbox.Queue(request);
++                await queued.Durable.WaitAsync(TimeSpan.FromSeconds(3));
++                Assert.True(File.Exists(Path.Combine(directory, $"{request.RequestId:N}.pending")));
++                var response = await queued.Completed.WaitAsync(TimeSpan.FromSeconds(3));
++                Assert.True(response.Accepted);
++                Assert.Equal(1, outbox.GetRevision(request.Npcs[0].NpcId, 4));
++                Assert.True(File.Exists(Path.Combine(directory, $"{request.RequestId:N}.response")));
++                Assert.False(File.Exists(Path.Combine(directory, $"{request.RequestId:N}.pending")));
++            }
++            await using var restarted = new NpcCheckpointOutbox(directory, new Uri("http://127.0.0.1"), "test", "source",
++                new Handler());
++            await restarted.Ready.WaitAsync(TimeSpan.FromSeconds(3));
++            Assert.Equal(1, restarted.GetRevision(request.Npcs[0].NpcId, 4));
++            Assert.Equal(0, restarted.GetRevision(request.Npcs[0].NpcId, 5));
++        }
++        finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
++    }
++
++    [Fact]
++    public async Task CoordinatorNetworkWaitDoesNotDelayDurableDiskWrite()
++    {
++        var directory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
++        try
++        {
++            var handler = new Handler(blocked: true);
++            var request = Request();
++            request = request with { ExpectedRevisions = [request.ExpectedRevisions[0] with { NpcId = request.Npcs[0].NpcId }] };
++            Task<NpcCheckpointWriteResponseV1>? completion;
++            await using (var outbox = new NpcCheckpointOutbox(directory, new Uri("http://127.0.0.1"), "test", "source", handler))
++            {
++                await outbox.Ready.WaitAsync(TimeSpan.FromSeconds(3));
++                var queued = outbox.Queue(request);
++                completion = queued.Completed;
++                await queued.Durable.WaitAsync(TimeSpan.FromSeconds(3));
++                await handler.Started.Task.WaitAsync(TimeSpan.FromSeconds(3));
++                Assert.True(File.Exists(Path.Combine(directory, $"{request.RequestId:N}.pending")));
++                Assert.False(queued.Completed.IsCompleted);
++            }
++            Assert.NotNull(completion);
++            Assert.True(completion.IsCanceled);
++            Assert.True(File.Exists(Path.Combine(directory, $"{request.RequestId:N}.pending")));
++        }
++        finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
++    }
++
++    private sealed class Handler(bool blocked = false) : HttpMessageHandler
++    {
++        public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
++        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
++        {
++            Started.TrySetResult();
++            if (blocked) await Task.Delay(Timeout.Infinite, token);
++            var body = await request.Content!.ReadFromJsonAsync<NpcCheckpointWriteRequestV1>(token);
++            var response = new NpcCheckpointWriteResponseV1
++            {
++                RequestId = body!.RequestId,
++                Accepted = true,
++                ReasonCode = "checkpointed",
++                Revisions = body.ExpectedRevisions.Select(expected => expected with
++                { Revision = expected.Revision + 1 }).ToArray()
++            };
++            return new(HttpStatusCode.OK) { Content = JsonContent.Create(response) };
++        }
++    }
++}
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -88,3 +88,10 @@
+   propagation in the build entry point.
+ - The integrity checker is read-only; preserve unrelated modifications and repair
+   identified overlay drift by applying the relevant maintained patch.
++
++- GameServer writes periodic checkpoints for active stable-ID ambient NPC groups
++  from the simulation queue, then persists and delivers them through the bounded
++  background outbox. Keep serialization capture on the simulation queue and all
++  staging/network I/O on outbox workers. Do not include MissionRuntime until
++  Gateway lease arbitration is wired. Terminal death/dock must use a survivor
++  checkpoint plus retirement as one write; do not hook generic removals.
