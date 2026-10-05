@@ -78,13 +78,6 @@ namespace LibreLancer.Thn.Events
                 }
                 return true;
             }
-
-            public override void Finish()
-            {
-                Parent.T = Event.StopPercent;
-                Child.Update();
-                Child.Attachments.Remove(Attachment);
-            }
         }
     }
 }

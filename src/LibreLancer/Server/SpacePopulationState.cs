@@ -1,5 +1,4 @@
 using System.Collections.Generic;
-using System.Linq;
 using System.Numerics;
 using LibreLancer.Data.Schema.Missions;
 using LibreLancer.World;
@@ -21,7 +20,7 @@ public partial class SpacePopulationManager
         public int PathIndex = -1;
     }
 
-    internal readonly record struct PatrolPathSegment(Zone Zone, int Label);
+    private readonly record struct PatrolPathSegment(Zone Zone, int Label);
 
     private sealed class PopGroup(ZoneState state, EncounterInfo encounter)
     {
@@ -34,43 +33,9 @@ public partial class SpacePopulationManager
         public float PersistDistance;
         public int PathIndex = state.PathIndex;
         public Vector3? InitialPathTarget;
-        public bool PatrolPathExhausted;
         public bool InCombat;
-        public bool Fleeing;
-        public GameObject? AlertTarget;
-        public bool IsTransferred;
         public Vector3? ResumeDutyTarget;
     }
-
-    public JumperNpc[] GatherPopulationTransferGroup(GameObject ship)
-    {
-        var transferred = transferredGroups.FirstOrDefault(group => group.Contains(ship));
-        if (transferred is not null)
-        {
-            if (transferred.Any(member => !Alive(member) ||
-                    !member.TryGetComponent<Components.SNPCComponent>(out var npc) || npc.MissionRuntime is not null ||
-                    npc.TerminalCheckpointPending))
-                return [];
-            return transferred.Select(member => JumperNpc.FromGameObject(member, world)).ToArray();
-        }
-        foreach (var state in zones)
-        foreach (var group in state.Groups)
-        {
-            if (!group.Ships.Contains(ship) ||
-                !CanTransferPopulationGroup(group.IsTransferred, group.Encounter?.FormationDefinition?.Behavior))
-                continue;
-            var members = group.Ships.Where(Alive).ToArray();
-            if (members.Length == 0 || members.Any(member =>
-                    !member.TryGetComponent<Components.SNPCComponent>(out var npc) || npc.MissionRuntime is not null ||
-                    npc.TerminalCheckpointPending))
-                return [];
-            return members.Select(member => JumperNpc.FromGameObject(member, world)).ToArray();
-        }
-        return [];
-    }
-
-    internal static bool CanTransferPopulationGroup(bool isTransferred, EncounterBehavior? behavior) =>
-        isTransferred || behavior == EncounterBehavior.trade;
 
     private readonly record struct SpawnLocation(
         Vector3 Position,

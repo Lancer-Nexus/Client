@@ -12,7 +12,7 @@ public partial class Explosion
 {
     [Entry("nickname", Required = true)] public string Nickname = null!;
     [Entry("effect")] public string? Effect;
-    [Entry("lifetime", MinMax = true)] public Vector2 Lifetime;
+    [Entry("lifetime")] public Vector2 Lifetime;
     [Entry("process")] public string? Process;
     [Entry("strength")] public float Strength;
     [Entry("radius")] public float Radius;

@@ -39,25 +39,6 @@ namespace LibreLancer.Server.Components
             _health = 0;
         }
 
-        internal NpcShieldTransferStateV1 CaptureTransferState(GameWorld world)
-        {
-            var totalTime = world.Server?.Server.TotalTime ?? 0;
-            return new NpcShieldTransferStateV1(_health, Math.Max(0, suppressedUntil - totalTime), suppressedRestoreHealth);
-        }
-
-        internal void RestoreTransferState(NpcShieldTransferStateV1 state, GameWorld world)
-        {
-            var totalTime = world.Server?.Server.TotalTime ?? 0;
-            _health = Math.Clamp(state.Health, 0, Equip.Def.MaxCapacity);
-            suppressedRestoreHealth = Math.Clamp(state.SuppressedRestoreHealth, 0, Equip.Def.MaxCapacity);
-            suppressedUntil = state.SuppressionRemainingSeconds > 0
-                ? totalTime + state.SuppressionRemainingSeconds
-                : 0;
-            if (suppressedUntil > 0)
-                _health = 0;
-            shieldHpActive = false;
-        }
-
         private bool shieldHpActive = false;
 
         public override void Update(double time, GameWorld world)

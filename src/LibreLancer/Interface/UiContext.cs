@@ -17,7 +17,6 @@ namespace LibreLancer.Interface
         // State
         public float ViewportWidth;
         public float ViewportHeight;
-        public float TextScale { get; set; } = 1f;
         public float MouseX;
         public float MouseY;
         public bool MouseLeftDown;
@@ -236,7 +235,7 @@ namespace LibreLancer.Interface
         {
             var ratio = ViewportHeight / 480;
             var pixels = inputPoints * ratio;
-            return (int) Math.Floor(pixels * TextScale);
+            return (int) Math.Floor(pixels);
         }
 
         public void Update(double globalTime, double deltaTime, int mouseX, int mouseY, bool leftDown)

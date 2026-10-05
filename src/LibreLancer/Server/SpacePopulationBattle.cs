@@ -44,11 +44,7 @@ public partial class SpacePopulationManager
             if (!group.InCombat)
                 continue;
 
-            if (group.Fleeing)
-                continue;
-
             group.InCombat = false;
-            group.AlertTarget = null;
             group.InitialPathTarget = group.ResumeDutyTarget;
             group.ResumeDutyTarget = null;
             ClearCombatTargets(group);
@@ -58,13 +54,6 @@ public partial class SpacePopulationManager
 
     private GameObject? FindGroupHostile(PopGroup group, float range)
     {
-        if (group.AlertTarget is { } alert && Alive(alert) &&
-            Vector3.DistanceSquared(group.Ships.FirstOrDefault(Alive)?.WorldTransform.Position ?? alert.WorldTransform.Position,
-                alert.WorldTransform.Position) <= range * range)
-        {
-            return alert;
-        }
-
         foreach (var ship in group.Ships)
         {
             if (!Alive(ship))
@@ -227,8 +216,7 @@ public partial class SpacePopulationManager
                 var persistDistance = state.InBattle || GroupInCombat(group, players)
                     ? Math.Max(basePersistDistance, BattlePersistDistance)
                     : basePersistDistance;
-                if (!group.IsTransferred && (players.Length == 0 ||
-                    group.Ships.All(x => DistanceToNearestPlayer(x.WorldTransform.Position, players) > persistDistance)))
+                if (players.Length == 0 || group.Ships.All(x => DistanceToNearestPlayer(x.WorldTransform.Position, players) > persistDistance))
                 {
                     foreach (var ship in group.Ships)
                     {
@@ -238,19 +226,6 @@ public partial class SpacePopulationManager
                     state.Groups.RemoveAt(i);
                 }
             }
-        }
-        for (int i = transferredGroups.Count - 1; i >= 0; i--)
-        {
-            var members = transferredGroups[i].Where(Alive).ToArray();
-            if (members.Length == 0)
-            {
-                transferredGroups.RemoveAt(i);
-                continue;
-            }
-            transferredGroups[i] = members;
-            // Transferred ships leave through their route, destruction or another handoff.
-            // Player distance must never discard a leased NPC.
-
         }
     }
 }

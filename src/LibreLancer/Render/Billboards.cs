@@ -66,15 +66,13 @@ namespace LibreLancer.Render
 			public ushort BlendMode;
 			public ushort IndexStart;
             public byte Triangle;
-            public bool DepthTest;
 
-            public RenderData(Texture tex, ushort blend, ushort idxStart, bool depthTest = true)
+            public RenderData(Texture tex, ushort blend, ushort idxStart)
             {
                 Texture = tex;
                 BlendMode = blend;
                 IndexStart = idxStart;
                 Triangle = 0;
-                DepthTest = depthTest;
             }
             public static RenderData CreateTri(Texture tex, ushort blend, ushort idxStart)
 			{
@@ -87,7 +85,6 @@ namespace LibreLancer.Render
 					var hash = 17;
 					hash += hash * 23 + Texture.GetHashCode();
 					hash += hash * 23 + BlendMode.GetHashCode();
-					hash += hash * 23 + DepthTest.GetHashCode();
 					return hash;
 				}
 			}
@@ -238,15 +235,13 @@ namespace LibreLancer.Render
 			Vector2 bottomright,
 			float angle,
 			int layer,
-			ushort blend = BlendMode.Normal,
-			bool depthTest = true
+			ushort blend = BlendMode.Normal
 		)
 		{
 			rendat[billboardCount] = new RenderData(
 				texture,
 				blend,
-				(ushort)vertexCountBasic,
-				depthTest
+				(ushort)vertexCountBasic
 			);
 			CreateBillboard(
 				Position,
@@ -331,11 +326,7 @@ namespace LibreLancer.Render
 
             rs.Textures[0] = rendat[datindex].Texture;
             rs.Samplers[0] = new SamplerState(rs.PreferredFilterLevel, WrapMode.ClampToEdge, WrapMode.ClampToEdge);
-            var depthEnabled = rs.DepthEnabled;
-            if (!rendat[datindex].DepthTest)
-                rs.DepthEnabled = false;
             vboBasic.Draw(PrimitiveTypes.TriangleList, 0, start, count / 3);
-            rs.DepthEnabled = depthEnabled;
             rs.Cull = true;
             lastDatHash = -1;
         }

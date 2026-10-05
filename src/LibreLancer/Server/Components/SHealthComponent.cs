@@ -183,14 +183,6 @@ namespace LibreLancer.Server.Components
             }
         }
 
-        public void DamageRootFromFuse(float hullDamage)
-        {
-            if (hullDamage > 0)
-            {
-                HandleHullDamage(hullDamage, null, null);
-            }
-        }
-
         public void DamageExplosion(float hullDamage, float energyDamage, GameObject? attacker, Vector3 origin, float radius)
         {
             if (energyDamage <= 0)

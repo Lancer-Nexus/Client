@@ -55,7 +55,6 @@ namespace LibreLancer.Fx
                 p=Vector3.Transform(p, particleSpawnTransform);
                 n=Vector3.TransformNormal(n, particleSpawnTransform);
             }
-			particle.Normal = n.Normalized();
 
 			n *= Pressure.GetValue(sparam, 0);
 			var pr = p * radius;
@@ -64,3 +63,4 @@ namespace LibreLancer.Fx
 		}
 	}
 }
+

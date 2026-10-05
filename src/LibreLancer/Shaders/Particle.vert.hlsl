@@ -102,34 +102,12 @@ Output main(int vertexID: SV_VertexID)
         right = normalize(particle.normal);
         float3 toCamera = normalize(CameraPosition - p);
         up = cross(toCamera, right);
-        float upLength = length(up);
-        if (upLength <= 0.0001)
-        {
-            float3 cameraRight = float3(View[0][0], View[1][0], View[2][0]);
-            up = cameraRight - right * dot(cameraRight, right);
-            upLength = length(up);
-        }
-        up /= max(upLength, 0.0001);
     }
     else if (Type == 2)
     {
-        // Perp billboards face along the particle direction and stay upright.
-        // A vertical or zero direction needs a fallback axis to keep the basis valid.
-        float3 perpNormal = particle.normal;
-        float normalLengthSquared = dot(perpNormal, perpNormal);
-        if (normalLengthSquared <= 1e-8)
-        {
-            perpNormal = float3(0.0, 0.0, 1.0);
-        }
-        else
-        {
-            perpNormal *= rsqrt(normalLengthSquared);
-        }
-        float3 referenceAxis = abs(perpNormal.y) < 0.999
-            ? float3(0.0, 1.0, 0.0)
-            : float3(1.0, 0.0, 0.0);
-        right = normalize(cross(perpNormal, referenceAxis));
-        up = normalize(cross(right, perpNormal));
+        // Perp
+        right = cross(particle.normal, float3(0.0, 1.0, 0.0));
+        up = cross(right, particle.normal);
     }
 
     float3 positions[4];

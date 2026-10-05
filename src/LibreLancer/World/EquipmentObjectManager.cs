@@ -37,13 +37,6 @@ namespace LibreLancer.World
 
         public static void InstantiateEquipment(GameObject parent, ResourceManager res, SoundManager? snd, EquipmentType type, string? hardpoint, Equipment equip)
         {
-            if (equip is AnimationEquipment animation)
-            {
-                if (animation.Animation != null)
-                    parent.AnimationComponent?.StartAnimation(animation.Animation);
-                return;
-            }
-
             var equipType = equip.GetType();
             if (!handlers.TryGetValue(equipType, out var handle))
             {

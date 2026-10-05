@@ -116,11 +116,7 @@ public class GameItemDb
         VFS = vfs;
         var flini = new FreelancerIni(VFS);
         flData = new FreelancerData(flini, VFS);
-        ThornReadCallback = (file) =>
-        {
-            var legacyPath = "EXE/" + file;
-            return VFS.ReadAllBytes(VFS.FileExists(legacyPath) ? legacyPath : file);
-        };
+        ThornReadCallback = (file) => VFS.ReadAllBytes("EXE/" + file);
     }
 
     public string? DataPath(string? input)
@@ -573,17 +569,14 @@ public class GameItemDb
                 }
                 else if (Goods.TryGetValue(gd.Good, out var good))
                 {
-                    @base.SoldGoods.Add(new BaseSoldGood(
-                        gd.Rank,
-                        good!,
-                        gd.Rep,
-                        (ulong)((double)good!.Ini.Price * gd.Multiplier),
-                        gd.Max > 0,
-                        m.SourceFile,
-                        gd.Min,
-                        gd.Max,
-                        gd.Preserve,
-                        gd.Multiplier));
+                    @base.SoldGoods.Add(new BaseSoldGood()
+                    {
+                        Rep = gd.Rep,
+                        Rank = gd.Rank,
+                        Good = good!,
+                        Price = (ulong)((double)good!.Ini.Price * gd.Multiplier),
+                        ForSale = gd.Max > 0
+                    });
                 }
             }
         }
@@ -816,18 +809,6 @@ public class GameItemDb
             }
         }
     }
-
-    internal static TradelaneEquipment CreateTradelaneEquipment(
-        Tradelane tradelane, Func<string?, ResolvedFx?> resolveEffect) => new()
-    {
-        ShipEnter = resolveEffect(tradelane.TlShipEnter),
-        ShipTravel = resolveEffect(tradelane.TlShipTravel),
-        ShipExit = resolveEffect(tradelane.TlShipExit),
-        ShipDisrupt = resolveEffect(tradelane.TlShipDisrupt),
-        PlayerTravel = resolveEffect(tradelane.TlPlayerTravel),
-        PlayerSplash = resolveEffect(tradelane.TlPlayerSplash),
-        RingActive = resolveEffect(tradelane.TlRingActive)
-    };
 
     public void LoadData(Action? onIniLoaded = null)
     {
@@ -1291,7 +1272,16 @@ public class GameItemDb
 
             if (val is Tradelane tl)
             {
-                equip = CreateTradelaneEquipment(tl, name => Effects.Get(name));
+                var tlequip = new TradelaneEquipment
+                {
+                    ShipEnter = Effects.Get(tl.TlShipEnter),
+                    ShipExit = Effects.Get(tl.TlShipExit),
+                    ShipDisrupt = Effects.Get(tl.TlShipDisrupt),
+                    PlayerTravel = Effects.Get(tl.TlPlayerTravel),
+                    PlayerSplash = Effects.Get(tl.TlPlayerSplash),
+                    RingActive = Effects.Get(tl.TlRingActive)
+                };
+                equip = tlequip;
             }
 
             if (val is Commodity cm)

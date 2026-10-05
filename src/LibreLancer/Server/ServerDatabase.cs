@@ -5,7 +5,6 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Security.AccessControl;
 using System.Threading.Tasks;
@@ -13,17 +12,11 @@ using System.Threading.Tasks.Dataflow;
 using LibreLancer.Database;
 using LibreLancer.Entities.Character;
 using LibreLancer.Entities.Enums;
-using LibreLancer.Data.Schema.Save;
 using LibreLancer.Net.Protocol;
 using Microsoft.EntityFrameworkCore;
 
 namespace LibreLancer.Server
 {
-
-    public sealed record TransferSnapshotImportRecord(
-        Guid TransferId, Guid AccountId, long CharacterId, string SourceInstanceId,
-        string TargetInstanceId, string TargetSystemId, long LeaseVersion, string TicketHash,
-        string? SnapshotHash, bool Imported);
 
     public class DatabaseCharacter
     {
@@ -108,6 +101,7 @@ namespace LibreLancer.Server
 
     public record BannedPlayerDescription(Guid? AccountId, string[] Characters, DateTime? BanExpiry);
 
+    public record AdminCharacterDescription(long Id, string Name, string System, string LastDockedLocation);
 
     public class ServerDatabase : IDisposable
     {
@@ -205,6 +199,13 @@ namespace LibreLancer.Server
             });
         }
 
+        public AdminCharacterDescription[] GetAdmins()
+        {
+            using var ctx = CreateDbContext();
+            return ctx.Characters.Where(x => x.IsAdmin).Select(x =>
+                new AdminCharacterDescription(x.Id, x.Name, x.System, x.Base)).ToArray();
+        }
+
         public BannedPlayerDescription[] GetBannedPlayers()
         {
             using var ctx = CreateDbContext();
@@ -222,6 +223,47 @@ namespace LibreLancer.Server
                 await using var ctx = CreateDbContext();
                 var c = ctx.Characters.Select(x => new {x.Id, x.Name}).FirstOrDefault(c => c.Name == character);
                 return c?.Id;
+            });
+        }
+
+        public async Task AdminCharacter(long character)
+        {
+            await Run(async () =>
+            {
+                await using var ctx = CreateDbContext();
+                var c = ctx.Characters.FirstOrDefault(x => x.Id == character);
+                if (c != null)
+                {
+                    c.IsAdmin = true;
+                    await ctx.SaveChangesAsync();
+
+                    server.ServerEvents.Enqueue(new ServerEvent
+                    {
+                        Type = ServerEventType.PlayerAdminChanged,
+                        TimeUtc = DateTime.UtcNow,
+                        Payload = new CharacterAdminChangedEventPayload(new AdminCharacterDescription(c.Id, c.Name, c.System, c.Base), true)
+                    });
+                }
+            });
+        }
+
+        public async Task DeadminCharacter(long character)
+        {
+            await Run(async () =>
+            {
+                await using var ctx = CreateDbContext();
+                var c = ctx.Characters.FirstOrDefault(x => x.Id == character);
+                if (c != null)
+                {
+                    c.IsAdmin = false;
+                    await ctx.SaveChangesAsync();
+                    server.ServerEvents.Enqueue(new ServerEvent
+                    {
+                        Type = ServerEventType.PlayerAdminChanged,
+                        TimeUtc = DateTime.UtcNow,
+                        Payload = new CharacterAdminChangedEventPayload(new AdminCharacterDescription(c.Id, c.Name, c.System, c.Base), false)
+                    });
+                }
             });
         }
 
@@ -338,113 +380,6 @@ namespace LibreLancer.Server
                 return c.Id;
             });
         }
-
-        public Task<TransferSnapshotImportRecord?> GetTransferSnapshotImportAsync(Guid transferId) =>
-            Run(async () =>
-            {
-                await using var ctx = CreateDbContext();
-                var record = await ctx.TransferSnapshotImports.AsNoTracking()
-                    .FirstOrDefaultAsync(x => x.TransferId == transferId);
-                return record == null ? null : ToImportRecord(record);
-            });
-
-        public Task RecordTransferSnapshotImportAsync(
-            Guid transferId, Guid accountId, long characterId, string sourceInstanceId,
-            string targetInstanceId, string targetSystemId, long leaseVersion, string ticketHash)
-        {
-            return Run(async () =>
-            {
-                await using var ctx = CreateDbContext();
-                var existing = await ctx.TransferSnapshotImports
-                    .FirstOrDefaultAsync(x => x.TransferId == transferId);
-                if (existing != null)
-                {
-                    if (existing.AccountId != accountId || existing.CharacterId != characterId ||
-                        existing.LeaseVersion != leaseVersion ||
-                        !string.Equals(existing.SourceInstanceId, sourceInstanceId, StringComparison.Ordinal) ||
-                        !string.Equals(existing.TargetInstanceId, targetInstanceId, StringComparison.Ordinal) ||
-                        !string.Equals(existing.TargetSystemId, targetSystemId, StringComparison.Ordinal) ||
-                        !string.Equals(existing.TicketHash, ticketHash, StringComparison.Ordinal))
-                        throw new InvalidOperationException("Transfer ID is already bound to different import claims.");
-                    return;
-                }
-
-                ctx.TransferSnapshotImports.Add(new TransferSnapshotImport
-                {
-                    TransferId = transferId,
-                    AccountId = accountId,
-                    CharacterId = characterId,
-                    SourceInstanceId = sourceInstanceId,
-                    TargetInstanceId = targetInstanceId,
-                    TargetSystemId = targetSystemId,
-                    LeaseVersion = leaseVersion,
-                    TicketHash = ticketHash
-                });
-                await ctx.SaveChangesAsync();
-            });
-        }
-
-        public Task<bool> ApplyTransferSnapshotImportAsync(Guid transferId, string snapshotHash, SaveGame save)
-        {
-            return Run(async () =>
-            {
-                await using var ctx = CreateDbContext();
-                await using var transaction = await ctx.Database.BeginTransactionAsync();
-                var import = await ctx.TransferSnapshotImports
-                    .FirstOrDefaultAsync(x => x.TransferId == transferId)
-                    ?? throw new InvalidOperationException("Transfer import claims have not been recorded.");
-                if (import.Imported)
-                {
-                    if (!string.Equals(import.SnapshotHash, snapshotHash, StringComparison.Ordinal))
-                        throw new InvalidOperationException("Transfer snapshot changed after it was imported.");
-                    await transaction.CommitAsync();
-                    return false;
-                }
-
-                if (save.Player == null || string.IsNullOrWhiteSpace(save.Player.Name) ||
-                    !string.Equals(save.Player.System, import.TargetSystemId, StringComparison.OrdinalIgnoreCase) ||
-                    !string.IsNullOrWhiteSpace(save.Player.Base))
-                    throw new InvalidDataException("Transfer snapshot character is not valid for the target system.");
-
-                var account = await ctx.Accounts.FirstOrDefaultAsync(x => x.AccountIdentifier == import.AccountId);
-                if (account == null)
-                {
-                    account = new Account { AccountIdentifier = import.AccountId, LastLogin = DateTime.UtcNow };
-                    ctx.Accounts.Add(account);
-                }
-
-                var character = await ctx.Characters
-                    .Include(x => x.Account)
-                    .Include(x => x.Items)
-                    .Include(x => x.Reputations)
-                    .Include(x => x.VisitEntries)
-                    .Include(x => x.VisitHistoryEntries)
-                    .AsSplitQuery()
-                    .FirstOrDefaultAsync(x => x.Id == import.CharacterId);
-                if (character == null)
-                {
-                    character = new Character { Id = import.CharacterId, Account = account };
-                    ctx.Characters.Add(character);
-                }
-                else if (character.Account.AccountIdentifier != import.AccountId ||
-                         !string.Equals(character.Name, save.Player.Name, StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new InvalidOperationException("Target character identity does not match the transfer.");
-                }
-
-                NetCharacter.SaveToDbCharacter(server, save, character);
-                import.SnapshotHash = snapshotHash;
-                import.Imported = true;
-                await ctx.SaveChangesAsync();
-                await transaction.CommitAsync();
-                return true;
-            });
-        }
-
-        private static TransferSnapshotImportRecord ToImportRecord(TransferSnapshotImport record) => new(
-            record.TransferId, record.AccountId, record.CharacterId, record.SourceInstanceId,
-            record.TargetInstanceId, record.TargetSystemId, record.LeaseVersion, record.TicketHash,
-            record.SnapshotHash, record.Imported);
 
         public void Dispose()
         {

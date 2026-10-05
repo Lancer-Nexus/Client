@@ -3,7 +3,7 @@ namespace LibreLancer.Server.ConsoleCommands
     public interface IConsoleCommand
     {
         string Name { get; }
-        string? Permission => null;
+        bool Admin { get; }
         void Run(Player player, string arguments);
     }
 }

@@ -1,5 +1,4 @@
 using System.Numerics;
-using System.Threading.Tasks;
 using LibreLancer.Missions;
 using LibreLancer.Net;
 using LibreLancer.Net.Protocol;
@@ -27,8 +26,6 @@ public class SpacePlayer : ISpacePlayer
     {
         world.RemovePlayer(player, exploded);
     }
-
-    public Task<(Vector3 Position, Quaternion Orientation)> FreezeAsync() => world.FreezePlayerAsync(player);
 
     public void ForceMove(Vector3 position, Quaternion? orientation = null)
     {

@@ -4,7 +4,6 @@ using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Linq;
 using System.Reflection;
-using System.Threading.Tasks;
 
 namespace LibreLancer.Server.ConsoleCommands
 {
@@ -47,36 +46,12 @@ namespace LibreLancer.Server.ConsoleCommands
                 return;
             }
 
-            if (command.Permission is { Length: > 0 } permission)
+            if (command.Admin && !(player.Character?.Admin ?? false))
             {
-                _ = RunAuthorizedAsync(player, command, args, permission, player.Character, player.GatewaySessionId);
+                player.RpcClient.OnConsoleMessage($"Permission denied.");
                 return;
             }
 
-            command.Run(player, args);
-        }
-
-        private static async Task RunAuthorizedAsync(Player player, IConsoleCommand command, string args,
-            string permission, NetCharacter? character, Guid sessionId)
-        {
-            bool allowed;
-            try { allowed = await player.Game.HasCommandPermissionAsync(player, permission); }
-            catch (Exception e)
-            {
-                FLLog.Warning("Permissions", $"Command permission check failed ({e.GetType().Name})");
-                player.RpcClient.OnConsoleMessage("Permission service unavailable; command denied.");
-                return;
-            }
-            if (!allowed)
-            {
-                player.RpcClient.OnConsoleMessage($"Permission denied: {permission}.");
-                return;
-            }
-            lock (player.Game.ConnectedPlayers)
-            {
-                if (!player.Game.ConnectedPlayers.Contains(player) || player.Character != character ||
-                    player.GatewaySessionId != sessionId) return;
-            }
             command.Run(player, args);
         }
 

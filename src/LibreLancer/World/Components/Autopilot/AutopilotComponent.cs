@@ -3,7 +3,6 @@
 // LICENSE, which is part of this source code package
 
 using System;
-using System.IO;
 using System.Linq;
 using System.Numerics;
 using ImGuiNET;
@@ -79,7 +78,6 @@ namespace LibreLancer.World.Components
         }
 
         protected bool CanCruise;
-        protected bool HasTriggeredCruise => hasTriggeredCruise;
 
         protected GameObject? TargetObject;
         private Vector3 _targetPosition;
@@ -88,63 +86,6 @@ namespace LibreLancer.World.Components
         protected float MaxThrottle;
         protected float GotoRadius;
         protected bool ShouldStopAtTarget = true;
-
-        protected AutopilotTransferState CaptureCommonState(
-            Func<GameObject, LibreLancer.Server.NpcTransferObjectReferenceV1?>? captureReference = null,
-            Vector3 formationHeldSeparation = default,
-            int formationHeldSeparationNeighbor = 0,
-            float formationSeparationHoldTimer = 0)
-        {
-            var targetReference = CaptureTargetReference(captureReference);
-            return new AutopilotTransferState
-            {
-                Behavior = Behavior,
-                CanCruise = CanCruise,
-                HasTriggeredCruise = hasTriggeredCruise,
-                MaxThrottle = MaxThrottle,
-                GotoRadius = GotoRadius,
-                ShouldStopAtTarget = ShouldStopAtTarget,
-                TargetPosition = _targetPosition,
-                TargetRadius = _targetRadius,
-                TargetNpcId = targetReference?.NpcId,
-                TargetCharacterId = targetReference?.CharacterId,
-                TargetNickname = targetReference?.Nickname,
-                FormationHeldSeparation = formationHeldSeparation,
-                FormationHeldSeparationNeighbor = formationHeldSeparationNeighbor,
-                FormationSeparationHoldTimer = formationSeparationHoldTimer
-            };
-        }
-
-        protected LibreLancer.Server.NpcTransferObjectReferenceV1? CaptureTargetReference(
-            Func<GameObject, LibreLancer.Server.NpcTransferObjectReferenceV1?>? captureReference) =>
-            TargetObject is null ? null : captureReference?.Invoke(TargetObject)
-                ?? throw new NotSupportedException("Autopilot targets need stable transfer IDs before capture.");
-
-        protected void RestoreCommonState(AutopilotTransferState state,
-            Func<LibreLancer.Server.NpcTransferObjectReferenceV1, GameObject?>? resolveReference = null)
-        {
-            CanCruise = state.CanCruise;
-            hasTriggeredCruise = state.HasTriggeredCruise;
-            MaxThrottle = state.MaxThrottle;
-            GotoRadius = state.GotoRadius;
-            ShouldStopAtTarget = state.ShouldStopAtTarget;
-            _targetPosition = state.TargetPosition;
-            _targetRadius = state.TargetRadius;
-            var targetReference = state.GetTargetReference();
-            TargetObject = targetReference is null ? null : resolveReference?.Invoke(targetReference)
-                ?? throw new InvalidDataException("Autopilot target reference could not be resolved after restore.");
-            avoidance.RestoreTransferState(state.Avoidance ??
-                throw new InvalidDataException("Autopilot avoidance transfer state is missing."));
-        }
-
-        internal AutopilotAvoidanceTransferState CaptureAvoidanceTransferState() => avoidance.CaptureTransferState();
-
-        public virtual AutopilotTransferState CaptureTransferState() =>
-            throw new NotSupportedException($"Autopilot behavior {Behavior} cannot be transferred yet.");
-
-        internal virtual AutopilotTransferState CaptureTransferState(
-            Func<GameObject, LibreLancer.Server.NpcTransferObjectReferenceV1?> captureReference) =>
-            CaptureTransferState();
 
         protected void SetThrottle(float throttle, ShipSteeringComponent control, ShipInputComponent? input)
         {
@@ -338,62 +279,6 @@ namespace LibreLancer.World.Components
         private Vector3 tradelaneEntryEndControl;
         private Vector3 tradelaneEntryEnd;
         private Vector3 tradelaneEntryAxis;
-
-        internal void RestoreTransferState(AutopilotTransferState state,
-            Func<LibreLancer.Server.NpcTransferObjectReferenceV1, GameObject?>? resolveReference)
-        {
-            if (state.Behavior != Behavior || state.DockIndex != dockIndex)
-                throw new ArgumentException("Snapshot state does not match Dock behavior.", nameof(state));
-            RestoreCommonState(state, resolveReference);
-            lastTargetHp = state.DockLastTargetHardpoint;
-            ringDocking = state.DockRingDocking;
-            ringDockTime = state.DockRingTime;
-            tradelaneHardpoint = state.DockTradelaneHardpoint;
-            tradelaneEntryPathActive = state.DockTradelaneEntryPathActive;
-            tradelaneEntryPathProgress = state.DockTradelaneEntryPathProgress;
-            tradelaneEntryStart = state.DockTradelaneEntryStart;
-            tradelaneEntryStartControl = state.DockTradelaneEntryStartControl;
-            tradelaneEntryEndControl = state.DockTradelaneEntryEndControl;
-            tradelaneEntryEnd = state.DockTradelaneEntryEnd;
-            tradelaneEntryAxis = state.DockTradelaneEntryAxis;
-        }
-
-        public override AutopilotTransferState CaptureTransferState() =>
-            CaptureDockState((Func<GameObject, LibreLancer.Server.NpcTransferObjectReferenceV1?>?)null);
-
-        internal override AutopilotTransferState CaptureTransferState(
-            Func<GameObject, LibreLancer.Server.NpcTransferObjectReferenceV1?> captureReference) =>
-            CaptureDockState(captureReference);
-
-        private AutopilotTransferState CaptureDockState(
-            Func<GameObject, LibreLancer.Server.NpcTransferObjectReferenceV1?>? captureReference) =>
-            CaptureDockState(CaptureTargetReference(captureReference));
-
-        private AutopilotTransferState CaptureDockState(
-            LibreLancer.Server.NpcTransferObjectReferenceV1? targetReference) => new()
-            {
-                Behavior = Behavior,
-                CanCruise = CanCruise,
-                HasTriggeredCruise = HasTriggeredCruise,
-                MaxThrottle = MaxThrottle,
-                GotoRadius = GotoRadius,
-                ShouldStopAtTarget = ShouldStopAtTarget,
-                DockIndex = dockIndex,
-                DockLastTargetHardpoint = lastTargetHp,
-                DockRingDocking = ringDocking,
-                DockRingTime = ringDockTime,
-                DockTradelaneHardpoint = tradelaneHardpoint,
-                DockTradelaneEntryPathActive = tradelaneEntryPathActive,
-                DockTradelaneEntryPathProgress = tradelaneEntryPathProgress,
-                DockTradelaneEntryStart = tradelaneEntryStart,
-                DockTradelaneEntryStartControl = tradelaneEntryStartControl,
-                DockTradelaneEntryEndControl = tradelaneEntryEndControl,
-                DockTradelaneEntryEnd = tradelaneEntryEnd,
-                DockTradelaneEntryAxis = tradelaneEntryAxis,
-                TargetNpcId = targetReference?.NpcId,
-                TargetCharacterId = targetReference?.CharacterId,
-                TargetNickname = targetReference?.Nickname
-            };
 
         private static bool IsDockingRingIndex(DockInfoComponent docking, int index) =>
             docking.Action.Kind == DockKinds.Base &&
@@ -667,45 +552,6 @@ namespace LibreLancer.World.Components
         private double delay = initialDelay;
         private int targetHp = 1;
 
-        internal void RestoreTransferState(AutopilotTransferState state,
-            Func<LibreLancer.Server.NpcTransferObjectReferenceV1, GameObject?>? resolveReference)
-        {
-            if (state.Behavior != Behavior || state.UndockIndex != index)
-                throw new ArgumentException("Snapshot state does not match Undock behavior.", nameof(state));
-            RestoreCommonState(state, resolveReference);
-            totalTime = state.UndockTotalTime;
-            delay = state.UndockDelay;
-            targetHp = state.UndockTargetHardpoint;
-        }
-
-        public override AutopilotTransferState CaptureTransferState() => CaptureUndockState(null);
-
-        internal override AutopilotTransferState CaptureTransferState(
-            Func<GameObject, LibreLancer.Server.NpcTransferObjectReferenceV1?> captureReference) =>
-            CaptureUndockState(captureReference);
-
-        private AutopilotTransferState CaptureUndockState(
-            Func<GameObject, LibreLancer.Server.NpcTransferObjectReferenceV1?>? captureReference)
-        {
-            var targetReference = CaptureTargetReference(captureReference);
-            return new AutopilotTransferState
-            {
-                Behavior = Behavior,
-                CanCruise = CanCruise,
-                HasTriggeredCruise = HasTriggeredCruise,
-                MaxThrottle = MaxThrottle,
-                GotoRadius = GotoRadius,
-                ShouldStopAtTarget = ShouldStopAtTarget,
-                UndockIndex = index,
-                UndockTotalTime = totalTime,
-                UndockDelay = delay,
-                UndockTargetHardpoint = targetHp,
-                TargetNpcId = targetReference?.NpcId,
-                TargetCharacterId = targetReference?.CharacterId,
-                TargetNickname = targetReference?.Nickname
-            };
-        }
-
         public override void ImGuiDebug()
         {
             ImGui.Text("Undocking");
@@ -772,14 +618,6 @@ namespace LibreLancer.World.Components
     {
         public override AutopilotBehaviors Behavior => AutopilotBehaviors.Goto;
 
-        internal void RestoreTransferState(AutopilotTransferState state,
-            Func<LibreLancer.Server.NpcTransferObjectReferenceV1, GameObject?>? resolveReference = null)
-        {
-            if (state.Behavior != Behavior)
-                throw new ArgumentException("Snapshot behavior does not match Goto.", nameof(state));
-            RestoreCommonState(state, resolveReference);
-        }
-
         private GameObject? cruiseSpeedReference;
         private string? cruiseSpeedReferenceNickname;
         private float cruiseSpeedFullDistance;
@@ -796,21 +634,6 @@ namespace LibreLancer.World.Components
             cruiseSpeedFullDistance = fullDistance;
             cruiseSpeedZeroDistance = zeroDistance;
             cruiseSpeedUnknown = unknown;
-        }
-
-        public override AutopilotTransferState CaptureTransferState()
-        {
-            if (cruiseSpeedReference != null || !string.IsNullOrWhiteSpace(cruiseSpeedReferenceNickname))
-                throw new NotSupportedException("Cruise reference needs a stable transfer ID before capture.");
-            return CaptureCommonState();
-        }
-
-        internal override AutopilotTransferState CaptureTransferState(
-            Func<GameObject, LibreLancer.Server.NpcTransferObjectReferenceV1?> captureReference)
-        {
-            if (cruiseSpeedReference != null || !string.IsNullOrWhiteSpace(cruiseSpeedReferenceNickname))
-                throw new NotSupportedException("Cruise reference needs a stable transfer ID before capture.");
-            return CaptureCommonState(captureReference);
         }
 
         internal static float ReferenceCruiseSpeedOffset(float distance, float fullDistance, float zeroDistance,
@@ -905,28 +728,6 @@ namespace LibreLancer.World.Components
     {
         public override AutopilotBehaviors Behavior => AutopilotBehaviors.Formation;
 
-        internal void RestoreTransferState(AutopilotTransferState state,
-            Func<LibreLancer.Server.NpcTransferObjectReferenceV1, GameObject?>? resolveReference)
-        {
-            if (state.Behavior != Behavior || Parent.Formation is null || Parent.Formation.LeadShip == Parent ||
-                !Parent.Formation.Contains(Parent))
-                throw new ArgumentException("Snapshot state does not match a formation follower.", nameof(state));
-            RestoreCommonState(state, resolveReference);
-            heldSeparation = state.FormationHeldSeparation;
-            heldSeparationNeighbor = state.FormationHeldSeparationNeighbor;
-            separationHoldTimer = state.FormationSeparationHoldTimer;
-        }
-
-        public override AutopilotTransferState CaptureTransferState() => CaptureFormationState(null);
-
-        internal override AutopilotTransferState CaptureTransferState(
-            Func<GameObject, LibreLancer.Server.NpcTransferObjectReferenceV1?> captureReference) =>
-            CaptureFormationState(captureReference);
-
-        private AutopilotTransferState CaptureFormationState(
-            Func<GameObject, LibreLancer.Server.NpcTransferObjectReferenceV1?>? captureReference) =>
-            CaptureCommonState(captureReference, heldSeparation, heldSeparationNeighbor, separationHoldTimer);
-
         private const float LeaderCruiseCatchupDistance = 450;
         private const float SteeringLookahead = 1000;
 
@@ -970,6 +771,10 @@ namespace LibreLancer.World.Components
 
         private static int StableFormationId(GameObject ship, ShipFormation formation)
         {
+            if (ship.NetID != 0)
+            {
+                return ship.NetID;
+            }
             if (ship == formation.LeadShip)
             {
                 return 0;
@@ -979,7 +784,7 @@ namespace LibreLancer.World.Components
                 if (formation.Followers[i] == ship)
                     return i + 1;
             }
-            return ship.NetID != 0 ? ship.NetID : -1;
+            return -1;
         }
 
         private FormationControl.Separation GetSeparation(double time, Vector3 selfForward)
@@ -1189,76 +994,6 @@ namespace LibreLancer.World.Components
         {
             PitchControl.P = 4;
             YawControl.P = 4;
-        }
-
-        /// <summary>Capture only behavior states that do not contain process-local object references.</summary>
-        public AutopilotTransferState CaptureTransferState()
-        {
-            var state = instance?.CaptureTransferState() ?? new AutopilotTransferState { Behavior = AutopilotBehaviors.None };
-            return CaptureControllerState(state);
-        }
-
-        internal AutopilotTransferState CaptureTransferState(
-            Func<GameObject, LibreLancer.Server.NpcTransferObjectReferenceV1?> captureReference)
-        {
-            var state = instance?.CaptureTransferState(captureReference) ??
-                        new AutopilotTransferState { Behavior = AutopilotBehaviors.None };
-            return CaptureControllerState(state);
-        }
-
-        private AutopilotTransferState CaptureControllerState(AutopilotTransferState state)
-        {
-            state.PitchController = PitchControl.CaptureTransferState();
-            state.YawController = YawControl.CaptureTransferState();
-            state.Avoidance = instance?.CaptureAvoidanceTransferState();
-            return state;
-        }
-
-        public void RestoreTransferState(AutopilotTransferState state) => RestoreTransferState(state, null);
-
-        internal void RestoreTransferState(AutopilotTransferState state,
-            Func<LibreLancer.Server.NpcTransferObjectReferenceV1, GameObject?>? resolveReference)
-        {
-            ArgumentNullException.ThrowIfNull(state);
-            state.Validate();
-            PitchControl.RestoreTransferState(state.PitchController!);
-            YawControl.RestoreTransferState(state.YawController!);
-            switch (state.Behavior)
-            {
-                case AutopilotBehaviors.None:
-                    Cancel();
-                    break;
-                case AutopilotBehaviors.Goto:
-                {
-                    var gotoBehavior = new GotoBehavior(this);
-                    gotoBehavior.RestoreTransferState(state, resolveReference);
-                    SetInstance(gotoBehavior);
-                    break;
-                }
-                case AutopilotBehaviors.Dock:
-                {
-                    var dockBehavior = new DockBehavior(this, state.DockIndex, state.DockTradelaneHardpoint);
-                    dockBehavior.RestoreTransferState(state, resolveReference);
-                    SetInstance(dockBehavior);
-                    break;
-                }
-                case AutopilotBehaviors.Undock:
-                {
-                    var undockBehavior = new UndockBehavior(this, state.UndockIndex, state.UndockDelay);
-                    undockBehavior.RestoreTransferState(state, resolveReference);
-                    SetInstance(undockBehavior);
-                    break;
-                }
-                case AutopilotBehaviors.Formation:
-                {
-                    var formationBehavior = new FormationBehavior(this);
-                    formationBehavior.RestoreTransferState(state, resolveReference);
-                    SetInstance(formationBehavior);
-                    break;
-                }
-                default:
-                    throw new NotSupportedException($"Autopilot behavior {state.Behavior} cannot be restored yet.");
-            }
         }
 
         public delegate void BehaviorChangedCallback(AutopilotBehaviors newBehavior, AutopilotBehaviors oldBehavior);

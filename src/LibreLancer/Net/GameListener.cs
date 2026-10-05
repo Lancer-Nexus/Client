@@ -7,7 +7,6 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Net.Http;
-using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
 using LibreLancer.Net.Protocol;
@@ -29,7 +28,6 @@ namespace LibreLancer.Net
         private static readonly object TagConnecting = new();
 
         public int Port = LNetConst.DEFAULT_PORT;
-        public string? BindAddress;
         public int MaxConnections = 200;
         public string AppIdentifier = LNetConst.DEFAULT_APP_IDENT;
 
@@ -109,37 +107,8 @@ namespace LibreLancer.Net
                     {
                         Task.Run(async () =>
                         {
-                            if (token.StartsWith("lnx-transfer:", StringComparison.Ordinal))
-                            {
-                                var parts = token.Split(':', 3);
-                                if (parts.Length != 3 || !Guid.TryParseExact(parts[1], "N", out var transferId))
-                                {
-                                    request.Reject();
-                                    return;
-                                }
-                                try
-                                {
-                                    var imported = await game.ImportTransferSnapshotAndAcceptAsync(transferId,
-                                        parts[2], game.CreateTargetTransferLeaseToken(transferId));
-                                    var transferPeer = request.Accept();
-                                    var transferPlayer = new Player(new RemotePacketClient(transferPeer), game,
-                                        imported.AccountId, imported.CharacterId, imported.SaveGame, imported.NpcSnapshot)
-                                    {
-                                        GatewayTransferId = imported.TransferId
-                                    };
-                                    transferPeer.Tag = transferPlayer;
-                                    lock (game.ConnectedPlayers) game.ConnectedPlayers.Add(transferPlayer);
-                                    _ = Task.Run(async () => await transferPlayer.OnLoggedIn());
-                                }
-                                catch (Exception error)
-                                {
-                                    FLLog.Error("Transfer", $"Target transfer login rejected: {error.Message}");
-                                    request.Reject();
-                                }
-                                return;
-                            }
-                            var identity = await http.VerifyGameIdentity(game.LoginUrl, token);
-                            if (identity.guid == Guid.Empty)
+                            var guid = await http.VerifyToken(game.LoginUrl, token);
+                            if (guid == Guid.Empty)
                             {
                                 FLLog.Info("Login", $"Login failed for {request.RemoteEndPoint}");
                                 var dw = new PacketWriter();
@@ -151,7 +120,7 @@ namespace LibreLancer.Net
                                 var peer = request.Accept();
                                 var remote = new RemotePacketClient(peer);
                                 var p = new Player(remote,
-                                    game, identity.guid) { GatewaySessionId = identity.sessionId };
+                                    game, guid);
                                 peer.Tag = p;
                                 _ = Task.Run(async () => await p.OnLoggedIn());
                                 lock (game.ConnectedPlayers)
@@ -177,9 +146,10 @@ namespace LibreLancer.Net
                 if (peer.Tag is Player player)
                 {
                     player.Disconnected();
-                    if (!player.TransferInProgress)
-                        lock (game.ConnectedPlayers)
-                            game.ConnectedPlayers.Remove(player);
+                    lock (game.ConnectedPlayers)
+                    {
+                        game.ConnectedPlayers.Remove(player);
+                    }
                 }
             };
             broadcastListener.ConnectionRequestEvent += request => request.RejectForce();
@@ -292,19 +262,15 @@ namespace LibreLancer.Net
             broadcastServer.IPv6Enabled = true;
             broadcastServer.BroadcastReceiveEnabled = true;
             broadcastServer.UnsyncedEvents = true;
-            if (!game.ClusterTransfersEnabled)
-                broadcastServer.Start(LNetConst.BROADCAST_PORT);
+            broadcastServer.Start(LNetConst.BROADCAST_PORT);
             Server = new NetManager(listener)
             {
-                IPv6Enabled = string.IsNullOrWhiteSpace(BindAddress),
+                IPv6Enabled = true,
                 UnconnectedMessagesEnabled = true,
                 ChannelsCount = 3,
                 UnsyncedEvents = true
             };
-            var started = string.IsNullOrWhiteSpace(BindAddress) ? Server.Start(Port) :
-                Server.Start(IPAddress.Parse(BindAddress), IPAddress.IPv6Any, Port);
-            if (!started)
-                throw new InvalidOperationException("Game listener could not bind the configured address and port.");
+            Server.Start(Port);
             FLLog.Info("Server", "Listening on port " + Port);
             stopHandle.WaitOne();
             http.Dispose();

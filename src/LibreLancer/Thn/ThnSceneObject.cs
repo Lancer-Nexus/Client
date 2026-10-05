@@ -49,11 +49,7 @@ public class ThnSceneObject
             var parent = t.Parent.GetTransform(t.PathLookAt);
             if (t.Orientation)
             {
-                if (t.ParentChildTransform is { } parentChildTransform)
-                {
-                    self.Orientation = (parentChildTransform * parent).Orientation;
-                }
-                else if (t.OrientationRelative)
+                if (t.OrientationRelative)
                 {
                     var qCurrent = parent.Orientation;
                     var diff = qCurrent * Quaternion.Inverse(t.LastRotate);
@@ -69,11 +65,7 @@ public class ThnSceneObject
 
             if (t.Position)
             {
-                if (t.ParentChildTransform is { } parentChildTransform)
-                {
-                    self.Position = (parentChildTransform * parent).Position;
-                }
-                else if (t.Offset != Vector3.Zero)
+                if (t.Offset != Vector3.Zero)
                 {
                     var off = t.Offset;
                     if (t.EntityRelative)
@@ -108,16 +100,6 @@ public class ThnSceneObject
         Translate = self.Position;
         Rotate = self.Orientation;
         UpdateEngineObjects();
-    }
-
-    public void FinishAnimation(string animationName)
-    {
-        Object?.AnimationComponent?.FinishAnimation(animationName);
-        if (Object?.RenderComponent is CharacterRenderer character && character.Skeleton.ApplyRootMotion)
-        {
-            Update();
-            character.Skeleton.ClearRootMotion();
-        }
     }
 
 
@@ -166,12 +148,8 @@ public class ThnAttachment(ThnAttachParent parent)
     public bool EntityRelative;
     public bool LookAt;
     public bool PathLookAt;
-    public Transform3D? ParentChildTransform;
 
     public ThnAttachParent Parent = parent;
-
-    public static Transform3D CaptureParentChildTransform(Transform3D child, Transform3D parent) =>
-        child * parent.Inverse();
 }
 
 public abstract class ThnAttachParent
@@ -205,21 +183,12 @@ public class ThnPathParent(ThnSceneObject Path)
     }
 }
 
-public class ThnObjectParent(ThnSceneObject obj, IRenderHardpoint? hardpoint, RigidModelPart? part,
-    bool characterRoot = false)
+public class ThnObjectParent(ThnSceneObject obj, IRenderHardpoint? hardpoint, RigidModelPart? part)
     : ThnAttachParent
 {
-    public static bool IsRootTarget(ThnSceneObject obj, string? targetPart) =>
-        string.Equals(targetPart, "Root", StringComparison.OrdinalIgnoreCase) &&
-        (obj.Object?.RenderComponent is CharacterRenderer || obj.Object?.Model?.RigidModel.Parts == null);
-
     public override Transform3D GetTransform(bool pathLookAt)
     {
-        var useCharacterWorldTransform =
-            obj.Object?.RenderComponent is CharacterRenderer && (characterRoot || hardpoint != null);
-        var tr = useCharacterWorldTransform
-            ? obj.Object!.WorldTransform
-            : obj.GetTransform();
+        var tr = obj.GetTransform();
         if (part != null)
         {
             if (obj.HpMount != null)

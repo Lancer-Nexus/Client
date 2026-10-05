@@ -111,7 +111,8 @@ namespace LibreLancer
         private double accum = 0;
 
         public bool Dead = false;
-        private readonly MouseTargetingGesture mouseTargeting = new();
+        private bool isLeftDown = false;
+        private double leftDownTimer = 0;
         private bool mouseFlight = false;
 
         public SpaceGameplay(FreelancerGame g, CGameSession session) : base(g)
@@ -699,8 +700,7 @@ namespace LibreLancer
         private (ParticleEffectRenderer? Renderer, SoundInstance? Sound)
             AttachShipEffect(
                 ResolvedFx? effect,
-                bool loopSound = false,
-            bool playSound = true)
+                bool loopSound = false)
         {
             if (effect == null)
                 return (null, null);
@@ -715,7 +715,7 @@ namespace LibreLancer
             }
 
             SoundInstance? sound = null;
-            if (playSound && effect.Sound != null)
+            if (effect.Sound != null)
             {
                 sound = Game.Sound.GetInstance(effect.Sound.Nickname, 0, -1, -1, null);
                 sound?.Play(loopSound);
@@ -900,6 +900,11 @@ namespace LibreLancer
                 if (updateStartDelay == 0)
                 {
                     session.GameplayUpdate(this, FixedDelta);
+
+                    if (isLeftDown)
+                    {
+                        leftDownTimer -= FixedDelta;
+                    }
 
                     if (musicTriggered)
                     {
@@ -1206,11 +1211,23 @@ namespace LibreLancer
 
             if (!(Game.Debug.CaptureMouse) && !ui.MouseWanted(Game.Mouse.X, Game.Mouse.Y))
             {
-                mouseTargeting.LeftMouseDown(pointerAvailable: true);
+                var newSelection = GetMouseSelection();
+
+                if (newSelection != null)
+                {
+                    Selection.Selected = newSelection;
+                }
+
+                if (!isLeftDown)
+                {
+                    isLeftDown = true;
+                    leftDownTimer = 0.25;
+                }
             }
             else
             {
-                mouseTargeting.LeftMouseDown(pointerAvailable: false);
+                isLeftDown = false;
+                leftDownTimer = 0;
             }
         }
 
@@ -1218,16 +1235,8 @@ namespace LibreLancer
         {
             if ((e.Buttons & MouseButtons.Left) > 0)
             {
-                if (mouseTargeting.LeftMouseUp(mouseFlight,
-                        !Game.Debug.CaptureMouse && !ui.MouseWanted(Game.Mouse.X, Game.Mouse.Y)))
-                {
-                    var newSelection = GetMouseSelection();
-                    if (newSelection != null)
-                    {
-                        Selection.Selected = newSelection;
-                    }
-                }
-
+                leftDownTimer = 0;
+                isLeftDown = false;
             }
         }
 
@@ -1292,10 +1301,9 @@ namespace LibreLancer
             var offset = otherPos - Selection.Selected.WorldTransform.Position;
             otherVel += Vector3.Cross(Selection.Selected.PhysicsComponent.Body.AngularVelocity, offset);
             var speed = weapons.GetAverageGunSpeed();
-            if (speed <= float.Epsilon)
-            {
+            if (speed <= 0)
                 return false;
-            }            Aiming.GetTargetLeading(otherPos - myPos, otherVel - myVel, speed, out var t);
+            Aiming.GetTargetLeading(otherPos - myPos, otherVel - myVel, speed, out var t);
             worldPos = (otherPos + otherVel * t);
             bool vis;
             (screenPos, vis) = ScreenPosition(worldPos);
@@ -1363,8 +1371,6 @@ namespace LibreLancer
                 return;
             }
 
-            mouseTargeting.Update(delta);
-
             Input.Update();
 
             if (!ui.MouseWanted(Game.Mouse.X, Game.Mouse.Y))
@@ -1423,7 +1429,7 @@ namespace LibreLancer
             shipInput.Viewport = new Vector2(Game.Width, Game.Height);
             shipInput.Camera = _chaseCamera;
 
-            if ((mouseTargeting.MouseFlightFromHold || mouseFlight) && control.Active)
+            if (((isLeftDown && leftDownTimer < 0) || mouseFlight) && control.Active)
             {
                 var mX = Game.Mouse.X;
                 var mY = Game.Mouse.Y;
@@ -2112,7 +2118,6 @@ namespace LibreLancer
             }
 
             ui.RenderWidget(delta);
-            DrawClusterDebugHud();
             session.SetDebug(Game.Debug.Enabled);
             DrawDebugWindow(delta);
 
@@ -2128,9 +2133,6 @@ namespace LibreLancer
 
         public override void Exiting()
         {
-            ui.TextScale = previousTextScale;
-            clusterDebugText?.Dispose();
-            clusterDebugText = null;
             session.OnExit();
         }
     }

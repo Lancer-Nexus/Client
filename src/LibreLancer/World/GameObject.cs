@@ -311,13 +311,6 @@ namespace LibreLancer.World
             }
         }
 
-        internal void InvalidateWorldTransform()
-        {
-            TransformDirty = true;
-            for (var i = 0; i < Children.Count; i++)
-                Children[i].InvalidateWorldTransform();
-        }
-
         public void AddComponent<T>(T component) where T : GameComponent
         {
             components.Add(component);
@@ -380,18 +373,6 @@ namespace LibreLancer.World
                 _parent = value;
                 TransformDirty = true;
             }
-        }
-
-        public void Reparent(GameObject? parent)
-        {
-            _parent?.Children.Remove(this);
-            _parent = parent;
-            if (parent != null)
-            {
-                parent.Children.Remove(this);
-                parent.Children.Add(this);
-            }
-            TransformDirty = true;
         }
 
         public Hardpoint? Attachment

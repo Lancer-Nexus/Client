@@ -57,15 +57,6 @@ namespace LibreLancer.Fx
             Scale = new(1);
         }
 
-        internal static Vector3 GetNormal(Vector3 velocity, Vector3 fallbackNormal)
-        {
-            if (velocity.LengthSquared() > float.Epsilon)
-                return Vector3.Normalize(velocity);
-            if (fallbackNormal.LengthSquared() > float.Epsilon)
-                return Vector3.Normalize(fallbackNormal);
-            return Vector3.UnitY;
-        }
-
         private Vector3 Project(Billboards billboards, Vector3 pt)
 		{
 			var mvp = billboards.Camera.ViewProjection;
@@ -82,7 +73,7 @@ namespace LibreLancer.Fx
             for (int i = 0; i < count; i++)
             {
                 ref var particle = ref instance.Buffer[nodeIdx, i];
-                particle.Normal = GetNormal(particle.Velocity, particle.Normal);
+                particle.Normal = particle.Velocity.Normalized();
 
                 var time = particle.TimeAlive / particle.LifeSpan;
                 var src_pos = particle.Position;
@@ -97,15 +88,9 @@ namespace LibreLancer.Fx
                 }
 
                 var p = Vector3.Transform(src_pos, node_tr);
-                if (!PassesVisibilityFields(node, instance, p, sparam))
-                    continue;
                 var c = Color!.GetValue(sparam, time);
                 var a = Alpha!.GetValue(sparam, time);
                 var n = Vector3.TransformNormal(particle.Normal, node_tr);
-                if (ViewingAngleFade)
-                {
-                    a *= GetViewingAngleFade(n, instance.Pool.Camera.Position - p);
-                }
 
                 instance.Pool.AddParticle(
                     TextureHandler,
@@ -134,3 +119,4 @@ namespace LibreLancer.Fx
         }
 	}
 }
+

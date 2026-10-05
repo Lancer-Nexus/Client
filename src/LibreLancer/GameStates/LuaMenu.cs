@@ -6,11 +6,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Net.Http;
 using System.Runtime;
 using System.Runtime.InteropServices;
-using System.Threading;
-using System.Threading.Tasks;
 using LibreLancer.Client;
 using LibreLancer.Data.GameData;
 using LibreLancer.ImUI.NodeEditor;
@@ -43,7 +40,6 @@ namespace LibreLancer
             api = new MenuAPI(this);
             ui = Game.Ui;
             ui.GameApi = api;
-            ui.TextScale = 0.5f;
             ui.Visible = true;
             ui.OpenScene("mainmenu", 0.4);
             g.GameData.PopulateCursors();
@@ -73,8 +69,6 @@ namespace LibreLancer
             // Set low latency GC mode only once everything has been loaded in
             GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency;
             FadeIn(0.1, 0.3);
-            if (!string.IsNullOrWhiteSpace(g.Config.ClusterGatewayUrl))
-                ui.OpenScene("serverlist");
         }
 
         private void TryRunScript(List<ResolvedThn> thnScripts)
@@ -243,54 +237,10 @@ namespace LibreLancer
             }
 
             public SaveGameFolder SaveGames() => state.Game.Saves;
-            public bool GatewayEnabled() => !string.IsNullOrWhiteSpace(state.Game.Config.ClusterGatewayUrl);
-
-            public bool HasDebugLoginCredentials()
-            {
-#if DEBUG
-                return GatewayEnabled() && !string.IsNullOrWhiteSpace(state.Game.DebugLoginEmail) &&
-                       !string.IsNullOrEmpty(state.Game.DebugLoginPassword);
-#else
-                return false;
-#endif
-            }
-
-            public void LoginWithDebugCredentials()
-            {
-#if DEBUG
-                if (HasDebugLoginCredentials())
-                    Login(state.Game.DebugLoginEmail!, state.Game.DebugLoginPassword!);
-#endif
-            }
-
-            public bool SelectDebugCharacter()
-            {
-#if DEBUG
-                var requestedName = state.Game.DebugCharacterName;
-                if (string.IsNullOrWhiteSpace(requestedName))
-                    return false;
-                var index = cselInfo.Characters.FindIndex(character =>
-                    string.Equals(character.Name, requestedName, StringComparison.OrdinalIgnoreCase));
-                if (index < 0)
-                {
-                    FLLog.Warning("Debug", $"Requested character '{requestedName}' was not found; opening character selection.");
-                    state.Game.DebugCharacterName = null;
-                    return false;
-                }
-                cselInfo.Selected = index;
-                FLLog.Info("Debug", $"Automatically selecting requested character '{cselInfo.Characters[index].Name}'.");
-                state.Game.DebugCharacterName = null;
-                return true;
-#else
-                return false;
-#endif
-            }
-
             public void DeleteSelectedGame() => state.Game.Saves.TryDelete(state.Game.Saves.Selected);
 
             public void LoadSelectedGame()
             {
-                if (GatewayEnabled()) return;
                 state.FadeOut(0.2, () =>
                 {
                     var embeddedServer = new EmbeddedServer(state.Game.GameData, state.Game.ResourceManager,
@@ -304,15 +254,13 @@ namespace LibreLancer
 
             public override void NewGame()
             {
-                if (GatewayEnabled()) return;
                 state.FadeOut(0.2, () =>
                 {
                     var embeddedServer = new EmbeddedServer(state.Game.GameData, state.Game.ResourceManager,
                         state.Game.GetSaveFolder());
                     var session = new CGameSession(state.Game, embeddedServer);
-                    var newPlayerPath = state.Game.GameData.Items.Ini.Freelancer.NewPlayerPath;
-                    embeddedServer.StartFromSave(newPlayerPath,
-                        state.Game.GameData.VFS.ReadAllBytes(newPlayerPath));
+                    embeddedServer.StartFromSave("EXE\\newplayer.fl",
+                        state.Game.GameData.VFS.ReadAllBytes("EXE\\newplayer.fl"));
                     state.Game.ChangeState(new NetWaitState(session, state.Game));
                 });
             }
@@ -384,7 +332,6 @@ namespace LibreLancer
             }
 
             private GameNetClient? netClient;
-            private CancellationTokenSource? gatewayLoginCancellation;
             private CGameSession netSession = null!;
             private ServerList serverList = new();
             private CharacterSelectInfo cselInfo = null!;
@@ -402,8 +349,7 @@ namespace LibreLancer
                 netClient.Disconnected += NetClientOnDisconnected;
                 netClient.AuthenticationRequired += NetClientOnAuthenticationRequired;
                 netClient.Start();
-                if (!GatewayEnabled())
-                    RefreshServers();
+                RefreshServers();
             }
 
             private void NetClientOnAuthenticationRequired(bool retry)
@@ -414,80 +360,7 @@ namespace LibreLancer
 
             public void Login(string username, string password)
             {
-                if (!GatewayEnabled())
-                    netClient?.Login(username, password);
-                else
-                    _ = LoginToGatewayAsync(username, password);
-            }
-
-            private async Task LoginToGatewayAsync(string email, string password)
-            {
-                gatewayLoginCancellation?.Cancel();
-                gatewayLoginCancellation?.Dispose();
-                gatewayLoginCancellation = new CancellationTokenSource();
-                var cancellation = gatewayLoginCancellation.Token;
-                var client = netClient;
-                if (client is null)
-                    return;
-                try
-                {
-                    using var gateway = new NexusGatewayLogin(
-                        new Uri(state.Game.Config.ClusterGatewayUrl, UriKind.Absolute));
-                    var result = await gateway.LoginAndPlaceAsync(email, password,
-                        state.Game.Config.ClusterTargetSystem, state.Game.Config.ClusterRegion,
-                        cancellation);
-                    state.Game.QueueUIThread(() =>
-                    {
-                        if (netClient != client || cancellation.IsCancellationRequested)
-                            return;
-                        if (result.RequestedExitCode is not null)
-                        {
-                            state.ui.Event("UpdateRequired", result.VersionDecision.MessageKey);
-                        }
-                        else if (result.Assigned)
-                        {
-                            client.ClusterGatewayUrl = state.Game.Config.ClusterGatewayUrl;
-                            client.ClusterAccessToken = result.AccessToken ?? "";
-                            client.ClusterRefreshToken = result.RefreshToken ?? "";
-                            client.ClusterSessionId = result.SessionId ?? Guid.Empty;
-                            client.ClusterInstanceId = result.InstanceId ?? "";
-                            client.ClusterSystemId = result.SystemId ?? "";
-                            client.ClusterEndpoint = result.GameEndpoint ?? "";
-                            client.ConnectWithTicket(result.GameEndpoint!, result.JoinTicket!);
-                        }
-                        else
-                            state.ui.Event("Disconnect", "AssignmentFailed");
-                    });
-                }
-                catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
-                {
-                }
-                catch (UnauthorizedAccessException)
-                {
-                    state.Game.QueueUIThread(() =>
-                    {
-                        if (netClient == client)
-                            state.ui.Event("IncorrectPassword");
-                    });
-                }
-                catch (ClientVersionMetadataException)
-                {
-                    state.Game.QueueUIThread(() =>
-                    {
-                        if (netClient == client)
-                            state.ui.Event("RepairRequired");
-                    });
-                }
-                catch (Exception exception) when (exception is HttpRequestException or
-                    InvalidDataException or ArgumentException or FormatException)
-                {
-                    FLLog.Error("Gateway", exception.Message);
-                    state.Game.QueueUIThread(() =>
-                    {
-                        if (netClient == client)
-                            state.ui.Event("Disconnect", "ConnectionError");
-                    });
-                }
+                netClient?.Login(username, password);
             }
 
             public void RequestNewCharacter()
@@ -543,37 +416,19 @@ namespace LibreLancer
 
             public void RefreshServers()
             {
-                if (GatewayEnabled()) return;
                 serverList.Reset();
                 netClient!.DiscoverLocalPeers();
             }
 
             public void ConnectSelection()
             {
-                if (GatewayEnabled()) return;
                 if (serverList.Selected != -1)
                 {
                     netClient!.Connect(serverList.Servers[serverList.Selected].EndPoint);
                 }
             }
 
-            public void ConnectAddress(string address)
-            {
-                if (!GatewayEnabled())
-                    netClient!.Connect(address);
-            }
-
-            public void ExitForUpdate()
-            {
-                Environment.ExitCode = 42;
-                state.FadeOut(0.2, () => state.Game.Exit());
-            }
-
-            public void ExitForRepair()
-            {
-                Environment.ExitCode = 43;
-                state.FadeOut(0.2, () => state.Game.Exit());
-            }
+            public void ConnectAddress(string address) => netClient!.Connect(address);
 
             public void NewCharacter(string name, int index, Closure onError)
             {
@@ -586,9 +441,6 @@ namespace LibreLancer
 
             public void StopNetworking()
             {
-                gatewayLoginCancellation?.Cancel();
-                gatewayLoginCancellation?.Dispose();
-                gatewayLoginCancellation = null;
                 netClient?.Shutdown();
                 netClient = null;
             }

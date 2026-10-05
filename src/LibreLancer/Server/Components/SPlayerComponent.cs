@@ -5,7 +5,6 @@ using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Numerics;
 using LibreLancer.Data;
-using LibreLancer.Data.GameData;
 using LibreLancer.Data.GameData.Items;
 using LibreLancer.Data.GameData.World;
 using LibreLancer.Missions;
@@ -512,37 +511,6 @@ namespace LibreLancer.Server.Components
             {
                 yield return new NetShipCargo(i.ID, i.Equipment!.CRC, null, 255, i.Count, i.IsMissionItem);
             }
-        }
-
-        internal List<BasicCargo> TakeLootableCargoForFuse()
-        {
-            var character = Player.Character;
-            if (character == null)
-            {
-                return [];
-            }
-
-            var slots = character.Items
-                .Where(x => string.IsNullOrEmpty(x.Hardpoint) && x.Equipment?.LootAppearance != null)
-                .ToArray();
-            if (slots.Length == 0)
-            {
-                return [];
-            }
-
-            var result = new List<BasicCargo>(slots.Length);
-            using (var transaction = character.BeginTransaction())
-            {
-                foreach (var slot in slots)
-                {
-                    result.Add(new BasicCargo(slot.Equipment!, slot.Count));
-                    Player.RpcClient.DeleteSlot(slot.ID);
-                    transaction.RemoveCargo(slot, slot.Count);
-                }
-            }
-
-            Player.UpdateCurrentInventory();
-            return result;
         }
     }
 }

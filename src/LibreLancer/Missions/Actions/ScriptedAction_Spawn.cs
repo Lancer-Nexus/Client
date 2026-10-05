@@ -139,10 +139,19 @@ namespace LibreLancer.Missions.Actions
             }
 
             var pos = archPos;
+            GameObject relObj;
 
             // Spawn relative to object
-            if (TryGetRelativePosition(ship.RelativePosition, runtime, out var relativePosition))
-                pos = relativePosition;
+            if (!string.IsNullOrWhiteSpace(ship.RelativePosition.ObjectName) &&
+                (relObj = runtime.Player.Space.World.GameWorld.GetObject(ship.RelativePosition.ObjectName)!) != null)
+            {
+                var dir = new Vector3(runtime.Random.NextFloat(-1, 1),
+                    runtime.Random.NextFloat(-0.1f, 0.1f),
+                    runtime.Random.NextFloat(-1, 1)).Normalized();
+                var range = runtime.Random.NextFloat(ship.RelativePosition.MinRange,
+                    ship.RelativePosition.MaxRange);
+                pos = relObj.WorldTransform.Position + (dir * range);
+            }
 
             var arrivalObject = string.IsNullOrWhiteSpace(ship.ArrivalObj.Object) || spawnpos.Present
                 ? null
@@ -157,6 +166,8 @@ namespace LibreLancer.Missions.Actions
                 ld!, pilot, pos, orient, arrivalObject, ship.ArrivalObj.Index, runtime);
             var drComp = obj.GetComponent<DirectiveRunnerComponent>();
             drComp!.SetDirectives(directives, runtime.Player.Space.World.GameWorld);
+            var dstComp = obj.GetComponent<SDestroyableComponent>();
+            dstComp!.OnKilled = () => { runtime.ObjectDestroyed(ship.Nickname); };
             return obj;
         }
 
@@ -168,27 +179,6 @@ namespace LibreLancer.Missions.Actions
             {
                 SpawnShipInWorld(ship, spawnpos, spawnorient, objList, script, runtime);
             });
-        }
-
-        protected bool TryGetRelativePosition(MissionRelativePosition relativePosition, MissionRuntime runtime,
-            out Vector3 position)
-        {
-            position = Vector3.Zero;
-
-            if (string.IsNullOrWhiteSpace(relativePosition.ObjectName))
-                return false;
-
-            var relObj = runtime.Player.Space!.World.GameWorld.GetObject(relativePosition.ObjectName);
-            if (relObj == null)
-                return false;
-
-            var dir = new Vector3(
-                runtime.Random.NextFloat(-1, 1),
-                runtime.Random.NextFloat(-0.1f, 0.1f),
-                runtime.Random.NextFloat(-1, 1)).Normalized();
-            var range = runtime.Random.NextFloat(relativePosition.MinRange, relativePosition.MaxRange);
-            position = relObj.WorldTransform.Position + (dir * range);
-            return true;
         }
     }
 
@@ -273,8 +263,6 @@ namespace LibreLancer.Missions.Actions
             }
 
             var fpos = Position.Get(form.Position);
-            if (!Position.Present && TryGetRelativePosition(form.RelativePosition, runtime, out var relativePosition))
-                fpos = relativePosition;
             var forient = Orientation.Get(form.Orientation);
             var mat = Matrix4x4.CreateFromQuaternion(forient) *
                       Matrix4x4.CreateTranslation(fpos);

@@ -12,7 +12,6 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Threading.Tasks.Dataflow;
-using MessagePack;
 using LibreLancer.Client;
 using LibreLancer.Data;
 using LibreLancer.Data.GameData;
@@ -57,40 +56,8 @@ namespace LibreLancer.Server
         private PreloadObject[] msnPreload = null!;
         private readonly DynamicThn thns = new();
         private bool jumpPending;
-        private JumperNpc[]? pendingClusterJumpers;
-        private ServerWorld? pendingClusterJumpSourceWorld;
 
         private ConcurrentQueue<Action> saveActions = new();
-        private readonly object transferSync = new();
-        private readonly object saveSync = new();
-        private readonly SemaphoreSlim packetProcessingGate = new(1, 1);
-        private Guid transferId;
-        private long transferCharacterId;
-        private Task<byte[]>? transferSnapshotTask;
-        private int transferState;
-        private int sourceDisconnected;
-        private readonly long? transferLoginCharacterId;
-        private readonly SaveGame? transferLoginSaveGame;
-        private readonly LancerNexus.Protocol.NpcTransferSnapshot? transferLoginNpcSnapshot;
-
-        private const int TransferActive = 0;
-        private const int TransferFreezing = 1;
-        private const int TransferFrozen = 2;
-        private const int TransferReleased = 3;
-        private const int MaxTransferSnapshotBytes = 16 * 1024 * 1024;
-
-        public bool TransferInProgress => Volatile.Read(ref transferState) is TransferFreezing or TransferFrozen;
-
-        public (Guid TransferId, long CharacterId)? PendingTransfer
-        {
-            get
-            {
-                lock (transferSync)
-                    return TransferInProgress && transferId != Guid.Empty && transferCharacterId > 0
-                        ? (transferId, transferCharacterId)
-                        : null;
-            }
-        }
 
         // State
         public NetCharacter? Character;
@@ -117,119 +84,17 @@ namespace LibreLancer.Server
 
         private Guid playerGuid; //:)
         public Guid AccountId => playerGuid;
-        // Populated exclusively from Gateway admission, never from a client chat payload.
-        public Guid GatewaySessionId { get; internal set; }
-        public Guid GatewayTransferId { get; internal set; }
-        private int adminQueryRunning;
-        private long lastAdminQuery;
-
-        private void HandleAdminQuery(string text)
-        {
-            if (PermissionChatCommand.IsCommand(text))
-            {
-                HandlePermissionCommand(text);
-                return;
-            }
-            void HandlePermissionCommand(string permissionText)
-            {
-                if (!PermissionChatCommand.TryParse(permissionText, Game.InstanceId, out var query) || query is null)
-                {
-                    rpcClient.OnConsoleMessage("Admin: /admin permission node <UUID> <allow|deny> <exact|wildcard|regex> <node> [global|instance]");
-                    rpcClient.OnConsoleMessage("Admin: /admin permission group <assign|remove|promote|demote> <UUID> <group|ladder> [global|instance]");
-                    rpcClient.OnConsoleMessage("Admin: /admin op <UUID> [global|instance] | /admin deop <UUID> [global|instance]");
-                    return;
-                }
-                if (Interlocked.CompareExchange(ref adminQueryRunning, 1, 0) != 0)
-                {
-                    rpcClient.OnConsoleMessage("Admin: Anfrage läuft bereits.");
-                    return;
-                }
-                var now = Environment.TickCount64;
-                if (lastAdminQuery != 0 && now - lastAdminQuery < 2000)
-                {
-                    Interlocked.Exchange(ref adminQueryRunning, 0);
-                    rpcClient.OnConsoleMessage("Admin: Bitte kurz warten.");
-                    return;
-                }
-                lastAdminQuery = now;
-                _ = Task.Run(async () =>
-                {
-                    try
-                    {
-                        var result = await Game.MutateAdministrationPermissionAsync(new GamePermissionMutationRequest(
-                            AccountId, GatewaySessionId, Character?.ID ?? 0, GatewayTransferId, query));
-                        rpcClient.OnConsoleMessage(result.Status switch
-                        {
-                            "ok" => "Admin: Rechteänderung synchronisiert.",
-                            "sync_pending" => $"Admin: Rechteänderung gespeichert (Revision {result.Revision}); Instanzen gleichen ab.",
-                            "denied" => "Admin: Keine Berechtigung permissions.manage.",
-                            "conflict" => "Admin: Änderung steht im Konflikt mit dem aktuellen Gruppenmodell.",
-                            _ => "Admin: Permissions-Dienst derzeit nicht verfügbar."
-                        });
-                    }
-                    catch (Exception e)
-                    {
-                        FLLog.Warning("Administration", $"Permission command unavailable ({e.GetType().Name})");
-                        rpcClient.OnConsoleMessage("Admin: Permissions-Dienst derzeit nicht erreichbar.");
-                    }
-                    finally { Interlocked.Exchange(ref adminQueryRunning, 0); }
-                });
-            }
-            var query = LancerNexus.Protocol.AdminQuery.ParseChat(text);
-            if (query == null)
-            {
-                rpcClient.OnConsoleMessage("Admin: /admin help | status | instances | instance <ID>");
-                return;
-            }
-            if (Interlocked.CompareExchange(ref adminQueryRunning, 1, 0) != 0)
-            {
-                rpcClient.OnConsoleMessage("Admin: Anfrage läuft bereits.");
-                return;
-            }
-            var now = Environment.TickCount64;
-            if (lastAdminQuery != 0 && now - lastAdminQuery < 2000)
-            {
-                Interlocked.Exchange(ref adminQueryRunning, 0);
-                rpcClient.OnConsoleMessage("Admin: Bitte kurz warten.");
-                return;
-            }
-            lastAdminQuery = now;
-            var characterId = Character?.ID ?? 0;
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    var result = await Game.QueryAdministrationAsync(new LancerNexus.Protocol.GameAdminQueryRequest
-                    {
-                        AccountId = AccountId, SessionId = GatewaySessionId, TransferId = GatewayTransferId,
-                        CharacterId = characterId, Query = query
-                    });
-                    foreach (var line in result.Lines) rpcClient.OnConsoleMessage("Admin: " + line);
-                }
-                catch (Exception e)
-                {
-                    FLLog.Warning("Administration", $"Private admin query unavailable ({e.GetType().Name})");
-                    rpcClient.OnConsoleMessage("Admin: Administration derzeit nicht erreichbar.");
-                }
-                finally { Interlocked.Exchange(ref adminQueryRunning, 0); }
-            });
-        }
         public NetResponseHandler ResponseHandler;
 
         private RemoteClientPlayer rpcClient;
 
         public RemoteClientPlayer RpcClient => rpcClient;
 
-        public Player(IPacketClient client, GameServer game, Guid playerGuid, long? transferLoginCharacterId = null,
-            SaveGame? transferLoginSaveGame = null,
-            LancerNexus.Protocol.NpcTransferSnapshot? transferLoginNpcSnapshot = null)
+        public Player(IPacketClient client, GameServer game, Guid playerGuid)
         {
             this.Client = client;
             this.Game = game;
             this.playerGuid = playerGuid;
-            this.transferLoginCharacterId = transferLoginCharacterId;
-            this.transferLoginSaveGame = transferLoginSaveGame;
-            this.transferLoginNpcSnapshot = transferLoginNpcSnapshot;
             ID = Interlocked.Increment(ref _gid);
             ResponseHandler = new NetResponseHandler();
             rpcClient = new RemoteClientPlayer(client, ResponseHandler);
@@ -254,13 +119,11 @@ namespace LibreLancer.Server
 
         public void UpdateMissionRuntime(double elapsed)
         {
-            if (Volatile.Read(ref transferState) != TransferActive)
-                return;
             msnRuntime?.Update(elapsed);
 
             if (Space != null)
             {
-                while (worldActions.Count > 0 && !Space.World.NPCs.HasPendingMissionSpawns(msnRuntime))
+                while (worldActions.Count > 0)
                     worldActions.Dequeue()();
             }
         }
@@ -287,7 +150,6 @@ namespace LibreLancer.Server
                 MissionRuntime.PlayerLaunch();
                 MissionRuntime.CheckMissionScript();
                 MissionRuntime.EnteredSpace();
-                MissionRuntime.CheckMissionScript();
             }
         }
 
@@ -377,9 +239,7 @@ namespace LibreLancer.Server
         public void StartRandomMission(GeneratedRandomMission mission, NetMissionOffer netOffer)
         {
             ActiveRandomMissionPosition = mission.Parameters.TargetPosition;
-            var missionNickname = $"random-{Guid.NewGuid():N}";
-            msnRuntime = new MissionRuntime(mission.CreateScript(), this, [], missionNickname: missionNickname,
-                generatedMissionState: mission.CaptureTransferState());
+            msnRuntime = new MissionRuntime(mission.CreateScript(), this, []);
             rpcClient.SetActiveRandomMission(netOffer);
             // Keep the objective in the mission runtime as well as on the client. This
             // makes the accepted offer a real active mission and lets the normal space
@@ -913,12 +773,6 @@ namespace LibreLancer.Server
 
         private void BeginGame(NetCharacter c, SaveGame? sg)
         {
-            // Disconnect can save immediately if an initial RPC fails. Hydrate
-            // the location before exposing this character to that cleanup path.
-            Base = c.Base;
-            System = c.System!;
-            Position = c.Position;
-            Orientation = c.Orientation == Quaternion.Zero ? Quaternion.Identity : c.Orientation;
             Character = c;
             MPlayer = sg?.MPlayer ?? new() { CanDock = 1, CanTl = 1 };
             StartTime = DateTime.UtcNow;
@@ -938,22 +792,26 @@ namespace LibreLancer.Server
                 rpcClient.UpdateVisits(VisitBundle.Compress(c.GetAllVisitFlags()));
             }
 
+            Base = Character.Base;
+            System = Character.System!;
+            Position = Character.Position;
+            Orientation = Character.Orientation;
+
+            if (Orientation == Quaternion.Zero)
+            {
+                Orientation = Quaternion.Identity;
+            }
 
             foreach (var player in Game.AllPlayers.Where(x => x != this))
             {
                 player.RpcClient.OnPlayerJoin(ID, Name!);
             }
 
-            rpcClient.ListPlayers(false);
+            rpcClient.ListPlayers(Character.Admin);
 
             if (sg != null)
             {
-                var missionTransferState = transferLoginNpcSnapshot is null
-                    ? null
-                    : MessagePackSerializer.Deserialize<LancerNexus.Protocol.NpcMissionRuntimeStateV1>(
-                        transferLoginNpcSnapshot.MissionRuntimeState,
-                        MessagePackSerializerOptions.Standard.WithSecurity(MessagePackSecurity.UntrustedData));
-                InitStory(sg, missionTransferState);
+                InitStory(sg);
             }
 
             rpcClient.UpdateCharacterProgress((int) Character.Rank, (long) (Story?.NextLevelWorth ?? -1));
@@ -1005,48 +863,13 @@ namespace LibreLancer.Server
                 Space = new SpacePlayer(world, this);
                 world.EnqueueAction(() =>
                 {
-                    if (transferLoginNpcSnapshot != null)
-                    {
-                        if (MissionRuntime == null)
-                        {
-                            FLLog.Error("NPC Transfer", "Target mission runtime was not restored before NPC activation.");
-                            Client.Disconnect(DisconnectReason.LoginError);
-                            return;
-                        }
-                    }
                     rpcClient.SpawnPlayer(ID, System, world.GameWorld.CrcTranslation.ToArray(), Objective, Position,
                         Orientation, Character!.GetDestroyedParts(), world.CurrentTick);
                     var pship = world.SpawnPlayer(this, Position, Orientation);
-                    if (transferLoginNpcSnapshot != null)
-                    {
-                        try
-                        {
-                            var arrivingNpcs = GameServer.RebaseNpcSnapshotAtArrival(transferLoginNpcSnapshot, world);
-                            world.NPCs.RestoreTransfer(arrivingNpcs, MissionRuntime);
-                        }
-                        catch (Exception error)
-                        {
-                            FLLog.Error("NPC Transfer", $"Could not activate committed NPC transfer: {error.Message}");
-                            Client.Disconnect(DisconnectReason.LoginError);
-                            return;
-                        }
-                    }
                     world.Population.PopulateInitialAroundPlayer(pship);
 
                     // Ensure mission runtime is properly initialized when spawning in space
                     HandleSpaceEntry();
-                    if (transferLoginNpcSnapshot != null)
-                    {
-                        try
-                        {
-                            Game.MarkNpcTransferActivated(transferLoginNpcSnapshot.TransferId);
-                        }
-                        catch (Exception error)
-                        {
-                            FLLog.Error("NPC Transfer", $"Could not persist activation receipt: {error.Message}");
-                            Client.Disconnect(DisconnectReason.LoginError);
-                        }
-                    }
                 });
             }, msnPreload);
         }
@@ -1121,7 +944,7 @@ namespace LibreLancer.Server
 
         private uint[] loadTriggers = null!;
 
-        public void LoadMission(LancerNexus.Protocol.NpcMissionRuntimeStateV1? transferState = null)
+        public void LoadMission()
         {
             if (Story?.CurrentMission != null)
             {
@@ -1130,16 +953,12 @@ namespace LibreLancer.Server
 
                 // Load the mission script
                 var missionIni = Game.GameData.Items.Ini.LoadMissionIni(Story.CurrentMission);
-                msnRuntime = new MissionRuntime(new(missionIni!, Game.GameData.Items), this, loadTriggers!,
-                    transferState, Story.CurrentMission.Nickname);
+                msnRuntime = new MissionRuntime(new(missionIni!, Game.GameData.Items), this, loadTriggers!);
                 msnPreload = msnRuntime.Script.CalculatePreloads(Game.GameData);
                 // rpcClient.SetPreloads(msnPreload); // TODO: Re-implement
 
                 // Ensure mission runtime is properly initialized
-                if (transferState == null)
-                    msnRuntime.Update(0.0);
-                if (transferState != null)
-                    msnRuntime.GiveNNObjectives();
+                msnRuntime.Update(0.0);
 
                 // Debug: Log the mission script details
                 FLLog.Debug("Mission",
@@ -1172,7 +991,7 @@ namespace LibreLancer.Server
             rpcClient.UpdateCharacterProgress((int) Character!.Rank, (long) (Story?.NextLevelWorth ?? -1));
         }
 
-        private void InitStory(SaveGame sg, LancerNexus.Protocol.NpcMissionRuntimeStateV1? transferState = null)
+        private void InitStory(SaveGame sg)
         {
             var msn = sg.StoryInfo?.Mission ?? "No_Mission";
             var missionNum = sg.StoryInfo?.MissionNum ?? 0;
@@ -1225,38 +1044,9 @@ namespace LibreLancer.Server
             loadTriggers = sg.TriggerSave.Select(x => (uint) x.Trigger).ToArray();
 
             // Only load mission if we have a valid mission
-            if (transferState?.GeneratedMission is { } generatedMission)
+            if (Story?.CurrentMission != null)
             {
-                ActiveRandomMissionPosition = new Vector3(generatedMission.TargetPosition.X,
-                    generatedMission.TargetPosition.Y, generatedMission.TargetPosition.Z);
-                var script = GeneratedRandomMission.CreateTransferScript(Game.GameData.Items, generatedMission);
-                msnRuntime = new MissionRuntime(script, this, [], transferState, transferState.MissionNickname,
-                    generatedMission);
-                msnPreload = msnRuntime.Script.CalculatePreloads(Game.GameData);
-                var offerFaction = Game.GameData.Items.Factions.Get(generatedMission.OfferFactionNickname)
-                    ?? throw new InvalidDataException("Generated mission offer faction is unavailable on the target.");
-                var destinationSystem = Game.GameData.Items.Systems.Get(generatedMission.DestinationSystemNickname)
-                    ?? throw new InvalidDataException("Generated mission destination system is unavailable on the target.");
-                rpcClient.SetActiveRandomMission(new NetMissionOffer
-                {
-                    Id = generatedMission.Id,
-                    FactionIdsName = offerFaction.IdsName,
-                    SystemIdsName = destinationSystem.IdsName,
-                    Reward = generatedMission.Reward,
-                    MissionType = generatedMission.MissionType,
-                    OfferText = generatedMission.OfferText,
-                    TargetName = generatedMission.TargetName
-                });
-                msnRuntime.GiveNNObjectives();
-                if (Space != null)
-                {
-                    HandleSpaceEntry();
-                    msnRuntime.Update(0.1);
-                }
-            }
-            else if (Story?.CurrentMission != null)
-            {
-                LoadMission(transferState);
+                LoadMission();
             }
             else
             {
@@ -1270,18 +1060,6 @@ namespace LibreLancer.Server
         public void MissionWorldAction(Action a)
         {
             worldActions.Enqueue(a);
-        }
-
-        internal void DrainMissionWorldActionsForTransfer()
-        {
-            while (worldActions.Count > 0)
-            {
-                if (Space?.World.NPCs.HasPendingMissionSpawns(msnRuntime) == true)
-                    throw new InvalidOperationException("Mission NPC identity allocation is still pending.");
-                worldActions.Dequeue()();
-            }
-            if (Space?.World.NPCs.HasPendingMissionSpawns(msnRuntime) == true)
-                throw new InvalidOperationException("Mission NPC identity allocation is still pending.");
         }
 
         public async Task OnLoggedIn()
@@ -1307,30 +1085,17 @@ namespace LibreLancer.Server
                 }
 
                 Client.SendPacket(new LoginSuccessPacket(), PacketDeliveryMethod.ReliableOrdered);
-                packetQueueTask = Task.Factory.StartNew(ProcessPacketQueue, TaskCreationOptions.LongRunning);
-                if (transferLoginCharacterId is long characterId)
+                Client.SendPacket(new OpenCharacterListPacket()
                 {
-                    var selected = CharacterList.SingleOrDefault(x => x.Id == characterId);
-                    if (selected == null || !Game.CharactersInUse.Add(characterId))
+                    Info = new CharacterSelectInfo()
                     {
-                        Client.Disconnect(DisconnectReason.LoginError);
-                        return;
+                        ServerName = Game.ServerName,
+                        ServerDescription = Game.ServerDescription,
+                        ServerNews = Game.ServerNews,
+                        Characters = CharacterList,
                     }
-                    BeginGame(await NetCharacter.FromDb(characterId, Game), transferLoginSaveGame);
-                }
-                else
-                {
-                    Client.SendPacket(new OpenCharacterListPacket()
-                    {
-                        Info = new CharacterSelectInfo()
-                        {
-                            ServerName = Game.ServerName,
-                            ServerDescription = Game.ServerDescription,
-                            ServerNews = Game.ServerNews,
-                            Characters = CharacterList,
-                        }
-                    }, PacketDeliveryMethod.ReliableOrdered);
-                }
+                }, PacketDeliveryMethod.ReliableOrdered);
+                packetQueueTask = Task.Factory.StartNew(ProcessPacketQueue, TaskCreationOptions.LongRunning);
 
                 Game.ServerEvents.Enqueue(new ServerEvent
                 {
@@ -1360,51 +1125,6 @@ namespace LibreLancer.Server
             }
         }
 
-        void IServerPlayer.BeginClusterTransfer(string transferId, long characterId, long leaseVersion,
-            string targetSystem, string target, string targetInstanceId, string targetEndpoint)
-        {
-            if (!Guid.TryParseExact(transferId, "N", out var id) || !Game.ClusterTransfersEnabled ||
-                Character?.ID != characterId || leaseVersion < 0)
-            {
-                rpcClient.TransferSnapshotStaged(transferId, false);
-                return;
-            }
-            GatewayTransferId = id;
-            _ = Task.Run(async () =>
-            {
-                var jumpers = pendingClusterJumpers ?? [];
-                var sourceWorld = pendingClusterJumpSourceWorld;
-                pendingClusterJumpers = null;
-                pendingClusterJumpSourceWorld = null;
-                try
-                {
-                    await Game.PrepareAndSendNpcTransferAsync(id, targetInstanceId, targetEndpoint, targetSystem,
-                        target, characterId, leaseVersion, jumpers, sourceWorld, MissionRuntime,
-                        DrainMissionWorldActionsForTransfer).ConfigureAwait(false);
-                    await Game.StageCharacterTransferSnapshotAsync(id, characterId, leaseVersion,
-                        targetSystem, target).ConfigureAwait(false);
-                    rpcClient.TransferSnapshotStaged(transferId, true);
-                }
-                catch (Exception error)
-                {
-                    FLLog.Error("Transfer", $"Snapshot staging failed: {error.Message}");
-                    if (jumpers.Length > 0)
-                    {
-                        try
-                        {
-                            await Game.AbortNpcTransferAndRestoreAsync(id, sourceWorld, MissionRuntime)
-                                .ConfigureAwait(false);
-                        }
-                        catch (Exception restoreError)
-                        {
-                            FLLog.Error("NPC Transfer", $"Could not restore source NPCs for {id:D}: {restoreError.Message}");
-                        }
-                    }
-                    rpcClient.TransferSnapshotStaged(transferId, false);
-                }
-            });
-        }
-
         public bool SinglePlayer => Client is LocalPacketClient;
 
         public void SendSPUpdate(SPUpdatePacket update) =>
@@ -1418,8 +1138,6 @@ namespace LibreLancer.Server
 
         public void EnqueuePacket(IPacket packet)
         {
-            if (Volatile.Read(ref transferState) != TransferActive)
-                return;
             inputPackets.Post(packet);
         }
 
@@ -1450,30 +1168,23 @@ namespace LibreLancer.Server
 
         public async Task ProcessPacketDirect(IPacket packet)
         {
-            await packetProcessingGate.WaitAsync().ConfigureAwait(false);
-            try
-            {
-                if (Volatile.Read(ref transferState) != TransferActive)
-                    return;
-                if (ResponseHandler.HandlePacket(packet))
-                    return;
-                if (await GeneratedProtocol.HandleIServerPlayer(packet, this, Client))
-                    return;
-                if (Space != null && await GeneratedProtocol.HandleISpacePlayer(packet, Space, Client))
-                    return;
-                if (Baseside != null && await GeneratedProtocol.HandleIBasesidePlayer(packet, Baseside, Client))
-                    return;
+            if (ResponseHandler.HandlePacket(packet))
+                return;
+            if (await GeneratedProtocol.HandleIServerPlayer(packet, this, Client))
+                return;
+            if (Space != null && await GeneratedProtocol.HandleISpacePlayer(packet, Space, Client))
+                return;
+            if (Baseside != null && await GeneratedProtocol.HandleIBasesidePlayer(packet, Baseside, Client))
+                return;
 
-                if (packet is InputUpdatePacket p)
-                    Space?.World.InputsUpdate(this, p);
-                else
-                {
-                    FLLog.Info("Player", $"Disconnecting player, invalid packet type {packet.GetType()}");
-                    Client.Disconnect(DisconnectReason.ConnectionError);
-                    Disconnected();
-                }
+            if (packet is InputUpdatePacket p)
+                Space?.World.InputsUpdate(this, p);
+            else
+            {
+                FLLog.Info("Player", $"Disconnecting player, invalid packet type {packet.GetType()}");
+                Client.Disconnect(DisconnectReason.ConnectionError);
+                Disconnected();
             }
-            finally { packetProcessingGate.Release(); }
         }
 
         private NetLoadout? _scanLoadout;
@@ -1544,22 +1255,7 @@ namespace LibreLancer.Server
                     return false;
                 }
 
-                SaveGame? testMission = null;
-#if DEBUG
-                if (!string.IsNullOrWhiteSpace(Game.TestMissionNickname))
-                {
-                    testMission = new SaveGame
-                    {
-                        StoryInfo = new StoryInfo
-                        {
-                            Mission = Game.TestMissionNickname,
-                            MissionNum = 0,
-                            DeltaWorth = -1
-                        }
-                    };
-                }
-#endif
-                BeginGame(await NetCharacter.FromDb(sc.Id, Game), testMission);
+                BeginGame(await NetCharacter.FromDb(sc.Id, Game), null);
                 return true;
             }
             else
@@ -1797,13 +1493,6 @@ namespace LibreLancer.Server
 
         void IServerPlayer.ChatMessage(ChatCategory category, BinaryChatMessage message)
         {
-            // Reconstruct styled/fragmented chat before interception. Admin text is private and never logged/broadcast.
-            var adminText = string.Concat(message.Segments.Select(segment => segment.Contents));
-            if (LancerNexus.Protocol.AdminQuery.IsAdminChat(adminText))
-            {
-                HandleAdminQuery(adminText);
-                return;
-            }
             string msg0 = message.Segments.Count > 0 ? message.Segments[0].Contents : "";
 
             if (msg0.Length >= 2 && msg0[0] == '/' && char.IsLetter(msg0[1]))
@@ -1833,203 +1522,8 @@ namespace LibreLancer.Server
 
         public void RunSave()
         {
-            lock (saveSync)
-            {
-                while (saveActions.TryDequeue(out var a))
-                    a();
-            }
-        }
-
-        /// <summary>Freezes this character in the source simulation and returns its Freelancer save snapshot.</summary>
-        public async Task<byte[]> FreezeForTransferAsync(Guid id, long expectedCharacterId,
-            string? targetSystem = null, string? target = null,
-            Func<Task<(Vector3 Position, Quaternion Orientation)>>? freezeSimulation = null)
-        {
-            if (id == Guid.Empty || expectedCharacterId <= 0)
-                throw new ArgumentException("Transfer and character IDs must be valid.");
-
-            await packetProcessingGate.WaitAsync().ConfigureAwait(false);
-            Task<byte[]> snapshotTask;
-            try
-            {
-                lock (transferSync)
-                {
-                    if (transferState != TransferActive)
-                    {
-                        if (transferId == id && transferSnapshotTask != null)
-                            snapshotTask = transferSnapshotTask;
-                        else
-                            throw new InvalidOperationException("Player already has another transfer in progress.");
-                    }
-                    else
-                    {
-                        if (Character == null || Character.ID != expectedCharacterId || Space == null || Base != null)
-                            throw new InvalidOperationException("Character is not eligible for a space transfer.");
-                        transferId = id;
-                        transferCharacterId = expectedCharacterId;
-                        Volatile.Write(ref transferState, TransferFreezing);
-                        transferSnapshotTask = FreezeTransferCoreAsync(id, expectedCharacterId, Space,
-                            targetSystem, target, freezeSimulation ?? Space.FreezeAsync, freezeSimulation is not null);
-                        snapshotTask = transferSnapshotTask;
-                    }
-                }
-            }
-            finally { packetProcessingGate.Release(); }
-
-            return await snapshotTask.ConfigureAwait(false);
-        }
-
-        private async Task<byte[]> FreezeTransferCoreAsync(Guid id, long expectedCharacterId, SpacePlayer sourceSpace,
-            string? targetSystem, string? target,
-            Func<Task<(Vector3 Position, Quaternion Orientation)>> freezeSimulation, bool coordinatedFreeze)
-        {
-            var removedFromWorld = false;
-            try
-            {
-                var transform = await freezeSimulation().ConfigureAwait(false);
-                removedFromWorld = true;
-                Position = transform.Position;
-                Orientation = transform.Orientation;
-
-                byte[] snapshot;
-                lock (saveSync)
-                {
-                    if (Character == null || Character.ID != expectedCharacterId || transferId != id)
-                        throw new InvalidOperationException("Character ownership changed during transfer freeze.");
-
-                    RunSave();
-                    var now = DateTime.UtcNow;
-                    using (var characterUpdate = Character.BeginTransaction())
-                    {
-                        characterUpdate.UpdatePosition(Base, System, Position, Orientation);
-                        characterUpdate.UpdateTime(Character.Time + (now - StartTime).TotalSeconds);
-                    }
-                    StartTime = now;
-
-                    SaveGame save;
-                    lock (thns)
-                    {
-                        save = SaveWriter.CreateSave(Character, null, 0, now, Game.GameData, thns.Rtcs,
-                            thns.Ambients, Story, MPlayer);
-                    }
-                    if (!string.IsNullOrWhiteSpace(targetSystem) && !string.IsNullOrWhiteSpace(target))
-                    {
-                        var destination = Game.GameData.Items.Systems.Get(targetSystem);
-                        var arrival = destination?.Objects.FirstOrDefault(obj =>
-                            obj.Nickname.Equals(target, StringComparison.OrdinalIgnoreCase));
-                        if (arrival == null)
-                            throw new InvalidDataException($"Transfer arrival object '{target}' was not found in '{targetSystem}'.");
-                        save.Player.System = targetSystem;
-                        save.Player.Base = null;
-                        save.Player.Position = Vector3.Transform(new Vector3(0, 0, 500), arrival.Rotation) + arrival.Position;
-                    }
-                    MissionRuntime?.WriteActiveTriggers(save);
-                    using var stream = new MemoryStream();
-                    IniWriter.WriteIni(stream, save.ToIni());
-                    if (stream.Length is 0 or > MaxTransferSnapshotBytes)
-                        throw new InvalidDataException("Transfer snapshot size is outside the supported limit.");
-                    snapshot = stream.ToArray();
-                }
-
-                lock (transferSync)
-                    Volatile.Write(ref transferState, TransferFrozen);
-                return snapshot;
-            }
-            catch
-            {
-                if (removedFromWorld && coordinatedFreeze)
-                {
-                    // The player and mission NPCs have already been removed together. Keep the
-                    // source fenced until Gateway confirms abort or commit; the caller restores
-                    // the NPC group before AbortTransferFreeze can respawn the player.
-                    lock (transferSync)
-                        Volatile.Write(ref transferState, TransferFrozen);
-                }
-                else
-                {
-                    lock (transferSync)
-                    {
-                        transferId = Guid.Empty;
-                        transferCharacterId = 0;
-                        transferSnapshotTask = null;
-                        Volatile.Write(ref transferState, TransferActive);
-                    }
-                    if (removedFromWorld && Character != null && Volatile.Read(ref sourceDisconnected) == 0)
-                        SpaceInitialSpawn(null);
-                    if (Volatile.Read(ref sourceDisconnected) != 0)
-                        FinalizeDisconnectedTransfer();
-                }
-                throw;
-            }
-        }
-
-        /// <summary>Resumes the source character after Gateway confirms that the transfer was aborted.</summary>
-        public bool AbortTransferFreeze(Guid id)
-        {
-            lock (transferSync)
-            {
-                if (transferState != TransferFrozen || transferId != id)
-                    return false;
-                transferId = Guid.Empty;
-                transferCharacterId = 0;
-                transferSnapshotTask = null;
-                Volatile.Write(ref transferState, TransferActive);
-            }
-            if (Volatile.Read(ref sourceDisconnected) != 0)
-                FinalizeDisconnectedTransfer();
-            else
-                SpaceInitialSpawn(null);
-            return true;
-        }
-
-        /// <summary>Discards the source copy only after Gateway confirms the atomic lease commit.</summary>
-        public bool ReleaseAfterTransferCommit(Guid id)
-        {
-            lock (transferSync)
-            {
-                if (transferState != TransferFrozen || transferId != id || Character == null)
-                    return false;
-                var characterId = Character.ID;
-                Volatile.Write(ref transferState, TransferReleased);
-                Game.CharactersInUse.Remove(characterId);
-                Game.ServerEvents.Enqueue(new ServerEvent
-                {
-                    Type = ServerEventType.CharacterDisconnected,
-                    TimeUtc = DateTime.UtcNow,
-                    Payload = new CharacterDisconnectedEventPayload(this)
-                });
-                Character = null;
-                Space = null;
-            }
-            foreach (var player in Game.AllPlayers.Where(x => x != this))
-                player.RpcClient.OnPlayerLeave(ID, Name);
-            Client.Disconnect(DisconnectReason.Unknown);
-            if (Volatile.Read(ref sourceDisconnected) != 0)
-                RemoveDisconnectedTransferPlayer();
-            return true;
-        }
-
-        private void FinalizeDisconnectedTransfer()
-        {
-            if (Character != null)
-            {
-                Game.CharactersInUse.Remove(Character.ID);
-                Game.ServerEvents.Enqueue(new ServerEvent
-                {
-                    Type = ServerEventType.CharacterDisconnected,
-                    TimeUtc = DateTime.UtcNow,
-                    Payload = new CharacterDisconnectedEventPayload(this)
-                });
-                Character = null;
-            }
-            Space = null;
-            RemoveDisconnectedTransferPlayer();
-        }
-
-        private void RemoveDisconnectedTransferPlayer()
-        {
-            lock (Game.ConnectedPlayers)
-                Game.ConnectedPlayers.Remove(this);
+            while (saveActions.TryDequeue(out var a))
+                a();
         }
 
         private const string SAVE_ALPHABET = "23456789bcdfghjlmnpqrstvwxyz";
@@ -2053,60 +1547,55 @@ namespace LibreLancer.Server
 
         public Task<string> SaveSP(string? description, int ids, bool isAutoSave, DateTime? timeStamp)
         {
-            var completionSource = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-            lock (transferSync)
+            var completionSource = new TaskCompletionSource<string>();
+            saveActions.Enqueue(() =>
             {
-                if (transferState != TransferActive)
-                    return Task.FromException<string>(new InvalidOperationException("Character is frozen for transfer."));
-                saveActions.Enqueue(() =>
+                if (Character != null)
                 {
-                    if (Character != null)
-                    {
-                        using var c = Character.BeginTransaction();
-                        c.UpdatePosition(Base, System, Position, Orientation);
-                        var n = DateTime.UtcNow;
-                        c.UpdateTime(Character.Time + (n - StartTime).Seconds);
-                        StartTime = n;
-                    }
+                    using var c = Character.BeginTransaction();
+                    c.UpdatePosition(Base, System, Position, Orientation);
+                    var n = DateTime.UtcNow;
+                    c.UpdateTime(Character.Time + (n - StartTime).Seconds);
+                    StartTime = n;
+                }
 
-                    SaveGame sg;
+                SaveGame sg;
 
-                    lock (thns)
-                    {
-                        sg = SaveWriter.CreateSave(Character!, description, ids, timeStamp, Game.GameData, thns.Rtcs,
-                            thns.Ambients, Story, MPlayer);
-                    }
+                lock (thns)
+                {
+                    sg = SaveWriter.CreateSave(Character!, description, ids, timeStamp, Game.GameData, thns.Rtcs,
+                        thns.Ambients, Story, MPlayer);
+                }
 
-                    string path;
-                    MissionRuntime?.WriteActiveTriggers(sg);
+                string path;
+                MissionRuntime?.WriteActiveTriggers(sg);
 
-                    if (isAutoSave)
+                if (isAutoSave)
+                {
+                    path = Path.Combine(SaveFolder, "AutoSave.fl");
+                }
+                else
+                {
+                    var filename = $"Save0{EncodeTime(DateTimeOffset.Now.ToUnixTimeSeconds())}.fl";
+                    path = Path.Combine(SaveFolder, filename);
+                    int i = 0;
+
+                    while (File.Exists(path))
                     {
-                        path = Path.Combine(SaveFolder, "AutoSave.fl");
-                    }
-                    else
-                    {
-                        var filename = $"Save0{EncodeTime(DateTimeOffset.Now.ToUnixTimeSeconds())}.fl";
+                        filename = $"Save0{EncodeTime(DateTimeOffset.Now.ToUnixTimeSeconds())}{i++}.fl";
                         path = Path.Combine(SaveFolder, filename);
-                        int i = 0;
-
-                        while (File.Exists(path))
-                        {
-                            filename = $"Save0{EncodeTime(DateTimeOffset.Now.ToUnixTimeSeconds())}{i++}.fl";
-                            path = Path.Combine(SaveFolder, filename);
-                        }
                     }
+                }
 
-                    IniWriter.WriteIniFile(path, sg.ToIni());
-                    completionSource.SetResult(path);
+                IniWriter.WriteIniFile(path, sg.ToIni());
+                completionSource.SetResult(path);
 
-                    if (isAutoSave || ids != 0)
-                    {
-                        // For the "load autosave" functionality
-                        rpcClient.SPSetAutosave(path);
-                    }
-                });
-            }
+                if (isAutoSave || ids != 0)
+                {
+                    // For the "load autosave" functionality
+                    rpcClient.SPSetAutosave(path);
+                }
+            });
             return completionSource.Task;
         }
 
@@ -2146,16 +1635,6 @@ namespace LibreLancer.Server
 
         public void Disconnected()
         {
-            if (Volatile.Read(ref transferState) == TransferReleased)
-            {
-                RemoveDisconnectedTransferPlayer();
-                return;
-            }
-            if (TransferInProgress)
-            {
-                Volatile.Write(ref sourceDisconnected, 1);
-                return;
-            }
             if (packetQueueTask != null)
             {
                 inputPackets.Complete();
@@ -2180,21 +1659,8 @@ namespace LibreLancer.Server
                 return;
             }
 
-            if (Game.ClusterTransfersEnabled && !Game.OwnsSystem(system))
-            {
-                if (Character == null)
-                    return;
-                pendingClusterJumpers = jumpers;
-                pendingClusterJumpSourceWorld = Space?.World;
-                rpcClient.StartJumpTunnel(system, target, Character.ID);
-                return;
-            }
-
-            if (jumpers.Length > 0 && Space is { } sourceSpace)
-                _ = sourceSpace.World.FreezeJumpersAsync(jumpers, MissionRuntime);
-
             jumpPending = true;
-            rpcClient.StartLocalJumpTunnel();
+            rpcClient.StartJumpTunnel();
             FLLog.Debug("Player", $"Jumping to {system} - {target}");
 
             if (Space != null)
@@ -2248,7 +1714,7 @@ namespace LibreLancer.Server
                         jumpPending = false;
                     }
                 });
-                world.DelayAction(() => { world.SpawnJumpers(target, jumpers, MissionRuntime!); }, 4);
+                world.DelayAction(() => { world.SpawnJumpers(target, jumpers); }, 4);
             }, msnPreload);
         }
 

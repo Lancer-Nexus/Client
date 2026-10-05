@@ -3,8 +3,6 @@
 // LICENSE, which is part of this source code package
 
 using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Numerics;
 using LibreLancer.Graphics;
 using LibreLancer.Render.Materials;
@@ -86,7 +84,7 @@ namespace LibreLancer.Render
 
         private int GetLevel(RigidModelPart file, Vector3 center, Vector3 camera)
         {
-            var ranges = SelectLodRanges(LODRanges, file.Mesh?.Switch2);
+            var ranges = LODRanges ?? file.Mesh?.Switch2;
             if (ranges == null || ranges.Length == 0)
                 return 0;
 
@@ -109,26 +107,6 @@ namespace LibreLancer.Render
             }
 
             return 0;
-        }
-
-        internal static float[]? SelectLodRanges(float[]? modelRanges, float[]? meshRanges)
-        {
-            return meshRanges is { Length: > 0 } ? meshRanges : modelRanges;
-        }
-
-        internal static float MaximumLodDistance(float[]? modelRanges, IEnumerable<float[]?> meshRangeSets)
-        {
-            float maximum = modelRanges is { Length: > 0 } ? modelRanges[^1] : 0f;
-            foreach (var meshRanges in meshRangeSets)
-            {
-                var ranges = SelectLodRanges(modelRanges, meshRanges);
-                if (ranges is { Length: > 0 })
-                {
-                    maximum = MathF.Max(maximum, ranges[^1]);
-                }
-            }
-
-            return maximum;
         }
 
         public override bool OutOfView(ICamera camera)
@@ -198,8 +176,7 @@ namespace LibreLancer.Render
 
             if (LODRanges != null) // Fastest cull
             {
-                var meshRanges = Model?.AllParts.Select(part => part.Mesh?.Switch2) ?? Enumerable.Empty<float[]?>();
-                var maxd = MaximumLodDistance(LODRanges, meshRanges) * sysr.Settings.LodMultiplier;
+                var maxd = LODRanges[LODRanges.Length - 1] * sysr.Settings.LodMultiplier;
                 maxd *= maxd;
 
                 if (dsq > maxd)

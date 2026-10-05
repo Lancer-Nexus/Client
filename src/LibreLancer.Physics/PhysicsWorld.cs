@@ -223,14 +223,12 @@ namespace LibreLancer.Physics
             return handler.Result;
         }
 
-        private struct HitHandler(PhysicsWorld world, bool allowDynAsteroids, PhysicsObject? self,
-            Func<PhysicsObject?, bool>? filter) : IRayHitHandler
+        private struct HitHandler(PhysicsWorld world, bool allowDynAsteroids, PhysicsObject? self) : IRayHitHandler
         {
             public PhysicsObject? Result;
             public object? ResultTag;
             public Vector3 ContactPoint;
             private readonly int selfId = self?.Id ?? -1;
-            private readonly Func<PhysicsObject?, bool>? filter = filter;
             public bool DidHit;
             private CollisionKind allowed = allowDynAsteroids ? CollisionKind.DynAsteroid : CollisionKind.StaticBody;
 
@@ -246,15 +244,9 @@ namespace LibreLancer.Physics
                 CollidableReference collidable,
                 int childIndex)
             {
-                var result = world.objectsById[world.bepuToLancer[collidable]];
-                if (filter != null && !filter(result))
-                {
-                    return;
-                }
-
                 maximumT = t;
                 ContactPoint = ray.Origin + ray.Direction * t;
-                Result = result;
+                Result = world.objectsById[world.bepuToLancer[collidable]];
                 DidHit = true;
                 if (Result?.Collider is ConvexMeshCollider convex)
                 {
@@ -270,10 +262,9 @@ namespace LibreLancer.Physics
             new (Vector3 Start, Vector3 End, bool Success)[32];
 
         public bool PointRaycast(PhysicsObject? me, Vector3 origin, Vector3 direction, float maxDist,
-            bool allowDynAsteroids, out Vector3 contactPoint, out PhysicsObject? didHit, out object? childTag,
-            Func<PhysicsObject?, bool>? filter = null)
+            bool allowDynAsteroids, out Vector3 contactPoint, out PhysicsObject? didHit, out object? childTag)
         {
-            HitHandler handler = new HitHandler(this, allowDynAsteroids, me, filter);
+            HitHandler handler = new HitHandler(this, allowDynAsteroids, me);
             Simulation.RayCast(origin, direction, maxDist, BufferPool, ref handler);
             contactPoint = handler.ContactPoint;
             didHit = handler.Result;

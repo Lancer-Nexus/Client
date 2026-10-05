@@ -4,7 +4,6 @@ using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Net;
 using System.Numerics;
-using LancerNexus.Protocol;
 using LibreLancer.Data.Ini;
 using LibreLancer.Data.Schema.Missions;
 using LibreLancer.Missions.Actions;
@@ -548,14 +547,6 @@ public class Cnd_ProjHit : EventListenerCondition<ProjectileHitEvent>
     private class HitCounter : ConditionStorage
     {
         public int Remaining;
-        public override NpcMissionConditionState CaptureTransferState() => new() { Kind = "int32", NumberValue = Remaining };
-        public override void RestoreTransferState(NpcMissionConditionState state)
-        {
-            if (state.Kind != "int32" || state.NumberValue is < int.MinValue or > int.MaxValue ||
-                Math.Truncate(state.NumberValue) != state.NumberValue)
-                throw new InvalidOperationException("Mission hit-counter state is invalid.");
-            Remaining = (int)state.NumberValue;
-        }
     }
 
     public Cnd_ProjHit(Entry entry)

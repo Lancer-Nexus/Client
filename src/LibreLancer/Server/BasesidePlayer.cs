@@ -214,6 +214,21 @@ public class BasesidePlayer : IBasesidePlayer
         return false;
     }
 
+    private static Equipment? GetBundledAmmo(Equipment equipment)
+    {
+        if (equipment is MissileLauncherEquipment launcher && launcher.Munition.Def.RequiresAmmo)
+            return launcher.Munition;
+
+        if (equipment is MineDropperEquipment mine && mine.Mine?.Def.RequiresAmmo == true)
+            return mine.Mine!;
+
+        if (equipment is CountermeasureEquipment countermeasure &&
+            countermeasure.Munition?.Def.RequiresAmmo == true)
+            return countermeasure.Munition;
+
+        return null;
+    }
+
     public Task<bool> PurchaseGood(string item, int count)
     {
         if (count <= 0)
@@ -233,7 +248,8 @@ public class BasesidePlayer : IBasesidePlayer
         }
 
         var equipment = g.Good.Equipment;
-        var bundledAmmo = CargoUtilities.GetBundledAmmo(equipment);
+        var bundledAmmo = GetBundledAmmo(equipment);
+        const int bundledAmmoPerLauncher = 10;
         var bundledAmmoCount = 0;
 
         var cost = (long) (g.Price * (ulong) count);
@@ -256,13 +272,22 @@ public class BasesidePlayer : IBasesidePlayer
 
         if (bundledAmmo != null)
         {
-            var ammoCount = (long) CargoUtilities.BundledAmmoPerLauncher * count;
+            var ammoCount = (long) bundledAmmoPerLauncher * count;
             if (ammoCount > int.MaxValue)
                 return Task.FromResult(false);
+
+            var itemsAfterLauncher = Player.Character.Items;
+            if (hp == null)
+            {
+                itemsAfterLauncher = new List<NetCargo>(Player.Character.Items)
+                {
+                    new NetCargo { Equipment = equipment, Count = count }
+                };
+            }
+
             bundledAmmoCount = (int) ammoCount;
-            if (CargoUtilities.GetBundledAmmoPurchaseLimit(
-                    Player.Character.Items, Player.Character.Ship!, equipment, bundledAmmo,
-                    count, canAutoMountSingle: hp != null) < count)
+            if (bundledAmmoCount > CargoUtilities.GetItemLimit(
+                    itemsAfterLauncher, Player.Character.Ship!, bundledAmmo))
             {
                 FLLog.Error("Player", $"{Player.Name} tried to overfill cargo hold with bundled ammunition");
                 return Task.FromResult(false);

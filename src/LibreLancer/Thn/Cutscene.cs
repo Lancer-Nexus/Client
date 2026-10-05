@@ -55,8 +55,6 @@ public class Cutscene : IDisposable
 
     private ThnScriptContext scriptContext;
     private List<ThnScriptInstance> instances = [];
-    private readonly Queue<ThnScript> pendingLoopInstances = new();
-    private int loopInstanceIndex;
     private readonly List<ThnScriptLayer> scriptLayers = [];
     private ThnSceneObject[] starSphereObjects = [];
     public event Action<ThnScript>? ScriptFinished;
@@ -160,35 +158,12 @@ public class Cutscene : IDisposable
         sceneObjects.Remove(obj.Name);
     }
 
-    public void RemoveObjects(IEnumerable<string> objectNames)
-    {
-        foreach (var name in objectNames)
-        {
-            if (sceneObjects.TryGetValue(name, out var obj))
-                RemoveObject(obj);
-        }
-    }
-
     public void BeginScene(params ThnScript[] scene) => BeginScene((IEnumerable<ThnScript>)scene);
 
-    public void BeginScene(IEnumerable<ThnScript> scene, int loopScriptCount = 0)
+    public void BeginScene(IEnumerable<ThnScript> scene)
     {
         var scripts = scene.ToArray();
-        SceneSetup(scripts, loopScriptCount: Math.Clamp(loopScriptCount, 0, scripts.Length));
-    }
-
-    public bool FinishScript(ThnScript script)
-    {
-        var instance = instances.FirstOrDefault(x => ReferenceEquals(x.Script, script));
-        if (instance == null)
-            return false;
-
-        instance.FinishImmediate(false);
-        foreach (var obj in sceneObjects.Values)
-            obj.Update();
-        camera.Update();
-        OnScriptFinished(script);
-        return true;
+        SceneSetup(scripts);
     }
 
     /// <summary>
@@ -263,8 +238,7 @@ public class Cutscene : IDisposable
     private ThnScriptInstance[] SceneSetup(
         ThnScript[] scripts,
         bool resetObjects = true,
-        bool spawnLayerObjects = false,
-        int loopScriptCount = 0)
+        bool spawnLayerObjects = false)
     {
         if (resetObjects)
         {
@@ -317,10 +291,6 @@ public class Cutscene : IDisposable
         {
             var script = scripts[i];
             var ts = new ThnScriptInstance(this, script);
-            ts.Loop = i < loopScriptCount;
-            ts.SuppressFinishEvent = ts.Loop;
-            if (ts.Loop)
-                ts.LoopReplacementRequested += pendingLoopInstances.Enqueue;
             ts.ConstructEntities(sceneObjects, spawnObjects && (resetObjects || spawnLayerObjects));
             instances.Add(ts);
             newInstances[i] = ts;
@@ -432,32 +402,16 @@ public class Cutscene : IDisposable
             }
         }
 
-        foreach (var instance in instances.ToArray())
+        foreach (var instance in instances)
         {
             instance.Update(delta);
         }
-        instances.RemoveAll(x => x.RemoveAfterFinish);
-        while (pendingLoopInstances.TryDequeue(out var script))
-            StartLoopInstance(script);
 
         camera.Update();
         if (Renderer != null)
         {
             World.Update(delta);
         }
-    }
-
-    private void StartLoopInstance(ThnScript script)
-    {
-        var instance = new ThnScriptInstance(this, script)
-        {
-            Loop = true,
-            SuppressFinishEvent = true
-        };
-        instance.LoopReplacementRequested += pendingLoopInstances.Enqueue;
-        instance.ConstructEntities(sceneObjects, spawnObjects, $"__loop{loopInstanceIndex++}");
-        instances.Add(instance);
-        instance.Update(0);
     }
 
     public void Draw(double delta, int renderWidth, int renderHeight, ICamera? overrideCam = null)

@@ -84,7 +84,7 @@ static class AleNodeEditor
             if (ImGui.Selectable("Reverse", v == LoopFlags.Reverse) && v != LoopFlags.Reverse)
                 undo.Set("Loop", loop, LoopFlags.Reverse);
             if (ImGui.Selectable("Continue", v == LoopFlags.Continue) && v != LoopFlags.Continue)
-                undo.Set("Loop", loop, LoopFlags.Continue);
+                undo.Set("Loop", loop, LoopFlags.PlayOnce);
             ImGui.EndCombo();
         }
 

@@ -25,12 +25,6 @@ namespace LibreLancer
 		public int BufferHeight = 768;
         [Entry("uuid")]
 		public Guid UUID = Guid.Empty;
-        [Entry("cluster_gateway_url")]
-        public string ClusterGatewayUrl = "";
-        [Entry("cluster_target_system")]
-        public string ClusterTargetSystem = "li01";
-        [Entry("cluster_region")]
-        public string ClusterRegion = "eu";
 
         [XmlIgnore]
 		public Func<FreelancerGame, GameState>? CustomState;
@@ -62,34 +56,12 @@ namespace LibreLancer
             return fs.FileExists("librelancer.ini") || fs.FileExists("EXE\\freelancer.ini");
         }
 
-        public Data.IO.FileSystem CreateFreelancerFileSystem()
-        {
-            try
-            {
-                var fs = Data.IO.FileSystem.FromPath(FreelancerPath);
-                if (fs.FileExists("librelancer.ini") || fs.FileExists("EXE\\freelancer.ini"))
-                {
-                    var overlayDirectory = Path.Combine(AppContext.BaseDirectory, "lib", "data");
-                    if (Directory.Exists(overlayDirectory))
-                        fs.FileProviders.Add(new Data.IO.FreelancerDataOverlayFileProvider(overlayDirectory));
-                    return fs;
-                }
-            }
-            catch (DirectoryNotFoundException)
-            {
-                // Report the same actionable configuration error as for an invalid install root.
-            }
-            catch (FileNotFoundException)
-            {
-                // The configured archive may have been removed after configuration was saved.
-            }
-
-            throw new InvalidFreelancerDirectory(FreelancerPath);
-        }
-
         public void Validate()
         {
-            _ = CreateFreelancerFileSystem();
+            if (!CheckFLDirectory(FreelancerPath))
+            {
+                throw new InvalidFreelancerDirectory(FreelancerPath);
+            }
         }
 
 		public static GameConfig Create(bool loadFile = true, Func<string>? filePath = null)
@@ -152,9 +124,6 @@ namespace LibreLancer
             writer.WriteLine($"res_width = {BufferWidth}");
             writer.WriteLine($"res_height = {BufferHeight}");
             writer.WriteLine($"uuid = {UUID:D}");
-            writer.WriteLine($"cluster_gateway_url = {ClusterGatewayUrl}");
-            writer.WriteLine($"cluster_target_system = {ClusterTargetSystem}");
-            writer.WriteLine($"cluster_region = {ClusterRegion}");
             writer.WriteLine();
             Settings.Write(writer);
         }
@@ -165,3 +134,4 @@ namespace LibreLancer
 		}
 	}
 }
+

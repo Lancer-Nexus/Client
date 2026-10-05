@@ -5,7 +5,6 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
-using System.IO;
 using System.Linq;
 using LibreLancer.Data;
 using LibreLancer.Data.Ini;
@@ -17,30 +16,23 @@ using LibreLancer.Net;
 using LibreLancer.Server;
 using LibreLancer.Server.Components;
 using LibreLancer.World;
-using LancerNexus.Protocol;
 
 namespace LibreLancer.Missions
 {
     public class MissionRuntime
     {
         public Player Player;
-        public string MissionNickname { get; }
-        public NpcGeneratedMissionState? GeneratedMissionState { get; }
         private object _msnLock = new();
 
         public MissionScript Script;
-        public SnapshotableRandom Random = new();
+        public Random Random = new();
 
         public Dictionary<string, MissionLabel> Labels = new(StringComparer.OrdinalIgnoreCase);
         private string? activeNNObjective;
 
-        public MissionRuntime(MissionScript script, Player player, uint[] triggerSave,
-            NpcMissionRuntimeStateV1? transferState = null, string missionNickname = "",
-            NpcGeneratedMissionState? generatedMissionState = null)
+        public MissionRuntime(MissionScript script, Player player, uint[] triggerSave)
         {
             Script = script;
-            MissionNickname = string.IsNullOrWhiteSpace(missionNickname) ? transferState?.MissionNickname ?? "" : missionNickname;
-            GeneratedMissionState = generatedMissionState ?? transferState?.GeneratedMission;
 
             foreach (var lbl in Script.GetLabels())
             {
@@ -48,12 +40,6 @@ namespace LibreLancer.Missions
             }
 
             this.Player = player;
-            if (transferState != null)
-            {
-                RestoreTransferState(transferState);
-                UpdateUiTriggers();
-                return;
-            }
             bool doInit = true;
             {
                 foreach (var tr in triggerSave)
@@ -89,115 +75,6 @@ namespace LibreLancer.Missions
             }
 
             UpdateUiTriggers();
-        }
-
-        public NpcMissionRuntimeStateV1 CaptureTransferState()
-        {
-            NpcMissionActiveTriggerState[] active;
-            string[] completed;
-            string lastSave;
-            string? activeObjective;
-            lock (_msnLock)
-            {
-                active = activeTriggers.Select(trigger =>
-                {
-                    var satisfied = new byte[16];
-                    trigger.Satisfied.CopyTo(satisfied);
-                    return new NpcMissionActiveTriggerState
-                    {
-                        Nickname = trigger.Trigger.Nickname,
-                        Deactivated = trigger.Deactivated,
-                        ActiveSeconds = trigger.ActiveTime,
-                        Satisfied = satisfied,
-                        Conditions = trigger.Conditions.Select(condition => condition.Storage.CaptureTransferState()).ToArray()
-                    };
-                }).ToArray();
-                completed = completedTriggers.OrderBy(name => name, StringComparer.OrdinalIgnoreCase).ToArray();
-                lastSave = lastSaveTrigger;
-                activeObjective = activeNNObjective;
-            }
-            NpcMissionPendingLineState[] pending;
-            lock (waitingLines)
-            {
-                pending = waitingLines.Select(line => new NpcMissionPendingLineState
-                {
-                    Hash = line.Hash,
-                    Line = line.Line
-                }).ToArray();
-            }
-            return new NpcMissionRuntimeStateV1
-            {
-                MissionNickname = MissionNickname,
-                RandomState = Random.State,
-                ActiveObjective = activeObjective,
-                LastSaveTrigger = lastSave,
-                CompletedTriggers = completed,
-                ActiveTriggers = active,
-                PendingLines = pending,
-                Labels = Labels.Values.OrderBy(label => label.Name, StringComparer.OrdinalIgnoreCase)
-                    .Select(label => label.CaptureTransferState()).ToArray(),
-                GeneratedMission = GeneratedMissionState
-            };
-        }
-
-        private void RestoreTransferState(NpcMissionRuntimeStateV1 state)
-        {
-            if (string.IsNullOrWhiteSpace(MissionNickname) ||
-                !string.Equals(state.MissionNickname, MissionNickname, StringComparison.OrdinalIgnoreCase))
-                throw new InvalidDataException("NPC mission runtime snapshot belongs to another mission script.");
-            if ((state.GeneratedMission is null) != (GeneratedMissionState is null) ||
-                state.GeneratedMission is not null && !MissionNickname.StartsWith("random-", StringComparison.OrdinalIgnoreCase))
-                throw new InvalidDataException("NPC generated mission descriptor does not match the restored runtime.");
-            Random.State = state.RandomState;
-            if (!string.IsNullOrWhiteSpace(state.ActiveObjective))
-            {
-                if (!Script.Objectives.ContainsKey(state.ActiveObjective))
-                    throw new InvalidDataException($"NPC mission objective '{state.ActiveObjective}' is unavailable.");
-                activeNNObjective = state.ActiveObjective;
-            }
-            if (!string.IsNullOrWhiteSpace(state.LastSaveTrigger) &&
-                !Script.AvailableTriggers.ContainsKey(state.LastSaveTrigger))
-                throw new InvalidDataException($"NPC mission save trigger '{state.LastSaveTrigger}' is unavailable.");
-            lastSaveTrigger = state.LastSaveTrigger;
-            if (state.Labels.Length != Labels.Count || state.Labels.Select(label => label.Nickname)
-                    .Distinct(StringComparer.OrdinalIgnoreCase).Count() != state.Labels.Length)
-                throw new InvalidDataException("NPC mission label snapshot is incomplete or duplicated.");
-            foreach (var labelState in state.Labels)
-            {
-                if (!Labels.TryGetValue(labelState.Nickname, out var label))
-                    throw new InvalidDataException($"NPC mission label '{labelState.Nickname}' is unavailable.");
-                label.RestoreTransferState(labelState);
-            }
-            foreach (var triggerName in state.CompletedTriggers)
-            {
-                if (!Script.AvailableTriggers.ContainsKey(triggerName) || !completedTriggers.Add(triggerName))
-                    throw new InvalidDataException($"NPC completed mission trigger '{triggerName}' is invalid or duplicated.");
-            }
-            foreach (var saved in state.ActiveTriggers)
-            {
-                if (!Script.AvailableTriggers.TryGetValue(saved.Nickname, out var definition) ||
-                    activeTriggers.Any(trigger => string.Equals(trigger.Trigger.Nickname, saved.Nickname,
-                        StringComparison.OrdinalIgnoreCase)) || saved.Conditions.Length != definition.Conditions.Length)
-                    throw new InvalidDataException($"NPC active mission trigger '{saved.Nickname}' is invalid.");
-                var active = new ActiveTrigger(definition)
-                {
-                    Deactivated = saved.Deactivated,
-                    ActiveTime = saved.ActiveSeconds,
-                    Satisfied = new BitArray128(saved.Satisfied)
-                };
-                foreach (var condition in definition.Conditions)
-                {
-                    var current = new ActiveCondition(active, condition);
-                    condition.Init(this, current);
-                    current.Storage.RestoreTransferState(saved.Conditions[active.Conditions.Count]);
-                    active.Conditions.Add(current);
-                }
-                activeTriggers.Add(active);
-            }
-            lock (waitingLines)
-            {
-                waitingLines = state.PendingLines.Select(line => new PendingLine(line.Hash, line.Line)).ToList();
-            }
         }
 
         private static NetObjective ToNetObjective(NNObjective objective) => objective.Type switch
@@ -341,8 +218,7 @@ namespace LibreLancer.Missions
                 sol.Position,
                 sol.Orientation,
                 sol.IdsName,
-                sol.Base,
-                Player.Game.GameData.Items.GetPilot(sol.Pilot!)
+                sol.Base
             );
 
             if (obj.TryGetComponent<SDestroyableComponent>(out var dstComp))
@@ -367,15 +243,6 @@ namespace LibreLancer.Missions
             }
 
             return null;
-        }
-
-        public bool IsMissionSolarBase(string? baseName)
-        {
-            if (string.IsNullOrWhiteSpace(baseName))
-                return false;
-
-            return Script.Solars.Values.Any(x =>
-                baseName.Equals(x.Base, StringComparison.OrdinalIgnoreCase));
         }
 
         public void ActivateTrigger(string trigger)

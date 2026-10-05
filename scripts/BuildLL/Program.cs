@@ -99,7 +99,6 @@ namespace BuildLL
             };
             Dotnet.Publish("src/LLServer/LLServer.csproj", settings);
             await CustomPublish.MergeAndPatch(objDir, binDir + rid, rid, ["LLServer"]);
-            CopyDataOverlay(outdir);
             CopyFile("Credits.txt", outdir);
             CopyFile("LICENSE", outdir);
         }
@@ -128,7 +127,6 @@ namespace BuildLL
             }
             await CustomPublish.MergeAndPatch(objDir, binDir + rid, rid,
                 projs.Select(x => Path.GetFileNameWithoutExtension(x)).ToArray());
-            CopyDataOverlay(outdir);
             if (sdk)
             {
                 var docsdir = Path.Combine(outdir, "lib/Docs");
@@ -161,14 +159,6 @@ namespace BuildLL
                 ZipFile.CreateFromDirectory("src/Editor/librelancer_blender_addon", blAddon, CompressionLevel.Optimal,
                     true);
             }
-        }
-
-        static void CopyDataOverlay(string outputDirectory)
-        {
-            var source = new DirectoryInfo("./data");
-            if (source.Exists)
-                CustomPublish.CopyFilesRecursively(source,
-                    new DirectoryInfo(Path.Combine(outputDirectory, "lib", "data")));
         }
 
         static string GetLinuxRid()

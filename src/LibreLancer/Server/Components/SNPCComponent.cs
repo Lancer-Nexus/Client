@@ -1,8 +1,6 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Numerics;
-using System.Text.Json;
 using LibreLancer.Data.GameData;
 using LibreLancer.Data.Schema.Pilots;
 using LibreLancer.Data.Schema.Ships;
@@ -22,39 +20,13 @@ namespace LibreLancer.Server.Components
         public Accessory? CommHelmet;
 
         public AiState? CurrentDirective;
-        private string previousDirectiveId = "none";
-        private double directiveElapsedSeconds;
         private NPCManager manager;
         public MissionRuntime? MissionRuntime;
 
         public Pilot? Pilot;
         public StateGraph? StateGraph;
 
-        public Guid NpcId { get; set; }
-        public bool TerminalCheckpointPending { get; set; }
-        public long OwnershipVersion { get; set; }
-        public bool PopulationFleeing { get; set; }
-        public ulong? TradeCargoUnitPrice { get; set; }
-
-        private readonly SnapshotableRandom random = new();
-
-        /// <summary>Capture or restore the random stream as part of an NPC runtime snapshot.</summary>
-        public ulong TransferRandomState
-        {
-            get => random.State;
-            set => random.State = value;
-        }
-
-        public string TransferPreviousDirectiveId => previousDirectiveId;
-        public double TransferDirectiveElapsedSeconds => directiveElapsedSeconds;
-        public double TransferMissileTimer => missileTimer;
-
-        public void RestoreTransferTimers(string previousDirective, double elapsedSeconds, double missileCooldown)
-        {
-            previousDirectiveId = string.IsNullOrWhiteSpace(previousDirective) ? "none" : previousDirective;
-            directiveElapsedSeconds = Math.Max(0, elapsedSeconds);
-            missileTimer = Math.Max(0, missileCooldown);
-        }
+        private Random random = new();
 
         public float GetStateValue(StateGraphEntry row, StateGraphEntry column, float defaultVal = 0.0f)
         {
@@ -95,25 +67,6 @@ namespace LibreLancer.Server.Components
 
         public void Docked()
         {
-            if (MissionRuntime != null)
-            {
-                if (Parent.TryGetComponent<AutopilotComponent>(out var autopilot))
-                    autopilot.Cancel();
-                if (Parent.TryGetComponent<ShipSteeringComponent>(out var steering))
-                {
-                    steering.InThrottle = 0;
-                    steering.Cruise = false;
-                }
-                return;
-            }
-            if (MissionRuntime is null && NpcId != Guid.Empty && OwnershipVersion > 0 &&
-                !TerminalCheckpointPending &&
-                manager.World.Server.TryQueueNpcTerminalCheckpoint(manager.World, Parent,
-                    LancerNexus.Protocol.NpcRetirementReasonV1.Docked, () => manager.Despawn(Parent, false)))
-            {
-                TerminalCheckpointPending = true;
-                return;
-            }
             manager.Despawn(Parent, false);
         }
 
@@ -124,9 +77,7 @@ namespace LibreLancer.Server.Components
 
         public void SetState(AiState? state, GameWorld world)
         {
-            previousDirectiveId = CurrentDirective?.GetType().Name ?? "none";
             this.CurrentDirective = state;
-            directiveElapsedSeconds = 0;
             lastStateChangeReason = state == null ? "directive cleared" : $"directive set: {state.GetDebugInfo()}";
             lastBlockReason = state == null ? "none" : "directive active";
             state?.OnStart(Parent, world, this);
@@ -172,165 +123,6 @@ namespace LibreLancer.Server.Components
             stayInRangeObject = null;
             stayInRangePoint = Vector3.Zero;
             stayInRangeRadius = 0;
-        }
-
-        internal NpcAiTransferExtensionV1 CaptureTransferState()
-        {
-            var directiveTarget = CurrentDirective switch
-            {
-                AiAttackState attack => attack.Target,
-                AiDockState dock => dock.Target,
-                _ => null
-            };
-            var selectedTarget = Parent.GetComponent<SelectedTargetComponent>()?.Selected;
-            return new NpcAiTransferExtensionV1
-            {
-                DirectiveTarget = CaptureObjectReference(directiveTarget),
-                SelectedTarget = CaptureObjectReference(selectedTarget),
-                SteeringRollController = Parent.GetComponent<ShipSteeringComponent>()?.CaptureRollControllerTransferState()
-                    ?? throw new InvalidDataException("NPC steering controller is missing during transfer capture."),
-                Steering = Parent.GetComponent<ShipSteeringComponent>()?.CaptureNpcTransferState()
-                    ?? throw new InvalidDataException("NPC steering component is missing during transfer capture."),
-                Physics = Parent.GetComponent<ShipPhysicsComponent>()?.CaptureNpcTransferState()
-                    ?? throw new InvalidDataException("NPC physics component is missing during transfer capture."),
-                GotoKind = CurrentDirective is AiDockState dockDirective ? (int)dockDirective.GotoKind : null,
-                CurrentState = currentState.ToString(),
-                PreviousState = previousState.ToString(),
-                TimeInState = timeInState,
-                MissileTimer = missileTimer,
-                FireTimer = fireTimer,
-                BurstTimer = burstTimer,
-                InBurst = inBurst,
-                FireCycle = fireCycle,
-                WeaponGroupIndex = weaponGroupIndex,
-                DamageTimer = damageTimer,
-                DamageTaken = damageTaken,
-                EvadeX = evadeX,
-                EvadeY = evadeY,
-                EvadeZ = evadeZ,
-                EvadeThrust = evadeThrust,
-                BuzzDirection = new NpcTransferVectorV1(buzzDirection.X, buzzDirection.Y, buzzDirection.Z),
-                StayInRangeTarget = CaptureObjectReference(stayInRangeObject),
-                StayInRangePoint = new NpcTransferVectorV1(stayInRangePoint.X, stayInRangePoint.Y, stayInRangePoint.Z),
-                StayInRangeRadius = stayInRangeRadius,
-                PopulationFleeing = PopulationFleeing,
-                TradeCargoUnitPrice = TradeCargoUnitPrice,
-                AutoTurret = Parent.TryGetComponent<SAutoTurretComponent>(out var autoTurret)
-                    ? autoTurret.CaptureTransferState()
-                    : null
-            };
-        }
-
-        internal void RestoreTransferState(NpcAiTransferExtensionV1 state,
-            Func<NpcTransferObjectReferenceV1, GameObject?> resolveReference)
-        {
-            ValidateTransferState(state);
-
-            var stayTarget = state.StayInRangeTarget is null ? null : resolveReference(state.StayInRangeTarget)
-                ?? throw new InvalidDataException("NPC stay-in-range target could not be resolved.");
-            var selectedTarget = state.SelectedTarget is null ? null : resolveReference(state.SelectedTarget)
-                ?? throw new InvalidDataException("NPC selected target could not be resolved.");
-            if (state.SteeringRollController is null)
-                throw new InvalidDataException("NPC steering controller transfer state is missing.");
-            (Parent.GetComponent<ShipSteeringComponent>() ??
-                throw new InvalidDataException("NPC steering component is missing during transfer restore."))
-                .RestoreRollControllerTransferState(state.SteeringRollController);
-            (Parent.GetComponent<ShipSteeringComponent>() ??
-                throw new InvalidDataException("NPC steering component is missing during transfer restore."))
-                .RestoreNpcTransferState(state.Steering ??
-                    throw new InvalidDataException("NPC steering runtime state is missing."));
-            (Parent.GetComponent<ShipPhysicsComponent>() ??
-                throw new InvalidDataException("NPC physics component is missing during transfer restore."))
-                .RestoreNpcTransferState(state.Physics ??
-                    throw new InvalidDataException("NPC physics runtime state is missing."));
-            if ((CurrentDirective is AiAttackState or AiDockState) && state.DirectiveTarget is null)
-                throw new InvalidDataException("NPC directive target reference is missing.");
-
-            currentState = Enum.Parse<StateGraphEntry>(state.CurrentState);
-            previousState = Enum.Parse<StateGraphEntry>(state.PreviousState);
-            timeInState = state.TimeInState;
-            missileTimer = state.MissileTimer;
-            fireTimer = state.FireTimer;
-            burstTimer = state.BurstTimer;
-            inBurst = state.InBurst;
-            fireCycle = state.FireCycle;
-            weaponGroupIndex = state.WeaponGroupIndex;
-            damageTimer = state.DamageTimer;
-            damageTaken = state.DamageTaken;
-            evadeX = state.EvadeX;
-            evadeY = state.EvadeY;
-            evadeZ = state.EvadeZ;
-            evadeThrust = state.EvadeThrust;
-            buzzDirection = new Vector3(state.BuzzDirection.X, state.BuzzDirection.Y, state.BuzzDirection.Z);
-            stayInRangeObject = stayTarget;
-            stayInRangePoint = new Vector3(state.StayInRangePoint.X, state.StayInRangePoint.Y, state.StayInRangePoint.Z);
-            stayInRangeRadius = state.StayInRangeRadius;
-            PopulationFleeing = state.PopulationFleeing;
-            TradeCargoUnitPrice = state.TradeCargoUnitPrice;
-            if (state.AutoTurret is { } autoTurretState)
-            {
-                if (!Parent.TryGetComponent<SAutoTurretComponent>(out var autoTurret))
-                    throw new InvalidDataException("NPC auto-turret transfer state has no target component.");
-                autoTurret.RestoreTransferState(autoTurretState);
-            }
-            Parent.GetComponent<SelectedTargetComponent>()!.Selected = selectedTarget;
-        }
-
-        internal static void ValidateTransferState(NpcAiTransferExtensionV1 state)
-        {
-            if (state.SchemaVersion != 3 || state.SteeringRollController is null ||
-                state.Steering is null || state.Physics is null ||
-                !Enum.TryParse<StateGraphEntry>(state.CurrentState, out var restoredCurrent) ||
-                !Enum.IsDefined(restoredCurrent) || !Enum.TryParse<StateGraphEntry>(state.PreviousState, out var restoredPrevious) ||
-                !Enum.IsDefined(restoredPrevious) || !double.IsFinite(state.TimeInState) || state.TimeInState < 0 ||
-                !double.IsFinite(state.MissileTimer) || !float.IsFinite(state.FireTimer) ||
-                !float.IsFinite(state.BurstTimer) || state.FireCycle < 0 || state.WeaponGroupIndex < 0 ||
-                !double.IsFinite(state.DamageTimer) || !float.IsFinite(state.DamageTaken) || state.DamageTaken < 0 ||
-                !float.IsFinite(state.EvadeX) || !float.IsFinite(state.EvadeY) || !float.IsFinite(state.EvadeZ) ||
-                state.BuzzDirection is null || !float.IsFinite(state.BuzzDirection.X) ||
-                !float.IsFinite(state.BuzzDirection.Y) || !float.IsFinite(state.BuzzDirection.Z) ||
-                state.StayInRangePoint is null || !float.IsFinite(state.StayInRangePoint.X) ||
-                !float.IsFinite(state.StayInRangePoint.Y) || !float.IsFinite(state.StayInRangePoint.Z) ||
-                !float.IsFinite(state.StayInRangeRadius) || state.StayInRangeRadius < 0 ||
-                state.TradeCargoUnitPrice is 0)
-                throw new InvalidDataException("NPC AI transfer state is invalid or unsupported.");
-            state.AutoTurret?.Validate();
-            state.SteeringRollController.Validate();
-            state.Steering.Validate();
-            state.Physics.Validate();
-            if (state.DirectiveTarget is not null && !IsValidTransferReference(state.DirectiveTarget) ||
-                state.SelectedTarget is not null && !IsValidTransferReference(state.SelectedTarget) ||
-                state.StayInRangeTarget is not null && !IsValidTransferReference(state.StayInRangeTarget))
-                throw new InvalidDataException("NPC AI transfer target reference is invalid.");
-        }
-
-        internal static bool IsValidTransferReference(NpcTransferObjectReferenceV1 reference) => reference switch
-        {
-            { Kind: "npc", NpcId: { } id, CharacterId: null, Nickname: null } => id != Guid.Empty,
-            { Kind: "character", NpcId: null, CharacterId: > 0, Nickname: null } => true,
-            { Kind: "nickname", NpcId: null, CharacterId: null, Nickname: { Length: > 0 and <= 96 } } => true,
-            _ => false
-        };
-
-        internal static NpcTransferObjectReferenceV1? CaptureObjectReference(GameObject? target)
-        {
-            if (target is null)
-                return null;
-            if (target.TryGetComponent<SNPCComponent>(out var npc))
-            {
-                if (npc.NpcId == Guid.Empty)
-                    throw new InvalidDataException("NPC AI target has no Coordinator-issued NPC identity.");
-                return new NpcTransferObjectReferenceV1("npc", NpcId: npc.NpcId);
-            }
-            if (target.TryGetComponent<SPlayerComponent>(out var player))
-            {
-                if (player.Player.Character is not { ID: > 0 } character)
-                    throw new InvalidDataException("NPC AI player target has no stable character identity.");
-                return new NpcTransferObjectReferenceV1("character", CharacterId: character.ID);
-            }
-            if (!string.IsNullOrWhiteSpace(target.Nickname))
-                return new NpcTransferObjectReferenceV1("nickname", Nickname: target.Nickname);
-            throw new InvalidDataException("NPC AI target has no stable transfer identity.");
         }
 
         private bool TryGetStayInRangeCenter(out Vector3 center)
@@ -419,12 +211,34 @@ namespace LibreLancer.Server.Components
         private bool inBurst = false;
         private float burstTimer = 0;
         private float fireTimer = 0;
-        // Retained in transfer payloads for compatibility with the current AI snapshot schema.
-        private int fireCycle = 0;
-        private int weaponGroupIndex = 0;
+        private int fireCycle = 0; // Track cycles for weapon grouping
+        private int weaponGroupIndex = 0; // Track which weapon group to fire
 
-        public bool RunFireTimers(float dt)
+        public struct FireInfo
         {
+            public bool ShouldFireRegular;
+            public bool ShouldFireAutoTurrets;
+        }
+
+        public FireInfo RunFireTimers(float dt)
+        {
+            var fireInfo = new FireInfo { ShouldFireRegular = false, ShouldFireAutoTurrets = false };
+
+            // Check if ship has auto-turret weapons
+            bool hasAutoTurrets = false;
+
+            if (Parent.TryGetComponent<WeaponControlComponent>(out var weapons))
+            {
+                foreach (var gun in Parent.GetChildComponents<GunComponent>())
+                {
+                    if (gun.Object.Def.AutoTurret)
+                    {
+                        hasAutoTurrets = true;
+                        break;
+                    }
+                }
+            }
+
             if (inBurst)
             {
                 burstTimer -= dt;
@@ -442,12 +256,29 @@ namespace LibreLancer.Server.Components
                     if (fireTimer <= 0)
                     {
                         var interval = Pilot?.Gun?.FireIntervalTime ?? 0;
+
                         if (interval == 0)
-                            interval = 0.1f;
+                        {
+                            interval = 0.1f; // minimum interval for NPCs
+                        }
 
                         fireTimer = ValueWithVariance(interval,
                             Pilot?.Gun?.FireIntervalVariancePercent);
-                        return true;
+                        fireInfo.ShouldFireRegular = true;
+
+                        // Auto-turrets fire based on their interval timing
+                        if (hasAutoTurrets)
+                        {
+                            fireCycle++;
+                            // Use auto-turret interval timing from INI
+                            float autoTurretInterval = Pilot?.Gun?.AutoTurretIntervalTime ?? 0.2f;
+
+                            if (autoTurretInterval <= 0 || fireCycle >= Math.Max(1, (int) (autoTurretInterval / 0.1f)))
+                            {
+                                fireInfo.ShouldFireAutoTurrets = true;
+                                fireCycle = 0; // Reset cycle counter
+                            }
+                        }
                     }
                 }
             }
@@ -460,41 +291,105 @@ namespace LibreLancer.Server.Components
                     inBurst = true;
                     burstTimer = ValueWithVariance(Pilot?.Gun?.FireBurstIntervalTime ?? 1f,
                         Pilot?.Gun?.FireBurstIntervalVariancePercent);
+                    // Reset timer when starting new burst
                     fireTimer = 0;
                 }
             }
 
-            return false;
+            return fireInfo;
         }
 
-        public void FireWeaponGroups(WeaponControlComponent weapons, GameWorld world)
+        public void FireWeaponGroups(WeaponControlComponent weapons, FireInfo fireInfo, GameWorld world)
         {
+            // Get all weapons and group them by type
             var regularGuns = new List<GunComponent>();
+            var autoTurrets = new List<GunComponent>();
 
             foreach (var gun in Parent.GetChildComponents<GunComponent>())
             {
-                if (!gun.Object.Def.AutoTurret)
+                if (gun.Object.Def.AutoTurret)
+                {
+                    autoTurrets.Add(gun);
+                }
+                else
+                {
                     regularGuns.Add(gun);
+                }
             }
 
-            if (regularGuns.Count == 0)
-                return;
+            // Create separate aim points for different weapon types due to accuracy differences
+            Vector3 regularAim = weapons.AimPoint; // Use existing aim point for regular guns
+            Vector3 autoTurretAim = weapons.AimPoint; // Will be recalculated with more inaccuracy
 
-            var burstInterval = Pilot?.Gun?.FireBurstIntervalTime ?? 1f;
-            var weaponsToFire = burstInterval switch
+            // If auto-turrets are firing, get a less accurate aim point
+            if (fireInfo.ShouldFireAutoTurrets &&
+                Parent.GetComponent<SelectedTargetComponent>()?.Selected is GameObject target)
             {
-                < 0.3f => Math.Max(1, regularGuns.Count / 2),
-                < 1.0f => Math.Max(1, regularGuns.Count / 3),
-                _ => Math.Max(1, regularGuns.Count / 4)
-            };
-
-            for (var i = 0; i < weaponsToFire && i < regularGuns.Count; i++)
-            {
-                var weaponIndex = (weaponGroupIndex + i) % regularGuns.Count;
-                regularGuns[weaponIndex].Fire(weapons.AimPoint, world);
+                autoTurretAim = GetAimPosition(target, weapons, true); // More inaccurate aim point
             }
 
-            weaponGroupIndex = (weaponGroupIndex + weaponsToFire) % regularGuns.Count;
+            // Fire regular weapons in groups based on burst timing
+            if (fireInfo.ShouldFireRegular && regularGuns.Count > 0)
+            {
+                // Use INI parameters to determine weapon grouping
+                float burstInterval = Pilot?.Gun?.FireBurstIntervalTime ?? 1f;
+                float fireInterval = Pilot?.Gun?.FireIntervalTime ?? 0.1f;
+                float noBurstInterval = Pilot?.Gun?.FireNoBurstIntervalTime ?? 2f;
+
+                // Determine weapon grouping strategy based on timing parameters
+                int weaponsToFire;
+
+                if (burstInterval < 0.3f)
+                {
+                    // Rapid fire - fire more weapons per burst
+                    weaponsToFire = Math.Max(1, regularGuns.Count / 2); // 50% of weapons
+                }
+                else if (burstInterval < 1.0f)
+                {
+                    // Medium fire rate - fire moderate number of weapons
+                    weaponsToFire = Math.Max(1, regularGuns.Count / 3); // 33% of weapons
+                }
+                else
+                {
+                    // Slow fire rate - fire fewer weapons per burst
+                    weaponsToFire = Math.Max(1, regularGuns.Count / 4); // 25% of weapons
+                }
+
+                // Use weapon group cycling to distribute firing
+                for (int i = 0; i < weaponsToFire && i < regularGuns.Count; i++)
+                {
+                    int weaponIndex = (weaponGroupIndex + i) % regularGuns.Count;
+                    regularGuns[weaponIndex].Fire(regularAim, world);
+                }
+
+                // Advance weapon group for next firing cycle
+                weaponGroupIndex = (weaponGroupIndex + weaponsToFire) % regularGuns.Count;
+            }
+
+            // Fire auto-turrets in groups with their own timing
+            if (fireInfo.ShouldFireAutoTurrets && autoTurrets.Count > 0)
+            {
+                // Use auto-turret specific parameters for grouping
+                float autoTurretBurstInterval = Pilot?.Gun?.AutoTurretBurstIntervalTime ?? 1f;
+
+                // Auto-turrets typically fire fewer weapons per cycle
+                int turretsToFire;
+
+                if (autoTurretBurstInterval < 0.5f)
+                {
+                    turretsToFire = Math.Max(1, autoTurrets.Count / 2); // 50% for rapid auto-turrets
+                }
+                else
+                {
+                    turretsToFire = Math.Max(1, autoTurrets.Count / 4); // 25% for normal auto-turrets
+                }
+
+                for (int i = 0; i < turretsToFire && i < autoTurrets.Count; i++)
+                {
+                    int turretIndex = (fireCycle * turretsToFire + i) % autoTurrets.Count;
+                    autoTurrets[turretIndex].Fire(autoTurretAim, world);
+                }
+            }
         }
 
         private Vector3 AddInaccuracy(Vector3 target, Vector3 myPos, float distance, float maxRange,
@@ -534,18 +429,20 @@ namespace LibreLancer.Server.Components
         private GameObject? lastShootAt;
 
         public Vector3 GetAimPosition(GameObject other, WeaponControlComponent weapons, bool isAutoTurret = false)
-            => GetAimPosition(other, weapons.GetAverageGunSpeed(), weapons.GetGunMaxRange(), isAutoTurret);
-
-        private Vector3 GetAimPosition(GameObject other, float projectileSpeed, float maxRange,
-            bool isAutoTurret)
         {
-            var myPos = Parent.PhysicsComponent?.Body.Position ?? Parent.WorldTransform.Position;
-            var myVelocity = Parent.PhysicsComponent?.Body.LinearVelocity ?? Vector3.Zero;
-            var otherPos = other.PhysicsComponent?.Body.Position ?? other.WorldTransform.Position;
-            var otherVelocity = other.PhysicsComponent?.Body.LinearVelocity ?? Vector3.Zero;
+            if (other.PhysicsComponent == null)
+            {
+                return other.WorldTransform.Position;
+            }
 
-            if (projectileSpeed > float.Epsilon &&
-                Aiming.GetTargetLeading(otherPos - myPos, otherVelocity - myVelocity, projectileSpeed, out var t))
+            var myPos = Parent.PhysicsComponent!.Body.Position;
+            var myVelocity = Parent.PhysicsComponent.Body.LinearVelocity;
+            var otherPos = other.PhysicsComponent.Body.Position;
+            var otherVelocity = other.PhysicsComponent.Body.LinearVelocity;
+            var avgSpeed = weapons.GetAverageGunSpeed();
+            var maxRange = weapons.GetGunMaxRange();
+
+            if (Aiming.GetTargetLeading((otherPos - myPos), (otherVelocity - myVelocity), avgSpeed, out var t))
             {
                 var predictedPos = otherPos + otherVelocity * t;
                 var leadDist = Vector3.Distance(myPos, predictedPos);
@@ -643,8 +540,13 @@ namespace LibreLancer.Server.Components
                 // Fire guns
                 if (dist < gunRange)
                 {
-                    if (RunFireTimers((float) time))
-                        FireWeaponGroups(weapons, world);
+                    var fireInfo = RunFireTimers((float) time);
+
+                    if (fireInfo.ShouldFireRegular || fireInfo.ShouldFireAutoTurrets)
+                    {
+                        // Fire regular guns and auto-turrets separately based on their timers
+                        FireWeaponGroups(weapons, fireInfo, world);
+                    }
                 }
             }
             else
@@ -728,10 +630,6 @@ namespace LibreLancer.Server.Components
             // Show accuracy info for debugging
             float npcPower = Pilot?.Gun?.FireAccuracyPowerNpc ?? 0;
             float npcAngle = Pilot?.Gun?.FireAccuracyConeAngle ?? 0;
-            var autoTurretController = Parent.GetComponent<SAutoTurretComponent>();
-            var autoTurretsTracking = autoTurretController?.TrackingCount ?? 0;
-            var autoTurretFireTimer = autoTurretController?.FireTimer ?? 0;
-            var autoTurretInBurst = autoTurretController?.InBurst ?? false;
 
             return
                 $"Autopilot: {beh}\nShooting At: {ls}\n" +
@@ -743,11 +641,11 @@ namespace LibreLancer.Server.Components
                 $"Transition Trace: {lastTransitionTrace}\n" +
                 $"Max Range: {maxRange}\nPhys Active: {physActive}\n" +
                 $"Weapons: {totalGuns} total ({regularGuns} regular, {autoTurrets} auto-turrets)\n" +
-                $"Fire Timer: {fireTimer:F2}\n" +
-                $"Auto-Turrets Tracking: {autoTurretsTracking}, Fire Timer: {autoTurretFireTimer:F2}\n" +
+                $"Fire Timer: {fireTimer:F2}, Fire Cycle: {fireCycle}\n" +
                 $"NPC Base Power: {npcPower} (higher=more inaccuracy)\n" +
                 $"NPC Base Angle: {npcAngle}\n" +
-                $"InBurst: {inBurst}, Auto-Turret InBurst: {autoTurretInBurst}\n{formation}";
+                $"Accuracy: Regular=min 5.0, Auto-Turret=10x base power\n" +
+                $"InBurst: {inBurst}\n{formation}";
         }
 
         private void Transition(params StateGraphEntry[] possible)
@@ -835,7 +733,6 @@ namespace LibreLancer.Server.Components
 
         public override void Update(double time, GameWorld world)
         {
-            directiveElapsedSeconds += Math.Max(0, time);
             if (!Parent.TryGetComponent<AutopilotComponent>(out var ap))
             {
                 lastBlockReason = "missing autopilot";

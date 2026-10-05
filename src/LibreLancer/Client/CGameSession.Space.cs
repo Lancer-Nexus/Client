@@ -1314,10 +1314,6 @@ public partial class CGameSession
                     }
                 }
 
-                if ((objInfo.Flags & ObjectSpawnFlags.Debris) != ObjectSpawnFlags.Debris &&
-                    (objInfo.Flags & ObjectSpawnFlags.Loot) != ObjectSpawnFlags.Loot)
-                    newObj.AddComponent(new WeaponControlComponent(newObj));
-
                 spaceGameplay!.world.AddObject(newObj);
                 newObj.Register(spaceGameplay.world);
                 ApplyPendingTradelaneLanes(newObj);
@@ -1327,6 +1323,8 @@ public partial class CGameSession
                 if ((objInfo.Flags & ObjectSpawnFlags.Debris) == ObjectSpawnFlags.Debris ||
                     (objInfo.Flags & ObjectSpawnFlags.Loot) == ObjectSpawnFlags.Loot)
                     newObj.PhysicsComponent!.Body.SetDamping(0.5f, 0.2f);
+                else
+                    newObj.AddComponent(new WeaponControlComponent(newObj));
 
                 if ((objInfo.Flags & ObjectSpawnFlags.Hidden) == ObjectSpawnFlags.Hidden &&
                     newObj.TryGetComponent<CloakComponent>(out var cloaked))
@@ -1349,21 +1347,24 @@ public partial class CGameSession
     {
         ModelResource? src;
         List<SeparablePart>? sep;
+        float[]? lodranges;
 
         if ((obj.Flags & ObjectSpawnFlags.Solar) == ObjectSpawnFlags.Solar)
         {
             var solar = Game.GameData.Items.Archetypes.Get(obj.Loadout.ArchetypeCrc);
             sep = solar?.SeparableParts;
             src = solar?.ModelFile?.LoadFile(Game.ResourceManager);
+            lodranges = solar?.LODRanges;
         }
         else
         {
             var ship = Game.GameData.Items.Ships.Get(obj.Loadout.ArchetypeCrc);
             sep = ship?.SeparableParts;
             src = ship?.ModelFile?.LoadFile(Game.ResourceManager);
+            lodranges = ship?.LODRanges;
         }
 
-        if (src is null || sep is null)
+        if (src is null || sep is null || lodranges is null)
             return null;
 
 #pragma warning disable CS8670
@@ -1383,6 +1384,9 @@ public partial class CGameSession
         };
 
 #pragma warning restore CS8670
+
+        if (go.RenderComponent is ModelRenderer mr)
+            mr.LODRanges = lodranges;
 
         // Child damage cap
         if (sepInfo is { ChildDamageCap: not null } &&
