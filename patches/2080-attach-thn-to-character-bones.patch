@@ -1,0 +1,147 @@
+diff --git a/src/LibreLancer/Render/DfmSkeletonManager.cs b/src/LibreLancer/Render/DfmSkeletonManager.cs
+--- a/src/LibreLancer/Render/DfmSkeletonManager.cs
++++ b/src/LibreLancer/Render/DfmSkeletonManager.cs
+@@ -730,6 +730,38 @@
+             }
+         }
+ 
++        public bool TryGetBoneTransform(string name, Transform3D worldTransform, out Transform3D result)
++        {
++            if (BodySkinning.Bones.TryGetValue(name, out var bodyBone))
++            {
++                result = bodyBone.LocalTransform * worldTransform;
++                return true;
++            }
++
++            if (HeadSkinning != null && HeadConnection != null && HeadSkinning.Bones.TryGetValue(name, out var headBone))
++            {
++                result = headBone.LocalTransform * HeadConnection.Transform * worldTransform;
++                return true;
++            }
++
++            if (LeftHandSkinning != null && LeftHandConnection != null &&
++                LeftHandSkinning.Bones.TryGetValue(name, out var leftHandBone))
++            {
++                result = leftHandBone.LocalTransform * LeftHandConnection.Transform * worldTransform;
++                return true;
++            }
++
++            if (RightHandSkinning != null && RightHandConnection != null &&
++                RightHandSkinning.Bones.TryGetValue(name, out var rightHandBone))
++            {
++                result = rightHandBone.LocalTransform * RightHandConnection.Transform * worldTransform;
++                return true;
++            }
++
++            result = Transform3D.Identity;
++            return false;
++        }
++
+         public void StartScript(Script anmScript, float start_time, float time_scale, float duration, bool loop = false,
+             float blendIn = 5f, float blendOut = 5f)
+         {
+diff --git a/src/LibreLancer/Thn/ThnSceneObject.cs b/src/LibreLancer/Thn/ThnSceneObject.cs
+--- a/src/LibreLancer/Thn/ThnSceneObject.cs
++++ b/src/LibreLancer/Thn/ThnSceneObject.cs
+@@ -206,7 +206,7 @@
+ }
+ 
+ public class ThnObjectParent(ThnSceneObject obj, IRenderHardpoint? hardpoint, RigidModelPart? part,
+-    bool characterRoot = false)
++    bool characterRoot = false, string? characterBoneName = null)
+     : ThnAttachParent
+ {
+     public static bool IsRootTarget(ThnSceneObject obj, string? targetPart) =>
+@@ -215,6 +215,10 @@
+ 
+     public override Transform3D GetTransform(bool pathLookAt)
+     {
++        if (characterBoneName != null && obj.Object?.RenderComponent is CharacterRenderer character &&
++            character.Skeleton.TryGetBoneTransform(characterBoneName, obj.Object.WorldTransform, out var boneTransform))
++            return boneTransform;
++
+         var useCharacterWorldTransform =
+             obj.Object?.RenderComponent is CharacterRenderer && (characterRoot || hardpoint != null);
+         var tr = useCharacterWorldTransform
+diff --git a/src/LibreLancer/Thn/Events/AttachEntityEvent.cs b/src/LibreLancer/Thn/Events/AttachEntityEvent.cs
+--- a/src/LibreLancer/Thn/Events/AttachEntityEvent.cs
++++ b/src/LibreLancer/Thn/Events/AttachEntityEvent.cs
+@@ -85,6 +85,7 @@
+             IRenderHardpoint? hardpoint = null;
+             RigidModelPart? part = null;
+             var characterRoot = false;
++            string? characterBoneName = null;
+             switch (TargetType)
+             {
+                 case TargetTypes.Hardpoint when !string.IsNullOrEmpty(TargetPart):
+@@ -107,6 +108,11 @@
+                     {
+                         characterRoot = true;
+                     }
++                    else if (objB.Object?.RenderComponent is CharacterRenderer character &&
++                             character.Skeleton.TryGetBoneTransform(TargetPart, objB.Object.WorldTransform, out _))
++                    {
++                        characterBoneName = TargetPart;
++                    }
+                     else if (objB.Object?.Model?.RigidModel.Parts == null)
+                     {
+                         FLLog.Error("Thn", "Could not get parts on " + objB.Name);
+@@ -123,7 +129,7 @@
+                 }
+             }
+ 
+-            var tgt = new ThnObjectParent(objB, hardpoint, part, characterRoot);
++            var tgt = new ThnObjectParent(objB, hardpoint, part, characterRoot, characterBoneName);
+             Quaternion lastRotate = Quaternion.Identity;
+             if ((Flags & AttachFlags.Orientation) == AttachFlags.Orientation &&
+                 (Flags & AttachFlags.OrientationRelative) == AttachFlags.OrientationRelative)
+diff --git a/src/LibreLancer.Tests/ThnCharacterRootAttachmentTests.cs b/src/LibreLancer.Tests/ThnCharacterRootAttachmentTests.cs
+--- a/src/LibreLancer.Tests/ThnCharacterRootAttachmentTests.cs
++++ b/src/LibreLancer.Tests/ThnCharacterRootAttachmentTests.cs
+@@ -1,4 +1,5 @@
+ using System;
++using System.Collections.Generic;
+ using System.Numerics;
+ using System.Runtime.CompilerServices;
+ using LibreLancer.Render;
+@@ -74,6 +75,40 @@
+         AssertTransformClose(hardpointTransform * rootMotionTransform, parent.GetTransform(pathLookAt: false));
+     }
+ 
++    [Fact]
++    public void CharacterBoneAttachmentUsesAnimatedBoneTransformAndWorldTransform()
++    {
++        var boneTransform = new Transform3D(
++            new Vector3(0.2f, 1.1f, -0.35f),
++            Quaternion.CreateFromAxisAngle(Vector3.UnitX, 0.2f));
++        var bone = new BoneInstance("Body_Head", boneTransform, Vector3.Zero, Vector3.One);
++        var skinning = (DfmSkinning)RuntimeHelpers.GetUninitializedObject(typeof(DfmSkinning));
++        skinning.Bones = new Dictionary<string, BoneInstance>(StringComparer.OrdinalIgnoreCase)
++        {
++            [bone.Name] = bone
++        };
++        var skeleton = (DfmSkeletonManager)RuntimeHelpers.GetUninitializedObject(typeof(DfmSkeletonManager));
++        skeleton.BodySkinning = skinning;
++        var characterRenderer = (CharacterRenderer)RuntimeHelpers.GetUninitializedObject(typeof(CharacterRenderer));
++        characterRenderer.Skeleton = skeleton;
++        var worldTransform = new Transform3D(
++            new Vector3(4, 2, -6),
++            Quaternion.CreateFromAxisAngle(Vector3.UnitY, -0.6f));
++        var character = new GameObject { RenderComponent = characterRenderer };
++        character.SetLocalTransform(worldTransform);
++        var sceneObject = new ThnSceneObject { Object = character };
++        var parent = new ThnObjectParent(sceneObject, null, null, characterBoneName: "body_head");
++
++        AssertTransformClose(boneTransform * worldTransform, parent.GetTransform(pathLookAt: false));
++
++        var animatedBoneTransform = new Transform3D(
++            new Vector3(-0.1f, 1.3f, 0.4f),
++            Quaternion.CreateFromAxisAngle(Vector3.UnitZ, -0.15f));
++        bone.LocalTransform = animatedBoneTransform;
++
++        AssertTransformClose(animatedBoneTransform * worldTransform, parent.GetTransform(pathLookAt: false));
++    }
++
+     private sealed class TestHardpoint(Transform3D transform) : IRenderHardpoint
+     {
+         public Transform3D Transform => transform;
