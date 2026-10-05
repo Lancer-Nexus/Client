@@ -1,0 +1,100 @@
+diff --git a/src/LibreLancer.Tests/FLBeamAppearanceTests.cs b/src/LibreLancer.Tests/FLBeamAppearanceTests.cs
+new file mode 100644
+index 00000000..43a51fdd
+--- /dev/null
++++ b/src/LibreLancer.Tests/FLBeamAppearanceTests.cs
+@@ -0,0 +1,50 @@
++using System.Numerics;
++using LibreLancer.Fx;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class FLBeamAppearanceTests
++{
++    [Fact]
++    public void LastBeamPointUsesIncomingSegmentDirection()
++    {
++        var direction = FLBeamAppearance.GetBeamForward(
++            new Vector3(4, 0, 0),
++            new Vector3(2, 0, 0),
++            Vector3.Zero,
++            hasPrevious: true,
++            hasNext: false);
++
++        Assert.Equal(Vector3.UnitX, direction);
++    }
++
++    [Fact]
++    public void ZeroLengthNextSegmentUsesPreviousNonZeroTangent()
++    {
++        var direction = FLBeamAppearance.GetBeamForward(
++            new Vector3(2, 0, 0),
++            Vector3.UnitX,
++            new Vector3(2, 0, 0),
++            hasPrevious: true,
++            hasNext: true);
++
++        Assert.Equal(Vector3.UnitX, direction);
++    }
++
++    [Fact]
++    public void FullyDegenerateBeamSegmentReturnsFiniteZeroDirection()
++    {
++        var direction = FLBeamAppearance.GetBeamForward(
++            Vector3.Zero,
++            Vector3.Zero,
++            Vector3.Zero,
++            hasPrevious: true,
++            hasNext: true);
++
++        Assert.Equal(Vector3.Zero, direction);
++        Assert.True(float.IsFinite(direction.X));
++        Assert.True(float.IsFinite(direction.Y));
++        Assert.True(float.IsFinite(direction.Z));
++    }
++}
+diff --git a/src/LibreLancer/Fx/Appearances/FLBeamAppearance.cs b/src/LibreLancer/Fx/Appearances/FLBeamAppearance.cs
+index ec3613d1..277564dc 100755
+--- a/src/LibreLancer/Fx/Appearances/FLBeamAppearance.cs
++++ b/src/LibreLancer/Fx/Appearances/FLBeamAppearance.cs
+@@ -50,22 +50,34 @@ namespace LibreLancer.Fx
+             var texCoords = TextureHandler.GetCoordinates(index);
+ 
+ 			var z = RenderHelpers.GetZ(instance.Pool!.Camera.Position, Vector3.Transform(Vector3.Zero, transform));
+-            Vector3 forward = Vector3.Zero;
+             for (int i = 0; i < count; i++)
+             {
+                 var pos = Vector3.Transform(instance.Buffer[nodeIdx, i].Position, node_tr);
++                Vector3 next = Vector3.Zero;
+                 if (i + 1 < count)
+                 {
+-                    var pos2 = Vector3.Transform(instance.Buffer[nodeIdx, i + 1].Position, node_tr);
+-                    forward = (pos2 - pos).Normalized();
++                    next = Vector3.Transform(instance.Buffer[nodeIdx, i + 1].Position, node_tr);
+                 }
++                Vector3 previous = Vector3.Zero;
++                if (i > 0)
++                    previous = Vector3.Transform(instance.Buffer[nodeIdx, i - 1].Position, node_tr);
++                var forward = GetBeamForward(pos, previous, next, i > 0, i + 1 < count);
+                 var time = instance.Buffer[nodeIdx, i].TimeAlive / instance.Buffer[nodeIdx, i].LifeSpan;
+                 var w = Width!.GetValue(sparam, time);
+                 instance.Pool.AddBeamPoint(pos, forward, w * 0.5f, texCoords,
+                     new Color4(Color.GetValue(sparam, time), Alpha.GetValue(sparam, time)));
+             }
+-            instance.Pool.DrawBeamBuffer(TextureHandler.Texture ?? res.WhiteTexture, BlendInfo, z);
++			instance.Pool.DrawBeamBuffer(TextureHandler.Texture ?? res.WhiteTexture, BlendInfo, z);
+ 		}
++
++        internal static Vector3 GetBeamForward(Vector3 position, Vector3 previous, Vector3 next,
++            bool hasPrevious, bool hasNext)
++        {
++            var direction = hasNext ? next - position : Vector3.Zero;
++            if (direction.LengthSquared() <= 1e-12f && hasPrevious)
++                direction = position - previous;
++            var lengthSquared = direction.LengthSquared();
++            return lengthSquared > 1e-12f ? direction / MathF.Sqrt(lengthSquared) : Vector3.Zero;
++        }
+ 	}
+ }
+-

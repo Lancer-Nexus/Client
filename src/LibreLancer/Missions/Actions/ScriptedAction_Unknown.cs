@@ -495,7 +495,7 @@ public class Act_SetNNHidden : ScriptedAction
     public Act_SetNNHidden(MissionAction act) : base(act)
     {
         GetString(nameof(Objective),  0, out Objective, act.Entry);
-        GetBoolean(nameof(Hide), 0, out Hide, act.Entry);
+        GetBoolean(nameof(Hide), 1, out Hide, act.Entry);
     }
 
     public override void Write(IniBuilder.IniSectionBuilder section)

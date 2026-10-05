@@ -110,7 +110,8 @@ public class DirectiveRunnerComponent(GameObject parent) : GameComponent(parent)
                     splineIndex = 0;
                     ap.GotoVec(EvalSpline(0, spline),
                         spline.CruiseKind,
-                        Throttle(spline.MaxThrottle));
+                        Throttle(spline.MaxThrottle),
+                        spline.Range);
                 }
 
                 break;
@@ -292,7 +293,8 @@ public class DirectiveRunnerComponent(GameObject parent) : GameComponent(parent)
                         if (splineIndex + 1 < 4)
                         {
                             splineIndex++;
-                            ap.GotoVec(EvalSpline(times[splineIndex], spline), spline.CruiseKind, Throttle(spline.MaxThrottle));
+                            ap.GotoVec(EvalSpline(times[splineIndex], spline), spline.CruiseKind,
+                                Throttle(spline.MaxThrottle), spline.Range);
                         }
                         else
                         {

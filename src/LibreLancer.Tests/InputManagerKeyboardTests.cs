@@ -1,0 +1,60 @@
+using LibreLancer.Input;
+using Xunit;
+
+namespace LibreLancer.Tests;
+
+public class InputManagerKeyboardTests
+{
+    [Fact]
+    public void ShiftWBindingDispatchesDownBeforeKeyRelease()
+    {
+        var game = new HeadlessGame();
+        var action = InputAction.USER_AFTERBURN;
+        using var manager = CreateManager(game, action, UserInput.FromKey(KeyModifiers.Shift, Keys.W));
+        var down = 0;
+        var up = 0;
+        manager.ActionDown += a => { if (a == action) down++; };
+        manager.ActionUp += a => { if (a == action) up++; };
+
+        manager.ProcessKeyDown(new KeyEventArgs(Keys.W, KeyModifiers.Shift, false));
+
+        Assert.Equal(1, down);
+        Assert.Equal(0, up);
+
+        manager.ProcessKeyUp(new KeyEventArgs(Keys.W, KeyModifiers.Shift, false));
+
+        Assert.Equal(1, down);
+        Assert.Equal(1, up);
+    }
+
+    [Fact]
+    public void WeaponNumberBindingIsIgnoredWhileTextInputIsEnabled()
+    {
+        var game = new HeadlessGame();
+        var action = InputAction.USER_FIRE_WEAPON1;
+        using var manager = CreateManager(game, action, UserInput.FromKey(Keys.D1));
+        var down = 0;
+        var up = 0;
+        manager.ActionDown += a => { if (a == action) down++; };
+        manager.ActionUp += a => { if (a == action) up++; };
+        game.TextInputEnabled = true;
+
+        manager.ProcessKeyDown(new KeyEventArgs(Keys.D1, KeyModifiers.None, false));
+        manager.ProcessKeyUp(new KeyEventArgs(Keys.D1, KeyModifiers.None, false));
+
+        Assert.Equal(0, down);
+        Assert.Equal(0, up);
+    }
+
+    private static InputManager CreateManager(HeadlessGame game, InputAction action, UserInput binding)
+    {
+        var map = new InputMap(string.Empty);
+        map.Actions[(int)action].Primary = binding;
+        return new InputManager(game, map);
+    }
+
+    private sealed class HeadlessGame : Game
+    {
+        public HeadlessGame() : base(640, 480, false, GameConfiguration.HeadlessTest()) { }
+    }
+}

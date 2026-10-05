@@ -6,7 +6,7 @@ namespace LibreLancer.Server.ConsoleCommands
     public class StopCommand : IConsoleCommand
     {
         public string Name => "stop";
-        public bool Admin => true;
+        public string? Permission => "command.stop";
         public void Run(Player player, string arguments)
         {
             player.RpcClient.StopShip();

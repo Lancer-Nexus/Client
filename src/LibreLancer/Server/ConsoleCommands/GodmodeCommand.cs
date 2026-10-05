@@ -7,7 +7,7 @@ namespace LibreLancer.Server.ConsoleCommands
     public class GodmodeCommand : IConsoleCommand
     {
         public string Name => "godmode";
-        public bool Admin => true;
+        public string? Permission => "command.godmode";
 
         public void Run(Player player, string args)
         {

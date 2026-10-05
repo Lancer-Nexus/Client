@@ -1,0 +1,551 @@
+diff --git a/src/LibreLancer.Tests/FxParticleRuntimeTests.cs b/src/LibreLancer.Tests/FxParticleRuntimeTests.cs
+new file mode 100644
+index 00000000..9edbd488
+--- /dev/null
++++ b/src/LibreLancer.Tests/FxParticleRuntimeTests.cs
+@@ -0,0 +1,69 @@
++using System.Numerics;
++using System.Reflection;
++using System.Runtime.CompilerServices;
++using LibreLancer.Fx;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class FxParticleRuntimeTests
++{
++    private static ParticleEffect CreateEffect(FxEmitter emitter, FxAppearance appearance)
++    {
++        var emitterNode = new EmitterReference(emitter);
++        var appearanceNode = new AppearanceReference(appearance);
++        emitterNode.Linked = appearanceNode;
++        return new ParticleEffect(1, "test", [emitterNode], [appearanceNode], [emitterNode, appearanceNode]);
++    }
++
++    private static ParticleEffectInstance CreateInstance(ParticleEffect effect)
++    {
++        var instance = new ParticleEffectInstance(effect)
++        {
++            Pool = (ParticleEffectPool)RuntimeHelpers.GetUninitializedObject(typeof(ParticleEffectPool))
++        };
++        return instance;
++    }
++
++    [Fact]
++    public void InitialParticlesSpawnOnceAndReceiveStableIds()
++    {
++        var emitter = new FxCubeEmitter("cube") { InitialParticles = 2 };
++        emitter.InitLifeSpan = new(1);
++        var effect = CreateEffect(emitter, new FxParticleAppearance("particle"));
++        var instance = CreateInstance(effect);
++
++        instance.Update(0, Matrix4x4.Identity, 0);
++        Assert.Equal(2, instance.Buffer.GetCount(0));
++        var firstId = instance.Buffer[0, 0].Id;
++        var secondId = instance.Buffer[0, 1].Id;
++        Assert.NotEqual(firstId, secondId);
++
++        instance.Update(0, Matrix4x4.Identity, 0);
++        Assert.Equal(2, instance.Buffer.GetCount(0));
++        Assert.Equal(firstId, instance.Buffer[0, 0].Id);
++        Assert.Equal(secondId, instance.Buffer[0, 1].Id);
++    }
++
++    [Fact]
++    public void ParticleLifeEffectIsUpdatedAndReleasedWithItsParticle()
++    {
++        var emitter = new FxCubeEmitter("cube") { InitialParticles = 1 };
++        emitter.InitLifeSpan = new(0.1f);
++        var appearance = new FxParticleAppearance("particle");
++        var effect = CreateEffect(emitter, appearance);
++        var childEffect = new ParticleEffect(2, "life", [], [], []);
++        typeof(FxParticleAppearance).GetField("LifeEffect", BindingFlags.Instance | BindingFlags.NonPublic)!
++            .SetValue(appearance, childEffect);
++        var instance = CreateInstance(effect);
++
++        instance.Update(0.05, Matrix4x4.Identity, 0);
++        var particleId = instance.Buffer[0, 0].Id;
++        Assert.True(instance.TryGetChildEffect(0, particleId, out var child));
++        Assert.Equal(0.05, child!.GlobalTime);
++
++        instance.Update(0.2, Matrix4x4.Identity, 0);
++        Assert.Equal(0, instance.Buffer.GetCount(0));
++        Assert.False(instance.TryGetChildEffect(0, particleId, out _));
++    }
++}
+diff --git a/src/LibreLancer/Fx/Appearances/FxParticleAppearance.cs b/src/LibreLancer/Fx/Appearances/FxParticleAppearance.cs
+index e7df3709..324eab0e 100644
+--- a/src/LibreLancer/Fx/Appearances/FxParticleAppearance.cs
++++ b/src/LibreLancer/Fx/Appearances/FxParticleAppearance.cs
+@@ -2,7 +2,8 @@
+ // This file is subject to the terms and conditions defined in
+ // LICENSE, which is part of this source code package
+ 
+-using System;
++using System.Collections.Generic;
++using System.Numerics;
+ using LibreLancer.Utf.Ale;
+ namespace LibreLancer.Fx
+ {
+@@ -12,6 +13,7 @@ namespace LibreLancer.Fx
+         public string DeathName = "";
+         public bool UseDynamicRotation;
+         public bool SmoothRotation;
++        internal ParticleEffect? LifeEffect;
+ 		public FxParticleAppearance (AlchemyNode ale) : base(ale)
+         {
+             LifeName = ale.GetString(AleProperty.ParticleApp_LifeName) ?? "";
+@@ -24,6 +26,40 @@ namespace LibreLancer.Fx
+         {
+         }
+ 
++        private static Matrix4x4 GetParticleTransform(ref Particle particle, Matrix4x4 attachment) =>
++            Matrix4x4.CreateFromQuaternion(particle.Orientation) *
++            Matrix4x4.CreateTranslation(particle.Position) * attachment;
++
++        public override void Update(ParticleEffectInstance instance, AppearanceReference node,
++            int nodeIdx, Matrix4x4 transform, float sparam, double delta)
++        {
++            if (LifeEffect == null) return;
++            var attachment = GetAttachment(node, transform);
++            var activeParticles = new HashSet<int>();
++            var count = instance.Buffer.GetCount(nodeIdx);
++            for (var i = 0; i < count; i++)
++            {
++                ref var particle = ref instance.Buffer[nodeIdx, i];
++                activeParticles.Add(particle.Id);
++                var child = instance.GetOrCreateChildEffect(nodeIdx, particle.Id, LifeEffect);
++                child.Update(delta, GetParticleTransform(ref particle, attachment), sparam);
++            }
++            instance.RemoveUnusedChildEffects(nodeIdx, activeParticles);
++        }
++
++        public override void Draw(ParticleEffectInstance instance, AppearanceReference node,
++            int nodeIdx, Matrix4x4 transform, float sparam)
++        {
++            var attachment = GetAttachment(node, transform);
++            var count = instance.Buffer.GetCount(nodeIdx);
++            for (var i = 0; i < count; i++)
++            {
++                ref var particle = ref instance.Buffer[nodeIdx, i];
++                if (instance.TryGetChildEffect(nodeIdx, particle.Id, out var child))
++                    child.Draw(GetParticleTransform(ref particle, attachment), sparam);
++            }
++        }
++
+         public override AlchemyNode SerializeNode()
+         {
+             var n = base.SerializeNode();
+@@ -35,4 +71,3 @@ namespace LibreLancer.Fx
+         }
+     }
+ }
+-
+diff --git a/src/LibreLancer/Fx/Emitters/FxConeEmitter.cs b/src/LibreLancer/Fx/Emitters/FxConeEmitter.cs
+index 625f0484..37e4a292 100644
+--- a/src/LibreLancer/Fx/Emitters/FxConeEmitter.cs
++++ b/src/LibreLancer/Fx/Emitters/FxConeEmitter.cs
+@@ -56,9 +56,10 @@ namespace LibreLancer.Fx
+ 			float s_min = MathHelper.DegreesToRadians(MinSpread.GetValue(sparam, 0));
+ 			float s_max = MathHelper.DegreesToRadians(MaxSpread.GetValue(sparam, 0));
+ 
+-			var n = RandomInCone(s_min, s_max);
++			var localDirection = RandomInCone(s_min, s_max);
++			var n = localDirection;
+ 
+-            var p = n * radius;
++            var p = (reference.Linked!.AirFieldOwnsDirection ? localDirection : n) * radius;
+ 
+             ref Matrix4x4 particleSpawnTransform = ref instance.EmitterParticleSpawnTransforms[reference.EmitterNodeIdx];
+             if (!particleSpawnTransform.IsIdentity)
+@@ -67,6 +68,7 @@ namespace LibreLancer.Fx
+                 p=Vector3.Transform(p, particleSpawnTransform);
+                 n=Vector3.TransformNormal(n, particleSpawnTransform);
+             }
++			particle.Normal = n.Normalized();
+ 
+ 			n *= Pressure!.GetValue(sparam, 0);
+             particle.Position = p;
+diff --git a/src/LibreLancer/Fx/Emitters/FxCubeEmitter.cs b/src/LibreLancer/Fx/Emitters/FxCubeEmitter.cs
+index d08f2be0..12aa961b 100644
+--- a/src/LibreLancer/Fx/Emitters/FxCubeEmitter.cs
++++ b/src/LibreLancer/Fx/Emitters/FxCubeEmitter.cs
+@@ -70,6 +70,7 @@ namespace LibreLancer.Fx
+             }
+ 
+             var pr = pos;
++            particle.Normal = n.Normalized();
+             particle.Position = pr;
+             particle.Velocity = n * Pressure!.GetValue(sparam, 0);
+         }
+diff --git a/src/LibreLancer/Fx/Emitters/FxSphereEmitter.cs b/src/LibreLancer/Fx/Emitters/FxSphereEmitter.cs
+index 0c0a9409..a7dbdca6 100644
+--- a/src/LibreLancer/Fx/Emitters/FxSphereEmitter.cs
++++ b/src/LibreLancer/Fx/Emitters/FxSphereEmitter.cs
+@@ -55,6 +55,7 @@ namespace LibreLancer.Fx
+                 p=Vector3.Transform(p, particleSpawnTransform);
+                 n=Vector3.TransformNormal(n, particleSpawnTransform);
+             }
++			particle.Normal = n.Normalized();
+ 
+ 			n *= Pressure.GetValue(sparam, 0);
+ 			var pr = p * radius;
+@@ -63,4 +64,3 @@ namespace LibreLancer.Fx
+ 		}
+ 	}
+ }
+-
+diff --git a/src/LibreLancer/Fx/Fields/FxAirField.cs b/src/LibreLancer/Fx/Fields/FxAirField.cs
+index e6d9217d..d5469af6 100644
+--- a/src/LibreLancer/Fx/Fields/FxAirField.cs
++++ b/src/LibreLancer/Fx/Fields/FxAirField.cs
+@@ -3,6 +3,7 @@
+ // LICENSE, which is part of this source code package
+ 
+ using System;
++using System.Numerics;
+ using LibreLancer.Utf.Ale;
+ namespace LibreLancer.Fx
+ {
+@@ -22,6 +23,38 @@ namespace LibreLancer.Fx
+             Approach = new(1);
+         }
+ 
++        public override void Update(ParticleEffectInstance instance, FieldReference self,
++            int appIdx, Matrix4x4 attachment, float sparam, float delta)
++        {
++            var time = (float)instance.GlobalTime;
++
++            var directionRotation = Transform.HasTransform
++                ? Transform.GetRotation(sparam, time)
++                : (self.Parent as AppearanceReference)?.SourceEmitter?.Emitter.Transform
++                    .GetRotation(sparam, time) ?? Quaternion.Identity;
++            var localDirection = Vector3.Transform(Vector3.UnitY, directionRotation).Normalized();
++            var particlesAreLocal = (self.Parent as AppearanceReference)?.Parent != null;
++            var direction = particlesAreLocal
++                ? localDirection
++                : Vector3.TransformNormal(localDirection, attachment).Normalized();
++            if (direction.LengthSquared() <= float.Epsilon)
++                direction = Vector3.UnitY;
++
++            var count = instance.Buffer.GetCount(appIdx);
++
++            for (var i = 0; i < count; i++)
++            {
++                ref var particle = ref instance.Buffer[appIdx, i];
++                var particleTime = particle.TimeAlive;
++                var magnitude = Magnitude.GetValue(sparam, particleTime);
++                var approach = MathHelper.Clamp(
++                    Approach.GetValue(sparam, particleTime), 0, 1);
++                particle.Velocity = Vector3.Lerp(
++                    particle.Velocity,
++                    direction * magnitude,
++                    approach);
++            }
++        }
++
+ 	}
+ }
+-
+diff --git a/src/LibreLancer/Fx/FxAppearance.cs b/src/LibreLancer/Fx/FxAppearance.cs
+index db6efb0c..e042bcec 100644
+--- a/src/LibreLancer/Fx/FxAppearance.cs
++++ b/src/LibreLancer/Fx/FxAppearance.cs
+@@ -28,6 +28,11 @@ namespace LibreLancer.Fx
+ 
+         }
+ 
++        public virtual void Update(ParticleEffectInstance instance, AppearanceReference node, int nodeIdx,
++            Matrix4x4 transform, float sparam, double delta)
++        {
++        }
++
+         private static readonly AlchemyTransform[] transforms = new AlchemyTransform[32];
+ 
+         public bool TransformParticle(NodeReference reference, float sparam, float t1, float t2, out Vector3 translate,
+diff --git a/src/LibreLancer/Fx/FxEmitter.cs b/src/LibreLancer/Fx/FxEmitter.cs
+index 249732cf..dd769cda 100755
+--- a/src/LibreLancer/Fx/FxEmitter.cs
++++ b/src/LibreLancer/Fx/FxEmitter.cs
+@@ -178,6 +178,16 @@ namespace LibreLancer.Fx
+ 
+             ref EmitterState state = ref instance.Emitters[index];
+ 
++            if (!state.Initialized)
++            {
++                state.Initialized = true;
++                var initialCount = Math.Min(InitialParticles, maxCount);
++                var initialWindow = freq > 0 ? Math.Min(lifespan, initialCount / freq) : 0;
++                var initialStep = initialCount > 0 ? initialWindow / initialCount : 0;
++                for (var i = 0; i < initialCount; i++)
++                    EmitParticle(reference, index, instance, sparam, lifespan, i * initialStep, ref state);
++            }
++
+             if(freq > 0)
+             {
+                 // Spawn lots of particles
+@@ -216,35 +226,8 @@ namespace LibreLancer.Fx
+                         continue;
+                     }
+ 
+-                    // Emit
+-                    ref var particle = ref instance.Buffer.Enqueue(reference.AppBufIdx, out var despawned);
+-
+-                    if (despawned != -1)
+-                    {
+-                        instance.Emitters[despawned].Count--;
+-                        Debug.Assert(instance.Emitters[despawned].Count >= 0);
+-                    }
+-
+-                    particle.LifeSpan = lifespan;
+-                    particle.TimeAlive =  (float) (count * correctionFactor); //Spread the starting time evenly among the spawned particles
+-                    particle.EmitterIndex = index;
+-                    particle.Orientation = Quaternion.Identity;
+-                    SetParticle(instance, reference, ref particle, sparam, (float) instance.GlobalTime);
+-                    state.Count++;
+-
+-                    var len = particle.Velocity.Length();
+-
+-                    if (!(Math.Abs(len) > float.Epsilon))
+-                    {
+-                        continue;
+-                    }
+-
+-                    //Correct position since the time alive can be non zero (see above)
+-                    if(toEmit > 1)
+-                        particle.Position += particle.Velocity * particle.TimeAlive;
+-
+-                    var nr = particle.Velocity.Normalized();
+-                    particle.Normal = nr;
++                    EmitParticle(reference, index, instance, sparam, lifespan,
++                        count * correctionFactor, ref state);
+                 }
+             }
+             else
+@@ -252,5 +235,30 @@ namespace LibreLancer.Fx
+                 state.NextEmitCount = 0;
+             }
+         }
++
++        private void EmitParticle(EmitterReference reference, int index, ParticleEffectInstance instance,
++            float sparam, float lifespan, double timeAlive, ref EmitterState state)
++        {
++            ref var particle = ref instance.Buffer.Enqueue(reference.AppBufIdx, out var despawned);
++            if (despawned != -1)
++            {
++                instance.Emitters[despawned].Count--;
++                Debug.Assert(instance.Emitters[despawned].Count >= 0);
++            }
++
++            particle.LifeSpan = lifespan;
++            particle.TimeAlive = (float)timeAlive;
++            particle.EmitterIndex = index;
++            particle.Id = instance.AllocateParticleId();
++            particle.Orientation = Quaternion.Identity;
++            SetParticle(instance, reference, ref particle, sparam, (float)instance.GlobalTime);
++            if (particle.Normal.LengthSquared() <= float.Epsilon)
++                particle.Normal = particle.Velocity.LengthSquared() > float.Epsilon
++                    ? particle.Velocity.Normalized()
++                    : Vector3.UnitY;
++            if (timeAlive > 0)
++                particle.Position += particle.Velocity * (float)timeAlive;
++            state.Count++;
++        }
+     }
+ }
+diff --git a/src/LibreLancer/Fx/Particle.cs b/src/LibreLancer/Fx/Particle.cs
+index 4e0a64a9..2d243966 100644
+--- a/src/LibreLancer/Fx/Particle.cs
++++ b/src/LibreLancer/Fx/Particle.cs
+@@ -16,6 +16,6 @@ namespace LibreLancer.Fx
+ 		public float TimeAlive;
+         public Quaternion Orientation;
+         public int EmitterIndex;
+-    }
++        public int Id;
++	}
+ }
+-
+diff --git a/src/LibreLancer/Fx/ParticleEffect.cs b/src/LibreLancer/Fx/ParticleEffect.cs
+index 604f22b2..9482025a 100644
+--- a/src/LibreLancer/Fx/ParticleEffect.cs
++++ b/src/LibreLancer/Fx/ParticleEffect.cs
+@@ -58,6 +58,8 @@ namespace LibreLancer.Fx
+     public class AppearanceReference(FxAppearance app) : NodeReference
+     {
+         public readonly FxAppearance Appearance = app;
++        public EmitterReference? SourceEmitter;
++        public bool AirFieldOwnsDirection;
+         public override FxNode Node => Appearance;
+ 
+         public List<FieldReference> Linked = [];
+@@ -133,6 +135,9 @@ namespace LibreLancer.Fx
+                         maxParticles = max2;
+                 }
+ 
++                if (emitter.InitialParticles > maxParticles)
++                    maxParticles = emitter.InitialParticles;
++
+                 ParticleCounts[emitNode.AppBufIdx] += maxParticles;
+ 
+                 if (emitNode.Linked.Parent == null)
+diff --git a/src/LibreLancer/Fx/ParticleEffectInstance.cs b/src/LibreLancer/Fx/ParticleEffectInstance.cs
+index 39fdcbe0..5a2015ae 100755
+--- a/src/LibreLancer/Fx/ParticleEffectInstance.cs
++++ b/src/LibreLancer/Fx/ParticleEffectInstance.cs
+@@ -3,6 +3,8 @@
+ // LICENSE, which is part of this source code package
+ 
+ using System;
++using System.Collections.Generic;
++using System.Diagnostics.CodeAnalysis;
+ using System.Diagnostics;
+ using System.Linq;
+ using System.Numerics;
+@@ -24,6 +26,7 @@ namespace LibreLancer.Fx
+     {
+         public double NextEmitCount;
+         public int Count;
++        public bool Initialized;
+     }
+ 
+     public class ParticleEffectInstance
+@@ -47,6 +50,8 @@ namespace LibreLancer.Fx
+         public double GlobalTime => globaltime;
+ 
+         public ParticleBuffer Buffer;
++        private readonly Dictionary<(int Appearance, int Particle), ParticleEffectInstance> childEffects = [];
++        private int nextParticleId;
+ 
+         public Matrix4x4[] NodeWorldTransforms;
+         public Matrix4x4[] EmitterParticleSpawnTransforms;
+@@ -94,12 +99,42 @@ namespace LibreLancer.Fx
+             globaltime = 0;
+             Buffer.Reset();
+             Array.Clear(Emitters);
++            childEffects.Clear();
+ 
+             //Code suggested by Callum
+             NodeWorldTransforms.AsSpan().Fill(Matrix4x4.Identity);
+             EmitterParticleSpawnTransforms.AsSpan().Fill(Matrix4x4.Identity);
+         }
+ 
++        public ParticleEffectInstance GetOrCreateChildEffect(int appearanceIndex, int particleId,
++            ParticleEffect effect)
++        {
++            var key = (appearanceIndex, particleId);
++            if (!childEffects.TryGetValue(key, out var child) || child.Effect != effect)
++            {
++                child = new ParticleEffectInstance(effect);
++                childEffects[key] = child;
++            }
++
++            child.Pool = Pool;
++            child.Resources = Resources;
++            child.DrawIndex = DrawIndex;
++            return child;
++        }
++
++        public bool TryGetChildEffect(int appearanceIndex, int particleId,
++            [MaybeNullWhen(false)] out ParticleEffectInstance effect) =>
++            childEffects.TryGetValue((appearanceIndex, particleId), out effect);
++
++        public void RemoveUnusedChildEffects(int appearanceIndex, HashSet<int> activeParticles)
++        {
++            foreach (var key in childEffects.Keys.Where(x =>
++                         x.Appearance == appearanceIndex && !activeParticles.Contains(x.Particle)).ToArray())
++                childEffects.Remove(key);
++        }
++
++        public int AllocateParticleId() => ++nextParticleId;
++
+         public double LastTime => lasttime;
+ 
+         private double lasttime = 0;
+@@ -209,6 +244,13 @@ namespace LibreLancer.Fx
+                     r.Emitter.Update(r, i, this, delta, ref transform, sparam);
+                 }
+             }
++
++            for (var i = 0; i < Effect.Appearances.Count; i++)
++            {
++                var appearance = Effect.Appearances[i];
++                if (appearance.Enabled)
++                    appearance.Appearance.Update(this, appearance, i, transform, sparam, delta);
++            }
+         }
+ 
+         public void Draw(Matrix4x4 transform, float sparam)
+@@ -232,4 +274,3 @@ namespace LibreLancer.Fx
+         }
+     }
+ }
+-
+diff --git a/src/LibreLancer/Fx/ParticleLibrary.cs b/src/LibreLancer/Fx/ParticleLibrary.cs
+index 06c66046..4e497a94 100644
+--- a/src/LibreLancer/Fx/ParticleLibrary.cs
++++ b/src/LibreLancer/Fx/ParticleLibrary.cs
+@@ -99,9 +99,11 @@ namespace LibreLancer.Fx
+                     {
+                         case EmitterReference er when n2 is AppearanceReference ar:
+                             er.Linked = ar;
++                            ar.SourceEmitter = er;
+                             break;
+                         case AppearanceReference ap when n2 is FieldReference fp:
+                             ap.Linked.Add(fp);
++                            ap.AirFieldOwnsDirection |= fp.Field is FxAirField && fp.Field.Transform.HasTransform;
+                             break;
+                     }
+                 }
+@@ -114,6 +116,10 @@ namespace LibreLancer.Fx
+                     nodesByIndex.Values.Where(x => x.Parent == null).ToList()
+                 ));
+             }
++
++            foreach (var appearance in Nodes.Values.OfType<FxParticleAppearance>())
++                appearance.LifeEffect = Effects.FirstOrDefault(x =>
++                    x.Nickname.Equals(appearance.LifeName, StringComparison.OrdinalIgnoreCase));
+         }
+ 
+         private static FxNode NodeFromAle(AlchemyNode ale) => ale.ClassName switch
+diff --git a/src/LibreLancer/Render/ParticleEffectRenderer.cs b/src/LibreLancer/Render/ParticleEffectRenderer.cs
+index 86749b53..32c78a34 100644
+--- a/src/LibreLancer/Render/ParticleEffectRenderer.cs
++++ b/src/LibreLancer/Render/ParticleEffectRenderer.cs
+@@ -40,6 +40,7 @@ namespace LibreLancer.Render
+         public void Restart()
+         {
+             fx?.Reset();
++            Finished = false;
+         }
+ 
+         public override bool PrepareRender(ICamera camera, NebulaRenderer? nr, SystemRenderer sys, bool forceCull)
+@@ -85,8 +86,8 @@ namespace LibreLancer.Render
+             }
+ 
+             tr = transform;
+-            fx.Update(time, transform, SParam);
+             fx.DrawIndex = Index;
++            fx.Update(time, transform, SParam);
+             if (fx.IsFinished())
+             {
+                 Finished = true;
+diff --git a/src/LibreLancer/Shaders/Particle.vert.hlsl b/src/LibreLancer/Shaders/Particle.vert.hlsl
+index bd065bd2..03e47371 100644
+--- a/src/LibreLancer/Shaders/Particle.vert.hlsl
++++ b/src/LibreLancer/Shaders/Particle.vert.hlsl
+@@ -102,6 +102,14 @@ Output main(int vertexID: SV_VertexID)
+         right = normalize(particle.normal);
+         float3 toCamera = normalize(CameraPosition - p);
+         up = cross(toCamera, right);
++        float upLength = length(up);
++        if (upLength <= 0.0001)
++        {
++            float3 cameraRight = float3(View[0][0], View[1][0], View[2][0]);
++            up = cameraRight - right * dot(cameraRight, right);
++            upLength = length(up);
++        }
++        up /= max(upLength, 0.0001);
+     }
+     else if (Type == 2)
+     {

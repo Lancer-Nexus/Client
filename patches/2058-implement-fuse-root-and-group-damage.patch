@@ -1,0 +1,191 @@
+diff --git a/src/LibreLancer.Data/Schema/Fuses/Fuse.cs b/src/LibreLancer.Data/Schema/Fuses/Fuse.cs
+--- a/src/LibreLancer.Data/Schema/Fuses/Fuse.cs
++++ b/src/LibreLancer.Data/Schema/Fuses/Fuse.cs
+@@ -24,6 +24,8 @@
+     [Section("start_cam_particles", Child = true)]
+     [Section("ignite_fuse", Child = true)]
+     [Section("impulse", Child = true)]
++    [Section("damage_root", Child = true)]
++    [Section("damage_group", Child = true)]
+     [Section("destroy_root", Child = true)]
+     public List<FuseAction> Actions = [];
+ }
+diff --git a/src/LibreLancer.Data/Schema/Fuses/FuseIni.cs b/src/LibreLancer.Data/Schema/Fuses/FuseIni.cs
+--- a/src/LibreLancer.Data/Schema/Fuses/FuseIni.cs
++++ b/src/LibreLancer.Data/Schema/Fuses/FuseIni.cs
+@@ -18,6 +18,8 @@
+     [Section("start_cam_particles", Type = typeof(FuseStartCamParticles), Child = true)]
+     [Section("ignite_fuse", Type = typeof(FuseIgniteFuse), Child = true)]
+     [Section("impulse", Type = typeof(FuseImpulse), Child = true)]
++    [Section("damage_root", Type = typeof(FuseDamageRoot), Child = true)]
++    [Section("damage_group", Type = typeof(FuseDamageGroup), Child = true)]
+     [Section("destroy_root", Type = typeof(FuseDestroyRoot), Child = true)]
+     public List<Fuse> Fuses = [];
+     public void AddFuseIni(string path, FileSystem vfs, IniStringPool? stringPool = null)
+diff --git a/src/LibreLancer.Data/Schema/Fuses/FuseAction.cs b/src/LibreLancer.Data/Schema/Fuses/FuseAction.cs
+--- a/src/LibreLancer.Data/Schema/Fuses/FuseAction.cs
++++ b/src/LibreLancer.Data/Schema/Fuses/FuseAction.cs
+@@ -91,3 +91,23 @@
+     [Entry("force")]
+     public float Force;
+ }
++
++[ParsedSection]
++public partial class FuseDamageRoot : FuseAction
++{
++    [Entry("damage_type")]
++    public string? DamageType;
++    [Entry("hitpoints")]
++    public float Hitpoints;
++}
++
++[ParsedSection]
++public partial class FuseDamageGroup : FuseAction
++{
++    [Entry("group_name")]
++    public string? GroupName;
++    [Entry("damage_type")]
++    public string? DamageType;
++    [Entry("hitpoints")]
++    public float Hitpoints;
++}
+diff --git a/src/LibreLancer/Server/Components/SHealthComponent.cs b/src/LibreLancer/Server/Components/SHealthComponent.cs
+--- a/src/LibreLancer/Server/Components/SHealthComponent.cs
++++ b/src/LibreLancer/Server/Components/SHealthComponent.cs
+@@ -180,6 +180,14 @@
+             if (Parent.TryGetComponent<SDestroyableComponent>(out var dst))
+             {
+                 dst.Destroy(true);
++            }
++        }
++
++        public void DamageRootFromFuse(float hullDamage)
++        {
++            if (hullDamage > 0)
++            {
++                HandleHullDamage(hullDamage, null, null);
+             }
+         }
+ 
+diff --git a/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs b/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs
+--- a/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs
++++ b/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs
+@@ -110,6 +110,17 @@
+                 {
+                     ApplyImpulse(world, impulse);
+                 }
++                else if (act is FuseDamageRoot damageRoot)
++                {
++                    if (IsAbsoluteDamage(damageRoot.DamageType))
++                    {
++                        Parent.GetComponent<SHealthComponent>()?.DamageRootFromFuse(damageRoot.Hitpoints);
++                    }
++                }
++                else if (act is FuseDamageGroup damageGroup)
++                {
++                    ApplyGroupDamage(world, damageGroup);
++                }
+                 else if (act is FuseIgniteFuse ig)
+                 {
+                     var start = true;
+@@ -142,6 +153,44 @@
+             }
+         }
+ 
++        private static bool IsAbsoluteDamage(string? damageType)
++        {
++            if (string.Equals(damageType, "absolute", StringComparison.OrdinalIgnoreCase))
++            {
++                return true;
++            }
++
++            FLLog.Warning("Fuse", $"Unsupported fuse damage_type '{damageType ?? "(missing)"}', expected 'absolute'.");
++            return false;
++        }
++
++        private void ApplyGroupDamage(GameWorld world, FuseDamageGroup action)
++        {
++            if (!IsAbsoluteDamage(action.DamageType) || action.Hitpoints <= 0 ||
++                string.IsNullOrWhiteSpace(action.GroupName) || Parent.Model?.RigidModel.Parts == null ||
++                !Parent.Model.RigidModel.Parts.TryGetPart(action.GroupName, out var part) ||
++                !Parent.TryGetComponent<SHealthComponent>(out var health))
++            {
++                return;
++            }
++
++            var destroyedPart = health.Damage(action.Hitpoints, 0, null, part);
++            if (destroyedPart == null || !Parent.Model.TryGetCollisionGroup(destroyedPart, out var collisionGroup))
++            {
++                return;
++            }
++
++            var resources = GetResourceManager(world)!;
++            if (collisionGroup.Definition.Separable)
++            {
++                Parent.SpawnDebris(destroyedPart.Name!, world, resources);
++            }
++            else
++            {
++                Parent.DisableCmpPart(destroyedPart.Name!, world, resources, out _);
++            }
++        }
++
+         private void ApplyImpulse(GameWorld world, FuseImpulse action)
+         {
+             var physics = world.Physics;
+diff --git a/src/LibreLancer.Tests/FuseAndExplosionIniTests.cs b/src/LibreLancer.Tests/FuseAndExplosionIniTests.cs
+--- a/src/LibreLancer.Tests/FuseAndExplosionIniTests.cs
++++ b/src/LibreLancer.Tests/FuseAndExplosionIniTests.cs
+@@ -69,4 +69,52 @@
+             Directory.Delete(root, true);
+         }
+     }
++
++    [Fact]
++    public void FuseDamageActionsReadRootAndGroupDamage()
++    {
++        var root = Path.Combine(Path.GetTempPath(), "fuse-damage-" + Guid.NewGuid().ToString("N"));
++        Directory.CreateDirectory(root);
++        try
++        {
++            File.WriteAllText(Path.Combine(root, "fuse.ini"), """
++                [fuse]
++                name = root_damage
++                lifetime = 1
++
++                [damage_root]
++                at_t = 0.25
++                damage_type = absolute
++                hitpoints = 800
++
++                [fuse]
++                name = group_damage
++                lifetime = 1
++
++                [damage_group]
++                group_name = Li_star_wing_lod1
++                at_t = 0.5
++                damage_type = absolute
++                hitpoints = 50
++                """);
++
++            var parsed = new FuseIni();
++            parsed.AddFuseIni("fuse.ini", FileSystem.FromPath(root));
++
++            var rootAction = Assert.IsType<FuseDamageRoot>(Assert.Single(parsed.Fuses[0].Actions));
++            Assert.Equal("absolute", rootAction.DamageType);
++            Assert.Equal(800, rootAction.Hitpoints);
++            Assert.Equal(0.25f, rootAction.AtT);
++
++            var groupAction = Assert.IsType<FuseDamageGroup>(Assert.Single(parsed.Fuses[1].Actions));
++            Assert.Equal("Li_star_wing_lod1", groupAction.GroupName);
++            Assert.Equal("absolute", groupAction.DamageType);
++            Assert.Equal(50, groupAction.Hitpoints);
++            Assert.Equal(0.5f, groupAction.AtT);
++        }
++        finally
++        {
++            Directory.Delete(root, true);
++        }
++    }
+ }

@@ -1,0 +1,420 @@
+diff --git a/src/LibreLancer.Physics/PhysicsWorld.cs b/src/LibreLancer.Physics/PhysicsWorld.cs
+index 4175227f..6f3a47a6 100644
+--- a/src/LibreLancer.Physics/PhysicsWorld.cs
++++ b/src/LibreLancer.Physics/PhysicsWorld.cs
+@@ -223,12 +223,14 @@ namespace LibreLancer.Physics
+             return handler.Result;
+         }
+ 
+-        private struct HitHandler(PhysicsWorld world, bool allowDynAsteroids, PhysicsObject? self) : IRayHitHandler
++        private struct HitHandler(PhysicsWorld world, bool allowDynAsteroids, PhysicsObject? self,
++            Func<PhysicsObject?, bool>? filter) : IRayHitHandler
+         {
+             public PhysicsObject? Result;
+             public object? ResultTag;
+             public Vector3 ContactPoint;
+             private readonly int selfId = self?.Id ?? -1;
++            private readonly Func<PhysicsObject?, bool>? filter = filter;
+             public bool DidHit;
+             private CollisionKind allowed = allowDynAsteroids ? CollisionKind.DynAsteroid : CollisionKind.StaticBody;
+ 
+@@ -244,9 +246,15 @@ namespace LibreLancer.Physics
+                 CollidableReference collidable,
+                 int childIndex)
+             {
++                var result = world.objectsById[world.bepuToLancer[collidable]];
++                if (filter != null && !filter(result))
++                {
++                    return;
++                }
++
+                 maximumT = t;
+                 ContactPoint = ray.Origin + ray.Direction * t;
+-                Result = world.objectsById[world.bepuToLancer[collidable]];
++                Result = result;
+                 DidHit = true;
+                 if (Result?.Collider is ConvexMeshCollider convex)
+                 {
+@@ -262,9 +270,10 @@ namespace LibreLancer.Physics
+             new (Vector3 Start, Vector3 End, bool Success)[32];
+ 
+         public bool PointRaycast(PhysicsObject? me, Vector3 origin, Vector3 direction, float maxDist,
+-            bool allowDynAsteroids, out Vector3 contactPoint, out PhysicsObject? didHit, out object? childTag)
++            bool allowDynAsteroids, out Vector3 contactPoint, out PhysicsObject? didHit, out object? childTag,
++            Func<PhysicsObject?, bool>? filter = null)
+         {
+-            HitHandler handler = new HitHandler(this, allowDynAsteroids, me);
++            HitHandler handler = new HitHandler(this, allowDynAsteroids, me, filter);
+             Simulation.RayCast(origin, direction, maxDist, BufferPool, ref handler);
+             contactPoint = handler.ContactPoint;
+             didHit = handler.Result;
+diff --git a/src/LibreLancer/GameStates/SpaceGameplay.cs b/src/LibreLancer/GameStates/SpaceGameplay.cs
+index 7dbf443a..82f0147e 100644
+--- a/src/LibreLancer/GameStates/SpaceGameplay.cs
++++ b/src/LibreLancer/GameStates/SpaceGameplay.cs
+@@ -114,6 +114,8 @@ namespace LibreLancer
+         private bool isLeftDown = false;
+         private double leftDownTimer = 0;
+         private bool mouseFlight = false;
++        // Closest to vanilla mouse-flight activation timing.
++        private const double MouseFlightActivationDelay = 0.155;
+ 
+         public SpaceGameplay(FreelancerGame g, CGameSession session) : base(g)
+         {
+@@ -901,11 +903,6 @@ namespace LibreLancer
+                 {
+                     session.GameplayUpdate(this, FixedDelta);
+ 
+-                    if (isLeftDown)
+-                    {
+-                        leftDownTimer -= FixedDelta;
+-                    }
+-
+                     if (musicTriggered)
+                     {
+                         if (RtcMusicOneShot && !Game.Sound.MusicPlaying)
+@@ -1211,17 +1208,10 @@ namespace LibreLancer
+ 
+             if (!(Game.Debug.CaptureMouse) && !ui.MouseWanted(Game.Mouse.X, Game.Mouse.Y))
+             {
+-                var newSelection = GetMouseSelection();
+-
+-                if (newSelection != null)
+-                {
+-                    Selection.Selected = newSelection;
+-                }
+-
+                 if (!isLeftDown)
+                 {
+                     isLeftDown = true;
+-                    leftDownTimer = 0.25;
++                    leftDownTimer = MouseFlightActivationDelay;
+                 }
+             }
+             else
+@@ -1235,6 +1225,16 @@ namespace LibreLancer
+         {
+             if ((e.Buttons & MouseButtons.Left) > 0)
+             {
++                if (isLeftDown && leftDownTimer >= 0 && !mouseFlight &&
++                    !Game.Debug.CaptureMouse && !ui.MouseWanted(Game.Mouse.X, Game.Mouse.Y))
++                {
++                    var newSelection = GetMouseSelection();
++                    if (newSelection != null)
++                    {
++                        Selection.Selected = newSelection;
++                    }
++                }
++
+                 leftDownTimer = 0;
+                 isLeftDown = false;
+             }
+@@ -1371,6 +1371,11 @@ namespace LibreLancer
+                 return;
+             }
+ 
++            if (isLeftDown)
++            {
++                leftDownTimer -= delta;
++            }
++
+             Input.Update();
+ 
+             if (!ui.MouseWanted(Game.Mouse.X, Game.Mouse.Y))
+diff --git a/src/LibreLancer/World/GameWorld.cs b/src/LibreLancer/World/GameWorld.cs
+index c60fb4de..62290e2a 100644
+--- a/src/LibreLancer/World/GameWorld.cs
++++ b/src/LibreLancer/World/GameWorld.cs
+@@ -27,6 +27,9 @@ namespace LibreLancer.World
+ {
+     public class GameWorld : IDisposable
+     {
++        private const float SelectionMaxDistance = 10000000f;
++        private const float TradelaneSelectionHeight = 0.25f;
++
+         public readonly PhysicsWorld? Physics;
+         public readonly SystemRenderer? Renderer;
+         public readonly SoundManager? Sounds;
+@@ -437,135 +440,189 @@ namespace LibreLancer.World
+         public GameObject? GetSelection(ICamera camera, GameObject self, float x, float y, float vpWidth,
+             float vpHeight)
+         {
+-
+             var cameraProjection = camera.Projection;
+             var cameraView = camera.View;
+ 
+             var vp = new Vector2(vpWidth, vpHeight);
+             var start = Vector3Ex.UnProject(new Vector3(x, y, 0f), cameraProjection, cameraView, vp);
+             var end = Vector3Ex.UnProject(new Vector3(x, y, 1f), cameraProjection, cameraView, vp);
+-            var dir = (end - start).Normalized();
++            var direction = (end - start).Normalized();
+ 
+-            if (!SelectionCast(camera, start, dir, 50000, self, out var rb))
++            GameObject? selected = null;
++            var selectedDistance = SelectionMaxDistance;
++
++            if (Physics != null && Physics.PointRaycast(self.PhysicsComponent?.Body, start, direction,
++                    SelectionMaxDistance, false, out var contactPoint, out var body, out _, IsSelectablePhysicsObject) &&
++                body?.Tag is GameObject hit)
+             {
+-                return null;
++                selected = hit;
++                selectedDistance = Vector3.Dot(contactPoint - start, direction);
+             }
+ 
+-            return rb.Tag as GameObject;
++            if (TryGetTradelaneSelection(start, direction, SelectionMaxDistance, out var tradelane,
++                    out var tradelaneDistance) && tradelaneDistance < selectedDistance)
++            {
++                selected = tradelane;
++            }
++
++            return selected;
+         }
+ 
+-        // Select by bounding box, not by mesh
+-        private bool SelectionCast(ICamera camera, Vector3 rayOrigin, Vector3 direction, float maxDist, GameObject self,
+-            [MaybeNullWhen(false)] out PhysicsObject body)
++        private static bool IsSelectablePhysicsObject(PhysicsObject? body) =>
++            body?.Tag is GameObject go &&
++            go.Kind is not (GameObjectKind.Debris or GameObjectKind.DynamicAsteroid);
++
++        private bool TryGetTradelaneSelection(Vector3 rayOrigin, Vector3 direction, float maxDistance,
++            [MaybeNullWhen(false)] out GameObject selected, out float selectedDistance)
+         {
+-            float dist = float.MaxValue;
+-            body = null;
+-            var jitterDir = direction * maxDist;
+-            var md2 = maxDist * maxDist;
++            selected = null;
++            selectedDistance = maxDistance;
+ 
+-            foreach (var rb in Physics!.Objects)
++            foreach (var obj in objects)
+             {
+-                if (rb.Tag == self)
++                if (obj.SystemObject?.Dock is not { Kind: DockKinds.Tradelane } dock ||
++                    !obj.TryGetComponent<DockInfoComponent>(out var dockInfo))
+                 {
+                     continue;
+                 }
+ 
+-                if (rb.Tag is GameObject go &&
+-                    (go.Kind == GameObjectKind.Debris || go.Kind == GameObjectKind.DynamicAsteroid))
++                var radius = GetTradelaneSelectionRadius(dockInfo);
++
++                if (radius <= 0 || !TryGetTradelaneOrientation(obj, dock, out var orientation))
+                 {
+                     continue;
+                 }
+ 
+-                if (Vector3.DistanceSquared(rb.Position, camera.Position) > md2)
++                var extents = GetTradelaneSelectionExtents(obj, orientation, radius);
++                if (!RayIntersectsOrientedBox(rayOrigin, direction, maxDistance, obj.WorldTransform.Position,
++                        orientation, extents, out var distance) || distance >= selectedDistance)
+                 {
+                     continue;
+                 }
+ 
+-                if (rb.Collider is SphereCollider sphereCollider)
++                selected = obj;
++                selectedDistance = distance;
++            }
++
++            return selected != null;
++        }
++
++        private static int GetTradelaneSelectionRadius(DockInfoComponent dockInfo)
++        {
++            var radius = 0;
++            foreach (var sphere in dockInfo.Spheres)
++            {
++                if ((sphere.Hardpoint.Equals("HpLeftLane", StringComparison.OrdinalIgnoreCase) ||
++                     sphere.Hardpoint.Equals("HpRightLane", StringComparison.OrdinalIgnoreCase)) &&
++                    sphere.Radius > radius)
+                 {
+-                    // Test spheres
+-                    var ray = new Ray(rayOrigin, direction);
+-                    var sphere = new BoundingSphere(rb.Position, sphereCollider.Radius);
+-                    var res = ray.Intersects(sphere);
++                    radius = sphere.Radius;
++                }
++            }
++
++            return radius;
++        }
++
++        private bool TryGetTradelaneOrientation(GameObject obj, DockAction dock,
++            out Quaternion orientation)
++        {
++            var laneDirection = Vector3.Transform(-Vector3.UnitZ, obj.WorldTransform.Orientation);
++            var target = GetObject(dock.Target) ?? GetObject(dock.TargetLeft);
++            if (target != null)
++            {
++                var targetDirection = target.WorldTransform.Position - obj.WorldTransform.Position;
++                if (targetDirection.LengthSquared() > 0.0001f)
++                {
++                    laneDirection = Vector3.Normalize(targetDirection);
++                }
++            }
++
++            if (laneDirection.LengthSquared() <= 0.0001f)
++            {
++                orientation = Quaternion.Identity;
++                return false;
++            }
+ 
+-                    if (res == null)
+-                    {
+-                        continue;
+-                    }
++            var up = Vector3.Transform(Vector3.UnitY, obj.WorldTransform.Orientation);
++            if (MathF.Abs(Vector3.Dot(laneDirection, up)) > 0.99f)
++            {
++                up = MathF.Abs(laneDirection.Y) < 0.99f ? Vector3.UnitY : Vector3.UnitX;
++            }
+ 
+-                    var p2 = rayOrigin + (direction * res.Value);
+ 
+-                    if (res == 0.0)
+-                    {
+-                        p2 = rb.Position;
+-                    }
++            orientation = QuaternionEx.LookRotation(-laneDirection, up);
++            return true;
++        }
++
++        private static Vector3 GetTradelaneSelectionExtents(GameObject obj, Quaternion orientation, float radius)
++        {
++            var body = obj.PhysicsComponent?.Body;
++            if (body == null)
++            {
++                return new Vector3(radius, radius * 0.25f, radius);
++            }
+ 
+-                    var nd = Vector3.DistanceSquared(p2, camera.Position);
++            var bounds = body.GetBoundingBox();
++            var inverse = Quaternion.Conjugate(orientation);
++            var localMin = new Vector3(float.MaxValue);
++            var localMax = new Vector3(float.MinValue);
++            var center = obj.WorldTransform.Position;
++            Span<Vector3> corners = stackalloc Vector3[BoundingBox.CornerCount];
++            bounds.GetCorners(corners);
+ 
+-                    if (!(nd < dist))
+-                    {
+-                        continue;
+-                    }
++            foreach (var corner in corners)
++            {
++                var local = Vector3.Transform(corner - center, inverse);
++                localMin = Vector3.Min(localMin, local);
++                localMax = Vector3.Max(localMax, local);
++            }
+ 
+-                    dist = nd;
+-                    body = rb;
+-                }
+-                else
+-                {
+-                    // var tag = rb.Tag as GameObject;
+-                    var box = rb.GetBoundingBox();
+-
+-                    if (!rb.GetBoundingBox().RayIntersect(ref rayOrigin, ref jitterDir))
+-                    {
+-                        continue;
+-                    }
+-
+-                    var nd = Vector3.DistanceSquared(rb.Position, camera.Position);
+-
+-                    if (!(nd < dist))
+-                    {
+-                        continue;
+-                    }
+-
+-                    dist = nd;
+-                    body = rb;
+-                    /*if (tag == null || tag.CmpParts.Count == 0)
+-                    {
+-                        // Single part
+-                        var nd = Vector3.DistanceSquared(rb.Position, camera.Position);
+-                        if (nd < dist)
+-                        {
+-                            dist = nd;
+-                            body = rb;
+-                        }
+-                    }
+-                    else
+-                    {
+-                        // Test by cmp parts
+-                        var sh = (CompoundSurShape)rb.Shape;
+-                        for (int i = 0; i < sh.Shapes.Length; i++)
+-                        {
+-                            sh.Shapes[i].UpdateBoundingBox();
+-                            var bb = sh.Shapes[i].BoundingBox;
+-                            bb.Min += rb.Position;
+-                            bb.Max += rb.Position;
+-                            if (bb.RayIntersect(ref rayOrigin, ref jitterDir))
+-                            {
+-
+-                                var nd = Vector3.DistanceSquared(rb.Position, camera.Position);
+-                                if (nd < dist)
+-                                {
+-                                    dist = nd;
+-                                    body = rb;
+-                                }
+-                                break;
+-                            }
+-                        }
+-                    }*/
+-                }
++            var halfWidth = MathF.Max(radius, MathF.Max(MathF.Abs(localMin.X), MathF.Abs(localMax.X)));
++            var boundHeight = localMax.Y - localMin.Y;
++            var halfHeight = boundHeight > 0 ? boundHeight * (TradelaneSelectionHeight / 2) :
++                radius * (TradelaneSelectionHeight / 2);
++            return new Vector3(halfWidth, halfHeight, radius);
++        }
++
++        private static bool RayIntersectsOrientedBox(Vector3 rayOrigin, Vector3 direction, float maxDistance,
++            Vector3 center, Quaternion orientation, Vector3 halfExtents, out float distance)
++        {
++            var inverse = Quaternion.Conjugate(orientation);
++            var localOrigin = Vector3.Transform(rayOrigin - center, inverse);
++            var localDirection = Vector3.Transform(direction, inverse);
++            var enter = 0f;
++            var exit = maxDistance;
++
++            if (!UpdateRayBoxInterval(localOrigin.X, localDirection.X, halfExtents.X, ref enter, ref exit) ||
++                !UpdateRayBoxInterval(localOrigin.Y, localDirection.Y, halfExtents.Y, ref enter, ref exit) ||
++                !UpdateRayBoxInterval(localOrigin.Z, localDirection.Z, halfExtents.Z, ref enter, ref exit))
++            {
++                distance = 0;
++                return false;
++            }
++
++            distance = enter;
++            return true;
++        }
++
++        private static bool UpdateRayBoxInterval(float origin, float direction, float extent,
++            ref float enter, ref float exit)
++        {
++            if (MathF.Abs(direction) < 0.000001f)
++            {
++                return origin >= -extent && origin <= extent;
++            }
++
++            var first = (-extent - origin) / direction;
++            var second = (extent - origin) / direction;
++            if (first > second)
++            {
++                (first, second) = (second, first);
+             }
+ 
+-            return body != null;
++            enter = MathF.Max(enter, first);
++            exit = MathF.Min(exit, second);
++            return enter <= exit;
+         }
+ 
+         public void Dispose()

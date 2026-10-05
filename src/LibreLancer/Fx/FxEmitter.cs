@@ -178,6 +178,16 @@ namespace LibreLancer.Fx
 
             ref EmitterState state = ref instance.Emitters[index];
 
+            if (!state.Initialized)
+            {
+                state.Initialized = true;
+                var initialCount = Math.Min(InitialParticles, maxCount);
+                var initialWindow = freq > 0 ? Math.Min(lifespan, initialCount / freq) : 0;
+                var initialStep = initialCount > 0 ? initialWindow / initialCount : 0;
+                for (var i = 0; i < initialCount; i++)
+                    EmitParticle(reference, index, instance, sparam, lifespan, i * initialStep, ref state);
+            }
+
             if(freq > 0)
             {
                 // Spawn lots of particles
@@ -216,41 +226,39 @@ namespace LibreLancer.Fx
                         continue;
                     }
 
-                    // Emit
-                    ref var particle = ref instance.Buffer.Enqueue(reference.AppBufIdx, out var despawned);
-
-                    if (despawned != -1)
-                    {
-                        instance.Emitters[despawned].Count--;
-                        Debug.Assert(instance.Emitters[despawned].Count >= 0);
-                    }
-
-                    particle.LifeSpan = lifespan;
-                    particle.TimeAlive =  (float) (count * correctionFactor); //Spread the starting time evenly among the spawned particles
-                    particle.EmitterIndex = index;
-                    particle.Orientation = Quaternion.Identity;
-                    SetParticle(instance, reference, ref particle, sparam, (float) instance.GlobalTime);
-                    state.Count++;
-
-                    var len = particle.Velocity.Length();
-
-                    if (!(Math.Abs(len) > float.Epsilon))
-                    {
-                        continue;
-                    }
-
-                    //Correct position since the time alive can be non zero (see above)
-                    if(toEmit > 1)
-                        particle.Position += particle.Velocity * particle.TimeAlive;
-
-                    var nr = particle.Velocity.Normalized();
-                    particle.Normal = nr;
+                    EmitParticle(reference, index, instance, sparam, lifespan,
+                        count * correctionFactor, ref state);
                 }
             }
             else
             {
                 state.NextEmitCount = 0;
             }
+        }
+
+        private void EmitParticle(EmitterReference reference, int index, ParticleEffectInstance instance,
+            float sparam, float lifespan, double timeAlive, ref EmitterState state)
+        {
+            ref var particle = ref instance.Buffer.Enqueue(reference.AppBufIdx, out var despawned);
+            if (despawned != -1)
+            {
+                instance.Emitters[despawned].Count--;
+                Debug.Assert(instance.Emitters[despawned].Count >= 0);
+            }
+
+            particle.LifeSpan = lifespan;
+            particle.TimeAlive = (float)timeAlive;
+            particle.EmitterIndex = index;
+            particle.Id = instance.AllocateParticleId();
+            particle.Orientation = Quaternion.Identity;
+            SetParticle(instance, reference, ref particle, sparam, (float)instance.GlobalTime);
+            if (particle.Normal.LengthSquared() <= float.Epsilon)
+                particle.Normal = particle.Velocity.LengthSquared() > float.Epsilon
+                    ? particle.Velocity.Normalized()
+                    : Vector3.UnitY;
+            if (timeAlive > 0)
+                particle.Position += particle.Velocity * (float)timeAlive;
+            state.Count++;
         }
     }
 }

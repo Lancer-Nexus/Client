@@ -1,0 +1,106 @@
+diff --git a/src/LibreLancer/Thn/Events/AttachEntityEvent.cs b/src/LibreLancer/Thn/Events/AttachEntityEvent.cs
+--- a/src/LibreLancer/Thn/Events/AttachEntityEvent.cs
++++ b/src/LibreLancer/Thn/Events/AttachEntityEvent.cs
+@@ -78,6 +78,7 @@
+             // Attach GameObjects to eachother
+             IRenderHardpoint? hardpoint = null;
+             RigidModelPart? part = null;
++            var characterRoot = false;
+             switch (TargetType)
+             {
+                 case TargetTypes.Hardpoint when !string.IsNullOrEmpty(TargetPart):
+@@ -96,7 +97,11 @@
+ 
+                 case TargetTypes.Part when !string.IsNullOrEmpty(TargetPart):
+                 {
+-                    if (objB.Object?.Model?.RigidModel.Parts == null)
++                    if (ThnObjectParent.IsCharacterRootTarget(objB, TargetPart))
++                    {
++                        characterRoot = true;
++                    }
++                    else if (objB.Object?.Model?.RigidModel.Parts == null)
+                     {
+                         FLLog.Error("Thn", "Could not get parts on " + objB.Name);
+                     }
+@@ -112,7 +117,7 @@
+                 }
+             }
+ 
+-            var tgt = new ThnObjectParent(objB, hardpoint, part);
++            var tgt = new ThnObjectParent(objB, hardpoint, part, characterRoot);
+             Quaternion lastRotate = Quaternion.Identity;
+             if ((Flags & AttachFlags.Orientation) == AttachFlags.Orientation &&
+                 (Flags & AttachFlags.OrientationRelative) == AttachFlags.OrientationRelative)
+diff --git a/src/LibreLancer/Thn/ThnSceneObject.cs b/src/LibreLancer/Thn/ThnSceneObject.cs
+--- a/src/LibreLancer/Thn/ThnSceneObject.cs
++++ b/src/LibreLancer/Thn/ThnSceneObject.cs
+@@ -195,12 +195,19 @@
+     }
+ }
+ 
+-public class ThnObjectParent(ThnSceneObject obj, IRenderHardpoint? hardpoint, RigidModelPart? part)
++public class ThnObjectParent(ThnSceneObject obj, IRenderHardpoint? hardpoint, RigidModelPart? part,
++    bool characterRoot = false)
+     : ThnAttachParent
+ {
++    public static bool IsCharacterRootTarget(ThnSceneObject obj, string? targetPart) =>
++        obj.Object?.RenderComponent is CharacterRenderer &&
++        string.Equals(targetPart, "Root", StringComparison.OrdinalIgnoreCase);
++
+     public override Transform3D GetTransform(bool pathLookAt)
+     {
+-        var tr = obj.GetTransform();
++        var tr = characterRoot && obj.Object != null
++            ? obj.Object.WorldTransform
++            : obj.GetTransform();
+         if (part != null)
+         {
+             if (obj.HpMount != null)
+diff --git a/src/LibreLancer.Tests/ThnCharacterRootAttachmentTests.cs b/src/LibreLancer.Tests/ThnCharacterRootAttachmentTests.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Tests/ThnCharacterRootAttachmentTests.cs
+@@ -0,0 +1,43 @@
++using System;
++using System.Numerics;
++using System.Runtime.CompilerServices;
++using LibreLancer.Render;
++using LibreLancer.Thn;
++using LibreLancer.World;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class ThnCharacterRootAttachmentTests
++{
++    [Fact]
++    public void CharacterRootAttachmentUsesWorldTransformAfterRootMotion()
++    {
++        var character = new GameObject
++        {
++            RenderComponent = (CharacterRenderer)RuntimeHelpers.GetUninitializedObject(typeof(CharacterRenderer))
++        };
++        var rootMotionTransform = new Transform3D(
++            new Vector3(-7, 2, 11),
++            Quaternion.CreateFromAxisAngle(Vector3.UnitY, 0.75f));
++        character.SetLocalTransform(rootMotionTransform);
++
++        var sceneObject = new ThnSceneObject
++        {
++            Translate = Vector3.Zero,
++            Rotate = Quaternion.Identity,
++            Object = character
++        };
++        Assert.True(ThnObjectParent.IsCharacterRootTarget(sceneObject, "Root"));
++        Assert.False(ThnObjectParent.IsCharacterRootTarget(sceneObject, "UpperTorso"));
++        var parent = new ThnObjectParent(sceneObject, null, null, characterRoot: true);
++
++        AssertTransformClose(rootMotionTransform, parent.GetTransform(pathLookAt: false));
++    }
++
++    private static void AssertTransformClose(Transform3D expected, Transform3D actual)
++    {
++        Assert.True(Vector3.Distance(expected.Position, actual.Position) < 0.0001f);
++        Assert.True(MathF.Abs(Quaternion.Dot(expected.Orientation, actual.Orientation)) > 0.9999f);
++    }
++}

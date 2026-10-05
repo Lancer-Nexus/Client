@@ -113,13 +113,17 @@ namespace LibreLancer.Fx
                 ref var particle = ref instance.Buffer[nodeIdx, i];
                 var time = particle.TimeAlive / particle.LifeSpan;
                 var p = Vector3.Transform(Vector3.Transform(particle.Position, particle.Orientation), nodeTr);
+                if (!PassesVisibilityFields(node, instance, p, sparam))
+                    continue;
                 var v = Vector3.TransformNormal(particle.Velocity, nodeTr);
                 var c = Color.GetValue(sparam, time);
                 var a = Alpha.GetValue(sparam, time);
+                var size = Size?.GetValue(sparam, time) ?? 1.0f;
+                var aspect = HToVAspect?.GetValue(sparam, time) ?? 1.0f;
                 instance.Pool?.AddParticle(
                     TextureHandler,
                     p,
-                    new Vector2(Size?.GetValue(sparam, time) ?? 1.0f) * 2,
+                    GetAspectAdjustedSize(size, aspect),
                     new Color4(c, a),
                     GetFrame((float) instance.GlobalTime, sparam, ref particle),
                     v, //For motion blur pass not normalized velocity as normal (needed)
@@ -133,6 +137,32 @@ namespace LibreLancer.Fx
         }
 
         public readonly ParticleTexture TextureHandler = new();
+
+        internal static float GetViewingAngleFade(Vector3 particleDirection, Vector3 viewDirection)
+        {
+            if (particleDirection.LengthSquared() <= float.Epsilon ||
+                viewDirection.LengthSquared() <= float.Epsilon)
+                return 1f;
+
+            var sinAngle = Vector3.Cross(Vector3.Normalize(particleDirection),
+                Vector3.Normalize(viewDirection)).Length();
+            return Math.Clamp(sinAngle, 0f, 1f);
+        }
+
+        internal static Vector2 GetAspectAdjustedSize(float size, float horizontalToVerticalAspect) =>
+            new Vector2(size * horizontalToVerticalAspect, size) * 2;
+
+        protected static bool PassesVisibilityFields(AppearanceReference node, ParticleEffectInstance instance,
+            Vector3 worldPosition, float sparam)
+        {
+            foreach (var field in node.Linked)
+            {
+                if (field.Field is FLDustField dustField &&
+                    !dustField.IsPositionVisible(instance, field, worldPosition, sparam))
+                    return false;
+            }
+            return true;
+        }
 
         protected float GetFrame(float globaltime, float sparam, ref Particle particle)
         {

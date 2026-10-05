@@ -1,0 +1,124 @@
+--- a/src/LibreLancer/Fx/Appearances/FxBasicAppearance.cs
++++ b/src/LibreLancer/Fx/Appearances/FxBasicAppearance.cs
+@@ -136,6 +136,17 @@
+ 
+         public readonly ParticleTexture TextureHandler = new();
+ 
++        internal static float GetViewingAngleFade(Vector3 particleDirection, Vector3 viewDirection)
++        {
++            if (particleDirection.LengthSquared() <= float.Epsilon ||
++                viewDirection.LengthSquared() <= float.Epsilon)
++                return 1f;
++
++            var sinAngle = Vector3.Cross(Vector3.Normalize(particleDirection),
++                Vector3.Normalize(viewDirection)).Length();
++            return Math.Clamp(sinAngle, 0f, 1f);
++        }
++
+         internal static Vector2 GetAspectAdjustedSize(float size, float horizontalToVerticalAspect) =>
+             new Vector2(size * horizontalToVerticalAspect, size) * 2;
+ 
+--- a/src/LibreLancer/Fx/Appearances/FxRectAppearance.cs
++++ b/src/LibreLancer/Fx/Appearances/FxRectAppearance.cs
+@@ -66,17 +66,6 @@
+             return Vector3.UnitY;
+         }
+ 
+-        internal static float GetViewingAngleFade(Vector3 particleDirection, Vector3 viewDirection)
+-        {
+-            if (particleDirection.LengthSquared() <= float.Epsilon ||
+-                viewDirection.LengthSquared() <= float.Epsilon)
+-                return 1f;
+-
+-            var sinAngle = Vector3.Cross(Vector3.Normalize(particleDirection),
+-                Vector3.Normalize(viewDirection)).Length();
+-            return Math.Clamp(sinAngle, 0f, 1f);
+-        }
+-
+         private Vector3 Project(Billboards billboards, Vector3 pt)
+ 		{
+ 			var mvp = billboards.Camera.ViewProjection;
+--- a/src/LibreLancer/Fx/Appearances/FxPerpAppearance.cs
++++ b/src/LibreLancer/Fx/Appearances/FxPerpAppearance.cs
+@@ -10,7 +10,12 @@
+ {
+ 	public class FxPerpAppearance : FxBasicAppearance
+ 	{
+-		public FxPerpAppearance(AlchemyNode ale) : base(ale) { }
++		public bool ViewingAngleFade;
++
++		public FxPerpAppearance(AlchemyNode ale) : base(ale)
++		{
++			ViewingAngleFade = ale.GetBoolean(AleProperty.RectApp_ViewingAngleFade);
++		}
+ 
+         public FxPerpAppearance(string name) : base(name)
+         {
+@@ -35,6 +40,8 @@
+                 var p = Vector3.Transform(particle.Position, node_tr);
+                 var p2 = Vector3.Transform(particle.Position + particle.Velocity, node_tr);
+                 var n = (p - p2).Normalized();
++                if (ViewingAngleFade)
++                    a *= GetViewingAngleFade(n, instance.Pool.Camera.Position - p);
+                 instance.Pool.AddParticle(
+                     TextureHandler,
+                     Vector3.Transform(particle.Position, node_tr),
+@@ -61,4 +68,3 @@
+         }
+ 	}
+ }
+-
+--- a/src/LibreLancer.Tests/FxRectAppearanceTests.cs
++++ b/src/LibreLancer.Tests/FxRectAppearanceTests.cs
+@@ -30,7 +30,7 @@
+     [Fact]
+     public void ViewingAngleFadeIsFullWhenViewedAcrossParticleDirection()
+     {
+-        var fade = FxRectAppearance.GetViewingAngleFade(Vector3.UnitZ, Vector3.UnitX);
++        var fade = FxBasicAppearance.GetViewingAngleFade(Vector3.UnitZ, Vector3.UnitX);
+ 
+         Assert.Equal(1f, fade);
+     }
+@@ -40,7 +40,7 @@
+     [InlineData(0, 0, -1)]
+     public void ViewingAngleFadeRemovesEdgeOnParticles(float x, float y, float z)
+     {
+-        var fade = FxRectAppearance.GetViewingAngleFade(Vector3.UnitZ, new Vector3(x, y, z));
++        var fade = FxBasicAppearance.GetViewingAngleFade(Vector3.UnitZ, new Vector3(x, y, z));
+ 
+         Assert.Equal(0f, fade);
+     }
+@@ -48,7 +48,7 @@
+     [Fact]
+     public void ViewingAngleFadeKeepsParticlesVisibleWhenDirectionIsUnavailable()
+     {
+-        Assert.Equal(1f, FxRectAppearance.GetViewingAngleFade(Vector3.Zero, Vector3.UnitX));
+-        Assert.Equal(1f, FxRectAppearance.GetViewingAngleFade(Vector3.UnitZ, Vector3.Zero));
++        Assert.Equal(1f, FxBasicAppearance.GetViewingAngleFade(Vector3.Zero, Vector3.UnitX));
++        Assert.Equal(1f, FxBasicAppearance.GetViewingAngleFade(Vector3.UnitZ, Vector3.Zero));
+     }
+ }
+--- /dev/null
++++ b/src/LibreLancer.Tests/FxPerpAppearanceTests.cs
+@@ -0,0 +1,21 @@
++using LibreLancer.Fx;
++using LibreLancer.Utf.Ale;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class FxPerpAppearanceTests
++{
++    [Theory]
++    [InlineData(true)]
++    [InlineData(false)]
++    public void ReadsViewingAngleFadeFromAleNode(bool enabled)
++    {
++        var node = new AlchemyNode();
++        node.Parameters.Add(new AleParameter(AleProperty.RectApp_ViewingAngleFade, enabled));
++
++        var appearance = new FxPerpAppearance(node);
++
++        Assert.Equal(enabled, appearance.ViewingAngleFade);
++    }
++}

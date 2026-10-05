@@ -1,0 +1,93 @@
+diff --git a/src/Editor/LancerEdit/GameContent/MissionEditor/MissionScriptEditorTab.cs b/src/Editor/LancerEdit/GameContent/MissionEditor/MissionScriptEditorTab.cs
+index 5743aa2a..89e31675 100644
+--- a/src/Editor/LancerEdit/GameContent/MissionEditor/MissionScriptEditorTab.cs
++++ b/src/Editor/LancerEdit/GameContent/MissionEditor/MissionScriptEditorTab.cs
+@@ -738,6 +738,14 @@ public sealed partial class MissionScriptEditorTab : GameContentTab
+ 
+     internal EditResult<bool> SaveMission(string savePath = null)
+     {
++        var emptyTriggerFields = FindEmptyTriggerFields(nodes.OfType<NodeMissionTrigger>());
++        if (emptyTriggerFields.Count > 0)
++        {
++            return EditResult<bool>.Error(
++                "Cannot save mission: trigger entries contain empty fields. " +
++                string.Join("; ", emptyTriggerFields));
++        }
++
+         if (savePath != null)
+         {
+             FileSaveLocation = savePath;
+@@ -763,6 +771,38 @@ public sealed partial class MissionScriptEditorTab : GameContentTab
+         return new EditResult<bool>(true);
+     }
+ 
++    public static List<string> FindEmptyTriggerFields(IEnumerable<NodeMissionTrigger> triggers)
++    {
++        var emptyFields = new List<string>();
++        foreach (var trigger in triggers)
++        {
++            CheckEntries(trigger, "condition", trigger.Conditions, emptyFields);
++            CheckEntries(trigger, "action", trigger.Actions, emptyFields);
++        }
++        return emptyFields;
++    }
++
++    private static void CheckEntries(NodeMissionTrigger trigger, string kind,
++        IEnumerable<NodeTriggerEntry> entries, List<string> emptyFields)
++    {
++        foreach (var entry in entries)
++        {
++            var builder = new IniBuilder();
++            var section = builder.Section("Trigger");
++            entry.WriteEntry(section);
++            foreach (var field in section.Section)
++            {
++                for (var i = 0; i < field.Count; i++)
++                {
++                    if (field[i] is StringValue text && string.IsNullOrWhiteSpace(text.ToString()))
++                    {
++                        emptyFields.Add($"'{trigger.Data.Nickname}' {kind} '{field.Name}' argument {i + 1}");
++                    }
++                }
++            }
++        }
++    }
++
+     private void DuplicateSelectedNodes()
+     {
+         Span<NodeId> nodeIds = stackalloc NodeId[nodes.Count];
+--- /dev/null
++++ b/src/LibreLancer.Tests/MissionTriggerSaveValidationTests.cs
+@@ -0,0 +1,32 @@
++using LancerEdit.GameContent.MissionEditor;
++using LancerEdit.GameContent.MissionEditor.NodeTypes;
++using LancerEdit.GameContent.MissionEditor.NodeTypes.Conditions;
++using LibreLancer.Data.Schema.Missions;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class MissionTriggerSaveValidationTests
++{
++    [Fact]
++    public void EmptyWatchTriggerReferenceIsReportedBeforeSaving()
++    {
++        var trigger = new NodeMissionTrigger(new MissionTrigger { Nickname = "start" }, null);
++        trigger.Conditions.Add(new CndWatchNodeTrigger(null));
++
++        var errors = MissionScriptEditorTab.FindEmptyTriggerFields([trigger]);
++
++        Assert.Equal(new[] { "'start' condition 'Cnd_WatchTrigger' argument 1" }, errors);
++    }
++
++    [Fact]
++    public void NumericTriggerFieldsAreNotReportedAsEmpty()
++    {
++        var trigger = new NodeMissionTrigger(new MissionTrigger { Nickname = "start" }, null);
++        trigger.Conditions.Add(new CndTimer(null));
++
++        var errors = MissionScriptEditorTab.FindEmptyTriggerFields([trigger]);
++
++        Assert.Empty(errors);
++    }
++}

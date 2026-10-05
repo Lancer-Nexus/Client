@@ -12,7 +12,6 @@ public enum ServerEventType
     CharacterConnected, // selected character & entered game
     CharacterDisconnected,// on logout / swap
 
-    PlayerAdminChanged,
     PlayerBanChanged,
 }
 
@@ -21,8 +20,6 @@ public record CharacterDisconnectedEventPayload(Player DisconnectedCharacter);
 public record PlayerConnectedEventPayload( Player ConnectedPlayer);
 public record PlayerDisconnectedEventPayload(Player DisconnectedPlayer, DisconnectReason Reason);
 public record PlayerBanChangedEventPayload(BannedPlayerDescription BannedPlayer, bool IsBanned);
-public record CharacterAdminChangedEventPayload(AdminCharacterDescription AdminCharacter, bool IsAdmin);
-
 public struct ServerEvent
 {
     public ServerEventType Type;

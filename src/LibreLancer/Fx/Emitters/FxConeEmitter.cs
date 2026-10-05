@@ -56,9 +56,10 @@ namespace LibreLancer.Fx
 			float s_min = MathHelper.DegreesToRadians(MinSpread.GetValue(sparam, 0));
 			float s_max = MathHelper.DegreesToRadians(MaxSpread.GetValue(sparam, 0));
 
-			var n = RandomInCone(s_min, s_max);
+			var localDirection = RandomInCone(s_min, s_max);
+			var n = localDirection;
 
-            var p = n * radius;
+            var p = (reference.Linked!.AirFieldOwnsDirection ? localDirection : n) * radius;
 
             ref Matrix4x4 particleSpawnTransform = ref instance.EmitterParticleSpawnTransforms[reference.EmitterNodeIdx];
             if (!particleSpawnTransform.IsIdentity)
@@ -67,6 +68,7 @@ namespace LibreLancer.Fx
                 p=Vector3.Transform(p, particleSpawnTransform);
                 n=Vector3.TransformNormal(n, particleSpawnTransform);
             }
+			particle.Normal = n.Normalized();
 
 			n *= Pressure!.GetValue(sparam, 0);
             particle.Position = p;

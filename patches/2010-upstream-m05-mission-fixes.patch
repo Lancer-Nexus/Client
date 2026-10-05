@@ -1,0 +1,226 @@
+diff --git a/src/LibreLancer.Tests/MissionSolarDockTests.cs b/src/LibreLancer.Tests/MissionSolarDockTests.cs
+new file mode 100644
+index 00000000..40985a00
+--- /dev/null
++++ b/src/LibreLancer.Tests/MissionSolarDockTests.cs
+@@ -0,0 +1,36 @@
++using System;
++using LibreLancer.Missions;
++using LibreLancer.Server;
++using LibreLancer.Server.Components;
++using LibreLancer.World;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class MissionSolarDockTests
++{
++    [Fact]
++    public void MissionSolarBaseDetectionIsCaseInsensitiveAndRejectsUnknownBases()
++    {
++        var script = new MissionScript();
++        script.Solars.Add("sprague", new ScriptSolar { Nickname = "sprague", Base = "Li01_01_Base" });
++        var runtime = new MissionRuntime(script, new Player(null!, null!, Guid.Empty), [], missionNickname: "fixture");
++
++        Assert.True(runtime.IsMissionSolarBase("li01_01_base"));
++        Assert.False(runtime.IsMissionSolarBase("li01_02_base"));
++        Assert.False(runtime.IsMissionSolarBase(null));
++    }
++
++    [Fact]
++    public void DockedMissionNpcRemainsInWorld()
++    {
++        var script = new MissionScript();
++        var runtime = new MissionRuntime(script, new Player(null!, null!, Guid.Empty), [], missionNickname: "fixture");
++        var parent = new GameObject { Nickname = "mission_escort" };
++        var npc = new SNPCComponent(parent, null!, null!) { MissionRuntime = runtime };
++
++        var exception = Record.Exception(npc.Docked);
++
++        Assert.Null(exception);
++    }
++}
+diff --git a/src/LibreLancer/Missions/Actions/ScriptedAction_Spawn.cs b/src/LibreLancer/Missions/Actions/ScriptedAction_Spawn.cs
+index 77a08313..b88d97c9 100644
+--- a/src/LibreLancer/Missions/Actions/ScriptedAction_Spawn.cs
++++ b/src/LibreLancer/Missions/Actions/ScriptedAction_Spawn.cs
+@@ -139,19 +139,10 @@ namespace LibreLancer.Missions.Actions
+             }
+ 
+             var pos = archPos;
+-            GameObject relObj;
+ 
+             // Spawn relative to object
+-            if (!string.IsNullOrWhiteSpace(ship.RelativePosition.ObjectName) &&
+-                (relObj = runtime.Player.Space.World.GameWorld.GetObject(ship.RelativePosition.ObjectName)!) != null)
+-            {
+-                var dir = new Vector3(runtime.Random.NextFloat(-1, 1),
+-                    runtime.Random.NextFloat(-0.1f, 0.1f),
+-                    runtime.Random.NextFloat(-1, 1)).Normalized();
+-                var range = runtime.Random.NextFloat(ship.RelativePosition.MinRange,
+-                    ship.RelativePosition.MaxRange);
+-                pos = relObj.WorldTransform.Position + (dir * range);
+-            }
++            if (TryGetRelativePosition(ship.RelativePosition, runtime, out var relativePosition))
++                pos = relativePosition;
+ 
+             var arrivalObject = string.IsNullOrWhiteSpace(ship.ArrivalObj.Object) || spawnpos.Present
+                 ? null
+@@ -178,6 +169,27 @@ namespace LibreLancer.Missions.Actions
+                 SpawnShipInWorld(ship, spawnpos, spawnorient, objList, script, runtime);
+             });
+         }
++
++        protected bool TryGetRelativePosition(MissionRelativePosition relativePosition, MissionRuntime runtime,
++            out Vector3 position)
++        {
++            position = Vector3.Zero;
++
++            if (string.IsNullOrWhiteSpace(relativePosition.ObjectName))
++                return false;
++
++            var relObj = runtime.Player.Space!.World.GameWorld.GetObject(relativePosition.ObjectName);
++            if (relObj == null)
++                return false;
++
++            var dir = new Vector3(
++                runtime.Random.NextFloat(-1, 1),
++                runtime.Random.NextFloat(-0.1f, 0.1f),
++                runtime.Random.NextFloat(-1, 1)).Normalized();
++            var range = runtime.Random.NextFloat(relativePosition.MinRange, relativePosition.MaxRange);
++            position = relObj.WorldTransform.Position + (dir * range);
++            return true;
++        }
+     }
+ 
+     public class Act_SpawnFormation : ShipSpawnBase
+@@ -261,6 +273,8 @@ namespace LibreLancer.Missions.Actions
+             }
+ 
+             var fpos = Position.Get(form.Position);
++            if (!Position.Present && TryGetRelativePosition(form.RelativePosition, runtime, out var relativePosition))
++                fpos = relativePosition;
+             var forient = Orientation.Get(form.Orientation);
+             var mat = Matrix4x4.CreateFromQuaternion(forient) *
+                       Matrix4x4.CreateTranslation(fpos);
+diff --git a/src/LibreLancer/Missions/MissionRuntime.cs b/src/LibreLancer/Missions/MissionRuntime.cs
+index 51a7376f..8bb45029 100644
+--- a/src/LibreLancer/Missions/MissionRuntime.cs
++++ b/src/LibreLancer/Missions/MissionRuntime.cs
+@@ -368,6 +368,15 @@ namespace LibreLancer.Missions
+             return null;
+         }
+ 
++        public bool IsMissionSolarBase(string? baseName)
++        {
++            if (string.IsNullOrWhiteSpace(baseName))
++                return false;
++
++            return Script.Solars.Values.Any(x =>
++                baseName.Equals(x.Base, StringComparison.OrdinalIgnoreCase));
++        }
++
+         public void ActivateTrigger(string trigger)
+         {
+             var t = Script.AvailableTriggers[trigger];
+diff --git a/src/LibreLancer/Server/Components/SNPCComponent.cs b/src/LibreLancer/Server/Components/SNPCComponent.cs
+index 090b520d..49160d95 100644
+--- a/src/LibreLancer/Server/Components/SNPCComponent.cs
++++ b/src/LibreLancer/Server/Components/SNPCComponent.cs
+@@ -95,6 +95,17 @@ namespace LibreLancer.Server.Components
+ 
+         public void Docked()
+         {
++            if (MissionRuntime != null)
++            {
++                if (Parent.TryGetComponent<AutopilotComponent>(out var autopilot))
++                    autopilot.Cancel();
++                if (Parent.TryGetComponent<ShipSteeringComponent>(out var steering))
++                {
++                    steering.InThrottle = 0;
++                    steering.Cruise = false;
++                }
++                return;
++            }
+             if (MissionRuntime is null && NpcId != Guid.Empty && OwnershipVersion > 0 &&
+                 !TerminalCheckpointPending &&
+                 manager.World.Server.TryQueueNpcTerminalCheckpoint(manager.World, Parent,
+diff --git a/src/LibreLancer/Server/Components/STradelaneMoveComponent.cs b/src/LibreLancer/Server/Components/STradelaneMoveComponent.cs
+index 21836848..70e813c2 100644
+--- a/src/LibreLancer/Server/Components/STradelaneMoveComponent.cs
++++ b/src/LibreLancer/Server/Components/STradelaneMoveComponent.cs
+@@ -390,6 +390,8 @@ namespace LibreLancer.Server.Components
+             if (Parent.TryGetComponent<AutopilotComponent>(out var ap))
+             {
+                 ap.Cancel();
++                if (Parent.Formation != null && Parent.Formation.LeadShip != Parent)
++                    ap.StartFormation();
+             }
+ 
+             if (TryGetMissionRuntime(out var msn, out var isPlayer))
+diff --git a/src/LibreLancer/Server/Player.cs b/src/LibreLancer/Server/Player.cs
+index a1994538..a31b8d50 100644
+--- a/src/LibreLancer/Server/Player.cs
++++ b/src/LibreLancer/Server/Player.cs
+@@ -287,6 +287,7 @@ namespace LibreLancer.Server
+                 MissionRuntime.PlayerLaunch();
+                 MissionRuntime.CheckMissionScript();
+                 MissionRuntime.EnteredSpace();
++                MissionRuntime.CheckMissionScript();
+             }
+         }
+ 
+diff --git a/src/LibreLancer/Server/ServerWorld.cs b/src/LibreLancer/Server/ServerWorld.cs
+index a851dfa8..2116369c 100644
+--- a/src/LibreLancer/Server/ServerWorld.cs
++++ b/src/LibreLancer/Server/ServerWorld.cs
+@@ -1512,6 +1512,35 @@ namespace LibreLancer.Server
+         private double noPlayersTime;
+         private double maxNoPlayers = 2.0;
+ 
++        private bool ShouldKeepAliveForMissionSolarBase()
++        {
++            var player = Server.LocalPlayer;
++            return PlayerCount == 0 &&
++                   player?.MissionRuntime != null &&
++                   player.Space == null &&
++                   player.MissionRuntime.IsMissionSolarBase(player.Base) &&
++                   System.Nickname.Equals(player.System, StringComparison.OrdinalIgnoreCase);
++        }
++
++        private void FreezeShipsForMissionSolarBase()
++        {
++            foreach (var obj in spawnedObjects)
++            {
++                if (!obj.TryGetComponent<ShipPhysicsComponent>(out var physics) || obj.PhysicsComponent?.Body is not { } body)
++                    continue;
++
++                body.LinearVelocity = Vector3.Zero;
++                body.AngularVelocity = Vector3.Zero;
++                physics.EnginePower = 0;
++
++                if (obj.TryGetComponent<ShipSteeringComponent>(out var steering))
++                {
++                    steering.InThrottle = 0;
++                    steering.Cruise = false;
++                }
++            }
++        }
++
+         private double npcCheckpointElapsed;
+ 
+         public bool Update(double delta, double totalTime, uint currentTick, int step)
+@@ -1541,6 +1570,13 @@ namespace LibreLancer.Server
+                 return true;
+             }
+ 
++            if (ShouldKeepAliveForMissionSolarBase())
++            {
++                FreezeShipsForMissionSolarBase();
++                noPlayersTime = 0;
++                return true;
++            }
++
+             // Update
+             NPCs.FrameStart();
+             Population.Update(delta);

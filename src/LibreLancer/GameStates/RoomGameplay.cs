@@ -918,7 +918,7 @@ namespace LibreLancer
                             break;
                         case ScriptState.Cutscene:
                         case ScriptState.Enter:
-                            SceneOnScriptFinished(waitingForFinish!);
+                            SkipCurrentSceneScript();
                             break;
                     }
                 }
@@ -928,6 +928,19 @@ namespace LibreLancer
                     paused = true;
                     ui.Event("Pause");
                 }
+            }
+        }
+
+        private void SkipCurrentSceneScript()
+        {
+            if (waitingForFinish == null)
+            {
+                return;
+            }
+
+            if (scene?.FinishScript(waitingForFinish) != true)
+            {
+                SceneOnScriptFinished(waitingForFinish);
             }
         }
 
@@ -1356,7 +1369,10 @@ namespace LibreLancer
                 ? playerShip.GetHardpoint("HpMount")!.Transform.Inverse()
                 : Transform3D.Identity);
 
-            shipMarker.Object?.Children.Add(playerShip);
+            if (shipMarker.Object != null)
+            {
+                playerShip.Reparent(shipMarker.Object);
+            }
         }
 
         private void RoomDoSceneScript(ThnScript? sc, ScriptState state)
@@ -1373,7 +1389,7 @@ namespace LibreLancer
             waitingForFinish = sc;
             if (hasLandingAnimation && state == ScriptState.Enter && sc != null)
                 locationAnnouncementDelay = Math.Max(0, sc.Duration - 8);
-            scene!.BeginScene(Scripts(sceneScripts, [sc]));
+            scene!.BeginScene(Scripts(sceneScripts, [sc]), sceneScripts.Length);
             PopulateRoomNpcs();
             string[] ships = [];
 

@@ -3,11 +3,12 @@
 // LICENSE, which is part of this source code package
 
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.IO;
 using System.Linq;
 using System.Numerics;
+using System.Threading.Tasks;
 using LibreLancer.Data;
 using LibreLancer.Data.GameData;
 using LibreLancer.Data.GameData.World;
@@ -25,11 +26,11 @@ namespace LibreLancer.Client;
 
 public partial class CGameSession : IClientPlayer
 {
+    private readonly ConcurrentDictionary<Guid, (string Endpoint, string Ticket, string InstanceId, string SystemId)> pendingTransfers = new();
     private static readonly int NewPlayerIds = 393298;
     private static readonly int DepartingPlayerIds = 393299;
 
     public List<StoryCutsceneIni> ActiveCutscenes = [];
-    public bool Admin;
     private AllowedDocking? allowedDocking;
     private readonly Queue<Action> audioActions = new();
 
@@ -145,6 +146,12 @@ public partial class CGameSession : IClientPlayer
 
     public bool Multiplayer => connection is GameNetClient;
 
+    public string? ClusterInstanceId => (connection as GameNetClient)?.ClusterInstanceId;
+    public string? ClusterSystemId => (connection as GameNetClient)?.ClusterSystemId;
+    public string? ClusterEndpoint => (connection as GameNetClient)?.ClusterEndpoint;
+    public int NetworkPing => (connection as GameNetClient)?.Ping ?? -1;
+    public int NetworkLossPercent => (connection as GameNetClient)?.LossPercent ?? -1;
+
 
     public EmbeddedServer? EmbeddedServer => connection as EmbeddedServer;
 
@@ -213,10 +220,96 @@ public partial class CGameSession : IClientPlayer
             FLLog.Warning("NPC", "NPC dialog received without an active room UI callback");
     }
 
-    void IClientPlayer.StartJumpTunnel()
+    void IClientPlayer.StartJumpTunnel(string targetSystem, string target, long characterId)
     {
         inTradelane = false;
-        FLLog.Warning("Client", "Jump tunnel unimplemented");
+        if (connection is not GameNetClient client || string.IsNullOrWhiteSpace(client.ClusterGatewayUrl) ||
+            string.IsNullOrWhiteSpace(client.ClusterAccessToken) || client.ClusterSessionId == Guid.Empty || characterId <= 0)
+        {
+            FLLog.Warning("Client", "Cluster jump is unavailable for this session");
+            return;
+        }
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var id = Guid.NewGuid();
+                var expiry = DateTime.UtcNow.AddMinutes(1);
+                using var gateway = new NexusGatewayLogin(new Uri(client.ClusterGatewayUrl, UriKind.Absolute));
+                await client.RefreshClusterSessionAsync();
+                var transfer = await gateway.StartTransferAsync(client.ClusterAccessToken, new LancerNexus.Protocol.TransferStartRequest
+                {
+                    TransferId = id,
+                    SessionId = client.ClusterSessionId,
+                    CharacterId = characterId,
+                    TargetSystemId = targetSystem,
+                    ExpiresUtc = expiry,
+                    IdempotencyKey = id.ToString("N")
+                });
+                if (!pendingTransfers.TryAdd(id, (transfer.TargetEndpoint!, transfer.Prepared!.TransferTicket!,
+                        transfer.TargetInstanceId!, transfer.TargetSystemId!)))
+                    throw new InvalidOperationException("Duplicate transfer identifier.");
+                RpcServer.BeginClusterTransfer(id.ToString("N"), characterId, transfer.LeaseVersion,
+                    targetSystem, target, transfer.TargetInstanceId!, transfer.TargetEndpoint!);
+            }
+            catch (Exception error)
+            {
+                FLLog.Error("Client", $"Unable to prepare cluster jump: {error.Message}");
+                uiActions.Enqueue(() =>
+                {
+                    var message = Game.Debug.Enabled
+                        ? $"Cluster transfer failed\nGate: {target}\nTarget system: {targetSystem}\nCause: {error.Message}"
+                        : "Die Zielinstanz ist aktuell nicht verfügbar oder wird gewartet.";
+                    Game.Typewriter.PlayString(message, new TypewriterStyle
+                    {
+                        FontSize = 22,
+                        Position = new Vector2(30, 350),
+                        Color = new Color4(1f, 0.45f, 0.3f, 1f),
+                        CharactersPerSecond = 90,
+                        DisplayDuration = 8
+                    });
+                });
+            }
+        });
+    }
+
+    void IClientPlayer.StartLocalJumpTunnel()
+    {
+        inTradelane = false;
+    }
+
+    void IClientPlayer.TransferSnapshotStaged(string transferIdText, bool succeeded)
+    {
+        if (!Guid.TryParseExact(transferIdText, "N", out var transferId))
+            return;
+        if (!pendingTransfers.TryRemove(transferId, out var transfer))
+            return;
+        if (!succeeded)
+        {
+            FLLog.Error("Client", "Source could not stage the transfer snapshot");
+            uiActions.Enqueue(() =>
+            {
+                var message = Game.Debug.Enabled
+                    ? $"Cluster transfer failed\nTarget instance: {transfer.InstanceId}\nTarget system: {transfer.SystemId}\nCause: The source snapshot could not be staged."
+                    : "Die Zielinstanz ist aktuell nicht verfügbar oder wird gewartet.";
+                Game.Typewriter.PlayString(message, new TypewriterStyle
+                {
+                    FontSize = 22,
+                    Position = new Vector2(30, 350),
+                    Color = new Color4(1f, 0.45f, 0.3f, 1f),
+                    CharactersPerSecond = 90,
+                    DisplayDuration = 8
+                });
+            });
+            return;
+        }
+        if (connection is GameNetClient client)
+        {
+            client.ClusterInstanceId = transfer.InstanceId;
+            client.ClusterSystemId = transfer.SystemId;
+            client.ClusterEndpoint = transfer.Endpoint;
+            client.ReconnectWithTransferTicket(transfer.Endpoint, "lnx-transfer:" + transferId.ToString("N") + ":" + transfer.Ticket);
+        }
     }
 
     void IClientPlayer.SetObjective(NetObjective objective, bool history)
@@ -287,8 +380,7 @@ public partial class CGameSession : IClientPlayer
         NetWorth = (long)lastInventory.NetWorth;
         SetSelfLoadout(lastInventory.Loadout);
 
-        if (OnUpdateInventory != null)
-            uiActions.Enqueue(OnUpdateInventory);
+        QueueInventoryUiUpdate();
 
         if (spaceGameplay == null && OnUpdatePlayerShip != null)
             uiActions.Enqueue(OnUpdatePlayerShip);
@@ -305,8 +397,7 @@ public partial class CGameSession : IClientPlayer
         var cargo = Items.FirstOrDefault(x => x.ID == slot);
         cargo?.Count = count;
 
-        if (OnUpdateInventory != null)
-            uiActions.Enqueue(OnUpdateInventory);
+        QueueInventoryUiUpdate();
     }
 
     public void DeleteSlot(int slot)
@@ -316,8 +407,7 @@ public partial class CGameSession : IClientPlayer
         if (cargo != null)
             Items.Remove(cargo);
 
-        if (OnUpdateInventory != null)
-            uiActions.Enqueue(OnUpdateInventory);
+        QueueInventoryUiUpdate();
     }
 
     public void UpdateWeaponGroups(NetWeaponGroup[] wg)
@@ -361,7 +451,6 @@ public partial class CGameSession : IClientPlayer
 
     void IClientPlayer.ListPlayers(bool isAdmin)
     {
-        Admin = isAdmin;
     }
 
     void IClientPlayer.ReceiveChatMessage(ChatCategory category, BinaryChatMessage player,
@@ -517,6 +606,21 @@ public partial class CGameSession : IClientPlayer
             act();
     }
 
+    private void QueueInventoryUiUpdate()
+    {
+        var handler = OnUpdateInventory;
+        if (handler is null)
+            return;
+
+        uiActions.Enqueue(() =>
+        {
+            // A system transition clears this callback before queued UI work drains.
+            // Do not invoke a Lua closure owned by the previous HUD scene.
+            if (ReferenceEquals(OnUpdateInventory, handler))
+                handler();
+        });
+    }
+
     public DisplayFaction[] GetUIRelations()
     {
         return PlayerReputations.Reputations
@@ -562,7 +666,7 @@ public partial class CGameSession : IClientPlayer
 
     bool CheckDisconnected()
     {
-        if (connection.Connected)
+        if (connection.Connected || connection is GameNetClient { IsTransferReconnecting: true })
             return false;
         connection.Shutdown();
         Game.ChangeState(new LuaMenu(Game));
@@ -711,7 +815,7 @@ public partial class CGameSession : IClientPlayer
         {
             BinaryChatMessage msg;
 
-            if (str[0] == '/' || !Admin)
+            if (str[0] == '/')
                 msg = BinaryChatMessage.PlainText(str);
             else
                 msg = BinaryChatMessage.ParseBbCode(str);

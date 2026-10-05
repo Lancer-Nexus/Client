@@ -3,6 +3,7 @@
 // LICENSE, which is part of this source code package
 
 using System;
+using System.IO;
 using System.Numerics;
 using LibreLancer.Data.GameData;
 using LibreLancer.Physics;
@@ -46,6 +47,7 @@ namespace LibreLancer.World.Components
         public float ChargePercent;
         public float CruiseAccelPct = 0;
         public Vector3 Steering;
+        public float AngularDragScale = 1;
         public StrafeControls CurrentStrafe = StrafeControls.None;
 
         public ShipPhysicsComponent(GameObject parent, Ship ship) : base(parent)
@@ -72,6 +74,54 @@ namespace LibreLancer.World.Components
         public override void SetEngineState(EngineStates es)
         {
             throw new InvalidOperationException("Cannot force EngineState on sim object");
+        }
+
+        internal LibreLancer.Server.NpcShipPhysicsTransferStateV1 CaptureNpcTransferState()
+        {
+            var engine = Parent.GetComponent<SEngineComponent>() ??
+                throw new InvalidOperationException("NPC ship physics has no engine component.");
+            return new LibreLancer.Server.NpcShipPhysicsTransferStateV1
+            {
+                Active = Active,
+                EngineState = EngineState,
+                ThrustRequested = ThrustRequested,
+                ThrustDepleted = thrustDepleted,
+                CruiseEnabled = cruiseEnabled,
+                PreviousCruiseEnabled = previousCruiseEnabled,
+                CruiseSpeedOffset = CruiseSpeedOffset,
+                EngineKillEnabled = EngineKillEnabled,
+                ChargePercent = ChargePercent,
+                CruiseAccelPercent = CruiseAccelPct,
+                EnginePower = EnginePower,
+                Steering = new LibreLancer.Server.NpcTransferVectorV1(Steering.X, Steering.Y, Steering.Z),
+                Strafe = CurrentStrafe,
+                EngineSpeed = engine.Speed,
+                EngineKill = engine.EngineKill,
+                CruiseThrust = engine.CruiseThrust
+            };
+        }
+
+        internal void RestoreNpcTransferState(LibreLancer.Server.NpcShipPhysicsTransferStateV1 state)
+        {
+            state.Validate();
+            var engine = Parent.GetComponent<SEngineComponent>() ??
+                throw new InvalidDataException("NPC ship physics has no engine component during restore.");
+            Active = state.Active;
+            EngineState = state.EngineState;
+            ThrustRequested = state.ThrustRequested;
+            thrustDepleted = state.ThrustDepleted;
+            cruiseEnabled = state.CruiseEnabled;
+            previousCruiseEnabled = state.PreviousCruiseEnabled;
+            CruiseSpeedOffset = state.CruiseSpeedOffset;
+            EngineKillEnabled = state.EngineKillEnabled;
+            ChargePercent = state.ChargePercent;
+            CruiseAccelPct = state.CruiseAccelPercent;
+            EnginePower = state.EnginePower;
+            Steering = new Vector3(state.Steering.X, state.Steering.Y, state.Steering.Z);
+            CurrentStrafe = state.Strafe;
+            engine.Speed = state.EngineSpeed;
+            engine.EngineKill = state.EngineKill;
+            engine.CruiseThrust = state.CruiseThrust;
         }
 
         // TODO: Engine Kill
@@ -307,7 +357,7 @@ namespace LibreLancer.World.Components
                 (Parent.PhysicsComponent.Body.RotateVector(-Vector3.UnitZ) * engineForce)
             );
             var angularForce = Steering * Ship.SteeringTorque;
-            angularForce += (Parent.PhysicsComponent.Body.AngularVelocity * -1) * Ship.AngularDrag;
+            angularForce += (Parent.PhysicsComponent.Body.AngularVelocity * -1) * (Ship.AngularDrag * AngularDragScale);
             // Add forces
             Parent.PhysicsComponent.Body.AddForce(totalForce);
             Parent.PhysicsComponent.Body.AddTorque(angularForce);

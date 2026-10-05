@@ -6,7 +6,7 @@ namespace LibreLancer.Server.ConsoleCommands;
 public class DamageSelfCommand : IConsoleCommand
 {
     public string Name => "damageself";
-    public bool Admin => true;
+    public string? Permission => "command.damageself";
     public void Run(Player player, string arguments)
     {
         if (!ConsoleCommands.ParseString(arguments, out float x))

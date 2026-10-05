@@ -28,6 +28,20 @@ namespace LibreLancer.Net
         private NetManager client = null!;
         public string AppIdentifier = LNetConst.DEFAULT_APP_IDENT;
 
+        public string ClusterInstanceId { get; set; } = "";
+        public string ClusterSystemId { get; set; } = "";
+        public string ClusterEndpoint { get; set; } = "";
+        public string ClusterGatewayUrl { get; set; } = "";
+        public string ClusterAccessToken { get; set; } = "";
+        public string ClusterRefreshToken { get; set; } = "";
+        public Guid ClusterSessionId { get; set; }
+        private (IPEndPoint Endpoint, string Ticket)? pendingTransferReconnect;
+        private volatile bool transferReconnecting;
+        public bool IsTransferReconnecting => transferReconnecting;
+        private readonly SemaphoreSlim clusterRefreshGate = new(1, 1);
+        private CancellationTokenSource? clusterHeartbeatCancellation;
+        private Task? clusterHeartbeatTask;
+
         public int MaxSequencedSize => 500; // Min safe UDP packet size - 8 bytes overhead
         public event Action<LocalServerInfo>? ServerFound;
         public event Action<bool>? AuthenticationRequired;
@@ -137,6 +151,8 @@ namespace LibreLancer.Net
             }
 
             running = false;
+            transferReconnecting = false;
+            clusterHeartbeatCancellation?.Cancel();
         }
 
         public bool Connected =>
@@ -203,9 +219,44 @@ namespace LibreLancer.Net
             });
         }
 
+        public void ConnectWithTicket(string endpoint, string ticket)
+        {
+            if (string.IsNullOrWhiteSpace(ticket))
+                throw new ArgumentException("Join ticket is required.", nameof(ticket));
+            StartClusterSessionHeartbeat();
+            Task.Run(() =>
+            {
+                if (!running)
+                    return;
+                if (ParseEP(endpoint, out var ep))
+                    ConnectInternal(ep, ticket);
+                else
+                    mainThread.QueueUIThread(() => Disconnected?.Invoke(DisconnectReason.InvalidEndpoint));
+            });
+        }
+
+        public void ReconnectWithTransferTicket(string endpoint, string transferTicket)
+        {
+            if (string.IsNullOrWhiteSpace(transferTicket) || !ParseEP(endpoint, out var parsed))
+                throw new ArgumentException("Transfer endpoint or ticket is invalid.");
+            var source = client?.FirstPeer;
+            if (!running || source?.ConnectionState != ConnectionState.Connected)
+                throw new InvalidOperationException("A transfer requires an active source connection.");
+            lock (this)
+            {
+                transferReconnecting = true;
+                pendingTransferReconnect = (parsed, transferTicket);
+            }
+            source.Disconnect();
+        }
+
         private static bool ParseEP(string str, out IPEndPoint endpoint)
         {
             endpoint = new IPEndPoint(IPAddress.None, 0);
+            if (str.StartsWith("quic://", StringComparison.OrdinalIgnoreCase))
+                str = str.Substring("quic://".Length);
+            else if (str.StartsWith("udp://", StringComparison.OrdinalIgnoreCase))
+                str = str.Substring("udp://".Length);
 
             if (IPAddress.TryParse(str, out var ip))
             {
@@ -405,6 +456,7 @@ namespace LibreLancer.Net
                         {
                             FLLog.Info("Client", "Login success");
                             connecting = false;
+                            transferReconnecting = false;
                         }
                         else
                         {
@@ -429,6 +481,34 @@ namespace LibreLancer.Net
 
             listener.PeerDisconnectedEvent += (peer, info) =>
             {
+                (IPEndPoint Endpoint, string Ticket)? transferReconnect;
+                lock (this)
+                {
+                    transferReconnect = pendingTransferReconnect;
+                    pendingTransferReconnect = null;
+                }
+                if (transferReconnect is { } next)
+                {
+                    packets.Clear();
+                    FLLog.Info("Transfer", $"Source disconnected; reconnecting to {next.Endpoint}");
+                    Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await Task.Delay(250).ConfigureAwait(false);
+                            if (running)
+                                ConnectInternal(next.Endpoint, next.Ticket);
+                        }
+                        catch (Exception error)
+                        {
+                            FLLog.Error("Transfer", $"Target reconnect failed: {error.GetType().Name}");
+                            transferReconnecting = false;
+                            mainThread.QueueUIThread(() => Disconnected?.Invoke(DisconnectReason.ConnectionError));
+                        }
+                    });
+                    return;
+                }
+                transferReconnecting = false;
                 var additional = new PacketReader(info.AdditionalData);
 
                 if (additional.TryGetDisconnectReason(out var reason) &&
@@ -502,7 +582,64 @@ namespace LibreLancer.Net
 
             client.DisconnectAll();
             client.Stop();
+            clusterHeartbeatCancellation?.Cancel();
             http.Dispose();
+        }
+
+        public async Task RefreshClusterSessionAsync(CancellationToken cancellationToken = default)
+        {
+            if (ClusterSessionId == Guid.Empty || string.IsNullOrWhiteSpace(ClusterRefreshToken) ||
+                string.IsNullOrWhiteSpace(ClusterGatewayUrl))
+                return;
+            await clusterRefreshGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                using var gateway = new NexusGatewayLogin(new Uri(ClusterGatewayUrl, UriKind.Absolute));
+                var refreshed = await gateway.RefreshAsync(ClusterSessionId, ClusterRefreshToken, cancellationToken)
+                    .ConfigureAwait(false);
+                ClusterAccessToken = refreshed.AccessToken;
+                ClusterRefreshToken = refreshed.RefreshToken;
+            }
+            finally
+            {
+                clusterRefreshGate.Release();
+            }
+        }
+
+        private void StartClusterSessionHeartbeat()
+        {
+            if (clusterHeartbeatTask != null || ClusterSessionId == Guid.Empty ||
+                string.IsNullOrWhiteSpace(ClusterRefreshToken) || string.IsNullOrWhiteSpace(ClusterGatewayUrl))
+                return;
+            clusterHeartbeatCancellation = new CancellationTokenSource();
+            var cancellationToken = clusterHeartbeatCancellation.Token;
+            clusterHeartbeatTask = Task.Run(async () =>
+            {
+                while (!cancellationToken.IsCancellationRequested)
+                {
+                    try
+                    {
+                        await Task.Delay(TimeSpan.FromMinutes(1), cancellationToken).ConfigureAwait(false);
+                        if (!running)
+                            return;
+                        if (Connected)
+                            await RefreshClusterSessionAsync(cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        return;
+                    }
+                    catch (UnauthorizedAccessException error)
+                    {
+                        FLLog.Warning("Net", $"Gateway session refresh rejected: {error.Message}");
+                        return;
+                    }
+                    catch (Exception error)
+                    {
+                        FLLog.Warning("Net", $"Gateway session refresh failed: {error.Message}");
+                    }
+                }
+            }, cancellationToken);
         }
 
         public void Update() => client?.TriggerUpdate();

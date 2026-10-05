@@ -1,0 +1,1276 @@
+diff --git a/src/LLServer.Core/ServerApp.cs b/src/LLServer.Core/ServerApp.cs
+index 7700eb3a..989501c4 100644
+--- a/src/LLServer.Core/ServerApp.cs
++++ b/src/LLServer.Core/ServerApp.cs
+@@ -1,7 +1,11 @@
+ using System;
+ using System.Diagnostics;
+ using System.IO;
++using System.Net;
++using System.Net.Quic;
++using System.Security.Cryptography.X509Certificates;
+ using System.Linq;
++using System.Text;
+ using System.Text.Json;
+ using System.Threading;
+ using System.Threading.Tasks;
+@@ -10,6 +14,7 @@ using LibreLancer.Data;
+ using LibreLancer.Data.IO;
+ using LibreLancer.Net;
+ using LibreLancer.Server;
++using LancerNexus.Protocol;
+ using Microsoft.EntityFrameworkCore;
+ 
+ namespace LLServer;
+@@ -20,6 +25,11 @@ public class ServerApp(ServerConfig config)
+     private readonly ServerConfig Config = config;
+     private CancellationTokenSource? statusCancellation;
+     private Task? statusWriter;
++    private CancellationTokenSource? transferResolutionCancellation;
++    private Task? transferResolver;
++    private NpcTransferQuicReceiver? npcTransferReceiver;
++    private X509Certificate2? npcTransferServerCertificate;
++    private X509Certificate2? npcTransferClientCaCertificate;
+ 
+     public bool StartServer()
+     {
+@@ -29,6 +39,16 @@ public class ServerApp(ServerConfig config)
+             FLLog.Error("Config", "Only HTTPS login servers are supported");
+             return false;
+         }
++        if (Config.TestNewCharacterRank is < 0 or > 100)
++        {
++            FLLog.Error("Config", "TestNewCharacterRank must be between 0 and 100");
++            return false;
++        }
++        if (Config.TestMissionNickname is { Length: > 128 })
++        {
++            FLLog.Error("Config", "TestMissionNickname must be no longer than 128 characters");
++            return false;
++        }
+         if (!GameConfig.CheckFLDirectory(Config.FreelancerPath))
+         {
+             FLLog.Error("Config", $"'{Config.FreelancerPath ?? "NULL"}' is not a valid game folder");
+@@ -38,16 +58,43 @@ public class ServerApp(ServerConfig config)
+             (string.IsNullOrWhiteSpace(Config.InstanceId) || string.IsNullOrWhiteSpace(Config.SystemId) ||
+              string.IsNullOrWhiteSpace(Config.InstanceEndpoint)))
+             throw new InvalidOperationException("Runtime status requires InstanceId, SystemId and InstanceEndpoint.");
++        if (Config.SystemIds is null || Config.SystemIds.Length > 128 ||
++            Config.SystemIds.Any(string.IsNullOrWhiteSpace) ||
++            Config.SystemIds.Distinct(StringComparer.OrdinalIgnoreCase).Count() != Config.SystemIds.Length ||
++            (Config.SystemIds.Length > 0 && !Config.SystemIds.Contains(Config.SystemId, StringComparer.OrdinalIgnoreCase)))
++            throw new InvalidOperationException("SystemIds must be unique and include the primary SystemId.");
+         var ctxFactory = new SqlDesignTimeFactory(Config.DatabasePath);
+         using (var ctx = ctxFactory.CreateDbContext([]))
+         {
++            // Migration creates a new SQLite database for a freshly prepared instance.
+             if (ctx.Database.GetPendingMigrations().Any())
+             {
+                 FLLog.Info("Server", "Migrating database");
+                 ctx.Database.Migrate();
+             }
++            if (!ctx.Database.CanConnect())
++            {
++                FLLog.Error("Server", "Local SQLite database connection failed");
++                return false;
++            }
++            FLLog.Info("Server", "Local SQLite database connection established");
+         }
+ 
++        var transferInstanceKey = Environment.GetEnvironmentVariable("LANCER_NEXUS_GAME_INSTANCE_KEY");
++        var npcCoordinatorApiKey = Environment.GetEnvironmentVariable("LANCER_NEXUS_COORDINATOR_API_KEY");
++        var validNpcCoordinatorUrl = Uri.TryCreate(Config.NpcCoordinatorUrl, UriKind.Absolute, out var npcCoordinatorUri) &&
++                                     (npcCoordinatorUri.Scheme == Uri.UriSchemeHttps ||
++                                      (npcCoordinatorUri.Scheme == Uri.UriSchemeHttp && npcCoordinatorUri.IsLoopback)) &&
++                                     string.IsNullOrEmpty(npcCoordinatorUri.UserInfo) &&
++                                     string.IsNullOrEmpty(npcCoordinatorUri.Query) &&
++                                     string.IsNullOrEmpty(npcCoordinatorUri.Fragment);
++        if (!string.IsNullOrWhiteSpace(Config.InstanceId) &&
++            (!validNpcCoordinatorUrl || string.IsNullOrWhiteSpace(npcCoordinatorApiKey) ||
++             Encoding.UTF8.GetByteCount(npcCoordinatorApiKey) < 32))
++        {
++            FLLog.Error("Config", "Cluster NPC IDs require a private HTTPS NpcCoordinatorUrl and a 32-byte LANCER_NEXUS_COORDINATOR_API_KEY.");
++            return false;
++        }
+         Server = new GameServer(FileSystem.FromPath(Config.FreelancerPath))
+         {
+             DbContextFactory = ctxFactory,
+@@ -55,15 +102,61 @@ public class ServerApp(ServerConfig config)
+             ServerDescription = Config.ServerDescription,
+             ScriptsFolder = Path.Combine(GetBasePath(), "scripts"),
+             LoginUrl = Config.LoginUrl,
+-            Listener =
+-            {
+-                Port = Config.Port > 0 ? Config.Port : LNetConst.DEFAULT_PORT,
+-                MaxConnections = Config.MaxPlayers > 0 ? Config.MaxPlayers : 200
+-            }
++            InstanceId = Config.InstanceId,
++            NpcCoordinatorUrl = Config.NpcCoordinatorUrl,
++            NpcTransferPort = Config.NpcTransferPort,
++            SystemId = Config.SystemId,
++            SystemIds = Config.SystemIds,
++            TransferInstanceKey = transferInstanceKey,
++            TestNewCharacterRank = Config.TestNewCharacterRank,
++            TestMissionNickname = Config.TestMissionNickname
+         };
++        Server.ConfigureNpcIdentityAllocation(npcCoordinatorApiKey);
++        if (Config.NpcTransferPort != 0)
++        {
++            if (!OperatingSystem.IsLinux() || !QuicListener.IsSupported)
++                throw new PlatformNotSupportedException("Configured NPC transfer listener requires Linux with MsQuic support.");
++            if (string.IsNullOrWhiteSpace(Config.InstanceId) || string.IsNullOrWhiteSpace(Config.NpcTransferListenAddress) ||
++                Config.NpcTransferPort is < 1 or > 65535 || string.IsNullOrWhiteSpace(Config.NpcTransferServerCertificate) ||
++                string.IsNullOrWhiteSpace(Config.NpcTransferClientCaCertificate) || string.IsNullOrWhiteSpace(Config.NpcTransferStagingDirectory) ||
++                !IPAddress.TryParse(Config.NpcTransferListenAddress, out var npcTransferAddress) ||
++                npcTransferAddress.Equals(IPAddress.Any) || npcTransferAddress.Equals(IPAddress.IPv6Any))
++                throw new InvalidOperationException("NPC transfer listener requires an instance ID, private bind address, valid port, certificates and a staging directory.");
++
++            var certificatePassword = Environment.GetEnvironmentVariable("LANCER_NEXUS_NPC_TRANSFER_CERT_PASSWORD");
++            npcTransferServerCertificate = new X509Certificate2(
++                Path.GetFullPath(Config.NpcTransferServerCertificate, GetBasePath()), certificatePassword,
++                X509KeyStorageFlags.EphemeralKeySet);
++            npcTransferClientCaCertificate = X509Certificate2.CreateFromPem(
++                File.ReadAllText(Path.GetFullPath(Config.NpcTransferClientCaCertificate, GetBasePath())));
++            Server.NpcTransferCertificate = npcTransferServerCertificate;
++            Server.NpcTransferCaCertificate = npcTransferClientCaCertificate;
++            Server.NpcTransferStagingDirectory = Path.GetFullPath(Config.NpcTransferStagingDirectory, GetBasePath());
++            npcTransferReceiver = new NpcTransferQuicReceiver(
++                Config.InstanceId!, npcTransferServerCertificate, npcTransferClientCaCertificate,
++                npcCoordinatorUri!, npcCoordinatorApiKey!, Server.StageIncomingNpcTransferAsync);
++            npcTransferReceiver.StartAsync(new IPEndPoint(npcTransferAddress, Config.NpcTransferPort)).GetAwaiter().GetResult();
++            FLLog.Info("NPC Transfer", $"Private mTLS QUIC receiver listening on {npcTransferAddress}:{Config.NpcTransferPort}");
++        }
++        Server.ConfigureLocalOperators(Path.GetFullPath(Config.LocalOperatorsFile, GetBasePath()));
++        if (Config.TestNewCharacterRank is int testRank)
++            FLLog.Info("Server", $"Test new-character rank override enabled: {testRank}");
++        if (!string.IsNullOrWhiteSpace(Config.TestMissionNickname))
++            FLLog.Info("Server", $"Test mission runtime injection enabled: {Config.TestMissionNickname}");
++        var listener = Server.Listener ?? throw new InvalidOperationException("Game server listener was not initialized.");
++        listener.Port = Config.Port > 0 ? Config.Port : LNetConst.DEFAULT_PORT;
++        listener.BindAddress = Config.BindAddress;
++        listener.MaxConnections = Config.MaxPlayers > 0 ? Config.MaxPlayers : 200;
+         if(Config.ThreadCount > 0)
+             Server.ThreadCount = Config.ThreadCount;
+         Server.Start();
++        if ((!string.IsNullOrWhiteSpace(Config.InstanceId) && !string.IsNullOrWhiteSpace(transferInstanceKey)) ||
++            npcTransferReceiver != null)
++        {
++            transferResolutionCancellation = new CancellationTokenSource();
++            transferResolver = ResolveTransfersAsync(transferResolutionCancellation.Token);
++            FLLog.Info("Server", "Automatic source transfer resolution enabled");
++        }
+         if (!string.IsNullOrWhiteSpace(Config.RuntimeStatusFile))
+         {
+             var statusPath = Path.GetFullPath(Config.RuntimeStatusFile, Platform.GetBasePath());
+@@ -71,7 +164,9 @@ public class ServerApp(ServerConfig config)
+             File.Delete(statusPath);
+             statusCancellation = new CancellationTokenSource();
+             statusWriter = WriteRuntimeStatusAsync(statusCancellation.Token);
++            FLLog.Info("Server", $"Instance status reporting enabled for {Config.InstanceId} on system {Config.SystemId}");
+         }
++        FLLog.Info("Server", $"Game server startup initiated on port {listener.Port} with capacity {listener.MaxConnections}");
+         return true;
+     }
+ 
+@@ -88,7 +183,24 @@ public class ServerApp(ServerConfig config)
+ 
+     public void StopServer()
+     {
++        transferResolutionCancellation?.Cancel();
++        try { transferResolver?.GetAwaiter().GetResult(); }
++        catch (OperationCanceledException) { }
++        catch (Exception exception)
++        {
++            FLLog.Error("Server", $"Transfer resolver stopped: {exception.Message}");
++        }
+         statusCancellation?.Cancel();
++        if (npcTransferReceiver != null)
++        {
++            try { npcTransferReceiver.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
++            catch (Exception exception) { FLLog.Error("NPC Transfer", $"Receiver stopped: {exception.Message}"); }
++            npcTransferReceiver = null;
++        }
++        npcTransferServerCertificate?.Dispose();
++        npcTransferServerCertificate = null;
++        npcTransferClientCaCertificate?.Dispose();
++        npcTransferClientCaCertificate = null;
+         Server?.Stop();
+         Server = null;
+         try { statusWriter?.GetAwaiter().GetResult(); }
+@@ -106,6 +218,37 @@ public class ServerApp(ServerConfig config)
+         statusCancellation?.Dispose();
+         statusCancellation = null;
+         statusWriter = null;
++        transferResolutionCancellation?.Dispose();
++        transferResolutionCancellation = null;
++        transferResolver = null;
++    }
++
++    private async Task ResolveTransfersAsync(CancellationToken cancellationToken)
++    {
++        while (!cancellationToken.IsCancellationRequested)
++        {
++            try
++            {
++                if (!string.IsNullOrWhiteSpace(Config.InstanceId) &&
++                    !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("LANCER_NEXUS_GAME_INSTANCE_KEY")))
++                {
++                    await Server!.InitializeNpcRetirementOutboxAsync();
++                    await Server!.ResolvePendingSourceTransfersAsync(cancellationToken);
++                    await Server.ResolvePendingSourceNpcTransfersAsync(cancellationToken);
++                }
++                await Server!.ResolvePendingNpcTransfersAsync(cancellationToken);
++                await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
++            }
++            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
++            {
++                break;
++            }
++            catch (Exception exception)
++            {
++                FLLog.Error("Transfer", $"Automatic transfer resolution failed: {exception.Message}");
++                await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
++            }
++        }
+     }
+ 
+     private async Task WriteRuntimeStatusAsync(CancellationToken cancellationToken)
+@@ -122,10 +265,16 @@ public class ServerApp(ServerConfig config)
+                 WrittenAtUtc = DateTimeOffset.UtcNow,
+                 InstanceId = Config.InstanceId!,
+                 SystemId = Config.SystemId!,
++                SystemIds = Config.SystemIds,
+                 IsReady = network?.IsRunning == true,
++                IsDraining = !string.IsNullOrWhiteSpace(Config.DrainFlagFile) &&
++                             File.Exists(Path.GetFullPath(Config.DrainFlagFile, Platform.GetBasePath())),
+                 CurrentPlayers = network?.ConnectedPeersCount ?? 0,
+                 MaxPlayers = listener?.MaxConnections ?? 0,
+-                Endpoint = Config.InstanceEndpoint!
++                Endpoint = Config.InstanceEndpoint!,
++                NpcTransferEndpoint = npcTransferReceiver is null ? null :
++                    new UriBuilder("quic", Config.NpcTransferListenAddress!, Config.NpcTransferPort).Uri.AbsoluteUri,
++                Capabilities = npcTransferReceiver is null ? [] : [ClusterCapabilities.NpcTransferV1]
+             };
+             var tempPath = $"{path}.{Guid.NewGuid():N}.tmp";
+             try
+@@ -144,11 +293,15 @@ public class ServerApp(ServerConfig config)
+ 
+ public sealed class InstanceRuntimeStatus
+ {
++    public string? NpcTransferEndpoint { get; init; }
+     public DateTimeOffset WrittenAtUtc { get; init; }
+     public string InstanceId { get; init; } = "";
+     public string SystemId { get; init; } = "";
++    public string[] SystemIds { get; init; } = [];
+     public bool IsReady { get; init; }
++    public bool IsDraining { get; init; }
+     public int CurrentPlayers { get; init; }
+     public int MaxPlayers { get; init; }
+     public string Endpoint { get; init; } = "";
++    public string[] Capabilities { get; init; } = [];
+ }
+diff --git a/src/LLServer.Core/ServerConfig.cs b/src/LLServer.Core/ServerConfig.cs
+index 287b7499..b2af296e 100644
+--- a/src/LLServer.Core/ServerConfig.cs
++++ b/src/LLServer.Core/ServerConfig.cs
+@@ -10,12 +10,24 @@ public class ServerConfig
+     public string? LoginUrl;
+     public string DatabasePath = "";
+     public int Port = LNetConst.DEFAULT_PORT;
++    public string? BindAddress;
+     public int MaxPlayers = 200;
+     public int ThreadCount = 0;
+     public string? RuntimeStatusFile;
++    public string? DrainFlagFile;
++    public string LocalOperatorsFile = "llserver-ops.json";
+     public string? InstanceId;
++    public string? NpcCoordinatorUrl;
++    public string? NpcTransferListenAddress;
++    public int NpcTransferPort;
++    public string? NpcTransferServerCertificate;
++    public string? NpcTransferClientCaCertificate;
++    public string? NpcTransferStagingDirectory;
+     public string? SystemId;
++    public string[] SystemIds = [];
+     public string? InstanceEndpoint;
++    public int? TestNewCharacterRank;
++    public string? TestMissionNickname;
+ 
+     public void CopyFrom(ServerConfig other)
+     {
+@@ -25,10 +37,22 @@ public class ServerConfig
+         LoginUrl = other.LoginUrl;
+         DatabasePath = other.DatabasePath;
+         Port = other.Port;
++        BindAddress = other.BindAddress;
+         MaxPlayers = other.MaxPlayers;
+         RuntimeStatusFile = other.RuntimeStatusFile;
++        DrainFlagFile = other.DrainFlagFile;
++        LocalOperatorsFile = other.LocalOperatorsFile;
+         InstanceId = other.InstanceId;
++        NpcCoordinatorUrl = other.NpcCoordinatorUrl;
++        NpcTransferListenAddress = other.NpcTransferListenAddress;
++        NpcTransferPort = other.NpcTransferPort;
++        NpcTransferServerCertificate = other.NpcTransferServerCertificate;
++        NpcTransferClientCaCertificate = other.NpcTransferClientCaCertificate;
++        NpcTransferStagingDirectory = other.NpcTransferStagingDirectory;
+         SystemId = other.SystemId;
++        SystemIds = (string[])other.SystemIds.Clone();
+         InstanceEndpoint = other.InstanceEndpoint;
++        TestNewCharacterRank = other.TestNewCharacterRank;
++        TestMissionNickname = other.TestMissionNickname;
+     }
+ }
+diff --git a/src/LLServer/Program.cs b/src/LLServer/Program.cs
+index fa46259a..df870a32 100644
+--- a/src/LLServer/Program.cs
++++ b/src/LLServer/Program.cs
+@@ -90,6 +90,55 @@ namespace LLServer
+ 					case "exit":
+ 						running = false;
+ 						break;
++#if DEBUG
++                    case "npc-state":
++                    {
++                        Guid? npcId = null;
++                        if (!string.IsNullOrWhiteSpace(cmdargs))
++                        {
++                            if (!Guid.TryParse(cmdargs, out var parsed) || parsed == Guid.Empty)
++                            {
++                                Console.WriteLine("Usage: npc-state [NPC UUID]");
++                                break;
++                            }
++                            npcId = parsed;
++                        }
++                        try
++                        {
++                            var state = await app.Server!.CaptureNpcDiagnosticsAsync(npcId)
++                                .WaitAsync(TimeSpan.FromSeconds(5));
++                            Console.WriteLine("NPC_STATE " + state);
++                        }
++                        catch (Exception exception) { Console.WriteLine("NPC state unavailable: " + exception.Message); }
++                        break;
++                    }
++                    case "npc-load-world":
++                    {
++                        if (string.IsNullOrWhiteSpace(cmdargs))
++                        {
++                            Console.WriteLine("Usage: npc-load-world <system nickname>");
++                            break;
++                        }
++                        var system = app.Server!.GameData.Items.Systems.Get(cmdargs);
++                        if (system == null)
++                        {
++                            Console.WriteLine($"Unknown system '{cmdargs}'.");
++                            break;
++                        }
++                        var ready = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
++                        app.Server.Worlds.RequestWorld(system, _ => ready.TrySetResult(true), []);
++                        try
++                        {
++                            await ready.Task.WaitAsync(TimeSpan.FromSeconds(60));
++                            Console.WriteLine($"NPC_WORLD_READY {system.Nickname}");
++                        }
++                        catch (TimeoutException)
++                        {
++                            Console.WriteLine($"NPC_WORLD_TIMEOUT {system.Nickname}");
++                        }
++                        break;
++                    }
++#endif
+                     case "ban":
+                     {
+                         Guid? g = null;
+@@ -124,30 +173,29 @@ namespace LLServer
+                         }
+                         break;
+                     }
+-                    case "admin":
++                    case "op":
++                    case "deop":
+                     {
+-                        long? id = null;
+-                        if (cmdargs.Length > 0)
+-                            id = await app.Server?.Database.FindCharacter(cmdargs)!;
+-                        if (id.HasValue)
++                        if (!Guid.TryParse(cmdargs, out var accountId))
+                         {
+-                            FLLog.Info("Server", $"Making '{cmdargs}' admin");
+-                            await app.Server?.Database.AdminCharacter(id.Value)!;
+-                            app.Server.AdminChanged(id.Value, true);
++                            Console.WriteLine("Use op <account-uuid> or deop <account-uuid>.");
++                            break;
+                         }
++                        var enabled = cmd.Equals("op", StringComparison.OrdinalIgnoreCase);
++                        if (app.Server?.SetLocalOperator(accountId, enabled) == true)
++                            Console.WriteLine($"Local operator {(enabled ? "enabled" : "removed")} for {accountId:D}.");
++                        else
++                            Console.WriteLine("Local OP is available only without Gateway. In Nexus, use /admin op or /admin deop <account-uuid> in-game with permissions.manage.");
++                        break;
++                    }
++                    case "admin":
++                    {
++                        Console.WriteLine("Character admin flags are disabled. Use op/deop <account-uuid> on an isolated server.");
+                         break;
+                     }
+                     case "deadmin":
+                     {
+-                        long? id = null;
+-                        if (cmdargs.Length > 0)
+-                            id = await app.Server?.Database.FindCharacter(cmdargs)!;
+-                        if (id.HasValue)
+-                        {
+-                            FLLog.Info("Server", $"Removing '{cmdargs}' admin");
+-                            await app.Server?.Database.DeadminCharacter(id.Value)!;
+-                            app.Server.AdminChanged(id.Value, false);
+-                        }
++                        Console.WriteLine("Character admin flags are disabled. Use op/deop <account-uuid> on an isolated server.");
+                         break;
+                     }
+                 }
+diff --git a/src/LLServerGui/Screens/RunningServerScreen.cs b/src/LLServerGui/Screens/RunningServerScreen.cs
+index deab3736..714ff1e2 100644
+--- a/src/LLServerGui/Screens/RunningServerScreen.cs
++++ b/src/LLServerGui/Screens/RunningServerScreen.cs
+@@ -21,7 +21,6 @@ public class RunningServerScreen(
+     private bool isStarting = true;
+ 
+     private List<BannedPlayerDescription>? bannedPlayers = [];
+-    private List<AdminCharacterDescription>? admins = [];
+ 
+     private readonly List<Player> lobbyPlayers = [];
+     private readonly List<Player> universePlayers = [];
+@@ -109,12 +108,6 @@ public class RunningServerScreen(
+                 ImGui.EndTabItem();
+             }
+ 
+-            if (ImGui.BeginTabItem("Admins"))
+-            {
+-                DrawAdminsTab();
+-                ImGui.EndTabItem();
+-            }
+-
+             ImGui.EndTabBar();
+         }
+ 
+@@ -158,12 +151,6 @@ public class RunningServerScreen(
+         ImGui.SameLine(Theme.LabelWidthMedium * ImGuiHelper.Scale);
+         ImGui.Text(universePlayers.Count().ToString());
+ 
+-        ImGui.Text("Admins in Game");
+-        ImGui.SameLine(Theme.LabelWidthMedium * ImGuiHelper.Scale);
+-        ImGui.Text(universePlayers.Count(p =>
+-            p.Character != null && admins != null &&
+-            admins.Any(a => a.Name == p.Character.Name)).ToString());
+-
+         ImGui.Text("Banned Players");
+ 
+         ImGui.SameLine(Theme.LabelWidthMedium * ImGuiHelper.Scale);
+@@ -245,7 +232,7 @@ public class RunningServerScreen(
+ 
+         if (ImGui.BeginTable(
+                 "connected_players",
+-                8,
++                6,
+                 ImGuiTableFlags.Borders |
+                 ImGuiTableFlags.RowBg |
+                 ImGuiTableFlags.Resizable |
+@@ -258,24 +245,17 @@ public class RunningServerScreen(
+             ImGui.TableSetupColumn("Name", ImGuiTableColumnFlags.WidthStretch, 200 * ImGuiHelper.Scale);
+             ImGui.TableSetupColumn("System", ImGuiTableColumnFlags.WidthStretch, 200 * ImGuiHelper.Scale);
+             ImGui.TableSetupColumn("Last Docked Base", ImGuiTableColumnFlags.WidthStretch, 200 * ImGuiHelper.Scale);
+-            ImGui.TableSetupColumn("Admin", ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoResize,
+-                60 * ImGuiHelper.Scale);
+-            ImGui.TableSetupColumn("Promote", ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoResize,
+-                60 * ImGuiHelper.Scale);
+             ImGui.TableSetupColumn("Ban", ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoResize,
+                 60 * ImGuiHelper.Scale);
+             ImGui.TableSetupColumn("Inspect", ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoResize,
+                 60 * ImGuiHelper.Scale);
+             ImGui.TableHeadersRow();
+ 
+-
+             if (win.IsRunning)
+             {
+                 var buttonSize = new Vector2(-1, ImGui.GetFrameHeight());
+                 foreach (var player in universePlayers)
+                 {
+-                    var isAdmin = player.Character is { Admin: true };
+-
+                     ImGui.TableNextRow();
+ 
+                     ImGui.TableNextColumn();
+@@ -295,56 +275,28 @@ public class RunningServerScreen(
+                     ImGui.Text(player.Character?.Base ?? "-");
+ 
+                     ImGui.TableNextColumn();
+-                    ImGui.AlignTextToFramePadding();
+-                    var icon = isAdmin ? Icons.Check : Icons.X;
+-                    var colour = isAdmin ? Theme.SuccessTextColor : Theme.ErrorTextColor;
+-                    ImGui.TextColored(colour, icon.ToString());
+-
+-                    ImGui.TableNextColumn();
+-                    var uiId = player.Character?.Name ?? "-";
+-
+-                    if (ImGuiExt.Button($"{Icons.ArrowUp.ToString()}##{uiId}", !isAdmin && uiId != "-", buttonSize))
+-                    {
+-                        pm.MessageBox("Confirm",
+-                            $"Are you sure you want to promote {player.Character.Name} to an admin?", false,
+-                            MessageBoxButtons.YesNo, response =>
+-                            {
+-                                if (response == MessageBoxResponse.Yes)
+-                                {
+-                                    PromotePlayer(player.Character.ID, player.Character.Name);
+-                                }
+-                            });
+-                    }
+-
+-                    ImGui.TableNextColumn();
+-                    if (ImGuiExt.Button($"{Icons.Fire.ToString()}##{player.Name ?? "-"}",
++                    if (ImGuiExt.Button($"{Icons.Fire}##{player.Name ?? "-"}",
+                             bannedPlayers.All(b => b.AccountId != player.AccountId), buttonSize))
+                     {
+                         pm.OpenPopup(new BanPopup(player.Name ?? "-", expiry =>
+                         {
+                             if (expiry.HasValue)
+-                            {
+                                 BanPlayer(player.Name, expiry.Value);
+-                            }
+                         }));
+                     }
+ 
+                     ImGui.TableNextColumn();
+                     if (ImGui.Button($"{Icons.Eye}##{player.Name ?? "-"}", buttonSize))
+-                    {
+                         pm.OpenPopup(new InspectorPopup(player));
+-                    }
+                 }
+ 
+                 foreach (var player in lobbyPlayers)
+                 {
+-                    var isAdmin = player.Character != null && player.Character.Admin;
+-
+                     ImGui.TableNextRow();
+ 
+                     ImGui.TableNextColumn();
+                     ImGui.AlignTextToFramePadding();
+-                    ImGui.Text(player?.AccountId.ToString() ?? "-");
++                    ImGui.Text(player.AccountId.ToString());
+ 
+                     ImGui.TableNextColumn();
+                     ImGui.AlignTextToFramePadding();
+@@ -359,95 +311,19 @@ public class RunningServerScreen(
+                     ImGui.Text("-");
+ 
+                     ImGui.TableNextColumn();
+-                    ImGui.AlignTextToFramePadding();
+-                    var icon = isAdmin ? Icons.Check : Icons.X;
+-                    var colour = isAdmin ? Theme.SuccessTextColor : Theme.ErrorTextColor;
+-                    ImGui.TextColored(colour, icon.ToString());
+-
+-                    ImGui.TableNextColumn();
+-                    var uiId = player?.Character?.Name ?? "-";
+-
+-                    ImGuiExt.Button($"{Icons.ArrowUp.ToString()}##{uiId}", false, buttonSize);
+-
+-                    ImGui.TableNextColumn();
+-                    if (ImGuiExt.Button($"{Icons.Fire.ToString()}##{player.Name ?? "-"}",
++                    if (ImGuiExt.Button($"{Icons.Fire}##{player.Name ?? "-"}",
+                             bannedPlayers.All(b => b.AccountId != player.AccountId), buttonSize))
+                     {
+-                        pm.OpenPopup(new BanPopup(player.Name, expiry =>
++                        pm.OpenPopup(new BanPopup(player.Name ?? "-", expiry =>
+                         {
+                             if (expiry.HasValue)
+-                            {
+-                                Guid? g = player.AccountId;
+-                                BanPlayerWithGuid(g, expiry);
+-                            }
++                                BanPlayerWithGuid(player.AccountId, expiry);
+                         }));
+                     }
+ 
+                     ImGui.TableNextColumn();
+                     ImGuiExt.Button($"{Icons.Eye}##{player.Name ?? "-"}", false, buttonSize);
+                 }
+-
+-                /*
+-                foreach (var player in connectedPlayers)
+-                {
+-                    bool isAdmin = player.Character != null && admins.Any(a => a.Id == player.Character.ID);
+-                    var buttonSize = new Vector2(-1, ImGui.GetFrameHeight());
+-
+-                    ImGui.TableNextRow();
+-
+-                    ImGui.TableNextColumn();
+-                    ImGui.AlignTextToFramePadding();
+-                    ImGui.Text(player?.Character?.ID.ToString()?? "-");
+-
+-                    ImGui.TableNextColumn();
+-                    ImGui.AlignTextToFramePadding();
+-                    ImGui.Text(player.Character?.Name ?? "-");
+-
+-                    ImGui.TableNextColumn();
+-                    ImGui.AlignTextToFramePadding();
+-                    ImGui.Text(player.Character?.System ?? "-");
+-
+-                    ImGui.TableNextColumn();
+-                    ImGui.AlignTextToFramePadding();
+-                    ImGui.Text(player.Character?.Base ?? "-");
+-
+-                    ImGui.TableNextColumn();
+-                    ImGui.AlignTextToFramePadding();
+-                    var icon = isAdmin ? Icons.Check : Icons.X;
+-                    var colour = isAdmin ? Theme.SUCCESS_TEXT_COLOUR : Theme.ERROR_TEXT_COLOUR;
+-                    ImGui.TextColored(colour, icon.ToString());
+-
+-                    ImGui.TableNextColumn();
+-                    var uiId = player.Character?.Name ?? "-";
+-                    if (ImGuiExt.Button($"{Icons.ArrowUp.ToString()}##{uiId}", !isAdmin && uiId != "-", buttonSize))
+-                    {
+-                        pm.MessageBox("Confirm", $"Are you sure you want to promote {player.Character.Name} to an admin?", false, MessageBoxButtons.YesNo, response =>
+-                        {
+-                            if (response == MessageBoxResponse.Yes)
+-                            {
+-                                PromotePlayer(player.Character.ID, player.Character.Name);
+-                            }
+-                        });
+-                    }
+-
+-                    ImGui.TableNextColumn();
+-                    if (ImGuiExt.Button($"{Icons.Fire.ToString()}##{player.Name?? "-"}",!String.IsNullOrWhiteSpace(player.Name) && !bannedPlayers.Any(b => b.Characters.Any(c => c == player.Name )), buttonSize))
+-                    {
+-                       pm.OpenPopup(new BanPopup(player.Name, expiry =>
+-                       {
+-                           if (expiry.HasValue)
+-                           {
+-                               BanPlayer(player.Name, expiry.Value);
+-                           }
+-                       }));
+-                    }
+-                    ImGui.TableNextColumn();
+-                    if (ImGui.Button($"{Icons.Eye}##{player.Name ?? "-"}", buttonSize))
+-                    {
+-                        pm.OpenPopup(new InspectorPopup(player));
+-                    }
+-                }
+-                */
+             }
+ 
+             ImGui.EndTable();
+@@ -536,110 +412,6 @@ public class RunningServerScreen(
+         ImGui.EndChild();
+     }
+ 
+-    private void DrawAdminsTab()
+-    {
+-        ImGui.BeginChild("admin_players_child", new Vector2(0, 0), ImGuiChildFlags.None);
+-
+-        var tableHeight = ImGui.GetContentRegionAvail().Y - ImGui.GetFrameHeightWithSpacing() * ImGuiHelper.Scale;
+-        if (ImGui.BeginTable(
+-                "admin_players",
+-                6,
+-                ImGuiTableFlags.Borders |
+-                ImGuiTableFlags.RowBg |
+-                ImGuiTableFlags.Resizable |
+-                ImGuiTableFlags.ScrollY |
+-                ImGuiTableFlags.Sortable,
+-                new Vector2(0, 0)
+-            ))
+-        {
+-            ImGui.TableSetupColumn("Id", ImGuiTableColumnFlags.WidthStretch, 200 * ImGuiHelper.Scale);
+-            ImGui.TableSetupColumn("Name", ImGuiTableColumnFlags.WidthStretch, 200 * ImGuiHelper.Scale);
+-            ImGui.TableSetupColumn("System", ImGuiTableColumnFlags.WidthStretch, 200 * ImGuiHelper.Scale);
+-            ImGui.TableSetupColumn("Last Docked Base", ImGuiTableColumnFlags.WidthStretch, 200 * ImGuiHelper.Scale);
+-            ImGui.TableSetupColumn("Online", ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoResize,
+-                60 * ImGuiHelper.Scale);
+-            ImGui.TableSetupColumn("Demote", ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoResize,
+-                60 * ImGuiHelper.Scale);
+-            ImGui.TableHeadersRow();
+-
+-            if (admins != null)
+-            {
+-                foreach (var admin in admins)
+-                {
+-                    ImGui.TableNextRow();
+-
+-                    ImGui.TableNextColumn();
+-                    ImGui.AlignTextToFramePadding();
+-                    ImGui.Text(admin.Id.ToString());
+-
+-                    ImGui.TableNextColumn();
+-                    ImGui.AlignTextToFramePadding();
+-                    ImGui.Text(admin.Name);
+-
+-                    ImGui.TableNextColumn();
+-                    ImGui.AlignTextToFramePadding();
+-                    ImGui.Text(admin.System);
+-
+-                    ImGui.TableNextColumn();
+-                    ImGui.AlignTextToFramePadding();
+-                    ImGui.Text(admin.LastDockedLocation);
+-
+-                    ImGui.TableNextColumn();
+-                    ImGui.AlignTextToFramePadding();
+-                    var isOnline = win.Server?.Server.AllPlayers.Any(p => p.Name == admin.Name) ?? false;
+-                    var icon = isOnline ? Icons.Check : Icons.X;
+-                    var color = isOnline ? Theme.SuccessTextColor : Theme.ErrorTextColor;
+-                    ImGui.TextColored(color, icon.ToString());
+-
+-
+-                    ImGui.TableNextColumn();
+-                    if (
+-                        ImGui.Button(
+-                            $"{Icons.ArrowDown.ToString()}##{admin.Id.ToString()}",
+-                            new Vector2(-1, ImGui.GetFrameHeight()
+-                            )))
+-                    {
+-                        pm.MessageBox("Confirm", $"Are you sure you want to demote {admin.Name}?", false,
+-                            MessageBoxButtons.YesNo, response =>
+-                            {
+-                                if (response == MessageBoxResponse.Yes)
+-                                {
+-                                    DemotePlayer(admin.Id, admin.Name);
+-                                }
+-                            });
+-                    }
+-                }
+-            }
+-
+-            ImGui.EndTable();
+-        }
+-
+-        ImGui.EndChild();
+-    }
+-
+-    // Server Player Actions
+-    private void PromotePlayer(long characterId, string name)
+-    {
+-        Task.Run(() =>
+-        {
+-            FLLog.Info("Server", $"Promoting {name} to admin");
+-            win.Server?.Server?.Database?.AdminCharacter(characterId).Wait();
+-            win.Server?.Server?.AdminChanged(characterId, true);
+-            return Task.CompletedTask;
+-        });
+-    }
+-
+-    private void DemotePlayer(long characterId, string name)
+-    {
+-        Task.Run(() =>
+-        {
+-            FLLog.Info("Server", $"Demoting {name} from admin");
+-            win.Server?.Server?.Database?.DeadminCharacter(characterId).Wait();
+-            win.Server?.Server?.AdminChanged(characterId, false);
+-            return Task.CompletedTask;
+-        });
+-    }
+-
+     private void BanPlayer(string characterName, DateTime expiry)
+     {
+         Task.Run(async () =>
+@@ -694,7 +466,6 @@ public class RunningServerScreen(
+         {
+             //connectedPlayers = win.Server.Server.AllPlayers;
+             bannedPlayers = win.Server?.Server.Database?.GetBannedPlayers().ToList();
+-            admins = win.Server?.Server.Database?.GetAdmins().ToList();
+         }
+     }
+ 
+@@ -718,9 +489,6 @@ public class RunningServerScreen(
+                     case ServerEventType.CharacterDisconnected:
+                         HandleCharacterDisconnected(serverEvent.GetPayload<CharacterDisconnectedEventPayload>());
+                         break;
+-                    case ServerEventType.PlayerAdminChanged:
+-                        HandleCharacterAdminChanged(serverEvent.GetPayload<CharacterAdminChangedEventPayload>());
+-                        break;
+                     case ServerEventType.PlayerBanChanged:
+                         HandlePlayerBannedChanged(serverEvent.GetPayload<PlayerBanChangedEventPayload>());
+                         break;
+@@ -750,26 +518,6 @@ public class RunningServerScreen(
+         }
+     }
+ 
+-    private void HandleCharacterAdminChanged(CharacterAdminChangedEventPayload? characterAdminChangedEventPayload)
+-    {
+-        FLLog.Info("Server Gui", "Received Character Admin Changed Server Event");
+-        if (characterAdminChangedEventPayload == null) return;
+-
+-        var player = characterAdminChangedEventPayload.AdminCharacter;
+-        if (player == null) return;
+-
+-        if (characterAdminChangedEventPayload.IsAdmin)
+-        {
+-            if (admins.Any(a => a.Id == player.Id)) return;
+-            admins.Add(player);
+-        }
+-        else
+-        {
+-            admins.RemoveAll(a => a.Id == player.Id);
+-        }
+-    }
+-
+-
+     private void HandleCharacterDisconnected(CharacterDisconnectedEventPayload? characterDisconnectedEventPayload)
+ 
+     {
+diff --git a/src/LibreLancer/Server/ConsoleCommands/AddCashCommand.cs b/src/LibreLancer/Server/ConsoleCommands/AddCashCommand.cs
+index 0043ae8e..c0db0127 100644
+--- a/src/LibreLancer/Server/ConsoleCommands/AddCashCommand.cs
++++ b/src/LibreLancer/Server/ConsoleCommands/AddCashCommand.cs
+@@ -4,7 +4,7 @@ namespace LibreLancer.Server.ConsoleCommands
+     public class AddCashCommand : IConsoleCommand
+     {
+         public string Name => "addcash";
+-        public bool Admin => true;
++        public string? Permission => "command.addcash";
+ 
+         public void Run(Player player, string args)
+         {
+diff --git a/src/LibreLancer/Server/ConsoleCommands/BaseCommand.cs b/src/LibreLancer/Server/ConsoleCommands/BaseCommand.cs
+index 2638b647..078b4bdd 100644
+--- a/src/LibreLancer/Server/ConsoleCommands/BaseCommand.cs
++++ b/src/LibreLancer/Server/ConsoleCommands/BaseCommand.cs
+@@ -4,7 +4,7 @@ namespace LibreLancer.Server.ConsoleCommands
+     public class BaseCommand : IConsoleCommand
+     {
+         public string Name => "base";
+-        public bool Admin => true;
++        public string? Permission => "command.base";
+ 
+         public void Run(Player player, string arguments)
+         {
+diff --git a/src/LibreLancer/Server/ConsoleCommands/ConsoleCommands.cs b/src/LibreLancer/Server/ConsoleCommands/ConsoleCommands.cs
+index 60d5025e..0035a325 100644
+--- a/src/LibreLancer/Server/ConsoleCommands/ConsoleCommands.cs
++++ b/src/LibreLancer/Server/ConsoleCommands/ConsoleCommands.cs
+@@ -4,6 +4,7 @@ using System.Diagnostics.CodeAnalysis;
+ using System.Globalization;
+ using System.Linq;
+ using System.Reflection;
++using System.Threading.Tasks;
+ 
+ namespace LibreLancer.Server.ConsoleCommands
+ {
+@@ -46,15 +47,39 @@ namespace LibreLancer.Server.ConsoleCommands
+                 return;
+             }
+ 
+-            if (command.Admin && !(player.Character?.Admin ?? false))
++            if (command.Permission is { Length: > 0 } permission)
+             {
+-                player.RpcClient.OnConsoleMessage($"Permission denied.");
++                _ = RunAuthorizedAsync(player, command, args, permission, player.Character, player.GatewaySessionId);
+                 return;
+             }
+ 
+             command.Run(player, args);
+         }
+ 
++        private static async Task RunAuthorizedAsync(Player player, IConsoleCommand command, string args,
++            string permission, NetCharacter? character, Guid sessionId)
++        {
++            bool allowed;
++            try { allowed = await player.Game.HasCommandPermissionAsync(player, permission); }
++            catch (Exception e)
++            {
++                FLLog.Warning("Permissions", $"Command permission check failed ({e.GetType().Name})");
++                player.RpcClient.OnConsoleMessage("Permission service unavailable; command denied.");
++                return;
++            }
++            if (!allowed)
++            {
++                player.RpcClient.OnConsoleMessage($"Permission denied: {permission}.");
++                return;
++            }
++            lock (player.Game.ConnectedPlayers)
++            {
++                if (!player.Game.ConnectedPlayers.Contains(player) || player.Character != character ||
++                    player.GatewaySessionId != sessionId) return;
++            }
++            command.Run(player, args);
++        }
++
+         public static bool ParseString<T>(string args, [MaybeNullWhen(false)] out T value)
+         {
+             if (ParseString(args, out var values, typeof(T)))
+diff --git a/src/LibreLancer/Server/ConsoleCommands/DamageSelfCommand.cs b/src/LibreLancer/Server/ConsoleCommands/DamageSelfCommand.cs
+index dea8ea22..130ad2d6 100644
+--- a/src/LibreLancer/Server/ConsoleCommands/DamageSelfCommand.cs
++++ b/src/LibreLancer/Server/ConsoleCommands/DamageSelfCommand.cs
+@@ -6,7 +6,7 @@ namespace LibreLancer.Server.ConsoleCommands;
+ public class DamageSelfCommand : IConsoleCommand
+ {
+     public string Name => "damageself";
+-    public bool Admin => true;
++    public string? Permission => "command.damageself";
+     public void Run(Player player, string arguments)
+     {
+         if (!ConsoleCommands.ParseString(arguments, out float x))
+diff --git a/src/LibreLancer/Server/ConsoleCommands/GodmodeCommand.cs b/src/LibreLancer/Server/ConsoleCommands/GodmodeCommand.cs
+index d774afa6..dc4722df 100644
+--- a/src/LibreLancer/Server/ConsoleCommands/GodmodeCommand.cs
++++ b/src/LibreLancer/Server/ConsoleCommands/GodmodeCommand.cs
+@@ -7,7 +7,7 @@ namespace LibreLancer.Server.ConsoleCommands
+     public class GodmodeCommand : IConsoleCommand
+     {
+         public string Name => "godmode";
+-        public bool Admin => true;
++        public string? Permission => "command.godmode";
+ 
+         public void Run(Player player, string args)
+         {
+@@ -32,4 +32,4 @@ namespace LibreLancer.Server.ConsoleCommands
+             }
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/src/LibreLancer/Server/ConsoleCommands/HelpCommand.cs b/src/LibreLancer/Server/ConsoleCommands/HelpCommand.cs
+index 48201875..c880524f 100644
+--- a/src/LibreLancer/Server/ConsoleCommands/HelpCommand.cs
++++ b/src/LibreLancer/Server/ConsoleCommands/HelpCommand.cs
+@@ -6,12 +6,10 @@ namespace LibreLancer.Server.ConsoleCommands
+     public class HelpCommand : IConsoleCommand
+     {
+         public string Name => "help";
+-        public bool Admin => false;
+         public void Run(Player player, string arguments)
+         {
+             var commandList = string.Join(", ",
+                 ConsoleCommands.AllCommands
+-                    .Where(x => !x.Admin || (player.Character?.Admin ?? false))
+                     .Select(x => x.Name)
+                     .OrderBy(x => x));
+             player.RpcClient.OnConsoleMessage($"Available Commands: pos, ping, debug, {commandList}");
+diff --git a/src/LibreLancer/Server/ConsoleCommands/IConsoleCommand.cs b/src/LibreLancer/Server/ConsoleCommands/IConsoleCommand.cs
+index 4951726c..82c0970e 100644
+--- a/src/LibreLancer/Server/ConsoleCommands/IConsoleCommand.cs
++++ b/src/LibreLancer/Server/ConsoleCommands/IConsoleCommand.cs
+@@ -3,7 +3,7 @@ namespace LibreLancer.Server.ConsoleCommands
+     public interface IConsoleCommand
+     {
+         string Name { get; }
+-        bool Admin { get; }
++        string? Permission => null;
+         void Run(Player player, string arguments);
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/src/LibreLancer/Server/ConsoleCommands/NPCCommand.cs b/src/LibreLancer/Server/ConsoleCommands/NPCCommand.cs
+index 726d1268..120abac0 100644
+--- a/src/LibreLancer/Server/ConsoleCommands/NPCCommand.cs
++++ b/src/LibreLancer/Server/ConsoleCommands/NPCCommand.cs
+@@ -4,7 +4,7 @@ namespace LibreLancer.Server.ConsoleCommands
+     public class NPCCommand : IConsoleCommand
+     {
+         public string Name => "npc";
+-        public bool Admin => true;
++        public string? Permission => "command.npc";
+         public void Run(Player player, string arguments)
+         {
+             player.Space!.World.NPCs.RunScript(arguments).ContinueWith((t) =>
+diff --git a/src/LibreLancer/Server/ConsoleCommands/SetLevelCommand.cs b/src/LibreLancer/Server/ConsoleCommands/SetLevelCommand.cs
+index 502f3cad..3ba80faf 100644
+--- a/src/LibreLancer/Server/ConsoleCommands/SetLevelCommand.cs
++++ b/src/LibreLancer/Server/ConsoleCommands/SetLevelCommand.cs
+@@ -4,7 +4,7 @@ namespace LibreLancer.Server.ConsoleCommands
+     public class SetLevelCommand : IConsoleCommand
+     {
+         public string Name => "setlevel";
+-        public bool Admin => true;
++        public string? Permission => "command.setlevel";
+ 
+         private static void ApplyLevel(Player targetPlayer, int level)
+         {
+diff --git a/src/LibreLancer/Server/ConsoleCommands/SpawnLootCommand.cs b/src/LibreLancer/Server/ConsoleCommands/SpawnLootCommand.cs
+index 965923e4..0e672b2a 100644
+--- a/src/LibreLancer/Server/ConsoleCommands/SpawnLootCommand.cs
++++ b/src/LibreLancer/Server/ConsoleCommands/SpawnLootCommand.cs
+@@ -7,7 +7,7 @@ namespace LibreLancer.Server.ConsoleCommands;
+ public class SpawnLootCommand : IConsoleCommand
+ {
+     public string Name => "spawnloot";
+-    public bool Admin => true;
++    public string? Permission => "command.spawnloot";
+     public void Run(Player player, string arguments)
+     {
+         if (!ConsoleCommands.ParseString<string, int>(arguments, out var l, out var count))
+diff --git a/src/LibreLancer/Server/ConsoleCommands/StopCommand.cs b/src/LibreLancer/Server/ConsoleCommands/StopCommand.cs
+index c4e1969d..7221ac9e 100644
+--- a/src/LibreLancer/Server/ConsoleCommands/StopCommand.cs
++++ b/src/LibreLancer/Server/ConsoleCommands/StopCommand.cs
+@@ -6,7 +6,7 @@ namespace LibreLancer.Server.ConsoleCommands
+     public class StopCommand : IConsoleCommand
+     {
+         public string Name => "stop";
+-        public bool Admin => true;
++        public string? Permission => "command.stop";
+         public void Run(Player player, string arguments)
+         {
+             player.RpcClient.StopShip();
+diff --git a/src/LibreLancer/Server/ConsoleCommands/WarpCommand.cs b/src/LibreLancer/Server/ConsoleCommands/WarpCommand.cs
+index 38256879..25bf413f 100644
+--- a/src/LibreLancer/Server/ConsoleCommands/WarpCommand.cs
++++ b/src/LibreLancer/Server/ConsoleCommands/WarpCommand.cs
+@@ -6,7 +6,7 @@ namespace LibreLancer.Server.ConsoleCommands
+     public class WarpCommand : IConsoleCommand
+     {
+         public string Name => "warp";
+-        public bool Admin => true;
++        public string? Permission => "command.warp";
+         public void Run(Player player, string arguments)
+         {
+             if (!ConsoleCommands.ParseString(arguments, out float x, out float y, out float z))
+diff --git a/src/LibreLancer.Tests/AdminChatInterceptionTests.cs b/src/LibreLancer.Tests/AdminChatInterceptionTests.cs
+new file mode 100644
+index 00000000..87be8834
+--- /dev/null
++++ b/src/LibreLancer.Tests/AdminChatInterceptionTests.cs
+@@ -0,0 +1,33 @@
++using System;
++using System.Collections.Generic;
++using LibreLancer.Net;
++using LibreLancer.Net.Protocol;
++using LibreLancer.Server;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class AdminChatInterceptionTests
++{
++    [Theory]
++    [InlineData(ChatCategory.System)]
++    [InlineData(ChatCategory.Local)]
++    public void FragmentedAdminCommandNeverUsesOrdinaryChatOrLocalConsole(ChatCategory category)
++    {
++        var sender = new Capture();
++        // No game world: accidentally entering ordinary chat/local command dispatch fails this test.
++        var player = new Player(sender, null!, Guid.NewGuid());
++        var message = new BinaryChatMessage { Segments = [
++            new() { Contents = "  /ad", Bold = true }, new() { Contents = "min kick secret-target" }] };
++        ((IServerPlayer)player).ChatMessage(category, message);
++        Assert.Single(sender.Packets); // Only the caller receives private usage feedback.
++    }
++
++    private sealed class Capture : IPacketClient
++    {
++        public List<IPacket> Packets = [];
++        public int MaxSequencedSize => 1024;
++        public void SendPacket(IPacket packet, PacketDeliveryMethod method) => Packets.Add(packet);
++        public void Disconnect(DisconnectReason reason) => throw new NotSupportedException();
++    }
++}
+diff --git a/src/LibreLancer.Tests/CommandPermissionTests.cs b/src/LibreLancer.Tests/CommandPermissionTests.cs
+new file mode 100644
+index 00000000..3be77466
+--- /dev/null
++++ b/src/LibreLancer.Tests/CommandPermissionTests.cs
+@@ -0,0 +1,51 @@
++using System;
++using System.Linq;
++using LibreLancer.Server;
++using LibreLancer.Server.ConsoleCommands;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class CommandPermissionTests
++{
++    private static readonly Guid Target = Guid.Parse("22222222-2222-4222-8222-222222222222");
++
++    [Theory]
++    [InlineData("addcash", "command.addcash")]
++    [InlineData("base", "command.base")]
++    [InlineData("damageself", "command.damageself")]
++    [InlineData("godmode", "command.godmode")]
++    [InlineData("npc", "command.npc")]
++    [InlineData("setlevel", "command.setlevel")]
++    [InlineData("spawnloot", "command.spawnloot")]
++    [InlineData("stop", "command.stop")]
++    [InlineData("warp", "command.warp")]
++    public void AdminCommandsDeclareTheirOwnPermission(string name, string permission)
++    {
++        var command = ConsoleCommands.AllCommands.Single(x => x.Name == name);
++        Assert.Equal(permission, command.Permission);
++    }
++
++    [Theory]
++    [InlineData("/admin op 22222222-2222-4222-8222-222222222222 global", 2, null)]
++    [InlineData("/admin op 22222222-2222-4222-8222-222222222222", 2, "li-01")]
++    [InlineData("/admin deop 22222222-2222-4222-8222-222222222222 instance", 3, "li-01")]
++    [InlineData("/admin deop 22222222-2222-4222-8222-222222222222 global", 3, null)]
++    public void OperatorAliasesMapToScopedOperatorMembership(string command, int kind, string? instance)
++    {
++        Assert.True(PermissionChatCommand.IsCommand(command));
++        Assert.True(PermissionChatCommand.TryParse(command, "li-01", out var parsed));
++        Assert.NotNull(parsed);
++        Assert.Equal(kind, parsed.Mutation.Kind);
++        Assert.Equal(Target, parsed.Mutation.AccountId);
++        Assert.Equal("operator", parsed.Mutation.GroupName);
++        Assert.Equal(instance, parsed.Mutation.InstanceId);
++    }
++
++    [Theory]
++    [InlineData("/admin op not-a-uuid")]
++    [InlineData("/admin deop 00000000-0000-0000-0000-000000000000")]
++    [InlineData("/admin op 22222222-2222-4222-8222-222222222222 remote")]
++    public void InvalidOperatorAliasesAreRejected(string command) =>
++        Assert.False(PermissionChatCommand.TryParse(command, "li-01", out _));
++}
+diff --git a/src/LibreLancer/Server/LocalOperatorStore.cs b/src/LibreLancer/Server/LocalOperatorStore.cs
+new file mode 100644
+index 00000000..ccbbb668
+--- /dev/null
++++ b/src/LibreLancer/Server/LocalOperatorStore.cs
+@@ -0,0 +1,51 @@
++using System;
++using System.Collections.Generic;
++using System.IO;
++using System.Linq;
++using System.Text.Json;
++
++namespace LibreLancer.Server;
++
++/// <summary>Host-local emergency operators for isolated, non-Gateway LLServer instances.</summary>
++public sealed class LocalOperatorStore
++{
++    private readonly object sync = new();
++    private readonly string path;
++    private readonly HashSet<Guid> accounts;
++
++    private LocalOperatorStore(string path, IEnumerable<Guid> accounts)
++    {
++        this.path = path;
++        this.accounts = accounts.Where(x => x != Guid.Empty).ToHashSet();
++    }
++
++    public static LocalOperatorStore Load(string path)
++    {
++        var accounts = File.Exists(path)
++            ? JsonSerializer.Deserialize<Guid[]>(File.ReadAllText(path)) ?? []
++            : [];
++        return new LocalOperatorStore(path, accounts);
++    }
++
++    public bool Contains(Guid accountId)
++    {
++        lock (sync) return accounts.Contains(accountId);
++    }
++
++    public void Set(Guid accountId, bool enabled)
++    {
++        if (accountId == Guid.Empty) throw new ArgumentException("Account UUID must not be empty.", nameof(accountId));
++        lock (sync)
++        {
++            if (enabled) accounts.Add(accountId);
++            else accounts.Remove(accountId);
++            var directory = Path.GetDirectoryName(path);
++            if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
++            var temporary = path + ".tmp";
++            File.WriteAllText(temporary, JsonSerializer.Serialize(accounts.Order().ToArray()));
++            if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(temporary, UnixFileMode.UserRead | UnixFileMode.UserWrite);
++            File.Move(temporary, path, true);
++            if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
++        }
++    }
++}
+diff --git a/src/LibreLancer/Server/PermissionChatCommand.cs b/src/LibreLancer/Server/PermissionChatCommand.cs
+new file mode 100644
+index 00000000..ac63c292
+--- /dev/null
++++ b/src/LibreLancer/Server/PermissionChatCommand.cs
+@@ -0,0 +1,91 @@
++using System;
++using LancerNexus.Protocol;
++
++namespace LibreLancer.Server;
++
++public sealed record GamePermissionMutationRequest(Guid AccountId, Guid SessionId, long CharacterId,
++    Guid TransferId, PermissionCommandRequest Request);
++public sealed record PermissionCommandRequest(Guid CorrelationId, string IdempotencyKey,
++    PermissionCommandMutation Mutation);
++public sealed record PermissionCommandMutation(int Kind, Guid? AccountId = null, string? GroupName = null,
++    string? Ladder = null, string? Pattern = null, int PatternKind = 1, bool Allowed = true,
++    string? InstanceId = null);
++public sealed record PermissionCommandResponse(string Status, long? Revision);
++public sealed record GamePermissionCheckRequest(Guid AccountId, Guid SessionId, long CharacterId,
++    Guid TransferId, string Permission, string? SystemId = null);
++public sealed record GamePermissionCheckResponse(bool Allowed);
++
++internal static class PermissionChatCommand
++{
++    public static bool IsCommand(string text)
++    {
++        var trimmed = text.TrimStart();
++        return IsSubcommand(trimmed, "/admin permission") || IsSubcommand(trimmed, "/admin op") ||
++               IsSubcommand(trimmed, "/admin deop");
++    }
++
++    private static bool IsSubcommand(string text, string prefix) =>
++        text.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) &&
++        (text.Length == prefix.Length || char.IsWhiteSpace(text[prefix.Length]));
++
++    public static bool TryParse(string text, string? instanceId, out PermissionCommandRequest? request)
++    {
++        request = null;
++        if (text.Length > 512 || !IsCommand(text)) return false;
++        var parts = text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
++        if (parts.Length is 3 or 4 &&
++            (parts[1].Equals("op", StringComparison.OrdinalIgnoreCase) ||
++             parts[1].Equals("deop", StringComparison.OrdinalIgnoreCase)))
++        {
++            if (!Guid.TryParse(parts[2], out var target) || target == Guid.Empty ||
++                (parts.Length == 4 && !ValidScope(parts[3]))) return false;
++            var assign = parts[1].Equals("op", StringComparison.OrdinalIgnoreCase);
++            var operatorMutation = new PermissionCommandMutation(assign ? 2 : 3, AccountId: target,
++                GroupName: "operator", InstanceId: Scope(parts, 3, instanceId));
++            var operatorId = Guid.NewGuid();
++            request = new PermissionCommandRequest(operatorId, operatorId.ToString("N"), operatorMutation);
++            return true;
++        }
++        if (parts.Length < 5) return false;
++        PermissionCommandMutation mutation;
++        if (parts.Length is 7 or 8 && parts[2].Equals("node", StringComparison.OrdinalIgnoreCase))
++        {
++            if (!Guid.TryParse(parts[3], out var accountId) || accountId == Guid.Empty) return false;
++            var allowed = parts[4].ToLowerInvariant() switch { "allow" => true, "deny" => false, _ => (bool?)null };
++            var kind = parts[5].ToLowerInvariant() switch { "exact" => 0, "wildcard" => 1, "regex" => 2, _ => -1 };
++            if (allowed is null || kind < 0 || parts[6].Length is 0 or > 256 ||
++                (parts.Length == 8 && !ValidScope(parts[7]))) return false;
++            mutation = new PermissionCommandMutation(4, AccountId: accountId, Pattern: parts[6], PatternKind: kind,
++                Allowed: allowed.Value, InstanceId: Scope(parts, 7, instanceId));
++        }
++        else if (parts.Length is 6 or 7 && parts[2].Equals("group", StringComparison.OrdinalIgnoreCase))
++        {
++            if (!Guid.TryParse(parts[4], out var accountId) || accountId == Guid.Empty ||
++                (parts.Length == 7 && !ValidScope(parts[6]))) return false;
++            if (parts[5].Length is 0 or > 64) return false;
++            var scope = Scope(parts, 6, instanceId);
++            switch (parts[3].ToLowerInvariant())
++            {
++                case "assign": mutation = new PermissionCommandMutation(2, AccountId: accountId, GroupName: parts[5], InstanceId: scope); break;
++                case "remove": mutation = new PermissionCommandMutation(3, AccountId: accountId, GroupName: parts[5], InstanceId: scope); break;
++                case "promote": mutation = new PermissionCommandMutation(6, AccountId: accountId, Ladder: parts[5], InstanceId: scope); break;
++                case "demote": mutation = new PermissionCommandMutation(7, AccountId: accountId, Ladder: parts[5], InstanceId: scope); break;
++                default: return false;
++            }
++        }
++        else return false;
++        var id = Guid.NewGuid();
++        request = new PermissionCommandRequest(id, id.ToString("N"), mutation);
++        return true;
++    }
++
++    private static string? Scope(string[] parts, int index, string? instanceId)
++    {
++        if (parts.Length <= index) return instanceId;
++        if (parts[index].Equals("global", StringComparison.OrdinalIgnoreCase)) return null;
++        return parts[index].Equals("instance", StringComparison.OrdinalIgnoreCase) ? instanceId : null;
++    }
++
++    private static bool ValidScope(string value) => value.Equals("global", StringComparison.OrdinalIgnoreCase) ||
++        value.Equals("instance", StringComparison.OrdinalIgnoreCase);
++}

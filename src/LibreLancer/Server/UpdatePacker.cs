@@ -85,7 +85,6 @@ public class UpdatePacker
                 int lastId = 0;
                 int updateCount = 0;
 
-                idWriter.PutVarInt32(sorted[0].Update.ID.Value);
                 for (idx = 0; idx < totalSorted && updateCount < 255; idx++)
                 {
                     int idBytes = NetPacking.ByteCountInt64(sorted[idx].Update.ID.Value - lastId);
@@ -106,10 +105,11 @@ public class UpdatePacker
                     else
                     {
                         idByteSum += idBytes;
-                        if (idx > 0)
-                        {
-                            idWriter.PutVarInt32(sorted[idx].Update.ID.Value - lastId);
-                        }
+                        // The first candidate may not fit. Write the first ID only
+                        // when its corresponding update is actually included.
+                        idWriter.PutVarInt32(updateCount == 0
+                            ? sorted[idx].Update.ID.Value
+                            : sorted[idx].Update.ID.Value - lastId);
                         written[sorted[idx].Object.Unique] = sorted[idx].Update;
                         rle.RemoveCheckpoint();
                         lastId = sorted[idx].Update.ID.Value;

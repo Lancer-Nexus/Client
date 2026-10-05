@@ -101,6 +101,27 @@ LLServer SystemIds defines owned worlds; SystemId is the primary fallback. Trave
   Gateway lease arbitration is wired. Terminal death/dock must use a survivor
   checkpoint plus retirement as one write; do not hook generic removals.
 
+## Original Freelancer reverse engineering references
+
+- The local retail reference installation is `/home/masterbee/Dokumente/FL`:
+  `DATA/` contains game assets/configuration and `EXE/` contains the original
+  executable and engine DLLs. Treat these files as read-only and do not copy them
+  into this repository.
+- Start with `Freelancer.exe`, `thorn.dll`, `deformable2.dll`, `shading.dll`,
+  `rendcomp.dll`, `flmaterials.dll`, `alchemy.dll`, `common.dll`, and `engbase.dll`
+  when investigating mission/cutscene, character, material, or rendering behavior.
+- Ghidra is installed at `/home/masterbee/Tools/ghidra_12.1.4_PUBLIC`; `radare2`
+  is also available as `/snap/bin/radare2`. Both can inspect the original PE32
+  binaries. Treat decompiler output as evidence to compare with asset data and
+  runtime behavior, not as a specification by itself. Original PDB files have
+  not been confirmed available.
+- Keep the Ghidra project, source hashes, notes, logs, and generated exports
+  under `/home/masterbee/Dokumente/FL/reverse-engineering/librelancer/`. Exports
+  should record binary name/hash and function name or address. Do not put binary
+  copies or large Ghidra project databases into Git.
+- Project bootstrap and export conventions are documented in
+  `/home/masterbee/Dokumente/FL/reverse-engineering/librelancer/README.md`.
+
 ## Restart-time ambient NPC recovery
 
 - Before publishing a world or starting population simulation, drain pending checkpoint writes and restore that system's current ambient NPC checkpoints from Coordinator. Resolve stable NPC references and preserve the serialized AI/autopilot state. Keep recovery fail-closed when the checkpoint store is unavailable or corrupt; only a Coordinator 404 after listing means ownership changed and may be skipped.

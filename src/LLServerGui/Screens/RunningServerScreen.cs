@@ -21,7 +21,6 @@ public class RunningServerScreen(
     private bool isStarting = true;
 
     private List<BannedPlayerDescription>? bannedPlayers = [];
-    private List<AdminCharacterDescription>? admins = [];
 
     private readonly List<Player> lobbyPlayers = [];
     private readonly List<Player> universePlayers = [];
@@ -109,12 +108,6 @@ public class RunningServerScreen(
                 ImGui.EndTabItem();
             }
 
-            if (ImGui.BeginTabItem("Admins"))
-            {
-                DrawAdminsTab();
-                ImGui.EndTabItem();
-            }
-
             ImGui.EndTabBar();
         }
 
@@ -157,12 +150,6 @@ public class RunningServerScreen(
         ImGui.Text("Players in Game");
         ImGui.SameLine(Theme.LabelWidthMedium * ImGuiHelper.Scale);
         ImGui.Text(universePlayers.Count().ToString());
-
-        ImGui.Text("Admins in Game");
-        ImGui.SameLine(Theme.LabelWidthMedium * ImGuiHelper.Scale);
-        ImGui.Text(universePlayers.Count(p =>
-            p.Character != null && admins != null &&
-            admins.Any(a => a.Name == p.Character.Name)).ToString());
 
         ImGui.Text("Banned Players");
 
@@ -245,7 +232,7 @@ public class RunningServerScreen(
 
         if (ImGui.BeginTable(
                 "connected_players",
-                8,
+                6,
                 ImGuiTableFlags.Borders |
                 ImGuiTableFlags.RowBg |
                 ImGuiTableFlags.Resizable |
@@ -258,24 +245,17 @@ public class RunningServerScreen(
             ImGui.TableSetupColumn("Name", ImGuiTableColumnFlags.WidthStretch, 200 * ImGuiHelper.Scale);
             ImGui.TableSetupColumn("System", ImGuiTableColumnFlags.WidthStretch, 200 * ImGuiHelper.Scale);
             ImGui.TableSetupColumn("Last Docked Base", ImGuiTableColumnFlags.WidthStretch, 200 * ImGuiHelper.Scale);
-            ImGui.TableSetupColumn("Admin", ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoResize,
-                60 * ImGuiHelper.Scale);
-            ImGui.TableSetupColumn("Promote", ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoResize,
-                60 * ImGuiHelper.Scale);
             ImGui.TableSetupColumn("Ban", ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoResize,
                 60 * ImGuiHelper.Scale);
             ImGui.TableSetupColumn("Inspect", ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoResize,
                 60 * ImGuiHelper.Scale);
             ImGui.TableHeadersRow();
 
-
             if (win.IsRunning)
             {
                 var buttonSize = new Vector2(-1, ImGui.GetFrameHeight());
                 foreach (var player in universePlayers)
                 {
-                    var isAdmin = player.Character is { Admin: true };
-
                     ImGui.TableNextRow();
 
                     ImGui.TableNextColumn();
@@ -295,56 +275,28 @@ public class RunningServerScreen(
                     ImGui.Text(player.Character?.Base ?? "-");
 
                     ImGui.TableNextColumn();
-                    ImGui.AlignTextToFramePadding();
-                    var icon = isAdmin ? Icons.Check : Icons.X;
-                    var colour = isAdmin ? Theme.SuccessTextColor : Theme.ErrorTextColor;
-                    ImGui.TextColored(colour, icon.ToString());
-
-                    ImGui.TableNextColumn();
-                    var uiId = player.Character?.Name ?? "-";
-
-                    if (ImGuiExt.Button($"{Icons.ArrowUp.ToString()}##{uiId}", !isAdmin && uiId != "-", buttonSize))
-                    {
-                        pm.MessageBox("Confirm",
-                            $"Are you sure you want to promote {player.Character.Name} to an admin?", false,
-                            MessageBoxButtons.YesNo, response =>
-                            {
-                                if (response == MessageBoxResponse.Yes)
-                                {
-                                    PromotePlayer(player.Character.ID, player.Character.Name);
-                                }
-                            });
-                    }
-
-                    ImGui.TableNextColumn();
-                    if (ImGuiExt.Button($"{Icons.Fire.ToString()}##{player.Name ?? "-"}",
+                    if (ImGuiExt.Button($"{Icons.Fire}##{player.Name ?? "-"}",
                             bannedPlayers.All(b => b.AccountId != player.AccountId), buttonSize))
                     {
                         pm.OpenPopup(new BanPopup(player.Name ?? "-", expiry =>
                         {
                             if (expiry.HasValue)
-                            {
                                 BanPlayer(player.Name, expiry.Value);
-                            }
                         }));
                     }
 
                     ImGui.TableNextColumn();
                     if (ImGui.Button($"{Icons.Eye}##{player.Name ?? "-"}", buttonSize))
-                    {
                         pm.OpenPopup(new InspectorPopup(player));
-                    }
                 }
 
                 foreach (var player in lobbyPlayers)
                 {
-                    var isAdmin = player.Character != null && player.Character.Admin;
-
                     ImGui.TableNextRow();
 
                     ImGui.TableNextColumn();
                     ImGui.AlignTextToFramePadding();
-                    ImGui.Text(player?.AccountId.ToString() ?? "-");
+                    ImGui.Text(player.AccountId.ToString());
 
                     ImGui.TableNextColumn();
                     ImGui.AlignTextToFramePadding();
@@ -359,95 +311,19 @@ public class RunningServerScreen(
                     ImGui.Text("-");
 
                     ImGui.TableNextColumn();
-                    ImGui.AlignTextToFramePadding();
-                    var icon = isAdmin ? Icons.Check : Icons.X;
-                    var colour = isAdmin ? Theme.SuccessTextColor : Theme.ErrorTextColor;
-                    ImGui.TextColored(colour, icon.ToString());
-
-                    ImGui.TableNextColumn();
-                    var uiId = player?.Character?.Name ?? "-";
-
-                    ImGuiExt.Button($"{Icons.ArrowUp.ToString()}##{uiId}", false, buttonSize);
-
-                    ImGui.TableNextColumn();
-                    if (ImGuiExt.Button($"{Icons.Fire.ToString()}##{player.Name ?? "-"}",
+                    if (ImGuiExt.Button($"{Icons.Fire}##{player.Name ?? "-"}",
                             bannedPlayers.All(b => b.AccountId != player.AccountId), buttonSize))
                     {
-                        pm.OpenPopup(new BanPopup(player.Name, expiry =>
+                        pm.OpenPopup(new BanPopup(player.Name ?? "-", expiry =>
                         {
                             if (expiry.HasValue)
-                            {
-                                Guid? g = player.AccountId;
-                                BanPlayerWithGuid(g, expiry);
-                            }
+                                BanPlayerWithGuid(player.AccountId, expiry);
                         }));
                     }
 
                     ImGui.TableNextColumn();
                     ImGuiExt.Button($"{Icons.Eye}##{player.Name ?? "-"}", false, buttonSize);
                 }
-
-                /*
-                foreach (var player in connectedPlayers)
-                {
-                    bool isAdmin = player.Character != null && admins.Any(a => a.Id == player.Character.ID);
-                    var buttonSize = new Vector2(-1, ImGui.GetFrameHeight());
-
-                    ImGui.TableNextRow();
-
-                    ImGui.TableNextColumn();
-                    ImGui.AlignTextToFramePadding();
-                    ImGui.Text(player?.Character?.ID.ToString()?? "-");
-
-                    ImGui.TableNextColumn();
-                    ImGui.AlignTextToFramePadding();
-                    ImGui.Text(player.Character?.Name ?? "-");
-
-                    ImGui.TableNextColumn();
-                    ImGui.AlignTextToFramePadding();
-                    ImGui.Text(player.Character?.System ?? "-");
-
-                    ImGui.TableNextColumn();
-                    ImGui.AlignTextToFramePadding();
-                    ImGui.Text(player.Character?.Base ?? "-");
-
-                    ImGui.TableNextColumn();
-                    ImGui.AlignTextToFramePadding();
-                    var icon = isAdmin ? Icons.Check : Icons.X;
-                    var colour = isAdmin ? Theme.SUCCESS_TEXT_COLOUR : Theme.ERROR_TEXT_COLOUR;
-                    ImGui.TextColored(colour, icon.ToString());
-
-                    ImGui.TableNextColumn();
-                    var uiId = player.Character?.Name ?? "-";
-                    if (ImGuiExt.Button($"{Icons.ArrowUp.ToString()}##{uiId}", !isAdmin && uiId != "-", buttonSize))
-                    {
-                        pm.MessageBox("Confirm", $"Are you sure you want to promote {player.Character.Name} to an admin?", false, MessageBoxButtons.YesNo, response =>
-                        {
-                            if (response == MessageBoxResponse.Yes)
-                            {
-                                PromotePlayer(player.Character.ID, player.Character.Name);
-                            }
-                        });
-                    }
-
-                    ImGui.TableNextColumn();
-                    if (ImGuiExt.Button($"{Icons.Fire.ToString()}##{player.Name?? "-"}",!String.IsNullOrWhiteSpace(player.Name) && !bannedPlayers.Any(b => b.Characters.Any(c => c == player.Name )), buttonSize))
-                    {
-                       pm.OpenPopup(new BanPopup(player.Name, expiry =>
-                       {
-                           if (expiry.HasValue)
-                           {
-                               BanPlayer(player.Name, expiry.Value);
-                           }
-                       }));
-                    }
-                    ImGui.TableNextColumn();
-                    if (ImGui.Button($"{Icons.Eye}##{player.Name ?? "-"}", buttonSize))
-                    {
-                        pm.OpenPopup(new InspectorPopup(player));
-                    }
-                }
-                */
             }
 
             ImGui.EndTable();
@@ -536,110 +412,6 @@ public class RunningServerScreen(
         ImGui.EndChild();
     }
 
-    private void DrawAdminsTab()
-    {
-        ImGui.BeginChild("admin_players_child", new Vector2(0, 0), ImGuiChildFlags.None);
-
-        var tableHeight = ImGui.GetContentRegionAvail().Y - ImGui.GetFrameHeightWithSpacing() * ImGuiHelper.Scale;
-        if (ImGui.BeginTable(
-                "admin_players",
-                6,
-                ImGuiTableFlags.Borders |
-                ImGuiTableFlags.RowBg |
-                ImGuiTableFlags.Resizable |
-                ImGuiTableFlags.ScrollY |
-                ImGuiTableFlags.Sortable,
-                new Vector2(0, 0)
-            ))
-        {
-            ImGui.TableSetupColumn("Id", ImGuiTableColumnFlags.WidthStretch, 200 * ImGuiHelper.Scale);
-            ImGui.TableSetupColumn("Name", ImGuiTableColumnFlags.WidthStretch, 200 * ImGuiHelper.Scale);
-            ImGui.TableSetupColumn("System", ImGuiTableColumnFlags.WidthStretch, 200 * ImGuiHelper.Scale);
-            ImGui.TableSetupColumn("Last Docked Base", ImGuiTableColumnFlags.WidthStretch, 200 * ImGuiHelper.Scale);
-            ImGui.TableSetupColumn("Online", ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoResize,
-                60 * ImGuiHelper.Scale);
-            ImGui.TableSetupColumn("Demote", ImGuiTableColumnFlags.WidthFixed | ImGuiTableColumnFlags.NoResize,
-                60 * ImGuiHelper.Scale);
-            ImGui.TableHeadersRow();
-
-            if (admins != null)
-            {
-                foreach (var admin in admins)
-                {
-                    ImGui.TableNextRow();
-
-                    ImGui.TableNextColumn();
-                    ImGui.AlignTextToFramePadding();
-                    ImGui.Text(admin.Id.ToString());
-
-                    ImGui.TableNextColumn();
-                    ImGui.AlignTextToFramePadding();
-                    ImGui.Text(admin.Name);
-
-                    ImGui.TableNextColumn();
-                    ImGui.AlignTextToFramePadding();
-                    ImGui.Text(admin.System);
-
-                    ImGui.TableNextColumn();
-                    ImGui.AlignTextToFramePadding();
-                    ImGui.Text(admin.LastDockedLocation);
-
-                    ImGui.TableNextColumn();
-                    ImGui.AlignTextToFramePadding();
-                    var isOnline = win.Server?.Server.AllPlayers.Any(p => p.Name == admin.Name) ?? false;
-                    var icon = isOnline ? Icons.Check : Icons.X;
-                    var color = isOnline ? Theme.SuccessTextColor : Theme.ErrorTextColor;
-                    ImGui.TextColored(color, icon.ToString());
-
-
-                    ImGui.TableNextColumn();
-                    if (
-                        ImGui.Button(
-                            $"{Icons.ArrowDown.ToString()}##{admin.Id.ToString()}",
-                            new Vector2(-1, ImGui.GetFrameHeight()
-                            )))
-                    {
-                        pm.MessageBox("Confirm", $"Are you sure you want to demote {admin.Name}?", false,
-                            MessageBoxButtons.YesNo, response =>
-                            {
-                                if (response == MessageBoxResponse.Yes)
-                                {
-                                    DemotePlayer(admin.Id, admin.Name);
-                                }
-                            });
-                    }
-                }
-            }
-
-            ImGui.EndTable();
-        }
-
-        ImGui.EndChild();
-    }
-
-    // Server Player Actions
-    private void PromotePlayer(long characterId, string name)
-    {
-        Task.Run(() =>
-        {
-            FLLog.Info("Server", $"Promoting {name} to admin");
-            win.Server?.Server?.Database?.AdminCharacter(characterId).Wait();
-            win.Server?.Server?.AdminChanged(characterId, true);
-            return Task.CompletedTask;
-        });
-    }
-
-    private void DemotePlayer(long characterId, string name)
-    {
-        Task.Run(() =>
-        {
-            FLLog.Info("Server", $"Demoting {name} from admin");
-            win.Server?.Server?.Database?.DeadminCharacter(characterId).Wait();
-            win.Server?.Server?.AdminChanged(characterId, false);
-            return Task.CompletedTask;
-        });
-    }
-
     private void BanPlayer(string characterName, DateTime expiry)
     {
         Task.Run(async () =>
@@ -694,7 +466,6 @@ public class RunningServerScreen(
         {
             //connectedPlayers = win.Server.Server.AllPlayers;
             bannedPlayers = win.Server?.Server.Database?.GetBannedPlayers().ToList();
-            admins = win.Server?.Server.Database?.GetAdmins().ToList();
         }
     }
 
@@ -717,9 +488,6 @@ public class RunningServerScreen(
                         break;
                     case ServerEventType.CharacterDisconnected:
                         HandleCharacterDisconnected(serverEvent.GetPayload<CharacterDisconnectedEventPayload>());
-                        break;
-                    case ServerEventType.PlayerAdminChanged:
-                        HandleCharacterAdminChanged(serverEvent.GetPayload<CharacterAdminChangedEventPayload>());
                         break;
                     case ServerEventType.PlayerBanChanged:
                         HandlePlayerBannedChanged(serverEvent.GetPayload<PlayerBanChangedEventPayload>());
@@ -749,26 +517,6 @@ public class RunningServerScreen(
             bannedPlayers.RemoveAll(b => b.AccountId == player.AccountId);
         }
     }
-
-    private void HandleCharacterAdminChanged(CharacterAdminChangedEventPayload? characterAdminChangedEventPayload)
-    {
-        FLLog.Info("Server Gui", "Received Character Admin Changed Server Event");
-        if (characterAdminChangedEventPayload == null) return;
-
-        var player = characterAdminChangedEventPayload.AdminCharacter;
-        if (player == null) return;
-
-        if (characterAdminChangedEventPayload.IsAdmin)
-        {
-            if (admins.Any(a => a.Id == player.Id)) return;
-            admins.Add(player);
-        }
-        else
-        {
-            admins.RemoveAll(a => a.Id == player.Id);
-        }
-    }
-
 
     private void HandleCharacterDisconnected(CharacterDisconnectedEventPayload? characterDisconnectedEventPayload)
 

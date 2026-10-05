@@ -1,0 +1,116 @@
+diff --git a/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs b/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs
+--- a/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs
++++ b/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs
+@@ -5,6 +5,7 @@
+ using System;
+ using System.Collections.Generic;
+ using System.Linq;
++using System.Numerics;
+ using LibreLancer.Data;
+ using LibreLancer.Data.Schema.Fuses;
+ using LibreLancer.Data.GameData;
+@@ -108,5 +109,5 @@ public class SFuseRunnerComponent : GameComponent
+-                else if (act is FuseImpulse)
++                else if (act is FuseImpulse impulse)
+                 {
+-
++                    ApplyImpulse(world, impulse);
+                 }
+                 else if (act is FuseIgniteFuse ig)
+@@ -144,3 +145,60 @@ public class SFuseRunnerComponent : GameComponent
++        private void ApplyImpulse(GameWorld world, FuseImpulse action)
++        {
++            var physics = world.Physics;
++            if (physics == null || action.Radius <= 0)
++            {
++                return;
++            }
++
++            var source = Parent.WorldTransform;
++            if (!string.IsNullOrWhiteSpace(action.Hardpoint) &&
++                Parent.GetHardpoint(action.Hardpoint) is { } hardpoint)
++            {
++                source = hardpoint.Transform * source;
++            }
++
++            var origin = source.Transform(action.PosOffset);
++            var affected = new HashSet<GameObject>();
++            foreach (var hit in physics.SphereTest(origin, action.Radius))
++            {
++                if (hit?.Tag is not GameObject target ||
++                    ReferenceEquals(target, Parent) ||
++                    !affected.Add(target))
++                {
++                    continue;
++                }
++
++                var targetPhysics = target.PhysicsComponent;
++                if (targetPhysics is null || targetPhysics.Mass <= 0)
++                {
++                    continue;
++                }
++
++                var impulse = CalculateImpulse(origin, targetPhysics.Body.Position, action.Radius, action.Force);
++                if (impulse != Vector3.Zero)
++                {
++                    targetPhysics.Body.Impulse(impulse);
++                }
++
++                if (action.Damage > 0 && target.TryGetComponent<SHealthComponent>(out var health))
++                {
++                    health.DamageExplosion(action.Damage, 0, Parent, origin, action.Radius);
++                }
++            }
++        }
++
++        internal static Vector3 CalculateImpulse(Vector3 origin, Vector3 target, float radius, float force)
++        {
++            var offset = target - origin;
++            var distance = offset.Length();
++            if (radius <= 0 || distance <= 0 || distance >= radius || force == 0)
++            {
++                return Vector3.Zero;
++            }
++
++            return offset / distance * (force * (1f - distance / radius));
++        }
++
+         public override void Update(double time, GameWorld world)
+ 
+         {
+diff --git a/src/LibreLancer.Tests/FuseImpulseTests.cs b/src/LibreLancer.Tests/FuseImpulseTests.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Tests/FuseImpulseTests.cs
+@@ -0,0 +1,31 @@
++using System.Numerics;
++using LibreLancer.Server.Components;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class FuseImpulseTests
++{
++    [Fact]
++    public void ImpulseFallsOffLinearlyAcrossConfiguredRadius()
++    {
++        var impulse = SFuseRunnerComponent.CalculateImpulse(Vector3.Zero, new Vector3(5, 0, 0), 10, 100);
++
++        Assert.Equal(new Vector3(50, 0, 0), impulse);
++    }
++
++    [Fact]
++    public void ImpulseIsZeroAtOrOutsideRadius()
++    {
++        Assert.Equal(Vector3.Zero,
++            SFuseRunnerComponent.CalculateImpulse(Vector3.Zero, new Vector3(10, 0, 0), 10, 100));
++        Assert.Equal(Vector3.Zero,
++            SFuseRunnerComponent.CalculateImpulse(Vector3.Zero, new Vector3(11, 0, 0), 10, 100));
++    }
++
++    [Fact]
++    public void ImpulseAtExplosionOriginIsZero()
++    {
++        Assert.Equal(Vector3.Zero, SFuseRunnerComponent.CalculateImpulse(Vector3.Zero, Vector3.Zero, 10, 100));
++    }
++}

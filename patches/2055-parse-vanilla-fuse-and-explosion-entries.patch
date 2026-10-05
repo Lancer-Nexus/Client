@@ -1,0 +1,127 @@
+diff --git a/src/LibreLancer.Data/Schema/Effects/Explosion.cs b/src/LibreLancer.Data/Schema/Effects/Explosion.cs
+index 9748a634..cef0e303 100644
+--- a/src/LibreLancer.Data/Schema/Effects/Explosion.cs
++++ b/src/LibreLancer.Data/Schema/Effects/Explosion.cs
+@@ -8,7 +8,7 @@ namespace LibreLancer.Data.Schema.Effects;
+ public partial class Explosion
+ {
+     [Entry("nickname", Required = true)] public string Nickname = null!;
+-    [Entry("lifetime")] public Vector2 Lifetime;
++    [Entry("lifetime", MinMax = true)] public Vector2 Lifetime;
+     [Entry("process")] public string? Process;
+     [Entry("radius")] public float Radius;
+     [Entry("hull_damage")] public float HullDamage;
+diff --git a/src/LibreLancer.Data/Schema/Equipment/Explosion.cs b/src/LibreLancer.Data/Schema/Equipment/Explosion.cs
+index 5e27cc7b..a4c1c6dd 100644
+--- a/src/LibreLancer.Data/Schema/Equipment/Explosion.cs
++++ b/src/LibreLancer.Data/Schema/Equipment/Explosion.cs
+@@ -12,7 +12,7 @@ public partial class Explosion
+ {
+     [Entry("nickname", Required = true)] public string Nickname = null!;
+     [Entry("effect")] public string? Effect;
+-    [Entry("lifetime")] public Vector2 Lifetime;
++    [Entry("lifetime", MinMax = true)] public Vector2 Lifetime;
+     [Entry("process")] public string? Process;
+     [Entry("strength")] public float Strength;
+     [Entry("radius")] public float Radius;
+diff --git a/src/LibreLancer.Data/Schema/Fuses/FuseAction.cs b/src/LibreLancer.Data/Schema/Fuses/FuseAction.cs
+index c0b67b8c..db717000 100644
+--- a/src/LibreLancer.Data/Schema/Fuses/FuseAction.cs
++++ b/src/LibreLancer.Data/Schema/Fuses/FuseAction.cs
+@@ -23,7 +23,6 @@ public partial class FuseDestroyRoot : FuseAction
+ [ParsedSection]
+ public partial class FuseStartEffect : FuseAction //[start_effect]
+ {
+-    [Entry("effect", Required = true)]
+     public string Effect = null!;
+     [Entry("hardpoint", Multiline = true)]
+     public List<string> Hardpoints = [];
+@@ -33,6 +32,10 @@ public partial class FuseStartEffect : FuseAction //[start_effect]
+     public Vector3 PosOffset;
+     [Entry("ori_offset")]
+     public Vector3 OriOffset;
++
++    [EntryHandler("effect", MinComponents = 1)]
++    [EntryHandler("particles", MinComponents = 1)]
++    private void HandleEffect(Entry e) => Effect = e[0].ToString();
+ }
+ [ParsedSection]
+ public partial class FuseDestroyHpAttachment : FuseAction //[destroy_hp_attachment]
+diff --git a/src/LibreLancer.Tests/FuseAndExplosionIniTests.cs b/src/LibreLancer.Tests/FuseAndExplosionIniTests.cs
+new file mode 100644
+index 00000000..28b06120
+--- /dev/null
++++ b/src/LibreLancer.Tests/FuseAndExplosionIniTests.cs
+@@ -0,0 +1,72 @@
++using System;
++using System.IO;
++using System.Linq;
++using LibreLancer.Data.IO;
++using LibreLancer.Data.Schema.Effects;
++using LibreLancer.Data.Schema.Fuses;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class FuseAndExplosionIniTests
++{
++    [Theory]
++    [InlineData("particles", "vanilla_particle_effect")]
++    [InlineData("effect", "legacy_effect_alias")]
++    public void FuseStartEffectReadsVanillaParticlesAndEffectKeys(string key, string value)
++    {
++        var root = Path.Combine(Path.GetTempPath(), "fuse-start-effect-" + Guid.NewGuid().ToString("N"));
++        Directory.CreateDirectory(root);
++        try
++        {
++            File.WriteAllText(Path.Combine(root, "fuse.ini"), $"""
++                [fuse]
++                name = test_fuse
++
++                [start_effect]
++                {key} = {value}
++                at_t = 0.9
++                """);
++
++            var parsed = new FuseIni();
++            parsed.AddFuseIni("fuse.ini", FileSystem.FromPath(root));
++
++            var effect = Assert.IsType<FuseStartEffect>(Assert.Single(Assert.Single(parsed.Fuses).Actions));
++            Assert.Equal(value, effect.Effect);
++            Assert.Equal(0.9f, effect.AtT);
++        }
++        finally
++        {
++            Directory.Delete(root, true);
++        }
++    }
++
++    [Fact]
++    public void ExplosionLifetimeAcceptsScalarAndRangeForms()
++    {
++        var root = Path.Combine(Path.GetTempPath(), "explosion-lifetime-" + Guid.NewGuid().ToString("N"));
++        Directory.CreateDirectory(root);
++        try
++        {
++            File.WriteAllText(Path.Combine(root, "explosions.ini"), """
++                [explosion]
++                nickname = scalar_lifetime
++                lifetime = 0.0
++
++                [explosion]
++                nickname = ranged_lifetime
++                lifetime = 1.0, 2.0
++                """);
++
++            var parsed = new ExplosionsIni();
++            parsed.AddFile("explosions.ini", FileSystem.FromPath(root));
++
++            Assert.Equal(new System.Numerics.Vector2(-1, 0), parsed.Explosions[0].Lifetime);
++            Assert.Equal(new System.Numerics.Vector2(1, 2), parsed.Explosions[1].Lifetime);
++        }
++        finally
++        {
++            Directory.Delete(root, true);
++        }
++    }
++}

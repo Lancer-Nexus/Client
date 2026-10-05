@@ -1,0 +1,147 @@
+diff --git a/src/LibreLancer.Data/GameItemDb.cs b/src/LibreLancer.Data/GameItemDb.cs
+--- a/src/LibreLancer.Data/GameItemDb.cs
++++ b/src/LibreLancer.Data/GameItemDb.cs
+@@ -814,6 +814,18 @@
+         }
+     }
+ 
++    internal static TradelaneEquipment CreateTradelaneEquipment(
++        Tradelane tradelane, Func<string?, ResolvedFx?> resolveEffect) => new()
++    {
++        ShipEnter = resolveEffect(tradelane.TlShipEnter),
++        ShipTravel = resolveEffect(tradelane.TlShipTravel),
++        ShipExit = resolveEffect(tradelane.TlShipExit),
++        ShipDisrupt = resolveEffect(tradelane.TlShipDisrupt),
++        PlayerTravel = resolveEffect(tradelane.TlPlayerTravel),
++        PlayerSplash = resolveEffect(tradelane.TlPlayerSplash),
++        RingActive = resolveEffect(tradelane.TlRingActive)
++    };
++
+     public void LoadData(Action? onIniLoaded = null)
+     {
+         flData.LoadData();
+@@ -1276,16 +1288,7 @@
+ 
+             if (val is Tradelane tl)
+             {
+-                var tlequip = new TradelaneEquipment
+-                {
+-                    ShipEnter = Effects.Get(tl.TlShipEnter),
+-                    ShipExit = Effects.Get(tl.TlShipExit),
+-                    ShipDisrupt = Effects.Get(tl.TlShipDisrupt),
+-                    PlayerTravel = Effects.Get(tl.TlPlayerTravel),
+-                    PlayerSplash = Effects.Get(tl.TlPlayerSplash),
+-                    RingActive = Effects.Get(tl.TlRingActive)
+-                };
+-                equip = tlequip;
++                equip = CreateTradelaneEquipment(tl, name => Effects.Get(name));
+             }
+ 
+             if (val is Commodity cm)
+diff --git a/src/LibreLancer.Data/GameData/Items/TradelaneEquipment.cs b/src/LibreLancer.Data/GameData/Items/TradelaneEquipment.cs
+--- a/src/LibreLancer.Data/GameData/Items/TradelaneEquipment.cs
++++ b/src/LibreLancer.Data/GameData/Items/TradelaneEquipment.cs
+@@ -3,6 +3,7 @@
+ public class TradelaneEquipment : Equipment
+ {
+     public ResolvedFx? ShipEnter;
++    public ResolvedFx? ShipTravel;
+     public ResolvedFx? ShipExit;
+     public ResolvedFx? ShipDisrupt;
+     public ResolvedFx? PlayerTravel;
+diff --git a/src/LibreLancer/GameStates/SpaceGameplay.cs b/src/LibreLancer/GameStates/SpaceGameplay.cs
+--- a/src/LibreLancer/GameStates/SpaceGameplay.cs
++++ b/src/LibreLancer/GameStates/SpaceGameplay.cs
+@@ -71,6 +71,7 @@
+         private readonly List<ParticleEffectRenderer> transientShipEffects = [];
+         private TradelaneEquipment? activeTradelaneEquipment;
+         private ParticleEffectRenderer? tradelaneTravelRenderer;
++        private ParticleEffectRenderer? tradelaneShipTravelRenderer;
+         private SoundInstance? tradelaneTravelSound;
+         public Cutscene? Thn;
+ 
+@@ -702,7 +703,8 @@
+         private (ParticleEffectRenderer? Renderer, SoundInstance? Sound)
+             AttachShipEffect(
+                 ResolvedFx? effect,
+-                bool loopSound = false)
++                bool loopSound = false,
++            bool playSound = true)
+         {
+             if (effect == null)
+                 return (null, null);
+@@ -717,7 +719,7 @@
+             }
+ 
+             SoundInstance? sound = null;
+-            if (effect.Sound != null)
++            if (playSound && effect.Sound != null)
+             {
+                 sound = Game.Sound.GetInstance(effect.Sound.Nickname, 0, -1, -1, null);
+                 sound?.Play(loopSound);
+@@ -754,6 +756,11 @@
+             {
+                 player?.ExtraRenderers.Remove(tradelaneTravelRenderer);
+                 tradelaneTravelRenderer = null;
++            }
++            if (tradelaneShipTravelRenderer != null)
++            {
++                player?.ExtraRenderers.Remove(tradelaneShipTravelRenderer);
++                tradelaneShipTravelRenderer = null;
+             }
+             tradelaneTravelSound?.Stop();
+             tradelaneTravelSound = null;
+@@ -1595,6 +1602,10 @@
+             if (activeTradelaneEquipment != null)
+             {
+                 AttachTransientShipEffect(activeTradelaneEquipment.ShipEnter);
++                var shipTravel = AttachShipEffect(
++                    activeTradelaneEquipment.ShipTravel,
++                    playSound: false);
++                tradelaneShipTravelRenderer = shipTravel.Renderer;
+                 var travel = AttachShipEffect(
+                     activeTradelaneEquipment.PlayerTravel,
+                     loopSound: true);
+diff --git a/src/LibreLancer.Data/LibreLancer.Data.csproj b/src/LibreLancer.Data/LibreLancer.Data.csproj
+--- a/src/LibreLancer.Data/LibreLancer.Data.csproj
++++ b/src/LibreLancer.Data/LibreLancer.Data.csproj
+@@ -34,6 +34,7 @@
+ 
+   <ItemGroup>
+     <Folder Include="Properties" />
++    <InternalsVisibleTo Include="LibreLancer.Tests" />
+   </ItemGroup>
+ 
+   <ItemGroup>
+diff --git a/src/LibreLancer.Tests/TradelaneEffectResolutionTests.cs b/src/LibreLancer.Tests/TradelaneEffectResolutionTests.cs
+new file mode 100644
+index 00000000..889ae8c240ec55520fc9e2dd49c42ac94b30cdfa
+--- /dev/null
++++ b/src/LibreLancer.Tests/TradelaneEffectResolutionTests.cs
+@@ -0,0 +1,26 @@
++using System.Runtime.CompilerServices;
++using LibreLancer.Data;
++using LibreLancer.Data.GameData;
++using LibreLancer.Data.Schema.Equipment;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class TradelaneEffectResolutionTests
++{
++    [Fact]
++    public void ShipTravelEffectIsResolvedFromTradeLaneEquipmentIni()
++    {
++        var expected = (ResolvedFx)RuntimeHelpers.GetUninitializedObject(typeof(ResolvedFx));
++        var definition = new Tradelane
++        {
++            TlShipTravel = "basic_tl_ship_travel"
++        };
++
++        var equipment = GameItemDb.CreateTradelaneEquipment(
++            definition,
++            name => name == "basic_tl_ship_travel" ? expected : null);
++
++        Assert.Same(expected, equipment.ShipTravel);
++    }
++}

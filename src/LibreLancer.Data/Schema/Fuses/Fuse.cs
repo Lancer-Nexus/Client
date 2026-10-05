@@ -24,6 +24,11 @@ public partial class Fuse
     [Section("start_cam_particles", Child = true)]
     [Section("ignite_fuse", Child = true)]
     [Section("impulse", Child = true)]
+    [Section("damage_root", Child = true)]
+    [Section("damage_group", Child = true)]
+    [Section("make_invincible", Child = true)]
+    [Section("dump_cargo", Child = true)]
+    [Section("tumble", Child = true)]
     [Section("destroy_root", Child = true)]
     public List<FuseAction> Actions = [];
 }

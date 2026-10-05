@@ -1,0 +1,74 @@
+--- a/src/LibreLancer/Fx/Appearances/FxPerpAppearance.cs
++++ b/src/LibreLancer/Fx/Appearances/FxPerpAppearance.cs
+@@ -34,6 +34,13 @@
+             return Vector3.UnitY;
+         }
+ 
++        internal static Vector3 TransformPosition(Vector3 position, Quaternion orientation, Matrix4x4 nodeTransform) =>
++            Vector3.Transform(Vector3.Transform(position, orientation), nodeTransform);
++
++        internal static Vector3 TransformDirection(Vector3 direction, Quaternion orientation,
++            Matrix4x4 nodeTransform) =>
++            Vector3.TransformNormal(Vector3.Transform(direction, orientation), nodeTransform);
++
+         public override void Draw(ParticleEffectInstance instance, AppearanceReference node, int nodeIdx,
+             Matrix4x4 transform, float sparam)
+         {
+@@ -50,17 +57,17 @@
+                 var q = particle.Orientation * Transform.GetDeltaRotation(sparam,
+                     (float)instance.LastTime, (float)instance.GlobalTime);
+                 particle.Orientation = q;
+-                var p = Vector3.Transform(particle.Position, node_tr);
++                var p = TransformPosition(particle.Position, q, node_tr);
+                 if (!PassesVisibilityFields(node, instance, p, sparam))
+                     continue;
+-                var p2 = Vector3.Transform(particle.Position + particle.Velocity, node_tr);
+-                var fallbackDirection = Vector3.TransformNormal(particle.Normal, node_tr);
++                var p2 = p + TransformDirection(particle.Velocity, q, node_tr);
++                var fallbackDirection = TransformDirection(particle.Normal, q, node_tr);
+                 var n = GetDirection(p - p2, fallbackDirection);
+                 if (ViewingAngleFade)
+                     a *= GetViewingAngleFade(n, instance.Pool.Camera.Position - p);
+                 instance.Pool.AddParticle(
+                     TextureHandler,
+-                    Vector3.Transform(particle.Position, node_tr),
++                    p,
+                     new Vector2(Size.GetValue(sparam, time)),
+                     new Color4(c, a),
+                     GetFrame((float)instance.GlobalTime, sparam, ref particle),
+--- a/src/LibreLancer.Tests/FxPerpAppearanceTests.cs
++++ b/src/LibreLancer.Tests/FxPerpAppearanceTests.cs
+@@ -1,3 +1,4 @@
++using System;
+ using System.Numerics;
+ using LibreLancer.Fx;
+ using LibreLancer.Utf.Ale;
+@@ -25,6 +26,28 @@
+         Assert.Equal(-Vector3.UnitZ, FxPerpAppearance.GetDirection(new Vector3(0, 0, -4), Vector3.UnitX));
+     }
+ 
++    [Fact]
++    public void AnimatedOrientationRotatesParticleOffset()
++    {
++        var rotation = Quaternion.CreateFromAxisAngle(Vector3.UnitZ, MathF.PI / 2);
++
++        var position = FxPerpAppearance.TransformPosition(Vector3.UnitX, rotation, Matrix4x4.Identity);
++
++        Assert.InRange(Vector3.Distance(position, Vector3.UnitY), 0, 0.00001f);
++    }
++
++    [Fact]
++    public void AnimatedOrientationRotatesParticleDirectionAndEmitterFallback()
++    {
++        var rotation = Quaternion.CreateFromAxisAngle(Vector3.UnitZ, MathF.PI / 2);
++
++        var velocity = FxPerpAppearance.TransformDirection(Vector3.UnitX, rotation, Matrix4x4.Identity);
++        var fallback = FxPerpAppearance.TransformDirection(Vector3.UnitY, rotation, Matrix4x4.Identity);
++
++        Assert.InRange(Vector3.Distance(velocity, Vector3.UnitY), 0, 0.00001f);
++        Assert.InRange(Vector3.Distance(fallback, -Vector3.UnitX), 0, 0.00001f);
++    }
++
+     [Theory]
+     [InlineData(true)]
+     [InlineData(false)]

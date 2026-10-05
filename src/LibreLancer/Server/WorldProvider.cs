@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Net.Http;
 using System.Net.Security;
 using System.Threading;
 using System.Threading.Tasks;
@@ -30,37 +31,39 @@ public class WorldProvider
 
     private ConcurrentDictionary<StarSystem, WorldState> worlds = new();
 
-    private void LoadWorld(StarSystem system, out WorldState ws, PreloadObject[] preloads)
+    private async Task LoadWorldAsync(StarSystem system, PreloadObject[] preloads)
     {
-        var x = new WorldState();
-        if (worlds.TryAdd(system, new WorldState()))
+        if (!worlds.TryAdd(system, new WorldState())) return;
+        try
         {
-            x.World = new ServerWorld(system, server);
+            var world = new ServerWorld(system, server);
             server.GameData.PreloadObjects(preloads, server.Resources);
-            x.Ready = true;
-            server.WorldReady(x.World);
-            worlds.AddOrUpdate(
-                system,
-                _ => x,
-                (_, _) => x
-            );
+            await server.RestoreNpcCheckpointsForWorldAsync(world).ConfigureAwait(false);
+            server.WorldReady(world);
+            worlds[system] = new WorldState { Ready = true, World = world };
         }
-        ws = x;
+        catch
+        {
+            worlds.TryRemove(system, out _);
+            throw;
+        }
     }
     public void RequestWorld(StarSystem system, Action<ServerWorld> spunUp, PreloadObject[] preloads)
     {
         Task.Run(async () =>
         {
-            if (!worlds.TryGetValue(system, out var ws))
-                LoadWorld(system, out ws, preloads);
-            while (!ws.Ready)
+            while (true)
             {
+                if (worlds.TryGetValue(system, out var ws) && ws.Ready)
+                {
+                    spunUp(ws.World);
+                    return;
+                }
+                try { await LoadWorldAsync(system, preloads); }
+                catch (HttpRequestException) { await Task.Delay(TimeSpan.FromSeconds(2)); }
+                catch (TaskCanceledException) { await Task.Delay(TimeSpan.FromSeconds(2)); }
                 await Task.Delay(33);
-                if (!worlds.TryGetValue(system, out ws))
-                    LoadWorld(system, out ws, preloads);
             }
-
-            spunUp(ws.World);
         }).ContinueWith(x =>
         {
             if (x.Exception != null)

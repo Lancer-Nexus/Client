@@ -16,8 +16,14 @@ class login : login_Designer with Modal
 				Game.Login(scn.username.CurrentText, scn.password.CurrentText);
 			}
 		});
-        scn.close.OnClick(() => this.Close());
-		this.Widget.OnEscape(() => this.Close());
+        scn.close.OnClick(() => {
+            if (Game.GatewayEnabled()) Game.Exit();
+            else this.Close();
+        });
+		this.Widget.OnEscape(() => {
+            if (Game.GatewayEnabled()) Game.Exit();
+            else this.Close();
+        });
     }
 }
 

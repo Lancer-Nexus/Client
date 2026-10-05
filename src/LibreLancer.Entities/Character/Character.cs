@@ -22,6 +22,7 @@ public class Character : BaseEntity
 
     // Is this an admin character?
 
+    // Retained for existing SQLite schemas only; authorization uses Nexus permissions.
     public bool IsAdmin { get; set; }
 
     public uint Rank { get; set; }

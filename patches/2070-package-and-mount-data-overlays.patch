@@ -1,0 +1,177 @@
+diff --git a/scripts/BuildLL/Program.cs b/scripts/BuildLL/Program.cs
+index 4d2fc70..f47cb2c 100644
+--- a/scripts/BuildLL/Program.cs
++++ b/scripts/BuildLL/Program.cs
+@@ -99,6 +99,7 @@ namespace BuildLL
+             };
+             Dotnet.Publish("src/LLServer/LLServer.csproj", settings);
+             await CustomPublish.MergeAndPatch(objDir, binDir + rid, rid, ["LLServer"]);
++            CopyDataOverlay(outdir);
+             CopyFile("Credits.txt", outdir);
+             CopyFile("LICENSE", outdir);
+         }
+@@ -127,6 +128,7 @@ namespace BuildLL
+             }
+             await CustomPublish.MergeAndPatch(objDir, binDir + rid, rid,
+                 projs.Select(x => Path.GetFileNameWithoutExtension(x)).ToArray());
++            CopyDataOverlay(outdir);
+             if (sdk)
+             {
+                 var docsdir = Path.Combine(outdir, "lib/Docs");
+@@ -161,6 +163,14 @@ namespace BuildLL
+             }
+         }
+ 
++        static void CopyDataOverlay(string outputDirectory)
++        {
++            var source = new DirectoryInfo("./data");
++            if (source.Exists)
++                CustomPublish.CopyFilesRecursively(source,
++                    new DirectoryInfo(Path.Combine(outputDirectory, "lib", "data")));
++        }
++
+         static string GetLinuxRid()
+         {
+             var uname = Bash("uname -m", false).Trim().ToLowerInvariant();
+diff --git a/src/LLServer.Core/ServerApp.cs b/src/LLServer.Core/ServerApp.cs
+index 391c96d..8aedeef 100644
+--- a/src/LLServer.Core/ServerApp.cs
++++ b/src/LLServer.Core/ServerApp.cs
+@@ -96,7 +96,9 @@ public class ServerApp(ServerConfig config)
+             return false;
+         }
+         var gameFiles = FileSystem.FromPath(Config.FreelancerPath);
+-        var npcDataOverlay = Path.Combine(GetBasePath(), "data");
++        var npcDataOverlay = Path.Combine(GetBasePath(), "lib", "data");
++        if (!Directory.Exists(npcDataOverlay))
++            npcDataOverlay = Path.Combine(GetBasePath(), "data");
+         if (Directory.Exists(npcDataOverlay))
+             gameFiles.FileProviders.Add(new NpcDataOverlayFileProvider(npcDataOverlay));
+         Server = new GameServer(gameFiles)
+diff --git a/src/LibreLancer.Data/IO/FileSystem.cs b/src/LibreLancer.Data/IO/FileSystem.cs
+index f9e882e..9f81ec3 100644
+--- a/src/LibreLancer.Data/IO/FileSystem.cs
++++ b/src/LibreLancer.Data/IO/FileSystem.cs
+@@ -311,6 +311,64 @@ public sealed class SysFolderQuickInit : IFileProvider
+     }
+ }
+ 
++/// <summary>Maps Freelancer DATA-relative VFS paths to packaged override files.</summary>
++public sealed class FreelancerDataOverlayFileProvider : IFileProvider
++{
++    private static readonly string[] prefixes = ["EXE/../data/", "../data/", "data/", "DATA/"];
++    private readonly SysFolderQuickInit files;
++
++    public FreelancerDataOverlayFileProvider(string dataDirectory)
++    {
++        files = new SysFolderQuickInit(dataDirectory);
++    }
++
++    private static string? Map(string path)
++    {
++        var normalized = path.Replace('\\', '/');
++        foreach (var prefix in prefixes)
++        {
++            if (normalized.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
++                return normalized[prefix.Length..];
++        }
++        return null;
++    }
++
++    public Stream? Open(string filename)
++    {
++        var mapped = Map(filename);
++        return mapped is null ? null : files.Open(mapped);
++    }
++
++    public bool FileExists(string filename)
++    {
++        var mapped = Map(filename);
++        return mapped is not null && files.FileExists(mapped);
++    }
++
++    public bool GetBackingFileName(string path, out string? fileName)
++    {
++        var mapped = Map(path);
++        if (mapped is not null)
++            return files.GetBackingFileName(mapped, out fileName);
++        fileName = null;
++        return false;
++    }
++
++    public IEnumerable<string> GetFiles(string path)
++    {
++        var mapped = Map(path.TrimEnd('\\', '/') + "/");
++        return mapped is null ? Array.Empty<string>() : files.GetFiles(mapped);
++    }
++
++    public IEnumerable<string> GetDirectories(string path)
++    {
++        var mapped = Map(path.TrimEnd('\\', '/') + "/");
++        return mapped is null ? Array.Empty<string>() : files.GetDirectories(mapped);
++    }
++
++    public void Refresh() => files.Refresh();
++}
++
+ /// <summary>
+ /// Case-insensitive implementation of IFileProvider
+ /// </summary>
+diff --git a/src/LibreLancer.Tests/FreelancerDataOverlayTests.cs b/src/LibreLancer.Tests/FreelancerDataOverlayTests.cs
+new file mode 100644
+index 0000000..127aaf6
+--- /dev/null
++++ b/src/LibreLancer.Tests/FreelancerDataOverlayTests.cs
+@@ -0,0 +1,38 @@
++using System;
++using System.IO;
++using LibreLancer.Data.IO;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class FreelancerDataOverlayTests
++{
++    [Fact]
++    public void OverridesDataFilesAndFallsBackToFreelancerInstallation()
++    {
++        var root = Path.Combine(Path.GetTempPath(), "freelancer-overlay-" + Guid.NewGuid().ToString("N"));
++        var installData = Path.Combine(root, "DATA", "MISSIONS", "M01A");
++        var overlayData = Path.Combine(root, "overlay", "MISSIONS", "M01A");
++        Directory.CreateDirectory(Path.Combine(root, "EXE"));
++        Directory.CreateDirectory(installData);
++        Directory.CreateDirectory(overlayData);
++        File.WriteAllText(Path.Combine(root, "EXE", "freelancer.ini"), "[Freelancer]\n");
++        File.WriteAllText(Path.Combine(installData, "m01a.ini"), "vanilla");
++        File.WriteAllText(Path.Combine(installData, "fallback.ini"), "installation");
++        File.WriteAllText(Path.Combine(overlayData, "m01a.ini"), "overlay");
++
++        try
++        {
++            var fs = FileSystem.FromPath(root);
++            fs.FileProviders.Add(new FreelancerDataOverlayFileProvider(Path.Combine(root, "overlay")));
++
++            Assert.Equal("overlay", fs.ReadAllText("EXE/../data/MISSIONS/M01A/m01a.ini"));
++            Assert.Equal("installation", fs.ReadAllText("EXE/../data/MISSIONS/M01A/fallback.ini"));
++            Assert.Contains("m01a.ini", fs.GetFiles("EXE/../data/MISSIONS/M01A"));
++        }
++        finally
++        {
++            Directory.Delete(root, true);
++        }
++    }
++}
+diff --git a/src/LibreLancer/GameConfig.cs b/src/LibreLancer/GameConfig.cs
+index 43f8224..b2a41d9 100644
+--- a/src/LibreLancer/GameConfig.cs
++++ b/src/LibreLancer/GameConfig.cs
+@@ -69,6 +69,9 @@ namespace LibreLancer
+                 var fs = Data.IO.FileSystem.FromPath(FreelancerPath);
+                 if (fs.FileExists("librelancer.ini") || fs.FileExists("EXE\\freelancer.ini"))
+                 {
++                    var overlayDirectory = Path.Combine(AppContext.BaseDirectory, "lib", "data");
++                    if (Directory.Exists(overlayDirectory))
++                        fs.FileProviders.Add(new Data.IO.FreelancerDataOverlayFileProvider(overlayDirectory));
+                     return fs;
+                 }
+             }

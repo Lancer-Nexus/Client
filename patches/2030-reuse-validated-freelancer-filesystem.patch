@@ -1,0 +1,101 @@
+diff --git a/src/LibreLancer/GameConfig.cs b/src/LibreLancer/GameConfig.cs
+--- a/src/LibreLancer/GameConfig.cs
++++ b/src/LibreLancer/GameConfig.cs
+@@ -62,12 +62,31 @@
+             return fs.FileExists("librelancer.ini") || fs.FileExists("EXE\\freelancer.ini");
+         }
+ 
++        public Data.IO.FileSystem CreateFreelancerFileSystem()
++        {
++            try
++            {
++                var fs = Data.IO.FileSystem.FromPath(FreelancerPath);
++                if (fs.FileExists("librelancer.ini") || fs.FileExists("EXE\\freelancer.ini"))
++                {
++                    return fs;
++                }
++            }
++            catch (DirectoryNotFoundException)
++            {
++                // Report the same actionable configuration error as for an invalid install root.
++            }
++            catch (FileNotFoundException)
++            {
++                // The configured archive may have been removed after configuration was saved.
++            }
++
++            throw new InvalidFreelancerDirectory(FreelancerPath);
++        }
++
+         public void Validate()
+         {
+-            if (!CheckFLDirectory(FreelancerPath))
+-            {
+-                throw new InvalidFreelancerDirectory(FreelancerPath);
+-            }
++            _ = CreateFreelancerFileSystem();
+         }
+ 
+ 		public static GameConfig Create(bool loadFile = true, Func<string>? filePath = null)
+diff --git a/src/LibreLancer/FreelancerGame.cs b/src/LibreLancer/FreelancerGame.cs
+--- a/src/LibreLancer/FreelancerGame.cs
++++ b/src/LibreLancer/FreelancerGame.cs
+@@ -92,10 +92,9 @@
+ 			SetFullScreen(Config.Settings.FullScreen);
+             SetVSync(Config.Settings.VSync);
+             Config.Settings.RenderContext = RenderContext;
+-            _cfg.Validate();
++            var vfs = _cfg.CreateFreelancerFileSystem();
+             Config.Settings.Validate();
+             // Cache
+-            var vfs = FileSystem.FromPath(_cfg.FreelancerPath);
+ 			ResourceManager = new GameResourceManager(this, vfs);
+ 			// Init Audio
+ 			FLLog.Info("Audio", "Initialising Audio");
+diff --git a/src/LibreLancer.Tests/FreelancerPathValidationTests.cs b/src/LibreLancer.Tests/FreelancerPathValidationTests.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Tests/FreelancerPathValidationTests.cs
+@@ -0,0 +1,42 @@
++using System;
++using System.IO;
++using LibreLancer.Exceptions;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class FreelancerPathValidationTests
++{
++    [Fact]
++    public void MissingFreelancerPathUsesConfigurationException()
++    {
++        var config = new GameConfig
++        {
++            FreelancerPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))
++        };
++
++        var exception = Assert.Throws<InvalidFreelancerDirectory>(config.CreateFreelancerFileSystem);
++
++        Assert.Contains(config.FreelancerPath, exception.Message);
++    }
++
++    [Fact]
++    public void CreatesFilesystemForValidFreelancerDirectory()
++    {
++        var root = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
++        Directory.CreateDirectory(Path.Combine(root, "EXE"));
++        File.WriteAllText(Path.Combine(root, "EXE", "freelancer.ini"), "[Freelancer]\n");
++        try
++        {
++            var config = new GameConfig { FreelancerPath = root };
++
++            var fileSystem = config.CreateFreelancerFileSystem();
++
++            Assert.True(fileSystem.FileExists("EXE\\freelancer.ini"));
++        }
++        finally
++        {
++            Directory.Delete(root, recursive: true);
++        }
++    }
++}

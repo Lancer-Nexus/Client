@@ -26,8 +26,13 @@ public partial class SpacePopulationManager
     private readonly ServerWorld world;
     private readonly Random random = new();
     private readonly List<ZoneState> zones = [];
+    private readonly List<GameObject[]> transferredGroups = [];
     private readonly Dictionary<string, EncounterIni?> encounterCache = new(StringComparer.OrdinalIgnoreCase);
     private int spawnCounter;
+    private readonly string populationSpawnNamespace = Guid.NewGuid().ToString("N");
+
+    internal string NextPopulationNickname(int memberIndex) =>
+        $"spacepop_{populationSpawnNamespace}_{++spawnCounter}_{memberIndex}";
 
     public SpacePopulationManager(ServerWorld world)
     {
@@ -47,6 +52,11 @@ public partial class SpacePopulationManager
         InitializePaths();
     }
 
+    // These groups remain authoritative traffic even when no player observes the system.
+    public bool HasActiveTransferredShips =>
+        transferredGroups.Any(group => group.Any(Alive)) ||
+        zones.Any(state => state.Groups.Any(group => group.IsTransferred && group.Ships.Any(Alive)));
+
     public void Update(double delta)
     {
         var players = GetPlayerObjects();
@@ -54,9 +64,7 @@ public partial class SpacePopulationManager
             UpdateBattleState(state, players, delta);
 
         PruneAndDespawn(players);
-
-        if (players.Length == 0)
-            return;
+        UpdateIdleTransferredGroupDirectives();
 
         foreach (var state in zones)
         {
@@ -65,6 +73,9 @@ public partial class SpacePopulationManager
 
             UpdateGroupCombat(state);
             UpdateIdleGroupDirectives(state);
+            // Continue existing routes without creating unobserved ambient population.
+            if (players.Length == 0)
+                continue;
             state.TimeUntilHeartbeat -= delta;
             if (state.TimeUntilHeartbeat > 0)
                 continue;
@@ -82,7 +93,7 @@ public partial class SpacePopulationManager
             .GroupBy(x => x.Zone.PathLabel![0], StringComparer.OrdinalIgnoreCase)
             .ToDictionary(
                 x => x.Key,
-                x => x.OrderBy(y => y.Label).ToList(),
+                x => x.OrderBy(y => y.Label).DistinctBy(y => y.Label).ToList(),
                 StringComparer.OrdinalIgnoreCase);
 
         foreach (var state in zones)
@@ -99,14 +110,17 @@ public partial class SpacePopulationManager
         }
     }
 
-    private static IEnumerable<PatrolPathSegment> PatrolPathSegments(Zone zone)
+    internal static IEnumerable<PatrolPathSegment> PatrolPathSegments(Zone zone)
     {
         if (zone.PathLabel is not { Length: >= 2 })
             yield break;
 
+        HashSet<int> labels = [];
         for (int i = 1; i < zone.PathLabel.Length; i++)
         {
-            if (int.TryParse(zone.PathLabel[i], out var label))
+            if (int.TryParse(zone.PathLabel[i], out var label) && label >= 0 &&
+                labels.Add(label) && float.IsFinite(zone.Position.X) &&
+                float.IsFinite(zone.Position.Y) && float.IsFinite(zone.Position.Z))
                 yield return new PatrolPathSegment(zone, label);
         }
     }

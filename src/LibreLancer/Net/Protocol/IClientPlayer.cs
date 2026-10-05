@@ -44,7 +44,9 @@ public interface IClientPlayer
     void DestroyPart(ObjNetId id, uint part);
     void DestroyEquipment(ObjNetId id, bool explode, string hardpoint);
     void RunMissionDialog(NetDlgLine[] lines);
-    void StartJumpTunnel();
+    void StartLocalJumpTunnel();
+    void StartJumpTunnel(string targetSystem, string target, long characterId);
+    void TransferSnapshotStaged(string transferId, bool succeeded);
     void StartTradelane(ObjNetId ring, Quaternion orientation);
     void TradelaneRing(ObjNetId ring);
     void TradelaneDisrupted();

@@ -1,0 +1,240 @@
+diff --git a/src/LibreLancer.Data/Schema/Fuses/Fuse.cs b/src/LibreLancer.Data/Schema/Fuses/Fuse.cs
+--- a/src/LibreLancer.Data/Schema/Fuses/Fuse.cs
++++ b/src/LibreLancer.Data/Schema/Fuses/Fuse.cs
+@@ -28,6 +28,7 @@
+     [Section("damage_group", Child = true)]
+     [Section("make_invincible", Child = true)]
+     [Section("dump_cargo", Child = true)]
++    [Section("tumble", Child = true)]
+     [Section("destroy_root", Child = true)]
+     public List<FuseAction> Actions = [];
+ }
+diff --git a/src/LibreLancer.Data/Schema/Fuses/FuseIni.cs b/src/LibreLancer.Data/Schema/Fuses/FuseIni.cs
+--- a/src/LibreLancer.Data/Schema/Fuses/FuseIni.cs
++++ b/src/LibreLancer.Data/Schema/Fuses/FuseIni.cs
+@@ -22,6 +22,7 @@
+     [Section("damage_group", Type = typeof(FuseDamageGroup), Child = true)]
+     [Section("make_invincible", Type = typeof(FuseMakeInvincible), Child = true)]
+     [Section("dump_cargo", Type = typeof(FuseDumpCargo), Child = true)]
++    [Section("tumble", Type = typeof(FuseTumble), Child = true)]
+     [Section("destroy_root", Type = typeof(FuseDestroyRoot), Child = true)]
+     public List<Fuse> Fuses = [];
+     public void AddFuseIni(string path, FileSystem vfs, IniStringPool? stringPool = null)
+diff --git a/src/LibreLancer.Data/Schema/Fuses/FuseAction.cs b/src/LibreLancer.Data/Schema/Fuses/FuseAction.cs
+--- a/src/LibreLancer.Data/Schema/Fuses/FuseAction.cs
++++ b/src/LibreLancer.Data/Schema/Fuses/FuseAction.cs
+@@ -126,3 +126,18 @@
+     [Entry("origin_hardpoint")]
+     public string? OriginHardpoint;
+ }
++
++[ParsedSection]
++public partial class FuseTumble : FuseAction
++{
++    [Entry("ang_drag_scale")]
++    public float AngularDragScale = 1;
++    [Entry("turn_throttle_x", MinMax = true)]
++    public Vector2 TurnThrottleX;
++    [Entry("turn_throttle_y", MinMax = true)]
++    public Vector2 TurnThrottleY;
++    [Entry("turn_throttle_z", MinMax = true)]
++    public Vector2 TurnThrottleZ;
++    [Entry("throttle", MinMax = true)]
++    public Vector2 Throttle;
++}
+diff --git a/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs b/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs
+--- a/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs
++++ b/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs
+@@ -139,6 +139,10 @@
+                 {
+                     DumpCargo(world, dumpCargo);
+                 }
++                else if (act is FuseTumble tumble)
++                {
++                    ApplyTumble(tumble);
++                }
+                 else if (act is FuseIgniteFuse ig)
+                 {
+                     var start = true;
+@@ -179,6 +183,33 @@
+             }
+ 
+             return range.X + (range.Y - range.X) * MathHelper.Clamp(randomValue, 0, 1);
++        }
++
++        internal static float ResolveTumbleThrottle(Vector2 range, float rangeValue, float directionValue)
++        {
++            var magnitude = ResolveActionTime(range, rangeValue);
++            if (magnitude == 0)
++            {
++                return 0;
++            }
++
++            return directionValue < 0.5f ? -magnitude : magnitude;
++        }
++
++        private void ApplyTumble(FuseTumble action)
++        {
++            if (!Parent.TryGetComponent<ShipSteeringComponent>(out var steering) ||
++                !Parent.TryGetComponent<ShipPhysicsComponent>(out var physics))
++            {
++                return;
++            }
++
++            steering.TumbleSteering = new Vector3(
++                ResolveTumbleThrottle(action.TurnThrottleX, Random.Shared.NextSingle(), Random.Shared.NextSingle()),
++                ResolveTumbleThrottle(action.TurnThrottleY, Random.Shared.NextSingle(), Random.Shared.NextSingle()),
++                ResolveTumbleThrottle(action.TurnThrottleZ, Random.Shared.NextSingle(), Random.Shared.NextSingle()));
++            steering.TumbleThrottle = ResolveActionTime(action.Throttle, Random.Shared.NextSingle());
++            physics.AngularDragScale = action.AngularDragScale > 0 ? action.AngularDragScale : 1;
+         }
+ 
+         private static bool IsAbsoluteDamage(string? damageType)
+diff --git a/src/LibreLancer/World/Components/ShipSteeringComponent.cs b/src/LibreLancer/World/Components/ShipSteeringComponent.cs
+--- a/src/LibreLancer/World/Components/ShipSteeringComponent.cs
++++ b/src/LibreLancer/World/Components/ShipSteeringComponent.cs
+@@ -25,6 +25,9 @@
+         public bool EngineKill;
+ 
+         public bool PlayerInput;
++
++        public Vector3? TumbleSteering;
++        public float? TumbleThrottle;
+ 
+         private PIDController rollPID = new() { P = 2 };
+ 
+@@ -99,7 +102,11 @@
+ 
+             // Set output parameters
+             Vector3 steerControl;
+-            if (!PlayerInput && Parent.TryGetComponent<AutopilotComponent>(out var autoPilot) &&
++            if (TumbleSteering.HasValue)
++            {
++                steerControl = TumbleSteering.Value;
++            }
++            else if (!PlayerInput && Parent.TryGetComponent<AutopilotComponent>(out var autoPilot) &&
+                 autoPilot.CurrentBehavior != AutopilotBehaviors.None)
+             {
+                 steerControl = new Vector3(autoPilot.OutPitch, autoPilot.OutYaw, 0);
+@@ -112,7 +119,7 @@
+             double pitch, yaw;
+             DecomposeOrientation(Matrix4x4.CreateFromQuaternion(Parent.PhysicsComponent!.Body.Orientation), out pitch, out yaw, out var roll);
+ 
+-            if (Math.Abs(InPitch) < float.Epsilon && Math.Abs(InYaw) < float.Epsilon)
++            if (!TumbleSteering.HasValue && Math.Abs(InPitch) < float.Epsilon && Math.Abs(InYaw) < float.Epsilon)
+                 steerControl.Z = MathHelper.Clamp((float) rollPID.Update(0, roll, (float) time), -0.5f, 0.5f);
+             else
+                 rollPID.Reset();
+@@ -121,18 +128,18 @@
+ 
+             var strafe = CurrentStrafe;
+             if (strafe == StrafeControls.None &&
+-                Parent.TryGetComponent<AutopilotComponent>(out autoPilot) &&
+-                autoPilot.CurrentBehavior != AutopilotBehaviors.None)
++                Parent.TryGetComponent<AutopilotComponent>(out var strafeAutopilot) &&
++                strafeAutopilot.CurrentBehavior != AutopilotBehaviors.None)
+             {
+-                strafe = autoPilot.AutopilotStrafe;
++                strafe = strafeAutopilot.AutopilotStrafe;
+             }
+ 
+             physics!.Steering = OutputSteering;
+             physics.CurrentStrafe = strafe;
+             var escortSpeedFactor = GetEscortSpeedFactor();
+-            physics.EnginePower = InThrottle * escortSpeedFactor;
++            physics.EnginePower = (TumbleThrottle ?? InThrottle) * escortSpeedFactor;
+             physics.ThrustRequested = Thrust;
+-            physics.CruiseEnabled = Cruise;
++            physics.CruiseEnabled = !TumbleSteering.HasValue && Cruise;
+             physics.CruiseSpeedOffset = Cruise ? CruiseSpeedOffset : 0;
+             if (Cruise && escortSpeedFactor < 1)
+             {
+@@ -140,7 +147,7 @@
+                 physics.CruiseSpeedOffset = MathF.Min(physics.CruiseSpeedOffset,
+                     -cruiseSpeed * (1 - escortSpeedFactor));
+             }
+-            physics.EngineKillEnabled = EngineKill;
++            physics.EngineKillEnabled = !TumbleSteering.HasValue && EngineKill;
+         }
+ 
+         // Specific decomposition for roll
+diff --git a/src/LibreLancer/World/Components/ShipPhysicsComponent.cs b/src/LibreLancer/World/Components/ShipPhysicsComponent.cs
+--- a/src/LibreLancer/World/Components/ShipPhysicsComponent.cs
++++ b/src/LibreLancer/World/Components/ShipPhysicsComponent.cs
+@@ -47,6 +47,7 @@
+         public float ChargePercent;
+         public float CruiseAccelPct = 0;
+         public Vector3 Steering;
++        public float AngularDragScale = 1;
+         public StrafeControls CurrentStrafe = StrafeControls.None;
+ 
+         public ShipPhysicsComponent(GameObject parent, Ship ship) : base(parent)
+@@ -356,7 +357,7 @@
+                 (Parent.PhysicsComponent.Body.RotateVector(-Vector3.UnitZ) * engineForce)
+             );
+             var angularForce = Steering * Ship.SteeringTorque;
+-            angularForce += (Parent.PhysicsComponent.Body.AngularVelocity * -1) * Ship.AngularDrag;
++            angularForce += (Parent.PhysicsComponent.Body.AngularVelocity * -1) * (Ship.AngularDrag * AngularDragScale);
+             // Add forces
+             Parent.PhysicsComponent.Body.AddForce(totalForce);
+             Parent.PhysicsComponent.Body.AddTorque(angularForce);
+diff --git a/src/LibreLancer.Tests/FuseAndExplosionIniTests.cs b/src/LibreLancer.Tests/FuseAndExplosionIniTests.cs
+--- a/src/LibreLancer.Tests/FuseAndExplosionIniTests.cs
++++ b/src/LibreLancer.Tests/FuseAndExplosionIniTests.cs
+@@ -213,4 +213,39 @@
+             Directory.Delete(root, true);
+         }
+     }
++
++    [Fact]
++    public void TumbleFuseParsesAngularDragAndThrottleRanges()
++    {
++        var root = Path.Combine(Path.GetTempPath(), "fuse-tumble-" + Guid.NewGuid().ToString("N"));
++        Directory.CreateDirectory(root);
++        try
++        {
++            File.WriteAllText(Path.Combine(root, "fuse.ini"), """
++                [fuse]
++                name = tumble_test
++
++                [tumble]
++                at_t = 0
++                ang_drag_scale = 0.3
++                turn_throttle_z = 0.7, 0.95
++                turn_throttle_x = 0.0, 0.1
++                turn_throttle_y = 0.0, 0.1
++                throttle = 1.0, 1.0
++                """);
++
++            var parsed = new FuseIni();
++            parsed.AddFuseIni("fuse.ini", FileSystem.FromPath(root));
++            var action = Assert.IsType<FuseTumble>(Assert.Single(Assert.Single(parsed.Fuses).Actions));
++            Assert.Equal(0.3f, action.AngularDragScale);
++            Assert.Equal(new System.Numerics.Vector2(0.7f, 0.95f), action.TurnThrottleZ);
++            Assert.Equal(new System.Numerics.Vector2(0, 0.1f), action.TurnThrottleX);
++            Assert.Equal(new System.Numerics.Vector2(0, 0.1f), action.TurnThrottleY);
++            Assert.Equal(new System.Numerics.Vector2(1, 1), action.Throttle);
++        }
++        finally
++        {
++            Directory.Delete(root, true);
++        }
++    }
+ }
+diff --git a/src/LibreLancer.Tests/FuseImpulseTests.cs b/src/LibreLancer.Tests/FuseImpulseTests.cs
+--- a/src/LibreLancer.Tests/FuseImpulseTests.cs
++++ b/src/LibreLancer.Tests/FuseImpulseTests.cs
+@@ -48,4 +48,13 @@
+         Assert.Equal("HpTurret02", SFuseRunnerComponent.SelectRandomHardpoint(hardpoints, 0.5f));
+         Assert.Equal("HpTurret03", SFuseRunnerComponent.SelectRandomHardpoint(hardpoints, 1));
+     }
++
++    [Fact]
++    public void TumbleControlsApplyRandomDirectionToConfiguredMagnitude()
++    {
++        var range = new Vector2(0.7f, 0.95f);
++        Assert.Equal(-0.7f, SFuseRunnerComponent.ResolveTumbleThrottle(range, 0, 0));
++        Assert.Equal(0.95f, SFuseRunnerComponent.ResolveTumbleThrottle(range, 1, 1));
++        Assert.Equal(0, SFuseRunnerComponent.ResolveTumbleThrottle(new Vector2(-1, 0), 0.5f, 0));
++    }
+ }

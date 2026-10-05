@@ -11,6 +11,7 @@ Welcome to the documentation for LancerEdit $(VERSION).
 ### Tools
 - [FRC Compiler](frc.md)
 - [Generating .3db icons](genicons.md)
+- [Renderer-Roadmap](renderer-roadmap.md)
 
 ### Scripting
 

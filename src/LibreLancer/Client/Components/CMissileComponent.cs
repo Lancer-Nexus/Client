@@ -1,5 +1,6 @@
 using LibreLancer.Data.GameData.Items;
 using LibreLancer.World;
+using LibreLancer.World.Components;
 
 namespace LibreLancer.Client.Components;
 
@@ -16,7 +17,7 @@ public class CDeployedMunitionComponent : GameComponent
 
     public override void Register(GameWorld world)
     {
-        if (Munition == null)
+        if (Equipment is not (MunitionEquip or MissileEquip))
         {
             return;
         }
@@ -33,13 +34,14 @@ public class CDeployedMunitionComponent : GameComponent
 
     public override void Update(double time, GameWorld world)
     {
-        if (Munition == null || Parent.PhysicsComponent is not { } physics || physics.Body == null)
+        if (Equipment is not (MunitionEquip or MissileEquip) ||
+            Parent.PhysicsComponent is not { } physics || physics.Body == null)
         {
             return;
         }
 
         elapsed += time;
-        var collidable = elapsed >= 1.0;
+        var collidable = !ProjectileLaunchSafety.IsCollisionSafe(elapsed);
         physics.Collidable = collidable;
         physics.Body.Collidable = collidable;
     }

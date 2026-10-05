@@ -43,7 +43,14 @@ namespace LibreLancer.Utf.Ale
                     case LoopFlags.PlayOnce:
                         return Keyframes[^1].Value;
                     case LoopFlags.Repeat:
-                        time = time % Keyframes[^1].Time;
+                        var firstTime = Keyframes[0].Time;
+                        var duration = Keyframes[^1].Time - firstTime;
+                        if (duration <= 0)
+                            return Keyframes[^1].Value;
+                        var elapsed = (time - firstTime) % duration;
+                        if (elapsed < 0)
+                            elapsed += duration;
+                        time = firstTime + elapsed;
                         break;
                     default:
                         return Keyframes[^1].Value;

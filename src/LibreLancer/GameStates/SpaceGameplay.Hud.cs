@@ -7,6 +7,7 @@ using LibreLancer.Client.Components;
 using LibreLancer.Data;
 using LibreLancer.Data.GameData;
 using LibreLancer.Graphics;
+using LibreLancer.Graphics.Text;
 using LibreLancer.Infocards;
 using LibreLancer.Interface;
 using LibreLancer.Net;
@@ -22,13 +23,66 @@ partial class SpaceGameplay
     private UiContext ui;
     private LuaAPI uiApi;
     private UiRenderable? steerArrow;
+    private float previousTextScale;
+    private BuiltRichText? clusterDebugText;
+    private string? clusterDebugTextValue;
+    private float clusterDebugTextMultiplier;
 
 
     private void CreateHud()
     {
         ui = Game.Ui;
+        previousTextScale = ui.TextScale;
+        ui.TextScale = 0.51f;
         ui.GameApi = uiApi = new LuaAPI(this);
         uiApi.IndicatorLayer.OnRender += IndicatorLayerOnRender;
+    }
+
+    private void DrawClusterDebugHud()
+    {
+        if (!ShowHud || string.IsNullOrWhiteSpace(session.ClusterInstanceId))
+            return;
+
+        var endpoint = session.ClusterEndpoint ?? "unknown";
+        var instance = session.ClusterInstanceId;
+        var system = sys.Nickname;
+        var link = session.NetworkPing < 0 ? "CONNECTING" : "CONNECTED";
+        var ping = session.NetworkPing < 0 ? "--" : $"{session.NetworkPing} ms";
+        var loss = session.NetworkLossPercent < 0 ? "--" : $"{session.NetworkLossPercent}%";
+        var text = $"LANCER NEXUS  |  {link}\n" +
+                   $"INSTANCE  {instance}\n" +
+                   $"SYSTEM    {system}\n" +
+                   $"SERVER    {endpoint}\n" +
+                   $"PING      {ping}   LOSS {loss}\n" +
+                   $"FPS       {Game.RenderFrequency:0}   TICK Δ {session.LastTickOffset}";
+        var multiplier = ui.ViewportHeight / 480f;
+        if (clusterDebugText == null || clusterDebugTextValue != text ||
+            Math.Abs(clusterDebugTextMultiplier - multiplier) > 0.01f)
+        {
+            clusterDebugText?.Dispose();
+            clusterDebugTextValue = text;
+            clusterDebugTextMultiplier = multiplier;
+            clusterDebugText = Game.RenderContext.Renderer2D.RichText.BuildText(
+                [new RichTextTextNode
+                {
+                    Contents = text,
+                    FontName = "Arial",
+                    FontSize = 7,
+                    Color = new Color4(0.72f, 0.92f, 1f, 1f)
+                }],
+                ui.PointsToPixels(250), multiplier);
+        }
+
+        var origin = ui.PointsToPixels(new Vector2(8, 8));
+        var padding = ui.PointsToPixels(5);
+        var drawList = Game.RenderContext.Renderer2D.CreateDrawList();
+        drawList.FillRectangle(
+            new Rectangle((int)origin.X - padding, (int)origin.Y - padding,
+                ui.PointsToPixels(258), (int)clusterDebugText.Height + padding * 2),
+            new Color4(0.015f, 0.035f, 0.075f, 0.78f));
+        Game.RenderContext.Renderer2D.RichText.RenderText(drawList, clusterDebugText,
+            (int)origin.X, (int)origin.Y);
+        drawList.Render();
     }
 
     private UiRenderable SteerArrow()
@@ -162,7 +216,7 @@ partial class SpaceGameplay
 
     private void DrawSteeringArrows(UiContext context, DrawList2D drawList)
     {
-        var steeringActive = ((isLeftDown && leftDownTimer < 0) || mouseFlight) &&
+        var steeringActive = (mouseTargeting.MouseFlightFromHold || mouseFlight) &&
                              control.Active &&
                              !ui.MouseWanted(Game.Mouse.X, Game.Mouse.Y);
         if (!steeringActive || isTurretView)

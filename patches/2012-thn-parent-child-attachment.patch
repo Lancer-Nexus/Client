@@ -1,0 +1,131 @@
+diff --git a/src/LibreLancer/Thn/Events/AttachEntityEvent.cs b/src/LibreLancer/Thn/Events/AttachEntityEvent.cs
+index a4866064..04a3ab34 100644
+--- a/src/LibreLancer/Thn/Events/AttachEntityEvent.cs
++++ b/src/LibreLancer/Thn/Events/AttachEntityEvent.cs
+@@ -120,6 +120,12 @@ namespace LibreLancer.Thn.Events
+                 var (_, tr) = tgt.GetTransform(false);
+                 lastRotate = tr;
+             }
++            Transform3D? parentChildTransform = null;
++            if ((Flags & AttachFlags.ParentChild) == AttachFlags.ParentChild)
++            {
++                parentChildTransform = ThnAttachment.CaptureParentChildTransform(
++                    objA.GetTransform(), tgt.GetTransform(false));
++            }
+             var attachment = new ThnAttachment(tgt)
+             {
+                 Position = ((Flags & AttachFlags.Position) == AttachFlags.Position),
+@@ -127,6 +133,7 @@ namespace LibreLancer.Thn.Events
+                 OrientationRelative = ((Flags & AttachFlags.OrientationRelative) == AttachFlags.OrientationRelative),
+                 EntityRelative = ((Flags & AttachFlags.EntityRelative) == AttachFlags.EntityRelative),
+                 LookAt = ((Flags & AttachFlags.LookAt) == AttachFlags.LookAt),
++                ParentChildTransform = parentChildTransform,
+                 LastRotate = lastRotate,
+                 Offset = Offset,
+             };
+diff --git a/src/LibreLancer/Thn/ThnSceneObject.cs b/src/LibreLancer/Thn/ThnSceneObject.cs
+index c75cd85b..98391484 100644
+--- a/src/LibreLancer/Thn/ThnSceneObject.cs
++++ b/src/LibreLancer/Thn/ThnSceneObject.cs
+@@ -49,7 +49,11 @@ public class ThnSceneObject
+             var parent = t.Parent.GetTransform(t.PathLookAt);
+             if (t.Orientation)
+             {
+-                if (t.OrientationRelative)
++                if (t.ParentChildTransform is { } parentChildTransform)
++                {
++                    self.Orientation = (parentChildTransform * parent).Orientation;
++                }
++                else if (t.OrientationRelative)
+                 {
+                     var qCurrent = parent.Orientation;
+                     var diff = qCurrent * Quaternion.Inverse(t.LastRotate);
+@@ -65,7 +69,11 @@ public class ThnSceneObject
+ 
+             if (t.Position)
+             {
+-                if (t.Offset != Vector3.Zero)
++                if (t.ParentChildTransform is { } parentChildTransform)
++                {
++                    self.Position = (parentChildTransform * parent).Position;
++                }
++                else if (t.Offset != Vector3.Zero)
+                 {
+                     var off = t.Offset;
+                     if (t.EntityRelative)
+@@ -148,8 +156,12 @@ public class ThnAttachment(ThnAttachParent parent)
+     public bool EntityRelative;
+     public bool LookAt;
+     public bool PathLookAt;
++    public Transform3D? ParentChildTransform;
+ 
+     public ThnAttachParent Parent = parent;
++
++    public static Transform3D CaptureParentChildTransform(Transform3D child, Transform3D parent) =>
++        child * parent.Inverse();
+ }
+ 
+ public abstract class ThnAttachParent
+diff --git a/src/LibreLancer.Tests/ThnParentChildAttachmentTests.cs b/src/LibreLancer.Tests/ThnParentChildAttachmentTests.cs
+new file mode 100644
+index 00000000..23bb7687
+--- /dev/null
++++ b/src/LibreLancer.Tests/ThnParentChildAttachmentTests.cs
+@@ -0,0 +1,57 @@
++using System;
++using System.Numerics;
++using LibreLancer.Thn;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class ThnParentChildAttachmentTests
++{
++    [Fact]
++    public void ParentChildAttachmentPreservesInitialRelativeTransform()
++    {
++        var initialParent = new Transform3D(
++            new Vector3(-3.665222f, 0, 3.132761f),
++            Quaternion.CreateFromAxisAngle(Vector3.UnitY, 0.151f));
++        var initialChild = new Transform3D(
++            new Vector3(-3.924391f, 1.667192f, 5.18079f),
++            Quaternion.CreateFromAxisAngle(Vector3.UnitY, 0.15f));
++        var parent = new MutableTransformParent(initialParent);
++        var child = new ThnSceneObject
++        {
++            Translate = initialChild.Position,
++            Rotate = initialChild.Orientation
++        };
++        var relative = ThnAttachment.CaptureParentChildTransform(initialChild, initialParent);
++        child.Attachments.Add(new ThnAttachment(parent)
++        {
++            Position = true,
++            Orientation = true,
++            ParentChildTransform = relative
++        });
++
++        AssertTransformClose(initialChild, child.GetTransform());
++
++        var movedParent = new Transform3D(
++            new Vector3(12, 4, -7),
++            Quaternion.CreateFromAxisAngle(Vector3.UnitY, 1.2f));
++        parent.Transform = movedParent;
++
++        var expectedChild = relative * movedParent;
++        AssertTransformClose(expectedChild, child.GetTransform());
++        Assert.True(Vector3.Distance(expectedChild.Position, movedParent.Position) > 1.5f);
++    }
++
++    private static void AssertTransformClose(Transform3D expected, Transform3D actual)
++    {
++        Assert.True(Vector3.Distance(expected.Position, actual.Position) < 0.0001f);
++        Assert.True(MathF.Abs(Quaternion.Dot(expected.Orientation, actual.Orientation)) > 0.9999f);
++    }
++
++    private sealed class MutableTransformParent(Transform3D transform) : ThnAttachParent
++    {
++        public Transform3D Transform = transform;
++
++        public override Transform3D GetTransform(bool pathLookAt) => Transform;
++    }
++}

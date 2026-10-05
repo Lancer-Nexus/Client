@@ -4,19 +4,22 @@ class characterlist : characterlist_Designer
     {
         base()
         var e = this.Elements;
+        if (Game.GatewayEnabled()) {
+            e.mainmenu.Strid = 0;
+            e.mainmenu.InfoId = 0;
+            e.mainmenu.Text = "QUIT";
+        }
         e.listtable.SetData(Game.CharacterList());
         e.listtable.OnDoubleClick(() => Game.LoadCharacter());
         e.newchar.OnClick(() => Game.RequestNewCharacter());
         e.loadchar.OnClick(() => Game.LoadCharacter());
         e.deletechar.OnClick(() => Game.DeleteCharacter());
+        e.serverlist.Visible = false;
 		this.Widget.OnEscape(() => this.GoBack());
-        e.serverlist.OnClick(() => this.ExitAnimation(() => {
-            Game.StopNetworking();
-            OpenScene("serverlist");
-        }));
         e.mainmenu.OnClick(() => this.ExitAnimation(() => {
             Game.StopNetworking();
-            OpenScene("mainmenu");
+            if (Game.GatewayEnabled()) Game.Exit();
+            else OpenScene("mainmenu");
         }));
     }
     
@@ -27,7 +30,8 @@ class characterlist : characterlist_Designer
 	{
 		this.ExitAnimation(() => {
             Game.StopNetworking();
-            OpenScene("serverlist");
+            if (Game.GatewayEnabled()) Game.Exit();
+            else OpenScene("serverlist");
         });
 	}
     
@@ -61,6 +65,4 @@ class characterlist : characterlist_Designer
         OpenModal(new popup(0, STRID_DISCONNECT, "ok", () => this.ExitAnimation(() => OpenScene("mainmenu"))));
     }
 }
-
-
 

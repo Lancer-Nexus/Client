@@ -1,0 +1,234 @@
+--- a/src/LibreLancer/World/CargoUtilities.cs
++++ b/src/LibreLancer/World/CargoUtilities.cs
+@@ -11,6 +11,7 @@
+ public static class CargoUtilities
+ {
+     public const int MaxAmmoPerType = 50;
++    public const int BundledAmmoPerLauncher = 10;
+ 
+     public static float GetUsedVolume(List<NetCargo> items) => items.Select(x => x.Count * x.Equipment!.Volume).Sum();
+ 
+@@ -81,4 +82,74 @@
+         }
+         return maxAmount < 0 ? 0 : maxAmount;
+     }
++
++    public static Equipment? GetBundledAmmo(Equipment equipment)
++    {
++        if (equipment is MissileLauncherEquipment launcher && launcher.Munition.Def.RequiresAmmo)
++            return launcher.Munition;
++
++        if (equipment is MineDropperEquipment mine && mine.Mine?.Def.RequiresAmmo == true)
++            return mine.Mine;
++
++        if (equipment is CountermeasureEquipment countermeasure &&
++            countermeasure.Munition?.Def.RequiresAmmo == true)
++            return countermeasure.Munition;
++
++        return null;
++    }
++
++    public static int GetPurchaseLimit(
++        List<NetCargo> items,
++        Ship ship,
++        Equipment equipment,
++        int maxByCredits,
++        bool canAutoMountSingle)
++    {
++        if (maxByCredits <= 0)
++            return 0;
++
++        var holdLimit = GetItemLimit(items, ship, equipment);
++        if (canAutoMountSingle)
++            holdLimit = Math.Max(holdLimit, 1);
++        var maxCount = Math.Min(maxByCredits, holdLimit);
++
++        return GetBundledAmmoPurchaseLimit(
++            items, ship, equipment, GetBundledAmmo(equipment), maxCount, canAutoMountSingle);
++    }
++
++    public static int GetBundledAmmoPurchaseLimit(
++        List<NetCargo> items,
++        Ship ship,
++        Equipment equipment,
++        Equipment? ammunition,
++        int maxLaunchers,
++        bool canAutoMountSingle)
++    {
++        if (ammunition == null || maxLaunchers <= 0)
++            return Math.Max(0, maxLaunchers);
++
++        var low = 0;
++        var high = maxLaunchers;
++        while (low < high)
++        {
++            var count = low + (high - low + 1) / 2;
++            var launcherMounted = count == 1 && canAutoMountSingle;
++            var itemsAfterLaunchers = items;
++            if (!launcherMounted)
++            {
++                itemsAfterLaunchers = new List<NetCargo>(items)
++                {
++                    new() { Equipment = equipment, Count = count }
++                };
++            }
++
++            var ammoNeeded = (long) count * BundledAmmoPerLauncher;
++            if (ammoNeeded <= GetItemLimit(itemsAfterLaunchers, ship, ammunition))
++                low = count;
++            else
++                high = count - 1;
++        }
++
++        return low;
++    }
+ }
+--- a/src/LibreLancer/Server/BasesidePlayer.cs
++++ b/src/LibreLancer/Server/BasesidePlayer.cs
+@@ -214,21 +214,6 @@
+         return false;
+     }
+ 
+-    private static Equipment? GetBundledAmmo(Equipment equipment)
+-    {
+-        if (equipment is MissileLauncherEquipment launcher && launcher.Munition.Def.RequiresAmmo)
+-            return launcher.Munition;
+-
+-        if (equipment is MineDropperEquipment mine && mine.Mine?.Def.RequiresAmmo == true)
+-            return mine.Mine!;
+-
+-        if (equipment is CountermeasureEquipment countermeasure &&
+-            countermeasure.Munition?.Def.RequiresAmmo == true)
+-            return countermeasure.Munition;
+-
+-        return null;
+-    }
+-
+     public Task<bool> PurchaseGood(string item, int count)
+     {
+         if (count <= 0)
+@@ -248,8 +233,7 @@
+         }
+ 
+         var equipment = g.Good.Equipment;
+-        var bundledAmmo = GetBundledAmmo(equipment);
+-        const int bundledAmmoPerLauncher = 10;
++        var bundledAmmo = CargoUtilities.GetBundledAmmo(equipment);
+         var bundledAmmoCount = 0;
+ 
+         var cost = (long) (g.Price * (ulong) count);
+@@ -272,22 +256,13 @@
+ 
+         if (bundledAmmo != null)
+         {
+-            var ammoCount = (long) bundledAmmoPerLauncher * count;
++            var ammoCount = (long) CargoUtilities.BundledAmmoPerLauncher * count;
+             if (ammoCount > int.MaxValue)
+                 return Task.FromResult(false);
+-
+-            var itemsAfterLauncher = Player.Character.Items;
+-            if (hp == null)
+-            {
+-                itemsAfterLauncher = new List<NetCargo>(Player.Character.Items)
+-                {
+-                    new NetCargo { Equipment = equipment, Count = count }
+-                };
+-            }
+-
+             bundledAmmoCount = (int) ammoCount;
+-            if (bundledAmmoCount > CargoUtilities.GetItemLimit(
+-                    itemsAfterLauncher, Player.Character.Ship!, bundledAmmo))
++            if (CargoUtilities.GetBundledAmmoPurchaseLimit(
++                    Player.Character.Items, Player.Character.Ship!, equipment, bundledAmmo,
++                    count, canAutoMountSingle: hp != null) < count)
+             {
+                 FLLog.Error("Player", $"{Player.Name} tried to overfill cargo hold with bundled ammunition");
+                 return Task.FromResult(false);
+--- a/src/LibreLancer/Client/Trader.cs
++++ b/src/LibreLancer/Client/Trader.cs
+@@ -573,8 +573,13 @@
+                 return 0;
+             }
+             var maxAmount = (int) Math.Floor(session.Credits / item.Price);
+-            var holdLimit = CargoUtilities.GetItemLimit(session.Items, session.PlayerShip!, item.Equipment!);
+-            return Math.Min(maxAmount, holdLimit);
++            var canAutoMountSingle = !string.IsNullOrWhiteSpace(item.Equipment.HpType) &&
++                CargoUtilities.CompatibleHardpoints(session.PlayerShip!, session.Game.GameData.Items.Ini.HpTypes,
++                        item.Equipment.HpType)
++                    .Any(hp => !session.Items.Any(x => hp.Equals(x.Hardpoint, StringComparison.OrdinalIgnoreCase)));
++
++            return CargoUtilities.GetPurchaseLimit(
++                session.Items, session.PlayerShip!, item.Equipment, maxAmount, canAutoMountSingle);
+         }
+ 
+         public float GetHoldSize() => session.PlayerShip?.HoldSize ?? 0;
+--- /dev/null
++++ b/src/LibreLancer.Tests/BundledAmmoPurchaseLimitTests.cs
+@@ -0,0 +1,67 @@
++using System.Collections.Generic;
++using LibreLancer.Data.GameData;
++using LibreLancer.Data.GameData.Items;
++using LibreLancer.Data.Schema.Equipment;
++using LibreLancer.Server;
++using LibreLancer.World;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class BundledAmmoPurchaseLimitTests
++{
++    [Fact]
++    public void SingleAutoMountedItemCanBePurchasedWithoutCargoSpaceForLauncher()
++    {
++        var launcher = new Equipment { Volume = 100 };
++        var ship = new Ship { HoldSize = 0 };
++
++        var limit = CargoUtilities.GetPurchaseLimit([], ship, launcher, maxByCredits: 5,
++            canAutoMountSingle: true);
++
++        Assert.Equal(1, limit);
++    }
++
++    [Fact]
++    public void PurchaseLimitRespectsPerTypeAmmoStackLimit()
++    {
++        var launcher = new Equipment { Volume = 1 };
++        var ammunition = new MunitionEquip { Def = new Munition(), Volume = 0.1f };
++        var ship = new Ship { HoldSize = 100 };
++        var cargo = new List<NetCargo>
++        {
++            new() { Equipment = ammunition, Count = 30 }
++        };
++
++        var limit = CargoUtilities.GetBundledAmmoPurchaseLimit(
++            cargo, ship, launcher, ammunition, maxLaunchers: 10, canAutoMountSingle: false);
++
++        Assert.Equal(2, limit);
++    }
++
++    [Fact]
++    public void PurchaseLimitAccountsForLauncherAndBundledAmmoHoldSpace()
++    {
++        var launcher = new Equipment { Volume = 1 };
++        var ammunition = new MunitionEquip { Def = new Munition(), Volume = 0.5f };
++        var ship = new Ship { HoldSize = 15 };
++
++        var limit = CargoUtilities.GetBundledAmmoPurchaseLimit(
++            [], ship, launcher, ammunition, maxLaunchers: 10, canAutoMountSingle: false);
++
++        Assert.Equal(2, limit);
++    }
++
++    [Fact]
++    public void SingleAutoMountedLauncherDoesNotConsumeCargoVolume()
++    {
++        var launcher = new Equipment { Volume = 100 };
++        var ammunition = new MunitionEquip { Def = new Munition(), Volume = 1 };
++        var ship = new Ship { HoldSize = 10 };
++
++        var limit = CargoUtilities.GetBundledAmmoPurchaseLimit(
++            [], ship, launcher, ammunition, maxLaunchers: 10, canAutoMountSingle: true);
++
++        Assert.Equal(1, limit);
++    }
++}

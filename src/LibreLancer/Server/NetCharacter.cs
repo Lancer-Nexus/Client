@@ -28,7 +28,6 @@ namespace LibreLancer.Server
     {
         public string? Name;
 
-        public bool Admin;
         public string? Base { get; private set; }
         public string? System { get; private set; }
         public Vector3 Position { get; private set; }
@@ -263,6 +262,7 @@ namespace LibreLancer.Server
 
             public void ClearAllCargo()
             {
+                cargoDirty = true;
                 foreach(var item in nc.Items.Where(x => x.DbItemId != 0))
                     cargoToDelete.Add(item.DbItemId);
                 nc.Items = [];
@@ -411,11 +411,19 @@ namespace LibreLancer.Server
             var nc = new NetCharacter
             {
                 gData = game.GameData,
-                Admin = db == null
             };
             nc.transactionCount++;
             var stats = new NetPlayerStatistics();
             using var c = new CharacterTransaction(nc, db);
+
+            if (db != null)
+            {
+                db.Items.Clear();
+                db.Reputations.Clear();
+                db.VisitEntries.Clear();
+                db.VisitHistoryEntries.Clear();
+                c.ClearAllCargo();
+            }
 
             c.UpdateName(sg.Player!.Name!);
             c.UpdateCredits(sg.Player.Money);
@@ -504,7 +512,6 @@ namespace LibreLancer.Server
             var db = await game.Database.GetCharacter(id);
             var nc = new NetCharacter();
             var c = await db.GetCharacter();
-            nc.Admin = c.IsAdmin;
             nc.Reputation = new ReputationCollection();
             foreach (var rep in c.Reputations)
             {

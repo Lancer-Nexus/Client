@@ -1,0 +1,200 @@
+--- a/src/LibreLancer/Fx/Fields/FLDustField.cs
++++ b/src/LibreLancer/Fx/Fields/FLDustField.cs
+@@ -3,22 +3,51 @@
+ // LICENSE, which is part of this source code package
+ 
+ using System;
++using System.Numerics;
+ using LibreLancer.Utf.Ale;
+ namespace LibreLancer.Fx
+ {
+ 	public class FLDustField : FxField
+ 	{
+         public AlchemyCurveAnimation MaxRadius;
++        public AleProperty MaxRadiusProperty;
+ 
+         public FLDustField (AlchemyNode ale) : base(ale)
+         {
+-            MaxRadius = ale.GetCurveAnimation(AleProperty.SphereEmitter_MaxRadius)!;
++            MaxRadiusProperty = ale.TryGetParameter(AleProperty.DustField_MaxRadius, out _)
++                ? AleProperty.DustField_MaxRadius
++                : AleProperty.SphereEmitter_MaxRadius;
++            MaxRadius = ale.GetCurveAnimation(MaxRadiusProperty)!;
+         }
+ 
+         public FLDustField(string name) : base(name)
+         {
++            MaxRadiusProperty = AleProperty.DustField_MaxRadius;
+             MaxRadius = new(1);
+         }
++
++        public override AlchemyNode SerializeNode()
++        {
++            var node = base.SerializeNode();
++            node.Parameters.Add(new(MaxRadiusProperty, MaxRadius));
++            return node;
++        }
++
++        public bool IsPositionVisible(ParticleEffectInstance instance, FieldReference field,
++            Vector3 worldPosition, float sparam)
++        {
++            var radius = MaxRadius.GetValue(sparam, (float) instance.GlobalTime);
++            var center = Vector3.Transform(Vector3.Zero, instance.NodeWorldTransforms[field.NodeIdx]);
++            return IsWithinRadius(worldPosition, center, radius);
++        }
++
++        internal static bool IsWithinRadius(Vector3 position, Vector3 center, float radius)
++        {
++            if (!float.IsFinite(radius) || radius < 0)
++                return false;
++            var offset = position - center;
++            return offset.LengthSquared() <= radius * radius;
++        }
+ 	}
+ }
+ 
+--- a/src/LibreLancer/Utf/Ale/AleProperty.cs
++++ b/src/LibreLancer/Utf/Ale/AleProperty.cs
+@@ -1,10 +1,11 @@
+-// ReSharper disable InconsistentNaming
++﻿// ReSharper disable InconsistentNaming
+ 
+ namespace LibreLancer.Utf.Ale;
+ 
+ public enum AleProperty : uint
+ {
+     // Manual Entry
++    DustField_MaxRadius = 0xE63AA248,
+     BeamApp_LineAppearance = 0x1C65B7B9,
+     // FLAleCrc constants
+     AirField_Approach = 0x10423CEB,
+--- a/src/LibreLancer/Fx/Appearances/FxBasicAppearance.cs
++++ b/src/LibreLancer/Fx/Appearances/FxBasicAppearance.cs
+@@ -113,6 +113,8 @@
+                 ref var particle = ref instance.Buffer[nodeIdx, i];
+                 var time = particle.TimeAlive / particle.LifeSpan;
+                 var p = Vector3.Transform(Vector3.Transform(particle.Position, particle.Orientation), nodeTr);
++                if (!PassesVisibilityFields(node, instance, p, sparam))
++                    continue;
+                 var v = Vector3.TransformNormal(particle.Velocity, nodeTr);
+                 var c = Color.GetValue(sparam, time);
+                 var a = Alpha.GetValue(sparam, time);
+@@ -150,6 +152,18 @@
+         internal static Vector2 GetAspectAdjustedSize(float size, float horizontalToVerticalAspect) =>
+             new Vector2(size * horizontalToVerticalAspect, size) * 2;
+ 
++        protected static bool PassesVisibilityFields(AppearanceReference node, ParticleEffectInstance instance,
++            Vector3 worldPosition, float sparam)
++        {
++            foreach (var field in node.Linked)
++            {
++                if (field.Field is FLDustField dustField &&
++                    !dustField.IsPositionVisible(instance, field, worldPosition, sparam))
++                    return false;
++            }
++            return true;
++        }
++
+         protected float GetFrame(float globaltime, float sparam, ref Particle particle)
+         {
+             float frame = 0;
+--- a/src/LibreLancer/Fx/Appearances/FxRectAppearance.cs
++++ b/src/LibreLancer/Fx/Appearances/FxRectAppearance.cs
+@@ -97,6 +97,8 @@
+                 }
+ 
+                 var p = Vector3.Transform(src_pos, node_tr);
++                if (!PassesVisibilityFields(node, instance, p, sparam))
++                    continue;
+                 var c = Color!.GetValue(sparam, time);
+                 var a = Alpha!.GetValue(sparam, time);
+                 var n = Vector3.TransformNormal(particle.Normal, node_tr);
+--- a/src/LibreLancer/Fx/Appearances/FxPerpAppearance.cs
++++ b/src/LibreLancer/Fx/Appearances/FxPerpAppearance.cs
+@@ -38,6 +38,8 @@
+                     (float)instance.LastTime, (float)instance.GlobalTime);
+                 particle.Orientation = q;
+                 var p = Vector3.Transform(particle.Position, node_tr);
++                if (!PassesVisibilityFields(node, instance, p, sparam))
++                    continue;
+                 var p2 = Vector3.Transform(particle.Position + particle.Velocity, node_tr);
+                 var n = (p - p2).Normalized();
+                 if (ViewingAngleFade)
+--- a/src/LibreLancer/Fx/Appearances/FxOrientedAppearance.cs
++++ b/src/LibreLancer/Fx/Appearances/FxOrientedAppearance.cs
+@@ -41,6 +41,8 @@
+                 ref var particle = ref instance.Buffer[nodeIdx, i];
+                 var time = particle.TimeAlive / particle.LifeSpan;
+                 var position = Vector3.Transform(Vector3.Transform(particle.Position, particle.Orientation), nodeTr);
++                if (!PassesVisibilityFields(node, instance, position, sparam))
++                    continue;
+                 var velocity = Vector3.TransformNormal(particle.Velocity, nodeTr);
+                 var color = Color.GetValue(sparam, time);
+                 var alpha = Alpha.GetValue(sparam, time);
+diff --git a/src/LibreLancer.Tests/FLDustFieldTests.cs b/src/LibreLancer.Tests/FLDustFieldTests.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Tests/FLDustFieldTests.cs
+@@ -0,0 +1,62 @@
++using System.Numerics;
++using LibreLancer.Fx;
++using LibreLancer.Utf.Ale;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class FLDustFieldTests
++{
++    [Fact]
++    public void ReadsTheRadiusCurveUsedByVanillaDustFields()
++    {
++        var radius = new AlchemyCurveAnimation(12f);
++        var node = new AlchemyNode();
++        node.Parameters.Add(new AleParameter(AleProperty.DustField_MaxRadius, radius));
++
++        var field = new FLDustField(node);
++
++        Assert.Same(radius, field.MaxRadius);
++    }
++
++    [Fact]
++    public void ReadsTheSphereEmitterRadiusAliasUsedByMostVanillaDustFields()
++    {
++        var radius = new AlchemyCurveAnimation(60.1f);
++        var node = new AlchemyNode();
++        node.Parameters.Add(new AleParameter(AleProperty.SphereEmitter_MaxRadius, radius));
++
++        var field = new FLDustField(node);
++
++        Assert.Same(radius, field.MaxRadius);
++        Assert.Equal(AleProperty.SphereEmitter_MaxRadius, field.MaxRadiusProperty);
++    }
++
++    [Theory]
++    [InlineData(false)]
++    [InlineData(true)]
++    public void PreservesTheRadiusPropertyKeyWhenSerializing(bool useDustFieldKey)
++    {
++        var radius = new AlchemyCurveAnimation(12f);
++        var key = useDustFieldKey ? AleProperty.DustField_MaxRadius : AleProperty.SphereEmitter_MaxRadius;
++        var node = new AlchemyNode();
++        node.Parameters.Add(new AleParameter(key, radius));
++        var field = new FLDustField(node);
++
++        var serialized = field.SerializeNode();
++
++        Assert.Contains(serialized.Parameters,
++            p => p.Name == key && ReferenceEquals(p.Value, radius));
++    }
++
++    [Theory]
++    [InlineData(0, 0, 0, true)]
++    [InlineData(3, 4, 0, true)]
++    [InlineData(3.001, 4, 0, false)]
++    [InlineData(0, 0, 5.001, false)]
++    public void VisibilityIsLimitedToTheDustSphere(double x, double y, double z, bool expected)
++    {
++        Assert.Equal(expected, FLDustField.IsWithinRadius(
++            new Vector3((float)x, (float)y, (float)z), Vector3.Zero, 5));
++    }
++}

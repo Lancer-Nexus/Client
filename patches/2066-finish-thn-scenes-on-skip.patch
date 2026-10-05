@@ -1,0 +1,514 @@
+--- a/src/LibreLancer/GameStates/RoomGameplay.cs
++++ b/src/LibreLancer/GameStates/RoomGameplay.cs
+@@ -918,7 +918,7 @@
+                             break;
+                         case ScriptState.Cutscene:
+                         case ScriptState.Enter:
+-                            SceneOnScriptFinished(waitingForFinish!);
++                            SkipCurrentSceneScript();
+                             break;
+                     }
+                 }
+@@ -928,6 +928,19 @@
+                     paused = true;
+                     ui.Event("Pause");
+                 }
++            }
++        }
++
++        private void SkipCurrentSceneScript()
++        {
++            if (waitingForFinish == null)
++            {
++                return;
++            }
++
++            if (scene?.FinishScript(waitingForFinish) != true)
++            {
++                SceneOnScriptFinished(waitingForFinish);
+             }
+         }
+ 
+--- a/src/LibreLancer/Thn/Cutscene.cs
++++ b/src/LibreLancer/Thn/Cutscene.cs
+@@ -166,6 +166,20 @@
+         SceneSetup(scripts);
+     }
+ 
++    public bool FinishScript(ThnScript script)
++    {
++        var instance = instances.FirstOrDefault(x => ReferenceEquals(x.Script, script));
++        if (instance == null)
++            return false;
++
++        instance.FinishImmediate(false);
++        foreach (var obj in sceneObjects.Values)
++            obj.Update();
++        camera.Update();
++        OnScriptFinished(script);
++        return true;
++    }
++
+     /// <summary>
+     /// Runs a THN without rebuilding the room set. Bound aliases are added to
+     /// the shared scene-object table before entity references are resolved.
+--- a/src/LibreLancer/Thn/ThnScriptInstance.cs
++++ b/src/LibreLancer/Thn/ThnScriptInstance.cs
+@@ -4,6 +4,7 @@
+ 
+ using System;
+ using System.Collections.Generic;
++using System.Linq;
+ using System.Numerics;
+ using LibreLancer.Client.Components;
+ using LibreLancer.Render;
+@@ -19,6 +20,8 @@
+     public abstract class ThnEventProcessor
+     {
+         public abstract bool Run(double delta);
++
++        public virtual void Finish() => Run(double.MaxValue);
+     }
+ 
+     public class ThnScriptInstance
+@@ -37,6 +40,8 @@
+         public Dictionary<string, ThnSoundInstance> Sounds = new();
+ 
+         private readonly ThnScript thn;
++        private readonly List<(ThnSceneObject Object, string Animation)> skipMotionTargets = [];
++        public ThnScript Script => thn;
+ 
+         public ThnScriptInstance(Cutscene cs, ThnScript script)
+         {
+@@ -53,6 +58,15 @@
+         public void AddProcessor(ThnEventProcessor ev)
+         {
+             processors.Add(ev);
++        }
++
++        public void AddSkipMotionTarget(ThnSceneObject obj, string animation)
++        {
++            if (!skipMotionTargets.Any(x => ReferenceEquals(x.Object, obj) &&
++                    x.Animation.Equals(animation, StringComparison.OrdinalIgnoreCase)))
++            {
++                skipMotionTargets.Add((obj, animation));
++            }
+         }
+ 
+         private bool CheckObject(ThnEntity e, object? sub, EntityTypes type, string templateName)
+@@ -350,9 +364,31 @@
+                 Shutdown();
+         }
+ 
+-        public void Shutdown()
+-        {
+-            Cutscene.OnScriptFinished(thn);
++        public void FinishImmediate(bool raiseFinished = true)
++        {
++            if (CurrentTime > Duration)
++                return;
++
++            CurrentTime = Duration;
++            delaySoundEvents.Clear();
++            while (events.Count > 0 && events.Peek().Time <= Duration)
++                events.Dequeue().Run(this);
++
++            for (var i = 0; i < processors.Count; i++)
++                processors[i].Finish();
++            processors.Clear();
++
++            foreach (var target in skipMotionTargets)
++                target.Object.FinishAnimation(target.Animation);
++
++            CurrentTime = Duration + (1.0 / 60.0);
++            Shutdown(raiseFinished);
++        }
++
++        public void Shutdown(bool raiseFinished = true)
++        {
++            if (raiseFinished)
++                Cutscene.OnScriptFinished(thn);
+             Cleanup();
+         }
+ 
+--- a/src/LibreLancer/Thn/ThnSceneObject.cs
++++ b/src/LibreLancer/Thn/ThnSceneObject.cs
+@@ -110,6 +110,16 @@
+         UpdateEngineObjects();
+     }
+ 
++    public void FinishAnimation(string animationName)
++    {
++        Object?.AnimationComponent?.FinishAnimation(animationName);
++        if (Object?.RenderComponent is CharacterRenderer character && character.Skeleton.ApplyRootMotion)
++        {
++            Update();
++            character.Skeleton.ClearRootMotion();
++        }
++    }
++
+ 
+     void UpdateEngineObjects()
+     {
+--- a/src/LibreLancer/Thn/Events/AttachEntityEvent.cs
++++ b/src/LibreLancer/Thn/Events/AttachEntityEvent.cs
+@@ -37,6 +37,12 @@
+                     return false;
+                 }
+                 return true;
++            }
++
++            public override void Finish()
++            {
++                Child.Update();
++                Child.Attachments.Remove(Attachment);
+             }
+         }
+ 
+--- a/src/LibreLancer/Thn/Events/StartPathAnimationEvent.cs
++++ b/src/LibreLancer/Thn/Events/StartPathAnimationEvent.cs
+@@ -78,6 +78,13 @@
+                 }
+                 return true;
+             }
++
++            public override void Finish()
++            {
++                Parent.T = Event.StopPercent;
++                Child.Update();
++                Child.Attachments.Remove(Attachment);
++            }
+         }
+     }
+ }
+--- a/src/LibreLancer/Thn/Events/StartMotionEvent.cs
++++ b/src/LibreLancer/Thn/Events/StartMotionEvent.cs
+@@ -54,6 +54,7 @@
+             {
+                 bool loop = (Flags == 2);
+                 obj.Object.AnimationComponent.StartAnimation(Animation, loop, StartTime, TimeScale, Duration);
++                instance.AddSkipMotionTarget(obj, Animation);
+             }
+             else
+             {
+--- a/src/LibreLancer/World/Components/AnimationComponent.cs
++++ b/src/LibreLancer/World/Components/AnimationComponent.cs
+@@ -279,6 +279,50 @@
+             }
+         }
+ 
++        public void FinishAnimation(string animationName)
++        {
++            if (Parent?.RenderComponent is CharacterRenderer characterRenderer)
++            {
++                characterRenderer.Skeleton.FinishScript(animationName);
++                return;
++            }
++
++            for (int i = animations.Count - 1; i >= 0; i--)
++            {
++                var animation = animations[i];
++                if (animation.Loop ||
++                    !animation.Name.Equals(animationName, StringComparison.OrdinalIgnoreCase))
++                    continue;
++
++                ApplyAnimationFinalPose(animation.Script, animation.Reverse);
++                active.Remove(animation.Script);
++                completeAnimations.Add(animation);
++                animations.RemoveAt(i);
++            }
++
++            Parent?.Model?.RigidModel.UpdateTransform();
++            Parent?.UpdateCollision();
++            rm?.UpdateTransform();
++        }
++
++        private void ApplyAnimationFinalPose(Script script, bool reverse)
++        {
++            var model = Parent == null ? rm : Parent.Model!.RigidModel;
++            foreach (var jointMap in script.JointMaps)
++            {
++                var joint = model.Parts[jointMap.ChildName].Construct;
++                var time = reverse ? 0 : jointMap.Channel.Duration;
++                var cursor = 0;
++                var angle = jointMap.Channel.HasAngle
++                    ? jointMap.Channel.FloatAtTime(time, ref cursor)
++                    : (ChannelFloat)0;
++                var orientation = jointMap.Channel.HasOrientation
++                    ? jointMap.Channel.QuaternionAtTime(time, ref cursor)
++                    : Quaternion.Identity;
++                joint?.Update(angle, orientation);
++            }
++        }
++
+         public void ResetTimeSource()
+         {
+             getTotalTime = () => accumTime;
+--- a/src/LibreLancer/Render/DfmSkeletonManager.cs
++++ b/src/LibreLancer/Render/DfmSkeletonManager.cs
+@@ -166,6 +166,12 @@
+         public Quaternion RootRotation => _rootMotionInstance!.RootRotation;
+ 
+         public Quaternion RootRotationAccumulator => _rootMotionInstance!.RootRotationAccumulator;
++
++        public void ClearRootMotion()
++        {
++            _rootMotionInstance = null;
++            _rootMotionWeight = 0f;
++        }
+         public Vector3 LastTranslation;
+         public Quaternion LastRotation;
+ 
+@@ -365,6 +371,56 @@
+                     return running;
+                 }
+             }
++
++            public void Finish(Dictionary<BoneInstance, BoneBlendData> blendData)
++            {
++                var finishTime = GetFinishTime();
++                for (var i = 0; i < Joints.Count; i++)
++                {
++                    ref var joint = ref Joints[i];
++                    ref var channel = ref Script.JointMaps[joint.JointMapIndex].Channel;
++                    var time = channel.Duration > 0f ? MathF.Min(finishTime, channel.Duration) : 0f;
++                    if (!blendData.TryGetValue(joint.Bone, out var data))
++                        data = default;
++
++                    if (channel.HasOrientation)
++                    {
++                        var rotation = channel.QuaternionAtTime(time, ref joint.JointMapCursor);
++                        DfmSkeletonManager.AccumulateRotation(ref data, rotation, 1f);
++                    }
++
++                    if (channel.HasPosition)
++                    {
++                        var translation = channel.PositionAtTime(time, ref joint.JointMapCursor);
++                        DfmSkeletonManager.AccumulateTranslation(ref data, translation, 1f);
++                    }
++                    blendData[joint.Bone] = data;
++                }
++
++                if (EvaluateRoot(lastFt, out var rootRotation, out var rootTranslation) &&
++                    EvaluateRoot(finishTime, out var finalRotation, out var finalTranslation))
++                {
++                    RootTranslation = finalTranslation - rootTranslation;
++                    RootRotation = Quaternion.Inverse(rootRotation) * finalRotation;
++                    RootRotationAccumulator = finalRotation;
++                    Parent._rootMotionInstance = this;
++                    Parent._rootMotionWeight = 1f;
++                }
++            }
++
++            private float GetFinishTime()
++            {
++                var timeScale = TimeScale <= 0f ? 1f : TimeScale;
++                if (Duration > 0f)
++                    return StartTime + Duration * timeScale;
++
++                var duration = 0f;
++                foreach (var jointMap in Script.JointMaps)
++                    duration = MathF.Max(duration, jointMap.Channel.Duration);
++                foreach (var objectMap in Script.ObjectMaps)
++                    duration = MathF.Max(duration, objectMap.Channel.Duration);
++                return StartTime + duration;
++            }
+         }
+ 
+         public Dictionary<string, DfmHardpoint> Hardpoints = new(StringComparer.OrdinalIgnoreCase);
+@@ -568,6 +624,72 @@
+ 
+             foreach (var sc in toRemove) RunningScripts.Remove(sc);
+             UpdateBounds();
++        }
++
++        public void FinishScript(string scriptName)
++        {
++            _rootMotionInstance = null;
++            _rootMotionWeight = 0f;
++            var toFinish = RunningScripts
++                .Where(x => !x.Loop && x.Script.Name.Equals(scriptName, StringComparison.OrdinalIgnoreCase))
++                .ToArray();
++            if (toFinish.Length == 0)
++                return;
++
++            var basePose = new Dictionary<BoneInstance, BonePose>();
++            var blendData = new Dictionary<BoneInstance, BoneBlendData>();
++            CaptureBasePose(toFinish, basePose);
++            foreach (var script in toFinish)
++                script.Finish(blendData);
++            ApplyBlendData(basePose, blendData);
++            foreach (var script in toFinish)
++                RunningScripts.Remove(script);
++            UpdateBounds();
++        }
++
++        private static void CaptureBasePose(
++            IEnumerable<ScriptInstance> scripts,
++            Dictionary<BoneInstance, BonePose> basePose)
++        {
++            foreach (var script in scripts)
++            foreach (var joint in script.Joints)
++            {
++                if (!basePose.ContainsKey(joint.Bone))
++                    basePose[joint.Bone] = new BonePose(joint.Bone.Rotation, joint.Bone.Translation);
++            }
++        }
++
++        private void ApplyBlendData(
++            Dictionary<BoneInstance, BonePose> basePose,
++            Dictionary<BoneInstance, BoneBlendData> blendData)
++        {
++            foreach (var pair in basePose)
++            {
++                if (blendData.TryGetValue(pair.Key, out var data))
++                {
++                    var rotationWeight = MathF.Min(1f, data.RotationWeight);
++                    var translationWeight = MathF.Min(1f, data.TranslationWeight);
++                    pair.Key.Rotation = rotationWeight > 0f
++                        ? Quaternion.Slerp(pair.Value.Rotation, data.Rotation, rotationWeight)
++                        : pair.Value.Rotation;
++                    pair.Key.Translation = translationWeight > 0f
++                        ? Vector3.Lerp(pair.Value.Translation, data.Translation, translationWeight)
++                        : pair.Value.Translation;
++                }
++                else
++                {
++                    pair.Key.Rotation = pair.Value.Rotation;
++                    pair.Key.Translation = pair.Value.Translation;
++                }
++            }
++
++            BodySkinning.UpdateBones();
++            HeadSkinning?.UpdateBones();
++            LeftHandSkinning?.UpdateBones();
++            RightHandSkinning?.UpdateBones();
++            HeadConnection?.Update();
++            LeftHandConnection?.Update();
++            RightHandConnection?.Update();
+         }
+ 
+         public void UploadBoneData(StorageBuffer bonesBuffer, ref int offset, ref int lastSet)
+--- a/src/LibreLancer.Tests/ThnScriptDurationTests.cs
++++ b/src/LibreLancer.Tests/ThnScriptDurationTests.cs
+@@ -25,6 +25,24 @@
+         Assert.False(afterEnd.Ran);
+     }
+ 
++    [Fact]
++    public void FinishingScriptRunsOnlyInRangeEventsAndFinishesProcessors()
++    {
++        var inRange = new ProbeEvent(9);
++        var afterEnd = new ProbeEvent(11);
++        var script = new ThnScript { Duration = 10, Events = [inRange, afterEnd] };
++        var instance = new ThnScriptInstance(
++            (Cutscene)RuntimeHelpers.GetUninitializedObject(typeof(Cutscene)), script);
++        var processor = new ProbeProcessor();
++        instance.AddProcessor(processor);
++
++        instance.FinishImmediate(raiseFinished: false);
++
++        Assert.True(inRange.Ran);
++        Assert.False(afterEnd.Ran);
++        Assert.True(processor.Finished);
++    }
++
+     private sealed class ProbeEvent : ThnEvent
+     {
+         public bool Ran { get; private set; }
+@@ -33,4 +51,13 @@
+ 
+         public override void Run(ThnScriptInstance instance) => Ran = true;
+     }
++
++    private sealed class ProbeProcessor : ThnEventProcessor
++    {
++        public bool Finished { get; private set; }
++
++        public override bool Run(double delta) => true;
++
++        public override void Finish() => Finished = true;
++    }
+ }
+--- a/src/LibreLancer.Tests/MultipartLoopAnimationTests.cs
++++ b/src/LibreLancer.Tests/MultipartLoopAnimationTests.cs
+@@ -102,6 +102,48 @@
+     }
+ 
+     [Fact]
++    public void FinishingNonLoopedAnimationAppliesFinalPose()
++    {
++        var animation = new AnmFile();
++        var script = new Script("Sc_finish");
++        AddTrack(script, "Valve", 4f, 4f);
++        animation.Scripts.Add(script.Name, script);
++
++        var root = new RigidModelPart { Name = "Root", Children = [] };
++        var part = new RigidModelPart
++        {
++            Name = "Valve",
++            Construct = new PrisConstruct
++            {
++                ParentName = "Root",
++                ChildName = "Valve",
++                AxisTranslation = Vector3.UnitX,
++                Min = -10,
++                Max = 10
++            }
++        };
++        root.Children.Add(part);
++        var model = new RigidModel
++        {
++            Root = root,
++            Parts = new ModelPartCollection(),
++            AllParts = [root, part],
++            Source = RigidModelSource.Compound
++        };
++        model.Parts.Add(root);
++        model.Parts.Add(part);
++
++        var component = new AnimationComponent(model, animation);
++        component.StartAnimation(script, loop: false);
++        component.Update(0.25, null!);
++
++        component.FinishAnimation(script.Name);
++
++        Assert.InRange(part.Construct!.LocalTransform.Position.X, 3.999f, 4.001f);
++        Assert.Single(component.Serialize(), x => x.Finished);
++    }
++
++    [Fact]
+     public void NewClipBlendsFromTheCurrentlyDisplayedPose()
+     {
+         var animation = new AnmFile();
+--- a/src/LibreLancer.Tests/DfmSkeletonAnimationTransitionTests.cs
++++ b/src/LibreLancer.Tests/DfmSkeletonAnimationTransitionTests.cs
+@@ -28,6 +28,28 @@
+ 
+         var expected = Quaternion.Slerp(previousPose, Quaternion.Identity, 0.1f);
+         Assert.True(MathF.Abs(Quaternion.Dot(expected, bone.Rotation)) > 0.9999f);
++    }
++
++    [Fact]
++    public void FinishScriptAppliesTheAnimationFinalPose()
++    {
++        var manager = new DfmSkeletonManager(CreateSingleBoneDfm());
++        var finalPose = Quaternion.CreateFromAxisAngle(Vector3.UnitY, MathF.PI / 2);
++        manager.StartScript(CreateScript("escape", finalPose), 0, 1, 0, blendIn: 0, blendOut: 0);
++        manager.UpdateScripts(0.25);
++
++        manager.FinishScript("escape");
++
++        var bone = manager.BodySkinning.Bones["root"];
++        Assert.True(MathF.Abs(Quaternion.Dot(finalPose, bone.Rotation)) > 0.9999f);
++        Assert.Empty(GetRunningScripts(manager));
++    }
++
++    private static System.Collections.ICollection GetRunningScripts(DfmSkeletonManager manager)
++    {
++        var field = typeof(DfmSkeletonManager).GetField("RunningScripts",
++            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
++        return (System.Collections.ICollection)field.GetValue(manager)!;
+     }
+ 
+     private static Script CreateScript(string name, Quaternion pose)

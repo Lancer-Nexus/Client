@@ -8,6 +8,7 @@ using System.Linq;
 using System.Numerics;
 using LibreLancer.Client.Components;
 using LibreLancer.Data;
+using LibreLancer.Data.GameData;
 using LibreLancer.Data.GameData.Items;
 using LibreLancer.Fx;
 using LibreLancer.Media;
@@ -66,7 +67,7 @@ namespace LibreLancer.World
                 {
                     Projectiles[i].Alive = false;
                     Projectiles[i].Effect = null;
-                    world.Renderer?.SpawnTempFx(Projectiles[i].Data.HitEffect, contactPoint);
+                    world.SpawnTempFx(Projectiles[i].Data.HitEffect, contactPoint);
 
                     if (po?.Tag is GameObject go)
                     {
@@ -124,8 +125,7 @@ namespace LibreLancer.World
 
                 if (gunDef.Munition.Def.MunitionHitEffect != null)
                 {
-                    pdata.HitEffect = res.Items.Effects.Get(gunDef.Munition.Def.MunitionHitEffect)?
-                        .GetEffect(world.Renderer.ResourceManager);
+                    pdata.HitEffect = res.Items.Effects.Get(gunDef.Munition.Def.MunitionHitEffect);
                 }
 
                 if (gunDef.Munition.Def.ConstEffect != null)
@@ -171,7 +171,9 @@ namespace LibreLancer.World
                     bool first = true;
                     List<Vector3>? targets = null;
 
-                    foreach (var v in x)
+                    // OtherTargets is consumed by ascending gun bit on the
+                    // client, so targets must be packed in weapon-index order.
+                    foreach (var v in x.OrderBy(v => v.Index))
                     {
                         if (first)
                         {
@@ -184,7 +186,7 @@ namespace LibreLancer.World
                             if (spawn.Target != v.Target)
                             {
                                 targets ??= [];
-                                targets.Add(spawn.Target);
+                                targets.Add(v.Target);
                                 spawn.Unique |= (1UL << v.Index);
                             }
                         }
@@ -328,7 +330,7 @@ namespace LibreLancer.World
         public required MunitionEquip Munition;
         public float Velocity;
         public float Lifetime;
-        public ParticleEffect? HitEffect;
+        public ResolvedFx? HitEffect;
         public ParticleEffect? TravelEffect;
     }
 

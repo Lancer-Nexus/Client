@@ -166,6 +166,12 @@ namespace LibreLancer.Render
         public Quaternion RootRotation => _rootMotionInstance!.RootRotation;
 
         public Quaternion RootRotationAccumulator => _rootMotionInstance!.RootRotationAccumulator;
+
+        public void ClearRootMotion()
+        {
+            _rootMotionInstance = null;
+            _rootMotionWeight = 0f;
+        }
         public Vector3 LastTranslation;
         public Quaternion LastRotation;
 
@@ -364,6 +370,56 @@ namespace LibreLancer.Render
                 {
                     return running;
                 }
+            }
+
+            public void Finish(Dictionary<BoneInstance, BoneBlendData> blendData)
+            {
+                var finishTime = GetFinishTime();
+                for (var i = 0; i < Joints.Count; i++)
+                {
+                    ref var joint = ref Joints[i];
+                    ref var channel = ref Script.JointMaps[joint.JointMapIndex].Channel;
+                    var time = channel.Duration > 0f ? MathF.Min(finishTime, channel.Duration) : 0f;
+                    if (!blendData.TryGetValue(joint.Bone, out var data))
+                        data = default;
+
+                    if (channel.HasOrientation)
+                    {
+                        var rotation = channel.QuaternionAtTime(time, ref joint.JointMapCursor);
+                        DfmSkeletonManager.AccumulateRotation(ref data, rotation, 1f);
+                    }
+
+                    if (channel.HasPosition)
+                    {
+                        var translation = channel.PositionAtTime(time, ref joint.JointMapCursor);
+                        DfmSkeletonManager.AccumulateTranslation(ref data, translation, 1f);
+                    }
+                    blendData[joint.Bone] = data;
+                }
+
+                if (EvaluateRoot(lastFt, out var rootRotation, out var rootTranslation) &&
+                    EvaluateRoot(finishTime, out var finalRotation, out var finalTranslation))
+                {
+                    RootTranslation = finalTranslation - rootTranslation;
+                    RootRotation = Quaternion.Inverse(rootRotation) * finalRotation;
+                    RootRotationAccumulator = finalRotation;
+                    Parent._rootMotionInstance = this;
+                    Parent._rootMotionWeight = 1f;
+                }
+            }
+
+            private float GetFinishTime()
+            {
+                var timeScale = TimeScale <= 0f ? 1f : TimeScale;
+                if (Duration > 0f)
+                    return StartTime + Duration * timeScale;
+
+                var duration = 0f;
+                foreach (var jointMap in Script.JointMaps)
+                    duration = MathF.Max(duration, jointMap.Channel.Duration);
+                foreach (var objectMap in Script.ObjectMaps)
+                    duration = MathF.Max(duration, objectMap.Channel.Duration);
+                return StartTime + duration;
             }
         }
 
@@ -570,6 +626,72 @@ namespace LibreLancer.Render
             UpdateBounds();
         }
 
+        public void FinishScript(string scriptName)
+        {
+            _rootMotionInstance = null;
+            _rootMotionWeight = 0f;
+            var toFinish = RunningScripts
+                .Where(x => !x.Loop && x.Script.Name.Equals(scriptName, StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            if (toFinish.Length == 0)
+                return;
+
+            var basePose = new Dictionary<BoneInstance, BonePose>();
+            var blendData = new Dictionary<BoneInstance, BoneBlendData>();
+            CaptureBasePose(toFinish, basePose);
+            foreach (var script in toFinish)
+                script.Finish(blendData);
+            ApplyBlendData(basePose, blendData);
+            foreach (var script in toFinish)
+                RunningScripts.Remove(script);
+            UpdateBounds();
+        }
+
+        private static void CaptureBasePose(
+            IEnumerable<ScriptInstance> scripts,
+            Dictionary<BoneInstance, BonePose> basePose)
+        {
+            foreach (var script in scripts)
+            foreach (var joint in script.Joints)
+            {
+                if (!basePose.ContainsKey(joint.Bone))
+                    basePose[joint.Bone] = new BonePose(joint.Bone.Rotation, joint.Bone.Translation);
+            }
+        }
+
+        private void ApplyBlendData(
+            Dictionary<BoneInstance, BonePose> basePose,
+            Dictionary<BoneInstance, BoneBlendData> blendData)
+        {
+            foreach (var pair in basePose)
+            {
+                if (blendData.TryGetValue(pair.Key, out var data))
+                {
+                    var rotationWeight = MathF.Min(1f, data.RotationWeight);
+                    var translationWeight = MathF.Min(1f, data.TranslationWeight);
+                    pair.Key.Rotation = rotationWeight > 0f
+                        ? Quaternion.Slerp(pair.Value.Rotation, data.Rotation, rotationWeight)
+                        : pair.Value.Rotation;
+                    pair.Key.Translation = translationWeight > 0f
+                        ? Vector3.Lerp(pair.Value.Translation, data.Translation, translationWeight)
+                        : pair.Value.Translation;
+                }
+                else
+                {
+                    pair.Key.Rotation = pair.Value.Rotation;
+                    pair.Key.Translation = pair.Value.Translation;
+                }
+            }
+
+            BodySkinning.UpdateBones();
+            HeadSkinning?.UpdateBones();
+            LeftHandSkinning?.UpdateBones();
+            RightHandSkinning?.UpdateBones();
+            HeadConnection?.Update();
+            LeftHandConnection?.Update();
+            RightHandConnection?.Update();
+        }
+
         public void UploadBoneData(StorageBuffer bonesBuffer, ref int offset, ref int lastSet)
         {
             BodySkinning.SetBoneData(bonesBuffer, ref offset, ref lastSet);
@@ -611,6 +733,13 @@ namespace LibreLancer.Render
         public void StartScript(Script anmScript, float start_time, float time_scale, float duration, bool loop = false,
             float blendIn = 5f, float blendOut = 5f)
         {
+            if (!loop && duration > 0f)
+            {
+                var maxBlendDuration = duration * 0.5f;
+                blendIn = MathF.Min(blendIn, maxBlendDuration);
+                blendOut = MathF.Min(blendOut, maxBlendDuration);
+            }
+
             if (anmScript.HasRootHeight)
             {
                 RootHeight = anmScript.RootHeight;

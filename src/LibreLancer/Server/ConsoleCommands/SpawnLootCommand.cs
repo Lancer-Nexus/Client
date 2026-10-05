@@ -7,7 +7,7 @@ namespace LibreLancer.Server.ConsoleCommands;
 public class SpawnLootCommand : IConsoleCommand
 {
     public string Name => "spawnloot";
-    public bool Admin => true;
+    public string? Permission => "command.spawnloot";
     public void Run(Player player, string arguments)
     {
         if (!ConsoleCommands.ParseString<string, int>(arguments, out var l, out var count))

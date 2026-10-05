@@ -1,0 +1,2847 @@
+diff --git a/src/LibreLancer.Data/GameItemDb.cs b/src/LibreLancer.Data/GameItemDb.cs
+index c6b895f9..a9365640 100644
+--- a/src/LibreLancer.Data/GameItemDb.cs
++++ b/src/LibreLancer.Data/GameItemDb.cs
+@@ -116,7 +116,11 @@ public class GameItemDb
+         VFS = vfs;
+         var flini = new FreelancerIni(VFS);
+         flData = new FreelancerData(flini, VFS);
+-        ThornReadCallback = (file) => VFS.ReadAllBytes("EXE/" + file);
++        ThornReadCallback = (file) =>
++        {
++            var legacyPath = "EXE/" + file;
++            return VFS.ReadAllBytes(VFS.FileExists(legacyPath) ? legacyPath : file);
++        };
+     }
+ 
+     public string? DataPath(string? input)
+diff --git a/src/LibreLancer.Data/Schema/FreelancerData.cs b/src/LibreLancer.Data/Schema/FreelancerData.cs
+index f4ec92d0..97392c9b 100644
+--- a/src/LibreLancer.Data/Schema/FreelancerData.cs
++++ b/src/LibreLancer.Data/Schema/FreelancerData.cs
+@@ -432,8 +432,11 @@ public class FreelancerData
+         Run(() =>
+         {
+             ContentDll = new ContentDll();
+-            if (VFS.FileExists("DLLS\\BIN\\content.dll"))
+-                ContentDll.Load(VFS.ReadAllBytes("DLLS\\BIN\\content.dll"));
++            var contentDllPath = VFS.FileExists("content.dll")
++                ? "content.dll"
++                : "DLLS\\BIN\\content.dll";
++            if (VFS.FileExists(contentDllPath))
++                ContentDll.Load(VFS.ReadAllBytes(contentDllPath));
+             if (!string.IsNullOrEmpty(Freelancer.DataVersion))
+                 DataVersion = Freelancer.DataVersion;
+             else
+diff --git a/src/LibreLancer.Data/Schema/FreelancerIni.cs b/src/LibreLancer.Data/Schema/FreelancerIni.cs
+index 7d635a7f..d6ed7032 100644
+--- a/src/LibreLancer.Data/Schema/FreelancerIni.cs
++++ b/src/LibreLancer.Data/Schema/FreelancerIni.cs
+@@ -103,6 +103,8 @@ public class FreelancerIni
+         if (IsLibrelancer)
+         {
+             DacomPath = null;
++            NewPlayerPath = "newplayer.fl";
++            MpNewCharacterPath = "mpnewcharacter.fl";
+         }
+ 
+         EquipmentPaths = [];
+diff --git a/src/LibreLancer.Data/Schema/Save/SavePlayer.cs b/src/LibreLancer.Data/Schema/Save/SavePlayer.cs
+index 0f5908d8..fe798651 100644
+--- a/src/LibreLancer.Data/Schema/Save/SavePlayer.cs
++++ b/src/LibreLancer.Data/Schema/Save/SavePlayer.cs
+@@ -51,7 +51,7 @@ public class PlayerCargo
+         if (!uint.TryParse(s, out uint hash)) Item = new HashValue(s);
+         else Item = hash;
+         Count = e[1].ToInt32();
+-        if (e.Count > 2)
++        if (e.Count > 2 && !string.IsNullOrWhiteSpace(e[2].ToString()))
+             PercentageHealth = e[2].ToSingle();
+         if (e.Count > 4)
+             IsMissionCargo = e[4].ToBoolean();
+diff --git a/src/LibreLancer.Entities/Character/Character.cs b/src/LibreLancer.Entities/Character/Character.cs
+index 0eedef5c..88ca8de1 100644
+--- a/src/LibreLancer.Entities/Character/Character.cs
++++ b/src/LibreLancer.Entities/Character/Character.cs
+@@ -22,6 +22,7 @@ public class Character : BaseEntity
+ 
+     // Is this an admin character?
+ 
++    // Retained for existing SQLite schemas only; authorization uses Nexus permissions.
+     public bool IsAdmin { get; set; }
+ 
+     public uint Rank { get; set; }
+diff --git a/src/LibreLancer.Tests/MissionLabelTests.cs b/src/LibreLancer.Tests/MissionLabelTests.cs
+index f9cd290d..6bee3841 100644
+--- a/src/LibreLancer.Tests/MissionLabelTests.cs
++++ b/src/LibreLancer.Tests/MissionLabelTests.cs
+@@ -42,4 +42,22 @@ public class MissionLabelTests
+ 
+         Assert.False(label.IsAllKilled());
+     }
++
++    [Fact]
++    public void TransferStateRestoresAliveDestroyedAndNotSpawnedMembers()
++    {
++        var source = new MissionLabel("enemies", ["alive", "destroyed", "not_spawned"]);
++        source.Spawned("alive");
++        source.Spawned("destroyed");
++        source.Destroyed("destroyed");
++
++        var target = new MissionLabel("enemies", ["alive", "destroyed", "not_spawned"]);
++        target.RestoreTransferState(source.CaptureTransferState());
++
++        Assert.True(target.AnyAlive());
++        Assert.Equal(1, target.DestroyedCount());
++        Assert.False(target.IsAllKilled());
++        target.Destroyed("alive");
++        Assert.True(target.IsAllKilled());
++    }
+ }
+diff --git a/src/LibreLancer/Client/CGameSession.cs b/src/LibreLancer/Client/CGameSession.cs
+index 2758933a..c1688594 100644
+--- a/src/LibreLancer/Client/CGameSession.cs
++++ b/src/LibreLancer/Client/CGameSession.cs
+@@ -3,11 +3,12 @@
+ // LICENSE, which is part of this source code package
+ 
+ using System;
+-using System.Collections.Concurrent;
+ using System.Collections.Generic;
++using System.Collections.Concurrent;
+ using System.IO;
+ using System.Linq;
+ using System.Numerics;
++using System.Threading.Tasks;
+ using LibreLancer.Data;
+ using LibreLancer.Data.GameData;
+ using LibreLancer.Data.GameData.World;
+@@ -25,11 +26,11 @@ namespace LibreLancer.Client;
+ 
+ public partial class CGameSession : IClientPlayer
+ {
++    private readonly ConcurrentDictionary<Guid, (string Endpoint, string Ticket, string InstanceId, string SystemId)> pendingTransfers = new();
+     private static readonly int NewPlayerIds = 393298;
+     private static readonly int DepartingPlayerIds = 393299;
+ 
+     public List<StoryCutsceneIni> ActiveCutscenes = [];
+-    public bool Admin;
+     private AllowedDocking? allowedDocking;
+     private readonly Queue<Action> audioActions = new();
+ 
+@@ -145,6 +146,12 @@ public partial class CGameSession : IClientPlayer
+ 
+     public bool Multiplayer => connection is GameNetClient;
+ 
++    public string? ClusterInstanceId => (connection as GameNetClient)?.ClusterInstanceId;
++    public string? ClusterSystemId => (connection as GameNetClient)?.ClusterSystemId;
++    public string? ClusterEndpoint => (connection as GameNetClient)?.ClusterEndpoint;
++    public int NetworkPing => (connection as GameNetClient)?.Ping ?? -1;
++    public int NetworkLossPercent => (connection as GameNetClient)?.LossPercent ?? -1;
++
+ 
+     public EmbeddedServer? EmbeddedServer => connection as EmbeddedServer;
+ 
+@@ -213,10 +220,96 @@ public partial class CGameSession : IClientPlayer
+             FLLog.Warning("NPC", "NPC dialog received without an active room UI callback");
+     }
+ 
+-    void IClientPlayer.StartJumpTunnel()
++    void IClientPlayer.StartJumpTunnel(string targetSystem, string target, long characterId)
++    {
++        inTradelane = false;
++        if (connection is not GameNetClient client || string.IsNullOrWhiteSpace(client.ClusterGatewayUrl) ||
++            string.IsNullOrWhiteSpace(client.ClusterAccessToken) || client.ClusterSessionId == Guid.Empty || characterId <= 0)
++        {
++            FLLog.Warning("Client", "Cluster jump is unavailable for this session");
++            return;
++        }
++        _ = Task.Run(async () =>
++        {
++            try
++            {
++                var id = Guid.NewGuid();
++                var expiry = DateTime.UtcNow.AddMinutes(1);
++                using var gateway = new NexusGatewayLogin(new Uri(client.ClusterGatewayUrl, UriKind.Absolute));
++                await client.RefreshClusterSessionAsync();
++                var transfer = await gateway.StartTransferAsync(client.ClusterAccessToken, new LancerNexus.Protocol.TransferStartRequest
++                {
++                    TransferId = id,
++                    SessionId = client.ClusterSessionId,
++                    CharacterId = characterId,
++                    TargetSystemId = targetSystem,
++                    ExpiresUtc = expiry,
++                    IdempotencyKey = id.ToString("N")
++                });
++                if (!pendingTransfers.TryAdd(id, (transfer.TargetEndpoint!, transfer.Prepared!.TransferTicket!,
++                        transfer.TargetInstanceId!, transfer.TargetSystemId!)))
++                    throw new InvalidOperationException("Duplicate transfer identifier.");
++                RpcServer.BeginClusterTransfer(id.ToString("N"), characterId, transfer.LeaseVersion,
++                    targetSystem, target, transfer.TargetInstanceId!, transfer.TargetEndpoint!);
++            }
++            catch (Exception error)
++            {
++                FLLog.Error("Client", $"Unable to prepare cluster jump: {error.Message}");
++                uiActions.Enqueue(() =>
++                {
++                    var message = Game.Debug.Enabled
++                        ? $"Cluster transfer failed\nGate: {target}\nTarget system: {targetSystem}\nCause: {error.Message}"
++                        : "Die Zielinstanz ist aktuell nicht verfügbar oder wird gewartet.";
++                    Game.Typewriter.PlayString(message, new TypewriterStyle
++                    {
++                        FontSize = 22,
++                        Position = new Vector2(30, 350),
++                        Color = new Color4(1f, 0.45f, 0.3f, 1f),
++                        CharactersPerSecond = 90,
++                        DisplayDuration = 8
++                    });
++                });
++            }
++        });
++    }
++
++    void IClientPlayer.StartLocalJumpTunnel()
+     {
+         inTradelane = false;
+-        FLLog.Warning("Client", "Jump tunnel unimplemented");
++    }
++
++    void IClientPlayer.TransferSnapshotStaged(string transferIdText, bool succeeded)
++    {
++        if (!Guid.TryParseExact(transferIdText, "N", out var transferId))
++            return;
++        if (!pendingTransfers.TryRemove(transferId, out var transfer))
++            return;
++        if (!succeeded)
++        {
++            FLLog.Error("Client", "Source could not stage the transfer snapshot");
++            uiActions.Enqueue(() =>
++            {
++                var message = Game.Debug.Enabled
++                    ? $"Cluster transfer failed\nTarget instance: {transfer.InstanceId}\nTarget system: {transfer.SystemId}\nCause: The source snapshot could not be staged."
++                    : "Die Zielinstanz ist aktuell nicht verfügbar oder wird gewartet.";
++                Game.Typewriter.PlayString(message, new TypewriterStyle
++                {
++                    FontSize = 22,
++                    Position = new Vector2(30, 350),
++                    Color = new Color4(1f, 0.45f, 0.3f, 1f),
++                    CharactersPerSecond = 90,
++                    DisplayDuration = 8
++                });
++            });
++            return;
++        }
++        if (connection is GameNetClient client)
++        {
++            client.ClusterInstanceId = transfer.InstanceId;
++            client.ClusterSystemId = transfer.SystemId;
++            client.ClusterEndpoint = transfer.Endpoint;
++            client.ReconnectWithTransferTicket(transfer.Endpoint, "lnx-transfer:" + transferId.ToString("N") + ":" + transfer.Ticket);
++        }
+     }
+ 
+     void IClientPlayer.SetObjective(NetObjective objective, bool history)
+@@ -287,8 +380,7 @@ public partial class CGameSession : IClientPlayer
+         NetWorth = (long)lastInventory.NetWorth;
+         SetSelfLoadout(lastInventory.Loadout);
+ 
+-        if (OnUpdateInventory != null)
+-            uiActions.Enqueue(OnUpdateInventory);
++        QueueInventoryUiUpdate();
+ 
+         if (spaceGameplay == null && OnUpdatePlayerShip != null)
+             uiActions.Enqueue(OnUpdatePlayerShip);
+@@ -305,8 +397,7 @@ public partial class CGameSession : IClientPlayer
+         var cargo = Items.FirstOrDefault(x => x.ID == slot);
+         cargo?.Count = count;
+ 
+-        if (OnUpdateInventory != null)
+-            uiActions.Enqueue(OnUpdateInventory);
++        QueueInventoryUiUpdate();
+     }
+ 
+     public void DeleteSlot(int slot)
+@@ -316,8 +407,7 @@ public partial class CGameSession : IClientPlayer
+         if (cargo != null)
+             Items.Remove(cargo);
+ 
+-        if (OnUpdateInventory != null)
+-            uiActions.Enqueue(OnUpdateInventory);
++        QueueInventoryUiUpdate();
+     }
+ 
+     public void UpdateWeaponGroups(NetWeaponGroup[] wg)
+@@ -361,7 +451,6 @@ public partial class CGameSession : IClientPlayer
+ 
+     void IClientPlayer.ListPlayers(bool isAdmin)
+     {
+-        Admin = isAdmin;
+     }
+ 
+     void IClientPlayer.ReceiveChatMessage(ChatCategory category, BinaryChatMessage player,
+@@ -517,6 +606,21 @@ public partial class CGameSession : IClientPlayer
+             act();
+     }
+ 
++    private void QueueInventoryUiUpdate()
++    {
++        var handler = OnUpdateInventory;
++        if (handler is null)
++            return;
++
++        uiActions.Enqueue(() =>
++        {
++            // A system transition clears this callback before queued UI work drains.
++            // Do not invoke a Lua closure owned by the previous HUD scene.
++            if (ReferenceEquals(OnUpdateInventory, handler))
++                handler();
++        });
++    }
++
+     public DisplayFaction[] GetUIRelations()
+     {
+         return PlayerReputations.Reputations
+@@ -562,7 +666,7 @@ public partial class CGameSession : IClientPlayer
+ 
+     bool CheckDisconnected()
+     {
+-        if (connection.Connected)
++        if (connection.Connected || connection is GameNetClient { IsTransferReconnecting: true })
+             return false;
+         connection.Shutdown();
+         Game.ChangeState(new LuaMenu(Game));
+@@ -711,7 +815,7 @@ public partial class CGameSession : IClientPlayer
+         {
+             BinaryChatMessage msg;
+ 
+-            if (str[0] == '/' || !Admin)
++            if (str[0] == '/')
+                 msg = BinaryChatMessage.PlainText(str);
+             else
+                 msg = BinaryChatMessage.ParseBbCode(str);
+diff --git a/src/LibreLancer/FreelancerGame.cs b/src/LibreLancer/FreelancerGame.cs
+--- a/src/LibreLancer/FreelancerGame.cs
++++ b/src/LibreLancer/FreelancerGame.cs
+@@ -43,6 +43,12 @@
+ 
+ 		public GameConfig Config => _cfg;
+ 
++#if DEBUG
++        public string? DebugLoginEmail { get; set; }
++        public string? DebugLoginPassword { get; set; }
++        public string? DebugCharacterName { get; set; }
++#endif
++
+         private GameConfig _cfg;
+ 		public FreelancerGame(GameConfig config) : base(config.BufferWidth, config.BufferHeight, false)
+ 		{
+@@ -84,8 +90,9 @@
+ 			// Move to stop _TSGetMainThread error on OSX
+ 			MinimumWindowSize = new Point(640, 480);
+ 			SetFullScreen(Config.Settings.FullScreen);
+-			SetVSync(Config.Settings.VSync);
++            SetVSync(Config.Settings.VSync);
+             Config.Settings.RenderContext = RenderContext;
++            _cfg.Validate();
+             Config.Settings.Validate();
+             // Cache
+             var vfs = FileSystem.FromPath(_cfg.FreelancerPath);
+diff --git a/src/LibreLancer/GameConfig.cs b/src/LibreLancer/GameConfig.cs
+index c5be1dc5..4b162c8e 100644
+--- a/src/LibreLancer/GameConfig.cs
++++ b/src/LibreLancer/GameConfig.cs
+@@ -25,6 +25,12 @@ namespace LibreLancer
+ 		public int BufferHeight = 768;
+         [Entry("uuid")]
+ 		public Guid UUID = Guid.Empty;
++        [Entry("cluster_gateway_url")]
++        public string ClusterGatewayUrl = "";
++        [Entry("cluster_target_system")]
++        public string ClusterTargetSystem = "li01";
++        [Entry("cluster_region")]
++        public string ClusterRegion = "eu";
+ 
+         [XmlIgnore]
+ 		public Func<FreelancerGame, GameState>? CustomState;
+@@ -124,6 +130,9 @@ namespace LibreLancer
+             writer.WriteLine($"res_width = {BufferWidth}");
+             writer.WriteLine($"res_height = {BufferHeight}");
+             writer.WriteLine($"uuid = {UUID:D}");
++            writer.WriteLine($"cluster_gateway_url = {ClusterGatewayUrl}");
++            writer.WriteLine($"cluster_target_system = {ClusterTargetSystem}");
++            writer.WriteLine($"cluster_region = {ClusterRegion}");
+             writer.WriteLine();
+             Settings.Write(writer);
+         }
+@@ -134,4 +143,3 @@ namespace LibreLancer
+ 		}
+ 	}
+ }
+-
+diff --git a/src/LibreLancer/Missions/Actions/ScriptedAction_Spawn.cs b/src/LibreLancer/Missions/Actions/ScriptedAction_Spawn.cs
+index 3536781b..77a08313 100644
+--- a/src/LibreLancer/Missions/Actions/ScriptedAction_Spawn.cs
++++ b/src/LibreLancer/Missions/Actions/ScriptedAction_Spawn.cs
+@@ -166,8 +166,6 @@ namespace LibreLancer.Missions.Actions
+                 ld!, pilot, pos, orient, arrivalObject, ship.ArrivalObj.Index, runtime);
+             var drComp = obj.GetComponent<DirectiveRunnerComponent>();
+             drComp!.SetDirectives(directives, runtime.Player.Space.World.GameWorld);
+-            var dstComp = obj.GetComponent<SDestroyableComponent>();
+-            dstComp!.OnKilled = () => { runtime.ObjectDestroyed(ship.Nickname); };
+             return obj;
+         }
+ 
+diff --git a/src/LibreLancer/Missions/ActiveCondition.cs b/src/LibreLancer/Missions/ActiveCondition.cs
+index a11e950f..5345fbae 100644
+--- a/src/LibreLancer/Missions/ActiveCondition.cs
++++ b/src/LibreLancer/Missions/ActiveCondition.cs
+@@ -1,5 +1,7 @@
+ using System;
+ using System.Collections.Generic;
++using System.Linq;
++using LancerNexus.Protocol;
+ using LibreLancer.Missions.Conditions;
+ 
+ namespace LibreLancer.Missions;
+@@ -8,7 +10,7 @@ public class ActiveCondition
+ {
+     public ActiveTrigger Trigger;
+     public ScriptedCondition Condition;
+-    public ConditionStorage Storage = null!;
++    public ConditionStorage Storage = new ConditionEmpty();
+ 
+     public ActiveCondition(ActiveTrigger trigger, ScriptedCondition condition)
+     {
+@@ -18,20 +20,55 @@ public class ActiveCondition
+ }
+ 
+ public abstract class ConditionStorage
++{
++    public virtual NpcMissionConditionState CaptureTransferState() => new() { Kind = "none" };
++
++    public virtual void RestoreTransferState(NpcMissionConditionState state)
++    {
++        if (state.Kind != "none")
++            throw new InvalidOperationException($"Unsupported mission condition storage kind '{state.Kind}'.");
++    }
++}
++
++// Stateless conditions still need an explicit snapshot kind for capture and restore.
++public sealed class ConditionEmpty : ConditionStorage
+ {
+ }
+ 
+ public class ConditionBoolean : ConditionStorage
+ {
+     public bool Value;
++    public override NpcMissionConditionState CaptureTransferState() => new() { Kind = "boolean", BooleanValue = Value };
++    public override void RestoreTransferState(NpcMissionConditionState state)
++    {
++        if (state.Kind != "boolean") throw new InvalidOperationException("Mission condition storage kind mismatch.");
++        Value = state.BooleanValue;
++    }
+ }
+ 
+ public class ConditionDouble : ConditionStorage
+ {
+     public double Value;
++    public override NpcMissionConditionState CaptureTransferState() => new() { Kind = "double", NumberValue = Value };
++    public override void RestoreTransferState(NpcMissionConditionState state)
++    {
++        if (state.Kind != "double") throw new InvalidOperationException("Mission condition storage kind mismatch.");
++        Value = state.NumberValue;
++    }
+ }
+ 
+ public class ConditionHashSet : ConditionStorage
+ {
+     public HashSet<string> Values = new(StringComparer.OrdinalIgnoreCase);
++    public override NpcMissionConditionState CaptureTransferState() => new()
++    {
++        Kind = "strings",
++        StringValues = Values.OrderBy(value => value, StringComparer.OrdinalIgnoreCase).ToArray()
++    };
++    public override void RestoreTransferState(NpcMissionConditionState state)
++    {
++        if (state.Kind != "strings") throw new InvalidOperationException("Mission condition storage kind mismatch.");
++        Values.Clear();
++        Values.UnionWith(state.StringValues);
++    }
+ }
+diff --git a/src/LibreLancer/Missions/Conditions/ScriptedCondition.cs b/src/LibreLancer/Missions/Conditions/ScriptedCondition.cs
+index 4a377c6d..8ad40e80 100644
+--- a/src/LibreLancer/Missions/Conditions/ScriptedCondition.cs
++++ b/src/LibreLancer/Missions/Conditions/ScriptedCondition.cs
+@@ -4,6 +4,7 @@ using System.Diagnostics.CodeAnalysis;
+ using System.Linq;
+ using System.Net;
+ using System.Numerics;
++using LancerNexus.Protocol;
+ using LibreLancer.Data.Ini;
+ using LibreLancer.Data.Schema.Missions;
+ using LibreLancer.Missions.Actions;
+@@ -547,6 +548,14 @@ public class Cnd_ProjHit : EventListenerCondition<ProjectileHitEvent>
+     private class HitCounter : ConditionStorage
+     {
+         public int Remaining;
++        public override NpcMissionConditionState CaptureTransferState() => new() { Kind = "int32", NumberValue = Remaining };
++        public override void RestoreTransferState(NpcMissionConditionState state)
++        {
++            if (state.Kind != "int32" || state.NumberValue is < int.MinValue or > int.MaxValue ||
++                Math.Truncate(state.NumberValue) != state.NumberValue)
++                throw new InvalidOperationException("Mission hit-counter state is invalid.");
++            Remaining = (int)state.NumberValue;
++        }
+     }
+ 
+     public Cnd_ProjHit(Entry entry)
+diff --git a/src/LibreLancer/Missions/MissionLabel.cs b/src/LibreLancer/Missions/MissionLabel.cs
+index 54b35e69..e4f8ed73 100644
+--- a/src/LibreLancer/Missions/MissionLabel.cs
++++ b/src/LibreLancer/Missions/MissionLabel.cs
+@@ -1,5 +1,6 @@
+ using System.Collections.Generic;
+ using System.Linq;
++using LancerNexus.Protocol;
+ 
+ namespace LibreLancer.Missions;
+ 
+@@ -25,6 +26,29 @@ public class MissionLabel
+ 
+     public int DestroyedCount() => states.Values.Count(x => x == NpcState.Dead);
+ 
++    public NpcMissionLabelState CaptureTransferState() => new()
++    {
++        Nickname = Name,
++        Alive = states.Where(x => x.Value == NpcState.Alive).Select(x => x.Key).OrderBy(x => x, System.StringComparer.OrdinalIgnoreCase).ToArray(),
++        Destroyed = states.Where(x => x.Value == NpcState.Dead).Select(x => x.Key).OrderBy(x => x, System.StringComparer.OrdinalIgnoreCase).ToArray()
++    };
++
++    public void RestoreTransferState(NpcMissionLabelState state)
++    {
++        foreach (var name in state.Alive)
++        {
++            if (!states.ContainsKey(name) || states[name] != NpcState.NotSpawned)
++                throw new System.IO.InvalidDataException($"Mission label '{Name}' contains an invalid alive object '{name}'.");
++            states[name] = NpcState.Alive;
++        }
++        foreach (var name in state.Destroyed)
++        {
++            if (!states.ContainsKey(name) || states[name] != NpcState.NotSpawned)
++                throw new System.IO.InvalidDataException($"Mission label '{Name}' contains an invalid destroyed object '{name}'.");
++            states[name] = NpcState.Dead;
++        }
++    }
++
+     public MissionLabel(string name, IEnumerable<string> ships)
+     {
+         Name = name;
+diff --git a/src/LibreLancer/Missions/MissionRuntime.cs b/src/LibreLancer/Missions/MissionRuntime.cs
+index ee803ebd..51a7376f 100644
+--- a/src/LibreLancer/Missions/MissionRuntime.cs
++++ b/src/LibreLancer/Missions/MissionRuntime.cs
+@@ -5,6 +5,7 @@
+ using System;
+ using System.Collections.Generic;
+ using System.Diagnostics.CodeAnalysis;
++using System.IO;
+ using System.Linq;
+ using LibreLancer.Data;
+ using LibreLancer.Data.Ini;
+@@ -16,23 +17,30 @@ using LibreLancer.Net;
+ using LibreLancer.Server;
+ using LibreLancer.Server.Components;
+ using LibreLancer.World;
++using LancerNexus.Protocol;
+ 
+ namespace LibreLancer.Missions
+ {
+     public class MissionRuntime
+     {
+         public Player Player;
++        public string MissionNickname { get; }
++        public NpcGeneratedMissionState? GeneratedMissionState { get; }
+         private object _msnLock = new();
+ 
+         public MissionScript Script;
+-        public Random Random = new();
++        public SnapshotableRandom Random = new();
+ 
+         public Dictionary<string, MissionLabel> Labels = new(StringComparer.OrdinalIgnoreCase);
+         private string? activeNNObjective;
+ 
+-        public MissionRuntime(MissionScript script, Player player, uint[] triggerSave)
++        public MissionRuntime(MissionScript script, Player player, uint[] triggerSave,
++            NpcMissionRuntimeStateV1? transferState = null, string missionNickname = "",
++            NpcGeneratedMissionState? generatedMissionState = null)
+         {
+             Script = script;
++            MissionNickname = string.IsNullOrWhiteSpace(missionNickname) ? transferState?.MissionNickname ?? "" : missionNickname;
++            GeneratedMissionState = generatedMissionState ?? transferState?.GeneratedMission;
+ 
+             foreach (var lbl in Script.GetLabels())
+             {
+@@ -40,6 +48,12 @@ namespace LibreLancer.Missions
+             }
+ 
+             this.Player = player;
++            if (transferState != null)
++            {
++                RestoreTransferState(transferState);
++                UpdateUiTriggers();
++                return;
++            }
+             bool doInit = true;
+             {
+                 foreach (var tr in triggerSave)
+@@ -77,6 +91,115 @@ namespace LibreLancer.Missions
+             UpdateUiTriggers();
+         }
+ 
++        public NpcMissionRuntimeStateV1 CaptureTransferState()
++        {
++            NpcMissionActiveTriggerState[] active;
++            string[] completed;
++            string lastSave;
++            string? activeObjective;
++            lock (_msnLock)
++            {
++                active = activeTriggers.Select(trigger =>
++                {
++                    var satisfied = new byte[16];
++                    trigger.Satisfied.CopyTo(satisfied);
++                    return new NpcMissionActiveTriggerState
++                    {
++                        Nickname = trigger.Trigger.Nickname,
++                        Deactivated = trigger.Deactivated,
++                        ActiveSeconds = trigger.ActiveTime,
++                        Satisfied = satisfied,
++                        Conditions = trigger.Conditions.Select(condition => condition.Storage.CaptureTransferState()).ToArray()
++                    };
++                }).ToArray();
++                completed = completedTriggers.OrderBy(name => name, StringComparer.OrdinalIgnoreCase).ToArray();
++                lastSave = lastSaveTrigger;
++                activeObjective = activeNNObjective;
++            }
++            NpcMissionPendingLineState[] pending;
++            lock (waitingLines)
++            {
++                pending = waitingLines.Select(line => new NpcMissionPendingLineState
++                {
++                    Hash = line.Hash,
++                    Line = line.Line
++                }).ToArray();
++            }
++            return new NpcMissionRuntimeStateV1
++            {
++                MissionNickname = MissionNickname,
++                RandomState = Random.State,
++                ActiveObjective = activeObjective,
++                LastSaveTrigger = lastSave,
++                CompletedTriggers = completed,
++                ActiveTriggers = active,
++                PendingLines = pending,
++                Labels = Labels.Values.OrderBy(label => label.Name, StringComparer.OrdinalIgnoreCase)
++                    .Select(label => label.CaptureTransferState()).ToArray(),
++                GeneratedMission = GeneratedMissionState
++            };
++        }
++
++        private void RestoreTransferState(NpcMissionRuntimeStateV1 state)
++        {
++            if (string.IsNullOrWhiteSpace(MissionNickname) ||
++                !string.Equals(state.MissionNickname, MissionNickname, StringComparison.OrdinalIgnoreCase))
++                throw new InvalidDataException("NPC mission runtime snapshot belongs to another mission script.");
++            if ((state.GeneratedMission is null) != (GeneratedMissionState is null) ||
++                state.GeneratedMission is not null && !MissionNickname.StartsWith("random-", StringComparison.OrdinalIgnoreCase))
++                throw new InvalidDataException("NPC generated mission descriptor does not match the restored runtime.");
++            Random.State = state.RandomState;
++            if (!string.IsNullOrWhiteSpace(state.ActiveObjective))
++            {
++                if (!Script.Objectives.ContainsKey(state.ActiveObjective))
++                    throw new InvalidDataException($"NPC mission objective '{state.ActiveObjective}' is unavailable.");
++                activeNNObjective = state.ActiveObjective;
++            }
++            if (!string.IsNullOrWhiteSpace(state.LastSaveTrigger) &&
++                !Script.AvailableTriggers.ContainsKey(state.LastSaveTrigger))
++                throw new InvalidDataException($"NPC mission save trigger '{state.LastSaveTrigger}' is unavailable.");
++            lastSaveTrigger = state.LastSaveTrigger;
++            if (state.Labels.Length != Labels.Count || state.Labels.Select(label => label.Nickname)
++                    .Distinct(StringComparer.OrdinalIgnoreCase).Count() != state.Labels.Length)
++                throw new InvalidDataException("NPC mission label snapshot is incomplete or duplicated.");
++            foreach (var labelState in state.Labels)
++            {
++                if (!Labels.TryGetValue(labelState.Nickname, out var label))
++                    throw new InvalidDataException($"NPC mission label '{labelState.Nickname}' is unavailable.");
++                label.RestoreTransferState(labelState);
++            }
++            foreach (var triggerName in state.CompletedTriggers)
++            {
++                if (!Script.AvailableTriggers.ContainsKey(triggerName) || !completedTriggers.Add(triggerName))
++                    throw new InvalidDataException($"NPC completed mission trigger '{triggerName}' is invalid or duplicated.");
++            }
++            foreach (var saved in state.ActiveTriggers)
++            {
++                if (!Script.AvailableTriggers.TryGetValue(saved.Nickname, out var definition) ||
++                    activeTriggers.Any(trigger => string.Equals(trigger.Trigger.Nickname, saved.Nickname,
++                        StringComparison.OrdinalIgnoreCase)) || saved.Conditions.Length != definition.Conditions.Length)
++                    throw new InvalidDataException($"NPC active mission trigger '{saved.Nickname}' is invalid.");
++                var active = new ActiveTrigger(definition)
++                {
++                    Deactivated = saved.Deactivated,
++                    ActiveTime = saved.ActiveSeconds,
++                    Satisfied = new BitArray128(saved.Satisfied)
++                };
++                foreach (var condition in definition.Conditions)
++                {
++                    var current = new ActiveCondition(active, condition);
++                    condition.Init(this, current);
++                    current.Storage.RestoreTransferState(saved.Conditions[active.Conditions.Count]);
++                    active.Conditions.Add(current);
++                }
++                activeTriggers.Add(active);
++            }
++            lock (waitingLines)
++            {
++                waitingLines = state.PendingLines.Select(line => new PendingLine(line.Hash, line.Line)).ToList();
++            }
++        }
++
+         private static NetObjective ToNetObjective(NNObjective objective) => objective.Type switch
+         {
+             NNObjectiveType.ids => new NetObjective(objective.NameIds),
+diff --git a/src/LibreLancer/Net/GameListener.cs b/src/LibreLancer/Net/GameListener.cs
+index 49b8bf53..7f59b93a 100644
+--- a/src/LibreLancer/Net/GameListener.cs
++++ b/src/LibreLancer/Net/GameListener.cs
+@@ -7,6 +7,7 @@ using System.Collections.Generic;
+ using System.Diagnostics;
+ using System.Linq;
+ using System.Net.Http;
++using System.Net;
+ using System.Threading;
+ using System.Threading.Tasks;
+ using LibreLancer.Net.Protocol;
+@@ -28,6 +29,7 @@ namespace LibreLancer.Net
+         private static readonly object TagConnecting = new();
+ 
+         public int Port = LNetConst.DEFAULT_PORT;
++        public string? BindAddress;
+         public int MaxConnections = 200;
+         public string AppIdentifier = LNetConst.DEFAULT_APP_IDENT;
+ 
+@@ -107,8 +109,37 @@ namespace LibreLancer.Net
+                     {
+                         Task.Run(async () =>
+                         {
+-                            var guid = await http.VerifyToken(game.LoginUrl, token);
+-                            if (guid == Guid.Empty)
++                            if (token.StartsWith("lnx-transfer:", StringComparison.Ordinal))
++                            {
++                                var parts = token.Split(':', 3);
++                                if (parts.Length != 3 || !Guid.TryParseExact(parts[1], "N", out var transferId))
++                                {
++                                    request.Reject();
++                                    return;
++                                }
++                                try
++                                {
++                                    var imported = await game.ImportTransferSnapshotAndAcceptAsync(transferId,
++                                        parts[2], game.CreateTargetTransferLeaseToken(transferId));
++                                    var transferPeer = request.Accept();
++                                    var transferPlayer = new Player(new RemotePacketClient(transferPeer), game,
++                                        imported.AccountId, imported.CharacterId, imported.SaveGame, imported.NpcSnapshot)
++                                    {
++                                        GatewayTransferId = imported.TransferId
++                                    };
++                                    transferPeer.Tag = transferPlayer;
++                                    lock (game.ConnectedPlayers) game.ConnectedPlayers.Add(transferPlayer);
++                                    _ = Task.Run(async () => await transferPlayer.OnLoggedIn());
++                                }
++                                catch (Exception error)
++                                {
++                                    FLLog.Error("Transfer", $"Target transfer login rejected: {error.Message}");
++                                    request.Reject();
++                                }
++                                return;
++                            }
++                            var identity = await http.VerifyGameIdentity(game.LoginUrl, token);
++                            if (identity.guid == Guid.Empty)
+                             {
+                                 FLLog.Info("Login", $"Login failed for {request.RemoteEndPoint}");
+                                 var dw = new PacketWriter();
+@@ -120,7 +151,7 @@ namespace LibreLancer.Net
+                                 var peer = request.Accept();
+                                 var remote = new RemotePacketClient(peer);
+                                 var p = new Player(remote,
+-                                    game, guid);
++                                    game, identity.guid) { GatewaySessionId = identity.sessionId };
+                                 peer.Tag = p;
+                                 _ = Task.Run(async () => await p.OnLoggedIn());
+                                 lock (game.ConnectedPlayers)
+@@ -146,10 +177,9 @@ namespace LibreLancer.Net
+                 if (peer.Tag is Player player)
+                 {
+                     player.Disconnected();
+-                    lock (game.ConnectedPlayers)
+-                    {
+-                        game.ConnectedPlayers.Remove(player);
+-                    }
++                    if (!player.TransferInProgress)
++                        lock (game.ConnectedPlayers)
++                            game.ConnectedPlayers.Remove(player);
+                 }
+             };
+             broadcastListener.ConnectionRequestEvent += request => request.RejectForce();
+@@ -262,15 +292,19 @@ namespace LibreLancer.Net
+             broadcastServer.IPv6Enabled = true;
+             broadcastServer.BroadcastReceiveEnabled = true;
+             broadcastServer.UnsyncedEvents = true;
+-            broadcastServer.Start(LNetConst.BROADCAST_PORT);
++            if (!game.ClusterTransfersEnabled)
++                broadcastServer.Start(LNetConst.BROADCAST_PORT);
+             Server = new NetManager(listener)
+             {
+-                IPv6Enabled = true,
++                IPv6Enabled = string.IsNullOrWhiteSpace(BindAddress),
+                 UnconnectedMessagesEnabled = true,
+                 ChannelsCount = 3,
+                 UnsyncedEvents = true
+             };
+-            Server.Start(Port);
++            var started = string.IsNullOrWhiteSpace(BindAddress) ? Server.Start(Port) :
++                Server.Start(IPAddress.Parse(BindAddress), IPAddress.IPv6Any, Port);
++            if (!started)
++                throw new InvalidOperationException("Game listener could not bind the configured address and port.");
+             FLLog.Info("Server", "Listening on port " + Port);
+             stopHandle.WaitOne();
+             http.Dispose();
+diff --git a/src/LibreLancer/Net/GameNetClient.cs b/src/LibreLancer/Net/GameNetClient.cs
+index 7e09afee..b22f9aee 100644
+--- a/src/LibreLancer/Net/GameNetClient.cs
++++ b/src/LibreLancer/Net/GameNetClient.cs
+@@ -28,6 +28,20 @@ namespace LibreLancer.Net
+         private NetManager client = null!;
+         public string AppIdentifier = LNetConst.DEFAULT_APP_IDENT;
+ 
++        public string ClusterInstanceId { get; set; } = "";
++        public string ClusterSystemId { get; set; } = "";
++        public string ClusterEndpoint { get; set; } = "";
++        public string ClusterGatewayUrl { get; set; } = "";
++        public string ClusterAccessToken { get; set; } = "";
++        public string ClusterRefreshToken { get; set; } = "";
++        public Guid ClusterSessionId { get; set; }
++        private (IPEndPoint Endpoint, string Ticket)? pendingTransferReconnect;
++        private volatile bool transferReconnecting;
++        public bool IsTransferReconnecting => transferReconnecting;
++        private readonly SemaphoreSlim clusterRefreshGate = new(1, 1);
++        private CancellationTokenSource? clusterHeartbeatCancellation;
++        private Task? clusterHeartbeatTask;
++
+         public int MaxSequencedSize => 500; // Min safe UDP packet size - 8 bytes overhead
+         public event Action<LocalServerInfo>? ServerFound;
+         public event Action<bool>? AuthenticationRequired;
+@@ -137,6 +151,8 @@ namespace LibreLancer.Net
+             }
+ 
+             running = false;
++            transferReconnecting = false;
++            clusterHeartbeatCancellation?.Cancel();
+         }
+ 
+         public bool Connected =>
+@@ -203,9 +219,44 @@ namespace LibreLancer.Net
+             });
+         }
+ 
++        public void ConnectWithTicket(string endpoint, string ticket)
++        {
++            if (string.IsNullOrWhiteSpace(ticket))
++                throw new ArgumentException("Join ticket is required.", nameof(ticket));
++            StartClusterSessionHeartbeat();
++            Task.Run(() =>
++            {
++                if (!running)
++                    return;
++                if (ParseEP(endpoint, out var ep))
++                    ConnectInternal(ep, ticket);
++                else
++                    mainThread.QueueUIThread(() => Disconnected?.Invoke(DisconnectReason.InvalidEndpoint));
++            });
++        }
++
++        public void ReconnectWithTransferTicket(string endpoint, string transferTicket)
++        {
++            if (string.IsNullOrWhiteSpace(transferTicket) || !ParseEP(endpoint, out var parsed))
++                throw new ArgumentException("Transfer endpoint or ticket is invalid.");
++            var source = client?.FirstPeer;
++            if (!running || source?.ConnectionState != ConnectionState.Connected)
++                throw new InvalidOperationException("A transfer requires an active source connection.");
++            lock (this)
++            {
++                transferReconnecting = true;
++                pendingTransferReconnect = (parsed, transferTicket);
++            }
++            source.Disconnect();
++        }
++
+         private static bool ParseEP(string str, out IPEndPoint endpoint)
+         {
+             endpoint = new IPEndPoint(IPAddress.None, 0);
++            if (str.StartsWith("quic://", StringComparison.OrdinalIgnoreCase))
++                str = str.Substring("quic://".Length);
++            else if (str.StartsWith("udp://", StringComparison.OrdinalIgnoreCase))
++                str = str.Substring("udp://".Length);
+ 
+             if (IPAddress.TryParse(str, out var ip))
+             {
+@@ -405,6 +456,7 @@ namespace LibreLancer.Net
+                         {
+                             FLLog.Info("Client", "Login success");
+                             connecting = false;
++                            transferReconnecting = false;
+                         }
+                         else
+                         {
+@@ -429,6 +481,34 @@ namespace LibreLancer.Net
+ 
+             listener.PeerDisconnectedEvent += (peer, info) =>
+             {
++                (IPEndPoint Endpoint, string Ticket)? transferReconnect;
++                lock (this)
++                {
++                    transferReconnect = pendingTransferReconnect;
++                    pendingTransferReconnect = null;
++                }
++                if (transferReconnect is { } next)
++                {
++                    packets.Clear();
++                    FLLog.Info("Transfer", $"Source disconnected; reconnecting to {next.Endpoint}");
++                    Task.Run(async () =>
++                    {
++                        try
++                        {
++                            await Task.Delay(250).ConfigureAwait(false);
++                            if (running)
++                                ConnectInternal(next.Endpoint, next.Ticket);
++                        }
++                        catch (Exception error)
++                        {
++                            FLLog.Error("Transfer", $"Target reconnect failed: {error.GetType().Name}");
++                            transferReconnecting = false;
++                            mainThread.QueueUIThread(() => Disconnected?.Invoke(DisconnectReason.ConnectionError));
++                        }
++                    });
++                    return;
++                }
++                transferReconnecting = false;
+                 var additional = new PacketReader(info.AdditionalData);
+ 
+                 if (additional.TryGetDisconnectReason(out var reason) &&
+@@ -502,9 +582,66 @@ namespace LibreLancer.Net
+ 
+             client.DisconnectAll();
+             client.Stop();
++            clusterHeartbeatCancellation?.Cancel();
+             http.Dispose();
+         }
+ 
++        public async Task RefreshClusterSessionAsync(CancellationToken cancellationToken = default)
++        {
++            if (ClusterSessionId == Guid.Empty || string.IsNullOrWhiteSpace(ClusterRefreshToken) ||
++                string.IsNullOrWhiteSpace(ClusterGatewayUrl))
++                return;
++            await clusterRefreshGate.WaitAsync(cancellationToken).ConfigureAwait(false);
++            try
++            {
++                using var gateway = new NexusGatewayLogin(new Uri(ClusterGatewayUrl, UriKind.Absolute));
++                var refreshed = await gateway.RefreshAsync(ClusterSessionId, ClusterRefreshToken, cancellationToken)
++                    .ConfigureAwait(false);
++                ClusterAccessToken = refreshed.AccessToken;
++                ClusterRefreshToken = refreshed.RefreshToken;
++            }
++            finally
++            {
++                clusterRefreshGate.Release();
++            }
++        }
++
++        private void StartClusterSessionHeartbeat()
++        {
++            if (clusterHeartbeatTask != null || ClusterSessionId == Guid.Empty ||
++                string.IsNullOrWhiteSpace(ClusterRefreshToken) || string.IsNullOrWhiteSpace(ClusterGatewayUrl))
++                return;
++            clusterHeartbeatCancellation = new CancellationTokenSource();
++            var cancellationToken = clusterHeartbeatCancellation.Token;
++            clusterHeartbeatTask = Task.Run(async () =>
++            {
++                while (!cancellationToken.IsCancellationRequested)
++                {
++                    try
++                    {
++                        await Task.Delay(TimeSpan.FromMinutes(1), cancellationToken).ConfigureAwait(false);
++                        if (!running)
++                            return;
++                        if (Connected)
++                            await RefreshClusterSessionAsync(cancellationToken).ConfigureAwait(false);
++                    }
++                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
++                    {
++                        return;
++                    }
++                    catch (UnauthorizedAccessException error)
++                    {
++                        FLLog.Warning("Net", $"Gateway session refresh rejected: {error.Message}");
++                        return;
++                    }
++                    catch (Exception error)
++                    {
++                        FLLog.Warning("Net", $"Gateway session refresh failed: {error.Message}");
++                    }
++                }
++            }, cancellationToken);
++        }
++
+         public void Update() => client?.TriggerUpdate();
+ 
+         public void SendPacket(IPacket packet, PacketDeliveryMethod method)
+diff --git a/src/LibreLancer/Net/HttpAuthentication.cs b/src/LibreLancer/Net/HttpAuthentication.cs
+index b19afca3..bf2af7d2 100644
+--- a/src/LibreLancer/Net/HttpAuthentication.cs
++++ b/src/LibreLancer/Net/HttpAuthentication.cs
+@@ -23,7 +23,7 @@ namespace LibreLancer.Net
+     {
+         private record LoginResult(string token);
+ 
+-        private record VerifyResult(Guid guid);
++        public record VerifiedGameIdentity(Guid guid, Guid sessionId = default);
+ 
+         private static string Combine(string baseUrl, string relUrl)
+         {
+@@ -188,7 +188,10 @@ namespace LibreLancer.Net
+             }
+         }
+ 
+-        public static async Task<Guid> VerifyToken(this HttpClient client, string url, string token)
++        public static async Task<Guid> VerifyToken(this HttpClient client, string url, string token) =>
++            (await client.VerifyGameIdentity(url, token)).guid;
++
++        public static async Task<VerifiedGameIdentity> VerifyGameIdentity(this HttpClient client, string url, string token)
+         {
+             try
+             {
+@@ -209,18 +212,21 @@ namespace LibreLancer.Net
+ 
+                 if (result.IsSuccessStatusCode)
+                 {
+-                    var verifyResult = await result.Content.ReadFromJsonAsync<VerifyResult>();
+-                    return verifyResult!.guid;
++                    using (result)
++                    {
++                        return await result.Content.ReadFromJsonAsync<VerifiedGameIdentity>()
++                            ?? new VerifiedGameIdentity(Guid.Empty);
++                    }
+                 }
+ 
+-                var response = await result.Content.ReadAsStringAsync();
+-                FLLog.Info("Http", $"verifytoken failed. {result.StatusCode}: {response}");
+-                return Guid.Empty;
++                FLLog.Info("Http", $"Ticket verification failed: HTTP {(int)result.StatusCode}");
++                result.Dispose();
++                return new VerifiedGameIdentity(Guid.Empty);
+             }
+             catch (Exception e)
+             {
+-                FLLog.Error("Http", e.ToString());
+-                return Guid.Empty;
++                FLLog.Error("Http", $"Ticket verification unavailable ({e.GetType().Name})");
++                return new VerifiedGameIdentity(Guid.Empty);
+             }
+         }
+     }
+diff --git a/src/LibreLancer/Net/Protocol/IClientPlayer.cs b/src/LibreLancer/Net/Protocol/IClientPlayer.cs
+index 9cf549c3..ef48d581 100644
+--- a/src/LibreLancer/Net/Protocol/IClientPlayer.cs
++++ b/src/LibreLancer/Net/Protocol/IClientPlayer.cs
+@@ -44,7 +44,9 @@ public interface IClientPlayer
+     void DestroyPart(ObjNetId id, uint part);
+     void DestroyEquipment(ObjNetId id, bool explode, string hardpoint);
+     void RunMissionDialog(NetDlgLine[] lines);
+-    void StartJumpTunnel();
++    void StartLocalJumpTunnel();
++    void StartJumpTunnel(string targetSystem, string target, long characterId);
++    void TransferSnapshotStaged(string transferId, bool succeeded);
+     void StartTradelane(ObjNetId ring, Quaternion orientation);
+     void TradelaneRing(ObjNetId ring);
+     void TradelaneDisrupted();
+diff --git a/src/LibreLancer/Net/Protocol/IServerPlayer.cs b/src/LibreLancer/Net/Protocol/IServerPlayer.cs
+index 6cf63233..4e86bc3f 100644
+--- a/src/LibreLancer/Net/Protocol/IServerPlayer.cs
++++ b/src/LibreLancer/Net/Protocol/IServerPlayer.cs
+@@ -1,3 +1,4 @@
++using System;
+ using System.Threading.Tasks;
+ 
+ namespace LibreLancer.Net.Protocol;
+@@ -6,6 +7,8 @@ namespace LibreLancer.Net.Protocol;
+ public interface IServerPlayer
+ {
+     void Launch();
++    void BeginClusterTransfer(string transferId, long characterId, long leaseVersion, string targetSystem, string target,
++        string targetInstanceId, string targetEndpoint);
+     void RTCComplete(string rtc);
+     void LineSpoken(uint hash);
+     void OnLocationEnter(string _base, string room);
+diff --git a/src/LibreLancer/Net/Protocol/VisitBundle.cs b/src/LibreLancer/Net/Protocol/VisitBundle.cs
+index 97a5df99..20b778b7 100644
+--- a/src/LibreLancer/Net/Protocol/VisitBundle.cs
++++ b/src/LibreLancer/Net/Protocol/VisitBundle.cs
+@@ -15,7 +15,8 @@ public struct VisitBundle
+         var writer = new PacketWriter();
+         var p2 = visits.OrderBy(x => x.Obj.Hash).ToArray();
+         writer.PutBigVarUInt32((uint)p2.Length);
+-        writer.Put(p2[0].Obj.Hash);
++        if (p2.Length > 0)
++            writer.Put(p2[0].Obj.Hash);
+         for (var i = 1; i < p2.Length; i++)
+             writer.PutBigVarUInt32(p2[i].Obj.Hash - p2[i - 1].Obj.Hash);
+         for (int i = 0; i < p2.Length; i++)
+@@ -39,7 +40,8 @@ public struct VisitBundle
+         {
+             Visits = new VisitEntry[reader.GetBigVarUInt32()]
+         };
+-        bp.Visits[0].Obj = (HashValue)reader.GetUInt();
++        if (bp.Visits.Length > 0)
++            bp.Visits[0].Obj = (HashValue)reader.GetUInt();
+         for (int i = 1; i < bp.Visits.Length; i++)
+             bp.Visits[i].Obj = (reader.GetBigVarUInt32() + bp.Visits[i - 1].Obj.Hash);
+         for (int i = 0; i < bp.Visits.Length; i++)
+diff --git a/src/Librelancer.Database/LibreLancerContext.cs b/src/Librelancer.Database/LibreLancerContext.cs
+index 29a2a27f..cc3aa966 100644
+--- a/src/Librelancer.Database/LibreLancerContext.cs
++++ b/src/Librelancer.Database/LibreLancerContext.cs
+@@ -24,6 +24,7 @@ namespace LibreLancer.Database
+ 
+         public DbSet<Character> Characters { get; set; }
+         public DbSet<Account> Accounts { get; set; }
++        public DbSet<TransferSnapshotImport> TransferSnapshotImports { get; set; }
+ 
+         protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
+         {
+@@ -39,6 +40,7 @@ namespace LibreLancer.Database
+             modelBuilder.Entity<Reputation>().Property(x => x.RepGroup).HasColumnType("TEXT COLLATE NOCASE");
+             // Indexes
+             modelBuilder.Entity<Account>().HasIndex(x => x.AccountIdentifier);
++            modelBuilder.Entity<TransferSnapshotImport>().HasKey(x => x.TransferId);
+ 
+             modelBuilder.Entity<VisitEntry>().HasIndex(x => new { x.CharacterId, x.Hash }).IsUnique();
+             modelBuilder.Entity<VisitEntry>().HasIndex(x => x.CharacterId);
+@@ -122,8 +124,8 @@ VisitValue=excluded.VisitValue, UpdateDate=excluded.UpdateDate WHERE VisitValue
+             var nowUtc = DateTime.UtcNow;
+             foreach (var update in ChangeTracker
+                          .Entries()
+-                         .Where(x => x.Entity is BaseEntity && x.State == EntityState.Modified ||
+-                                     x.State == EntityState.Added)
++                         .Where(x => x.Entity is BaseEntity &&
++                                     x.State is EntityState.Modified or EntityState.Added)
+                          .Select(x => new { Entity = (BaseEntity)x.Entity, State = x.State })
+                     )
+             {
+diff --git a/src/Librelancer.Database/Migrations/LibreLancerContextModelSnapshot.cs b/src/Librelancer.Database/Migrations/LibreLancerContextModelSnapshot.cs
+index 41a29fbc..3ed97ff1 100644
+--- a/src/Librelancer.Database/Migrations/LibreLancerContextModelSnapshot.cs
++++ b/src/Librelancer.Database/Migrations/LibreLancerContextModelSnapshot.cs
+@@ -45,6 +45,47 @@ namespace LibreLancer.Database.Migrations
+                     b.ToTable("Accounts");
+                 });
+ 
++            modelBuilder.Entity("LibreLancer.Entities.Character.TransferSnapshotImport", b =>
++                {
++                    b.Property<Guid>("TransferId")
++                        .HasColumnType("TEXT");
++
++                    b.Property<Guid>("AccountId")
++                        .HasColumnType("TEXT");
++
++                    b.Property<long>("CharacterId")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<bool>("Imported")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<long>("LeaseVersion")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<string>("SnapshotHash")
++                        .HasColumnType("TEXT");
++
++                    b.Property<string>("SourceInstanceId")
++                        .IsRequired()
++                        .HasColumnType("TEXT");
++
++                    b.Property<string>("TargetInstanceId")
++                        .IsRequired()
++                        .HasColumnType("TEXT");
++
++                    b.Property<string>("TargetSystemId")
++                        .IsRequired()
++                        .HasColumnType("TEXT");
++
++                    b.Property<string>("TicketHash")
++                        .IsRequired()
++                        .HasColumnType("TEXT");
++
++                    b.HasKey("TransferId");
++
++                    b.ToTable("TransferSnapshotImports");
++                });
++
+             modelBuilder.Entity("LibreLancer.Entities.Character.CargoItem", b =>
+                 {
+                     b.Property<long>("Id")
+diff --git a/src/lancer/Program.cs b/src/lancer/Program.cs
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -3,6 +3,7 @@
+ // LICENSE, which is part of this source code package
+ 
+ using System;
++using System.IO;
+ using LibreLancer;
+ 
+ namespace lancer;
+@@ -12,15 +13,173 @@
+     [STAThread]
+     public static void Main(string[] args)
+     {
++        if (args.Length == 1 && args[0] is "--help" or "-h")
++        {
++            Console.WriteLine("Usage: lancer [configuration-path]");
++#if DEBUG
++            Console.WriteLine("       lancer [configuration-path] --email=... --password=... [--character=...]");
++            Console.WriteLine("       lancer [configuration-path] --credentials-file=...");
++#endif
++            return;
++        }
++#if DEBUG
++        if (!TryParseArguments(args, out var configPath, out var email, out var password,
++                out var character, out var error))
++        {
++            Console.Error.WriteLine(error);
++            return;
++        }
++#else
++        foreach (var arg in args)
++        {
++            if (arg.StartsWith("--email", StringComparison.Ordinal) ||
++                arg.StartsWith("--password", StringComparison.Ordinal) ||
++                arg.StartsWith("--credentials-file", StringComparison.Ordinal) ||
++                arg.StartsWith("--character", StringComparison.Ordinal))
++            {
++                Console.Error.WriteLine("Automated login options are available in Debug builds only.");
++                return;
++            }
++            if (arg.StartsWith("-", StringComparison.Ordinal))
++            {
++                Console.Error.WriteLine($"Unknown option: {arg}. Use --help for usage.");
++                return;
++            }
++        }
++        var configPath = args.Length > 0 ? args[0] : null;
++#endif
+         FreelancerGame? game = null;
+         AppHandler.Run(() =>
+         {
+-            Func<string>? filePath = null;
+-            if (args.Length > 0)
+-                filePath = () => args[0];
++            Func<string>? filePath = configPath is null ? null : () => configPath;
+             var cfg = GameConfig.Create(true, filePath);
++#if DEBUG
++            if (email is not null && string.IsNullOrWhiteSpace(cfg.ClusterGatewayUrl))
++            {
++                Console.Error.WriteLine("Automated login requires cluster_gateway_url in the client configuration.");
++                return;
++            }
++#endif
+             game = new FreelancerGame(cfg);
++#if DEBUG
++            game.DebugLoginEmail = email;
++            game.DebugLoginPassword = password;
++            game.DebugCharacterName = character;
++#endif
+             game.Run();
+         }, () => game?.Crashed());
+     }
++
++#if DEBUG
++    private static bool TryParseArguments(string[] args, out string? configPath, out string? email,
++        out string? password, out string? character, out string? error)
++    {
++        configPath = email = password = character = error = null;
++        string? credentialsFile = null;
++        foreach (var arg in args)
++        {
++            if (arg.StartsWith("--credentials-file=", StringComparison.Ordinal))
++            {
++                if (credentialsFile is not null) { error = "--credentials-file may be supplied only once."; return false; }
++                credentialsFile = arg["--credentials-file=".Length..];
++            }
++            else if (arg.StartsWith("--email=", StringComparison.Ordinal))
++            {
++                if (email is not null) { error = "--email may be supplied only once."; return false; }
++                email = arg[8..];
++            }
++            else if (arg.StartsWith("--password=", StringComparison.Ordinal))
++            {
++                if (password is not null) { error = "--password may be supplied only once."; return false; }
++                password = arg[11..];
++            }
++            else if (arg.StartsWith("--character=", StringComparison.Ordinal))
++            {
++                if (character is not null) { error = "--character may be supplied only once."; return false; }
++                character = arg[12..];
++            }
++            else if (arg.StartsWith("--", StringComparison.Ordinal))
++            {
++                error = "Unknown option. Use --credentials-file=... or --email=... --password=..., and optionally --character=... .";
++                return false;
++            }
++            else if (configPath is null)
++            {
++                configPath = arg;
++            }
++            else
++            {
++                error = "Only one client configuration path may be supplied.";
++                return false;
++            }
++        }
++
++        if (credentialsFile is not null)
++        {
++            if (email is not null || password is not null)
++            {
++                error = "Use either --credentials-file or --email/--password, not both.";
++                return false;
++            }
++            try
++            {
++                if (string.IsNullOrWhiteSpace(credentialsFile))
++                {
++                    error = "Credentials file is missing or has an invalid size.";
++                    return false;
++                }
++                var info = new FileInfo(credentialsFile);
++                if (!info.Exists || info.Length is 0 or > 16_384)
++                {
++                    error = "Credentials file is missing or has an invalid size.";
++                    return false;
++                }
++                foreach (var line in File.ReadLines(credentialsFile))
++                {
++                    var separator = line.IndexOf(": ", StringComparison.Ordinal);
++                    if (separator < 0) continue;
++                    var key = line[..separator];
++                    var value = line[(separator + 2)..];
++                    if (key == "Email" && email is null) email = value;
++                    else if (key == "Password" && password is null) password = value;
++                    else if (key is "Email" or "Password")
++                    {
++                        error = "Credentials file contains duplicate fields.";
++                        return false;
++                    }
++                }
++            }
++            catch (IOException)
++            {
++                error = "Credentials file could not be read.";
++                return false;
++            }
++            catch (UnauthorizedAccessException)
++            {
++                error = "Credentials file could not be read.";
++                return false;
++            }
++            catch (ArgumentException)
++            {
++                error = "Credentials file could not be read.";
++                return false;
++            }
++        }
++
++        if ((email is null) != (password is null) ||
++            (email is not null && string.IsNullOrWhiteSpace(email)) ||
++            (password is not null && string.IsNullOrWhiteSpace(password)))
++        {
++            error = "--email and --password must both be supplied with non-empty values.";
++            return false;
++        }
++        if ((character is not null && string.IsNullOrWhiteSpace(character)) ||
++            (character is not null && email is null))
++        {
++            error = "--character requires a non-empty name and both login options.";
++            return false;
++        }
++        return true;
++    }
++#endif
+ }
+diff --git a/src/LibreLancer.Entities/Character/TransferSnapshotImport.cs b/src/LibreLancer.Entities/Character/TransferSnapshotImport.cs
+new file mode 100644
+index 00000000..cc7f25ff
+--- /dev/null
++++ b/src/LibreLancer.Entities/Character/TransferSnapshotImport.cs
+@@ -0,0 +1,18 @@
++using System;
++
++namespace LibreLancer.Entities.Character;
++
++/// <summary>Durable target-side state for an idempotent character transfer import.</summary>
++public sealed class TransferSnapshotImport
++{
++    public Guid TransferId { get; set; }
++    public Guid AccountId { get; set; }
++    public long CharacterId { get; set; }
++    public string SourceInstanceId { get; set; } = "";
++    public string TargetInstanceId { get; set; } = "";
++    public string TargetSystemId { get; set; } = "";
++    public long LeaseVersion { get; set; }
++    public string TicketHash { get; set; } = "";
++    public string? SnapshotHash { get; set; }
++    public bool Imported { get; set; }
++}
+diff --git a/src/LibreLancer.Tests/FailedCharacterEntryPositionTests.cs b/src/LibreLancer.Tests/FailedCharacterEntryPositionTests.cs
+new file mode 100644
+index 00000000..3c19517f
+--- /dev/null
++++ b/src/LibreLancer.Tests/FailedCharacterEntryPositionTests.cs
+@@ -0,0 +1,27 @@
++using System;
++using System.Numerics;
++using System.Reflection;
++using LibreLancer.Server;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class FailedCharacterEntryPositionTests
++{
++    [Fact]
++    public void InitialRpcFailureCannotLeaveDisconnectWithAnEmptyLocation()
++    {
++        var player = new Player(null!, null!, Guid.Empty);
++        var character = new NetCharacter { Name = "fixture" };
++        using (var transaction = character.BeginTransaction())
++            transaction.UpdatePosition("Li01_01_Base", "li01", new Vector3(1, 2, 3), Quaternion.Zero);
++        // The missing transport intentionally fails the first initial RPC.
++        var begin = typeof(Player).GetMethod("BeginGame", BindingFlags.Instance | BindingFlags.NonPublic)!;
++        Assert.Throws<TargetInvocationException>(() => begin.Invoke(player, [character, null]));
++        Assert.Same(character, player.Character);
++        Assert.Equal("li01", player.System);
++        Assert.Equal("Li01_01_Base", player.Base);
++        Assert.Equal(new Vector3(1, 2, 3), player.Position);
++        Assert.Equal(Quaternion.Identity, player.Orientation);
++    }
++}
+diff --git a/src/LibreLancer.Tests/FreelancerIniTests.cs b/src/LibreLancer.Tests/FreelancerIniTests.cs
+new file mode 100644
+index 00000000..a4ca9f49
+--- /dev/null
++++ b/src/LibreLancer.Tests/FreelancerIniTests.cs
+@@ -0,0 +1,33 @@
++using System;
++using System.IO;
++using LibreLancer.Data.IO;
++using LibreLancer.Data.Schema;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class FreelancerIniTests
++{
++    [Fact]
++    public void LibrelancerIniUsesFlatPackageSupportFiles()
++    {
++        var directory = Path.Combine(Path.GetTempPath(), "librelancer-ini-" + Guid.NewGuid().ToString("N"));
++        Directory.CreateDirectory(directory);
++        try
++        {
++            File.WriteAllText(Path.Combine(directory, "librelancer.ini"),
++                "[Freelancer]\ndata path = data\n");
++
++            var ini = new FreelancerIni(FileSystem.FromPath(directory));
++
++            Assert.Equal("data" + Path.DirectorySeparatorChar, ini.DataPath);
++            Assert.Equal("newplayer.fl", ini.NewPlayerPath);
++            Assert.Equal("mpnewcharacter.fl", ini.MpNewCharacterPath);
++            Assert.Null(ini.DacomPath);
++        }
++        finally
++        {
++            Directory.Delete(directory, true);
++        }
++    }
++}
+diff --git a/src/LibreLancer.Tests/NexusGatewayLoginTests.cs b/src/LibreLancer.Tests/NexusGatewayLoginTests.cs
+new file mode 100644
+index 00000000..679af2a6
+--- /dev/null
++++ b/src/LibreLancer.Tests/NexusGatewayLoginTests.cs
+@@ -0,0 +1,263 @@
++using System;
++using System.Collections.Generic;
++using System.IO;
++using System.Net;
++using System.Net.Http;
++using System.Text;
++using System.Text.Json;
++using System.Threading;
++using System.Threading.Tasks;
++using LancerNexus.Protocol;
++using LibreLancer.Net;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class NexusGatewayLoginTests
++{
++    [Fact]
++    public async Task SupportedVersionIsSentBeforeCredentials()
++    {
++        var folder = CreateMetadata();
++        try
++        {
++            var handler = new FakeHandler(false);
++            using var client = new NexusGatewayLogin(new Uri("https://gateway.example.test"), folder, handler);
++            var result = await client.LoginAsync("pilot@example.net", "secret",
++                TestContext.Current.CancellationToken);
++
++            Assert.True(result.LoggedIn);
++            Assert.Equal(2, handler.Requests.Count);
++            Assert.Equal("/api/v1/client/version", handler.Requests[0].Path);
++            Assert.Equal("/api/v1/auth/login", handler.Requests[1].Path);
++            Assert.DoesNotContain("secret", handler.Requests[0].Body);
++            Assert.Contains("proof", handler.Requests[1].Body);
++        }
++        finally { Directory.Delete(folder, true); }
++    }
++
++    [Fact]
++    public async Task MissingInstalledMetadataStopsBeforeNetworkAndCredentials()
++    {
++        var folder = Path.Combine(Path.GetTempPath(), $"nexus-gateway-{Guid.NewGuid():N}");
++        Directory.CreateDirectory(folder);
++        try
++        {
++            var handler = new FakeHandler(false);
++            using var client = new NexusGatewayLogin(new Uri("https://gateway.example.test"), folder, handler);
++            await Assert.ThrowsAsync<ClientVersionMetadataException>(() =>
++                client.LoginAsync("pilot@example.net", "secret", TestContext.Current.CancellationToken));
++            Assert.Empty(handler.Requests);
++        }
++        finally { Directory.Delete(folder, true); }
++    }
++
++    [Fact]
++    public async Task PlacementUsesSessionAfterHandshakeAndLogin()
++    {
++        var folder = CreateMetadata();
++        try
++        {
++            var handler = new FakeHandler(false);
++            using var client = new NexusGatewayLogin(new Uri("https://gateway.example.test"), folder, handler);
++            var result = await client.LoginAndPlaceAsync("pilot@example.net", "secret",
++                "li01", "eu", TestContext.Current.CancellationToken);
++
++            Assert.True(result.Assigned);
++            Assert.Equal("game.example.test:2300", result.GameEndpoint);
++            Assert.Equal("join-ticket", result.JoinTicket);
++            Assert.Equal("instance-eu-01", result.InstanceId);
++            Assert.Equal("li01", result.SystemId);
++            Assert.Equal(3, handler.Requests.Count);
++            Assert.Equal("/api/v1/placement/request", handler.Requests[2].Path);
++            Assert.Contains("\"targetSystem\":\"li01\"", handler.Requests[2].Body);
++            Assert.Equal("Bearer access", handler.PlacementAuthorization);
++        }
++        finally { Directory.Delete(folder, true); }
++    }
++
++    [Fact]
++    public async Task TransferStartUsesBearerSessionAndValidatesPreparedTicket()
++    {
++        var folder = CreateMetadata();
++        try
++        {
++            var handler = new FakeHandler(false);
++            using var client = new NexusGatewayLogin(new Uri("https://gateway.example.test"), folder, handler);
++            var request = new TransferStartRequest
++            {
++                TransferId = Guid.NewGuid(),
++                SessionId = Guid.NewGuid(),
++                CharacterId = 42,
++                TargetInstanceId = "instance-eu-02",
++                TargetSystemId = "li02",
++                ExpiresUtc = DateTime.UtcNow.AddMinutes(1),
++                IdempotencyKey = Guid.NewGuid().ToString("N")
++            };
++
++            var result = await client.StartTransferAsync("access", request, TestContext.Current.CancellationToken);
++
++            Assert.True(result.Prepared.Accepted);
++            Assert.Equal(request.TransferId, result.Prepared.TransferId);
++            Assert.Equal("transfer-ticket", result.Prepared.TransferTicket);
++            Assert.Equal("li02", result.TargetSystemId);
++            Assert.Equal("Bearer access", handler.TransferAuthorization);
++            Assert.Equal("/api/v1/transfers/start", handler.Requests[^1].Path);
++        }
++        finally { Directory.Delete(folder, true); }
++    }
++
++    [Fact]
++    public async Task TransferStartRejectsResponseForDifferentTargetSystem()
++    {
++        var folder = CreateMetadata();
++        try
++        {
++            var handler = new FakeHandler(false, mismatchedTransferTarget: true);
++            using var client = new NexusGatewayLogin(new Uri("https://gateway.example.test"), folder, handler);
++            var request = new TransferStartRequest
++            {
++                TransferId = Guid.NewGuid(),
++                SessionId = Guid.NewGuid(),
++                CharacterId = 42,
++                TargetInstanceId = "instance-eu-02",
++                TargetSystemId = "li02",
++                ExpiresUtc = DateTime.UtcNow.AddMinutes(1),
++                IdempotencyKey = Guid.NewGuid().ToString("N")
++            };
++
++            await Assert.ThrowsAsync<InvalidDataException>(() => client.StartTransferAsync(
++                "access", request, TestContext.Current.CancellationToken));
++        }
++        finally { Directory.Delete(folder, true); }
++    }
++
++    [Fact]
++    public async Task RefreshRotatesTokensForTheSameSession()
++    {
++        var folder = CreateMetadata();
++        try
++        {
++            var sessionId = Guid.NewGuid();
++            var handler = new FakeHandler(false);
++            using var client = new NexusGatewayLogin(new Uri("https://gateway.example.test"), folder, handler);
++            var result = await client.RefreshAsync(sessionId, "old-refresh-token", TestContext.Current.CancellationToken);
++
++            Assert.Equal(sessionId, result.SessionId);
++            Assert.Equal("new-access", result.AccessToken);
++            Assert.Equal("new-refresh", result.RefreshToken);
++            Assert.Equal("/api/v1/auth/refresh", handler.Requests[^1].Path);
++            Assert.Contains(sessionId.ToString(), handler.Requests[^1].Body);
++            Assert.Contains("old-refresh-token", handler.Requests[^1].Body);
++        }
++        finally { Directory.Delete(folder, true); }
++    }
++
++    [Fact]
++    public async Task RequiredUpdateStopsBeforeSendingCredentials()
++    {
++        var folder = CreateMetadata();
++        try
++        {
++            var handler = new FakeHandler(true);
++            using var client = new NexusGatewayLogin(new Uri("https://gateway.example.test"), folder, handler);
++            var result = await client.LoginAsync("pilot@example.net", "secret",
++                TestContext.Current.CancellationToken);
++
++            Assert.False(result.LoggedIn);
++            Assert.Equal(42, result.RequestedExitCode);
++            Assert.Single(handler.Requests);
++            Assert.DoesNotContain("secret", handler.Requests[0].Body);
++        }
++        finally { Directory.Delete(folder, true); }
++    }
++
++    private static string CreateMetadata()
++    {
++        var folder = Path.Combine(Path.GetTempPath(), $"nexus-gateway-{Guid.NewGuid():N}");
++        Directory.CreateDirectory(folder);
++        File.WriteAllText(Path.Combine(folder, "client-version.json"),
++            """{"clientVersion":"1.0.0","buildId":"20260923.1","protocolVersion":1,"dataManifestId":"data-2026-09-22","platform":"linux-x64","channel":"stable","capabilities":["transfer-v1"]}""");
++        return folder;
++    }
++
++    private sealed class FakeHandler(bool updateRequired, bool mismatchedTransferTarget = false) : HttpMessageHandler
++    {
++        public List<(string Path, string Body)> Requests { get; } = [];
++        public string? PlacementAuthorization { get; private set; }
++        public string? TransferAuthorization { get; private set; }
++
++        protected override async Task<HttpResponseMessage> SendAsync(
++            HttpRequestMessage request, CancellationToken cancellationToken)
++        {
++            var body = await request.Content!.ReadAsStringAsync(cancellationToken);
++            Requests.Add((request.RequestUri!.AbsolutePath, body));
++            var payload = request.RequestUri.AbsolutePath == "/api/v1/client/version"
++                ? updateRequired
++                    ? """{"status":"update_required","sessionAllowed":false,"serverProtocolVersion":1,"messageKey":"client_update_required"}"""
++                    : """{"status":"supported","sessionAllowed":true,"serverProtocolVersion":1,"messageKey":"client_version_supported","handshakeToken":"proof"}"""
++                : request.RequestUri.AbsolutePath == "/api/v1/placement/request"
++                    ? PlacementPayload(request, body)
++                : request.RequestUri.AbsolutePath == "/api/v1/transfers/start"
++                    ? TransferPayload(request, body)
++                    : request.RequestUri.AbsolutePath == "/api/v1/auth/refresh"
++                    ? RefreshPayload(body)
++                : JsonSerializer.Serialize(new
++                {
++                    accessToken = "access", refreshToken = "refresh",
++                    accountId = Guid.NewGuid(), sessionId = Guid.NewGuid(),
++                    expiresAtUtc = DateTime.UtcNow.AddMinutes(10)
++                });
++            return new HttpResponseMessage(HttpStatusCode.OK)
++            {
++                Content = new StringContent(payload, Encoding.UTF8, "application/json")
++            };
++        }
++
++        private string PlacementPayload(HttpRequestMessage request, string body)
++        {
++            PlacementAuthorization = request.Headers.Authorization?.ToString();
++            var requestId = JsonDocument.Parse(body).RootElement.GetProperty("requestId").GetGuid();
++            return JsonSerializer.Serialize(new
++            {
++                decision = new
++                {
++                    requestId, accepted = true, instanceId = "instance-eu-01", systemId = "li01",
++                    endpoint = "game.example.test:2300",
++                    joinTicket = "join-ticket", expiresUtc = DateTime.UtcNow.AddMinutes(2)
++                },
++                duplicate = false
++            });
++        }
++
++        private string TransferPayload(HttpRequestMessage request, string body)
++        {
++            TransferAuthorization = request.Headers.Authorization?.ToString();
++            var transferId = JsonDocument.Parse(body).RootElement.GetProperty("transferId").GetGuid();
++            return JsonSerializer.Serialize(new
++            {
++                prepared = new
++                {
++                    transferId, accepted = true, transferTicket = "transfer-ticket",
++                    expiresUtc = DateTime.UtcNow.AddSeconds(30), reasonCode = "prepared"
++                },
++                sourceInstanceId = "instance-eu-01",
++                targetEndpoint = "game-2.example.test:2300",
++                targetInstanceId = "instance-eu-02",
++                targetSystemId = mismatchedTransferTarget ? "li99" : "li02",
++                leaseVersion = 5,
++                duplicate = false
++            });
++        }
++
++        private static string RefreshPayload(string body)
++        {
++            var sessionId = JsonDocument.Parse(body).RootElement.GetProperty("sessionId").GetGuid();
++            return JsonSerializer.Serialize(new
++            {
++                accessToken = "new-access", refreshToken = "new-refresh",
++                accountId = Guid.NewGuid(), sessionId, expiresAtUtc = DateTime.UtcNow.AddMinutes(10)
++            });
++        }
++    }
++}
+diff --git a/src/LibreLancer.Tests/StatelessMissionConditionTransferTests.cs b/src/LibreLancer.Tests/StatelessMissionConditionTransferTests.cs
+new file mode 100644
+index 00000000..deb3da23
+--- /dev/null
++++ b/src/LibreLancer.Tests/StatelessMissionConditionTransferTests.cs
+@@ -0,0 +1,29 @@
++using System;
++using LibreLancer.Missions;
++using LibreLancer.Missions.Conditions;
++using LancerNexus.Protocol;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class StatelessMissionConditionTransferTests
++{
++    [Fact]
++    public void TimerHasExplicitEmptyStorageBeforeFirstUpdate()
++    {
++        var condition = new ActiveCondition(null!, new Cnd_Timer());
++        var saved = condition.Storage.CaptureTransferState();
++        Assert.Equal("none", saved.Kind);
++        var restored = new ActiveCondition(null!, new Cnd_Timer());
++        restored.Storage.RestoreTransferState(saved);
++        Assert.Equal("none", restored.Storage.CaptureTransferState().Kind);
++    }
++
++    [Fact]
++    public void EmptyStorageRejectsStateFromAnotherConditionKind()
++    {
++        var condition = new ActiveCondition(null!, new Cnd_Timer());
++        Assert.Throws<InvalidOperationException>(() => condition.Storage.RestoreTransferState(
++            new NpcMissionConditionState { Kind = "double", NumberValue = 600 }));
++    }
++}
+diff --git a/src/LibreLancer.Tests/TransferLeaseTokenTests.cs b/src/LibreLancer.Tests/TransferLeaseTokenTests.cs
+new file mode 100644
+index 00000000..5ab6146c
+--- /dev/null
++++ b/src/LibreLancer.Tests/TransferLeaseTokenTests.cs
+@@ -0,0 +1,59 @@
++using System;
++using System.IO;
++using LibreLancer.Data.IO;
++using LibreLancer.Server;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class TransferLeaseTokenTests
++{
++    [Fact]
++    public void TargetTokenUsesGatewayBase64UrlFormatAndBindsTransferAndInstance()
++    {
++        var game = new GameServer(new FileSystem(new EmptyFileSystem()))
++        {
++            InstanceId = "li02",
++            SystemId = "li03",
++            LoginUrl = "https://gateway.example",
++            TransferInstanceKey = new string('k', 32)
++        };
++        var id = Guid.NewGuid();
++        var token = game.CreateTargetTransferLeaseToken(id);
++        Assert.Matches("^[A-Za-z0-9_-]{43}$", token);
++        Assert.Equal(32, Convert.FromBase64String(token.Replace('-', '+').Replace('_', '/') + "=").Length);
++        Assert.Equal(token, game.CreateTargetTransferLeaseToken(id));
++        Assert.NotEqual(token, game.CreateTargetTransferLeaseToken(Guid.NewGuid()));
++        game.InstanceId = "li04";
++        Assert.NotEqual(token, game.CreateTargetTransferLeaseToken(id));
++        Assert.Throws<InvalidOperationException>(() => game.CreateTargetTransferLeaseToken(Guid.Empty));
++    }
++
++    [Fact]
++    public void GroupOwnershipKeepsInternalJumpsLocalAndRequiresTransfersOutsideTheGroup()
++    {
++        var game = new GameServer(new FileSystem(new EmptyFileSystem())) { SystemId = "li01" };
++        Assert.True(game.OwnsSystem("LI01"));
++        Assert.False(game.OwnsSystem("li03"));
++        game.SystemIds = ["li01", "li02", "li03", "li04", "li05"];
++        Assert.True(game.OwnsSystem("Li03"));
++        Assert.False(game.OwnsSystem("br01"));
++        Assert.False(game.OwnsSystem("li06"));
++    }
++
++    private sealed class EmptyFileSystem : BaseFileSystemProvider
++    {
++        public EmptyFileSystem() => Refresh();
++        public override void Refresh()
++        {
++            Root = new VfsDirectory();
++            var exe = new VfsDirectory { Name = "EXE", Parent = Root };
++            Root.Items["EXE"] = exe;
++            exe.Items.Add("freelancer.ini", new EmptyFile { Name = "freelancer.ini" });
++        }
++        private sealed class EmptyFile : VfsFile
++        {
++            public override Stream OpenRead() => new MemoryStream();
++        }
++    }
++}
+diff --git a/src/LibreLancer.Tests/TransferReconnectTests.cs b/src/LibreLancer.Tests/TransferReconnectTests.cs
+new file mode 100644
+index 00000000..768e7e4a
+--- /dev/null
++++ b/src/LibreLancer.Tests/TransferReconnectTests.cs
+@@ -0,0 +1,95 @@
++using System;
++using System.Diagnostics;
++using System.Net;
++using System.Threading.Tasks;
++using LibreLancer.Client;
++using LibreLancer.Net;
++using LibreLancer.Net.Protocol;
++using LiteNetLib;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class TransferReconnectTests
++{
++    [Theory]
++    [InlineData(false)]
++    [InlineData(true)]
++    public async Task IntentionalDisconnectPreservesSessionUntilTargetAcceptsOrRejects(bool rejectTarget)
++    {
++        var sourceListener = new EventBasedNetListener();
++        var targetListener = new EventBasedNetListener();
++        var source = new NetManager(sourceListener);
++        var target = new NetManager(targetListener);
++        var connection = new GameNetClient(new ImmediateUiThread());
++        var session = new CGameSession(null!, connection);
++        var disconnected = false;
++        var targetRequested = false;
++        var sourceGone = false;
++        sourceListener.ConnectionRequestEvent += request => request.Accept();
++        sourceListener.PeerConnectedEvent += SendLogin;
++        sourceListener.PeerDisconnectedEvent += (_, _) => sourceGone = true;
++        targetListener.ConnectionRequestEvent += request =>
++        {
++            targetRequested = true;
++            if (rejectTarget)
++                request.Reject();
++            else
++                request.Accept();
++        };
++        targetListener.PeerConnectedEvent += SendLogin;
++        connection.Disconnected += _ => disconnected = true;
++        Assert.True(source.Start(0));
++        Assert.True(target.Start(0));
++        connection.Start();
++        try
++        {
++            connection.Connect(new IPEndPoint(IPAddress.Loopback, source.LocalPort));
++            await PumpUntil(() => connection.Connected, source, target);
++            // Let the ordered login acknowledgement arrive before starting the handoff.
++            await Task.Delay(100);
++            Assert.False(session.Update());
++
++            connection.ReconnectWithTransferTicket($"127.0.0.1:{target.LocalPort}", "test-transfer-ticket");
++            await PumpUntil(() => sourceGone && !connection.Connected, source);
++            Assert.True(connection.IsTransferReconnecting);
++            // The old code shut down networking and opened LuaMenu during this gap.
++            Assert.False(session.Update());
++            Assert.False(disconnected);
++
++            await PumpUntil(() => targetRequested && !connection.IsTransferReconnecting, source, target);
++            Assert.Equal(rejectTarget, disconnected);
++            Assert.Equal(!rejectTarget, connection.Connected);
++        }
++        finally
++        {
++            connection.Shutdown();
++            source.Stop();
++            target.Stop();
++        }
++    }
++
++    private static void SendLogin(NetPeer peer)
++    {
++        var packet = new PacketWriter();
++        Packets.Write(packet, new LoginSuccessPacket());
++        peer.Send(packet, DeliveryMethod.ReliableOrdered);
++    }
++
++    private static async Task PumpUntil(Func<bool> complete, params NetManager[] servers)
++    {
++        var elapsed = Stopwatch.StartNew();
++        while (!complete())
++        {
++            Assert.True(elapsed.Elapsed < TimeSpan.FromSeconds(10), "UDP test timed out");
++            foreach (var server in servers)
++                server.PollEvents();
++            await Task.Delay(5);
++        }
++    }
++
++    private sealed class ImmediateUiThread : IUIThread
++    {
++        public void QueueUIThread(Action work) => work();
++    }
++}
+diff --git a/src/LibreLancer.Tests/TransferSnapshotImportMigrationTests.cs b/src/LibreLancer.Tests/TransferSnapshotImportMigrationTests.cs
+new file mode 100644
+index 00000000..885e847b
+--- /dev/null
++++ b/src/LibreLancer.Tests/TransferSnapshotImportMigrationTests.cs
+@@ -0,0 +1,50 @@
++using System;
++using System.Threading.Tasks;
++using LibreLancer.Database;
++using LibreLancer.Entities.Character;
++using Microsoft.Data.Sqlite;
++using Microsoft.EntityFrameworkCore;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class TransferSnapshotImportMigrationTests
++{
++    [Fact]
++    public async Task MigrationCreatesDurableImportReceiptTable()
++    {
++        var cancellationToken = TestContext.Current.CancellationToken;
++        await using var connection = new SqliteConnection("Data Source=:memory:");
++        await connection.OpenAsync(cancellationToken);
++        var options = new DbContextOptionsBuilder<LibreLancerContext>()
++            .UseSqlite(connection)
++            .Options;
++        await using var context = new LibreLancerContext(options);
++
++        await context.Database.MigrateAsync(cancellationToken);
++
++        Assert.Contains("20260926120000_TransferSnapshotImports",
++            await context.Database.GetAppliedMigrationsAsync(cancellationToken));
++
++        var transferId = Guid.NewGuid();
++        context.TransferSnapshotImports.Add(new TransferSnapshotImport
++        {
++            TransferId = transferId,
++            AccountId = Guid.NewGuid(),
++            CharacterId = 42,
++            SourceInstanceId = "li01-instance",
++            TargetInstanceId = "li02-instance",
++            TargetSystemId = "li02",
++            LeaseVersion = 8,
++            TicketHash = new string('A', 64),
++            SnapshotHash = new string('B', 64),
++            Imported = true
++        });
++        await context.SaveChangesAsync(cancellationToken);
++
++        var saved = await context.TransferSnapshotImports.SingleAsync(
++            x => x.TransferId == transferId, cancellationToken);
++        Assert.Equal(42, saved.CharacterId);
++        Assert.True(saved.Imported);
++    }
++}
+diff --git a/src/LibreLancer.Tests/TransferSourceVersionTests.cs b/src/LibreLancer.Tests/TransferSourceVersionTests.cs
+new file mode 100644
+index 00000000..d1fbc659
+--- /dev/null
++++ b/src/LibreLancer.Tests/TransferSourceVersionTests.cs
+@@ -0,0 +1,90 @@
++using System;
++using System.IO;
++using System.Net;
++using System.Net.Http;
++using System.Net.Http.Json;
++using System.Reflection;
++using System.Threading;
++using System.Threading.Tasks;
++using LibreLancer.Database;
++using LibreLancer.Data.IO;
++using LibreLancer.Server;
++using Microsoft.Data.Sqlite;
++using Microsoft.EntityFrameworkCore;
++using Microsoft.EntityFrameworkCore.Design;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class TransferSourceVersionTests
++{
++    [Theory]
++    [InlineData(0)]
++    [InlineData(1)]
++    [InlineData(8)]
++    public async Task FrozenTransferImportsVerifiedSourceVersionBeforeCommittedVersionExists(long version)
++    {
++        await using var connection = new SqliteConnection("Data Source=:memory:");
++        await connection.OpenAsync();
++        var options = new DbContextOptionsBuilder<LibreLancerContext>().UseSqlite(connection).Options;
++        await using (var context = new LibreLancerContext(options))
++            await context.Database.MigrateAsync();
++        var game = new GameServer(new FileSystem(new EmptyFileSystem()))
++        {
++            InstanceId = "li01", SystemId = "li01", LoginUrl = "https://gateway.example",
++            TransferInstanceKey = new string('k', 32), DbContextFactory = new Factory(options)
++        };
++        using var database = new ServerDatabase(game);
++        game.Database = database;
++        var transfer = Guid.NewGuid();
++        using var http = new HttpClient(new Handler(transfer, version));
++        var field = typeof(GameServer).GetField("transferHttp", BindingFlags.Instance | BindingFlags.NonPublic)!;
++        var original = (HttpClient)field.GetValue(game)!;
++        field.SetValue(game, http);
++        original.Dispose();
++        // Stop at snapshot download: the verified receipt must already have been durably written.
++        await Assert.ThrowsAsync<HttpRequestException>(() =>
++            game.ImportTransferSnapshotAndAcceptAsync(transfer, "test-ticket", "test-target-token"));
++        var receipt = await database.GetTransferSnapshotImportAsync(transfer);
++        Assert.NotNull(receipt);
++        Assert.Equal(version, receipt.LeaseVersion);
++        Assert.False(receipt.Imported);
++    }
++
++    private sealed class Factory(DbContextOptions<LibreLancerContext> options) : IDesignTimeDbContextFactory<LibreLancerContext>
++    {
++        public LibreLancerContext CreateDbContext(string[] args) => new(options);
++    }
++    private sealed class Handler(Guid transfer, long version) : HttpMessageHandler
++    {
++        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
++        {
++            if (request.RequestUri!.AbsolutePath.EndsWith("verify-transfer-ticket"))
++                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(new {
++                    TransferId = transfer, Guid = Guid.NewGuid(), CharacterId = 1,
++                    SourceInstanceId = "li02", InstanceId = "li01", SystemId = "Li01", LeaseVersion = version
++                }) });
++            if (request.RequestUri.AbsolutePath.EndsWith("/snapshot"))
++                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
++            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(new {
++                TransferId = transfer, State = 4, SourceInstanceId = "li02", TargetInstanceId = "li01",
++                TargetSystemId = "Li01", LeaseVersion = 0
++            }) });
++        }
++    }
++    private sealed class EmptyFileSystem : BaseFileSystemProvider
++    {
++        public EmptyFileSystem() => Refresh();
++        public override void Refresh()
++        {
++            Root = new VfsDirectory();
++            var exe = new VfsDirectory { Name = "EXE", Parent = Root };
++            Root.Items["EXE"] = exe;
++            exe.Items.Add("freelancer.ini", new EmptyFile { Name = "freelancer.ini" });
++        }
++        private sealed class EmptyFile : VfsFile
++        {
++            public override Stream OpenRead() => new MemoryStream();
++        }
++    }
++}
+diff --git a/src/LibreLancer.Tests/VisitBundleEmptyTests.cs b/src/LibreLancer.Tests/VisitBundleEmptyTests.cs
+new file mode 100644
+index 00000000..bf6b03af
+--- /dev/null
++++ b/src/LibreLancer.Tests/VisitBundleEmptyTests.cs
+@@ -0,0 +1,35 @@
++using LibreLancer.Data;
++using LibreLancer.Data.Schema.Save;
++using LibreLancer.Net.Protocol;
++using LiteNetLib.Utils;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class VisitBundleEmptyTests
++{
++    private static VisitBundle RoundTrip(VisitEntry[] visits)
++    {
++        var writer = new PacketWriter();
++        VisitBundle.Compress(visits).Put(writer);
++        return VisitBundle.Read(new PacketReader(new NetDataReader(writer.GetCopy())));
++    }
++
++    [Fact]
++    public void NewPilotWithNoVisitsRoundTripsWithoutIndexingAnEmptyArray()
++    {
++        Assert.Empty(RoundTrip([]).Visits);
++    }
++
++    [Fact]
++    public void ExistingVisitsKeepSortedHashesAndFlags()
++    {
++        var restored = RoundTrip([new() { Obj = (HashValue)200u, Visit = 3 },
++                                  new() { Obj = (HashValue)100u, Visit = 1 }]);
++        Assert.Equal(2, restored.Visits.Length);
++        Assert.Equal(100u, restored.Visits[0].Obj.Hash);
++        Assert.Equal(1, restored.Visits[0].Visit);
++        Assert.Equal(200u, restored.Visits[1].Obj.Hash);
++        Assert.Equal(3, restored.Visits[1].Visit);
++    }
++}
+diff --git a/src/LibreLancer/Net/NexusGatewayLogin.cs b/src/LibreLancer/Net/NexusGatewayLogin.cs
+new file mode 100644
+index 00000000..93d02607
+--- /dev/null
++++ b/src/LibreLancer/Net/NexusGatewayLogin.cs
+@@ -0,0 +1,234 @@
++using System;
++using System.IO;
++using System.Net.Http;
++using System.Net.Http.Json;
++using System.Net.Http.Headers;
++using System.Net;
++using System.Text.Json;
++using System.Threading;
++using System.Threading.Tasks;
++using LancerNexus.Protocol;
++
++namespace LibreLancer.Net;
++
++public sealed class ClientVersionMetadataException(string message, Exception innerException)
++    : Exception(message, innerException);
++
++public sealed record NexusGatewayLoginResult(
++    ClientVersionDecision VersionDecision, string? AccessToken, string? RefreshToken,
++    Guid? SessionId, string? GameEndpoint = null, string? JoinTicket = null,
++    string? InstanceId = null, string? SystemId = null)
++{
++    public bool LoggedIn => AccessToken is not null && SessionId.HasValue;
++    public bool Assigned => GameEndpoint is not null && JoinTicket is not null;
++    public int? RequestedExitCode => VersionDecision.Status is
++        ClientVersionStatus.UpdateRequired or ClientVersionStatus.ProtocolUnsupported ? 42 : null;
++}
++
++public sealed record NexusGatewayRefreshResult(
++    string AccessToken, string RefreshToken, Guid SessionId, DateTime ExpiresAtUtc);
++
++public sealed class NexusGatewayLogin : IDisposable
++{
++    private readonly HttpClient http;
++    private readonly Uri gateway;
++    private readonly string installDirectory;
++
++    public NexusGatewayLogin(Uri gateway)
++        : this(gateway, AppContext.BaseDirectory, new HttpClientHandler { AllowAutoRedirect = false })
++    {
++    }
++
++    internal NexusGatewayLogin(Uri gateway, string installDirectory, HttpMessageHandler handler)
++    {
++        if (!gateway.IsAbsoluteUri || gateway.Scheme != Uri.UriSchemeHttps ||
++            !string.IsNullOrEmpty(gateway.UserInfo) || !string.IsNullOrEmpty(gateway.Query) ||
++            !string.IsNullOrEmpty(gateway.Fragment))
++            throw new ArgumentException("Gateway endpoint must be an HTTPS origin.", nameof(gateway));
++        this.gateway = gateway;
++        this.installDirectory = installDirectory;
++        http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(15) };
++    }
++
++    public Task<NexusGatewayLoginResult> LoginAsync(
++        string email, string password, CancellationToken cancellationToken = default) =>
++        LoginWithHelloAsync(LoadInstalledHello(), email, password, cancellationToken);
++
++    private async Task<NexusGatewayLoginResult> LoginWithHelloAsync(
++        ClientVersionHello hello, string email, string password, CancellationToken cancellationToken)
++    {
++        using var versionResponse = await http.PostAsJsonAsync(
++            new Uri(gateway, "/api/v1/client/version"), hello, cancellationToken);
++        versionResponse.EnsureSuccessStatusCode();
++        var decision = await versionResponse.Content.ReadFromJsonAsync<ClientVersionDecision>(
++            cancellationToken: cancellationToken)
++            ?? throw new InvalidDataException("Gateway version response is empty.");
++        if (!decision.SessionAllowed)
++        {
++            if (decision.Status is not (ClientVersionStatus.UpdateRequired or ClientVersionStatus.ProtocolUnsupported))
++                throw new InvalidDataException("Gateway version response is contradictory.");
++            return new NexusGatewayLoginResult(decision, null, null, null);
++        }
++        if (decision.Status is not (ClientVersionStatus.Supported or ClientVersionStatus.UpdateRecommended) ||
++            string.IsNullOrWhiteSpace(decision.HandshakeToken))
++            throw new InvalidDataException("Gateway version response has no valid handshake proof.");
++
++        using var loginResponse = await http.PostAsJsonAsync(
++            new Uri(gateway, "/api/v1/auth/login"),
++            new GatewayCredentials(email, password, decision.HandshakeToken), cancellationToken);
++        if (loginResponse.StatusCode == HttpStatusCode.Unauthorized)
++            throw new UnauthorizedAccessException("Gateway credentials were rejected.");
++        if (!loginResponse.IsSuccessStatusCode)
++            throw new HttpRequestException($"Gateway login failed with HTTP {(int)loginResponse.StatusCode}.");
++        var login = await loginResponse.Content.ReadFromJsonAsync<GatewayLoginResponse>(
++            cancellationToken: cancellationToken)
++            ?? throw new InvalidDataException("Gateway login response is empty.");
++        if (string.IsNullOrWhiteSpace(login.AccessToken) || login.SessionId == Guid.Empty)
++            throw new InvalidDataException("Gateway login response is incomplete.");
++        return new NexusGatewayLoginResult(decision, login.AccessToken, login.RefreshToken, login.SessionId);
++    }
++
++    public async Task<NexusGatewayLoginResult> LoginAndPlaceAsync(
++        string email, string password, string targetSystem, string region,
++        CancellationToken cancellationToken = default)
++    {
++        var hello = LoadInstalledHello();
++        var login = await LoginWithHelloAsync(hello, email, password, cancellationToken);
++        if (!login.LoggedIn)
++            return login;
++        if (string.IsNullOrWhiteSpace(targetSystem))
++            throw new ArgumentException("Target system is required.", nameof(targetSystem));
++        var requestId = Guid.NewGuid();
++        var placement = new PlacementRequest
++        {
++            RequestId = requestId,
++            SessionId = login.SessionId!.Value,
++            TargetSystem = targetSystem,
++            ClientBuild = hello.BuildId,
++            Region = region,
++            IdempotencyKey = requestId.ToString("N")
++        };
++        using var message = new HttpRequestMessage(HttpMethod.Post,
++            new Uri(gateway, "/api/v1/placement/request"));
++        message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", login.AccessToken);
++        message.Content = JsonContent.Create(placement);
++        using var response = await http.SendAsync(message, cancellationToken);
++        if (!response.IsSuccessStatusCode)
++            throw new HttpRequestException($"Gateway placement failed with HTTP {(int)response.StatusCode}.");
++        var envelope = await response.Content.ReadFromJsonAsync<GatewayPlacementEnvelope>(
++            cancellationToken: cancellationToken)
++            ?? throw new InvalidDataException("Gateway placement response is empty.");
++        var decision = envelope.Decision;
++        if (decision is null || decision.RequestId != requestId || !decision.Accepted ||
++            string.IsNullOrWhiteSpace(decision.Endpoint) || string.IsNullOrWhiteSpace(decision.JoinTicket) ||
++            string.IsNullOrWhiteSpace(decision.InstanceId) || string.IsNullOrWhiteSpace(decision.SystemId) ||
++            decision.ExpiresUtc.Kind != DateTimeKind.Utc || decision.ExpiresUtc <= DateTime.UtcNow)
++            throw new InvalidDataException("Gateway placement response is invalid.");
++        return login with
++        {
++            GameEndpoint = decision.Endpoint,
++            JoinTicket = decision.JoinTicket,
++            InstanceId = decision.InstanceId,
++            SystemId = decision.SystemId
++        };
++    }
++
++    /// <summary>Requests a target reservation for a transfer that the source server has approved for preparation.</summary>
++    public async Task<TransferStartResult> StartTransferAsync(
++        string accessToken, TransferStartRequest request, CancellationToken cancellationToken = default)
++    {
++        if (string.IsNullOrWhiteSpace(accessToken))
++            throw new ArgumentException("Gateway access token is required.", nameof(accessToken));
++        if (request.TransferId == Guid.Empty || request.SessionId == Guid.Empty || request.CharacterId <= 0 ||
++            request.TargetInstanceId is { Length: > 96 } || string.IsNullOrWhiteSpace(request.TargetSystemId) ||
++            request.ExpiresUtc.Kind != DateTimeKind.Utc || request.ExpiresUtc <= DateTime.UtcNow ||
++            string.IsNullOrWhiteSpace(request.IdempotencyKey))
++            throw new ArgumentException("Transfer request is incomplete or expired.", nameof(request));
++
++        using var message = new HttpRequestMessage(HttpMethod.Post, new Uri(gateway, "/api/v1/transfers/start"));
++        message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
++        message.Content = JsonContent.Create(request);
++        using var response = await http.SendAsync(message, cancellationToken);
++        if (!response.IsSuccessStatusCode)
++        {
++            string? reasonCode = null;
++            var errorBody = await response.Content.ReadAsStringAsync(cancellationToken);
++            try
++            {
++                using var document = JsonDocument.Parse(errorBody);
++                if (document.RootElement.ValueKind == JsonValueKind.Object &&
++                    document.RootElement.TryGetProperty("error", out var error) &&
++                    error.ValueKind == JsonValueKind.String)
++                    reasonCode = error.GetString();
++            }
++            catch (JsonException) { }
++            var reason = string.IsNullOrWhiteSpace(reasonCode) ? "" : $" ({reasonCode})";
++            throw new HttpRequestException(
++                $"Gateway transfer preparation failed with HTTP {(int)response.StatusCode}{reason}.");
++        }
++        var result = await response.Content.ReadFromJsonAsync<TransferStartResult>(cancellationToken: cancellationToken)
++            ?? throw new InvalidDataException("Gateway transfer response is empty.");
++        var prepared = result.Prepared;
++        if (prepared is null || prepared.TransferId != request.TransferId || !prepared.Accepted ||
++            string.IsNullOrWhiteSpace(prepared.TransferTicket) || prepared.ExpiresUtc.Kind != DateTimeKind.Utc ||
++            prepared.ExpiresUtc <= DateTime.UtcNow || prepared.ExpiresUtc > request.ExpiresUtc ||
++            string.IsNullOrWhiteSpace(result.SourceInstanceId) || string.IsNullOrWhiteSpace(result.TargetEndpoint) ||
++            string.IsNullOrWhiteSpace(result.TargetInstanceId) ||
++            !string.Equals(result.TargetSystemId, request.TargetSystemId, StringComparison.Ordinal) || result.LeaseVersion < 0)
++            throw new InvalidDataException("Gateway transfer response is invalid.");
++        return result;
++    }
++
++    public async Task<NexusGatewayRefreshResult> RefreshAsync(
++        Guid sessionId, string refreshToken, CancellationToken cancellationToken = default)
++    {
++        if (sessionId == Guid.Empty || string.IsNullOrWhiteSpace(refreshToken))
++            throw new ArgumentException("Gateway refresh session and token are required.");
++        using var response = await http.PostAsJsonAsync(
++            new Uri(gateway, "/api/v1/auth/refresh"),
++            new GatewayRefreshRequest(sessionId, refreshToken), cancellationToken);
++        if (response.StatusCode == HttpStatusCode.Unauthorized)
++            throw new UnauthorizedAccessException("Gateway session expired or refresh token was rejected.");
++        if (!response.IsSuccessStatusCode)
++            throw new HttpRequestException($"Gateway token refresh failed with HTTP {(int)response.StatusCode}.");
++        var login = await response.Content.ReadFromJsonAsync<GatewayLoginResponse>(cancellationToken: cancellationToken)
++            ?? throw new InvalidDataException("Gateway refresh response is empty.");
++        if (string.IsNullOrWhiteSpace(login.AccessToken) || string.IsNullOrWhiteSpace(login.RefreshToken) ||
++            login.SessionId != sessionId || login.ExpiresAtUtc.Kind != DateTimeKind.Utc ||
++            login.ExpiresAtUtc <= DateTime.UtcNow)
++            throw new InvalidDataException("Gateway refresh response is invalid.");
++        return new NexusGatewayRefreshResult(login.AccessToken, login.RefreshToken, sessionId, login.ExpiresAtUtc);
++    }
++
++    internal ClientVersionHello LoadInstalledHello()
++    {
++        try
++        {
++            var path = Path.Combine(installDirectory, "client-version.json");
++            using var stream = File.OpenRead(path);
++            if (stream.Length is 0 or > 16_384)
++                throw new InvalidDataException("Installed client version metadata has an invalid size.");
++            var hello = JsonSerializer.Deserialize<ClientVersionHello>(stream,
++                new JsonSerializerOptions(JsonSerializerDefaults.Web))
++                ?? throw new InvalidDataException("Installed client version metadata is empty.");
++            if (string.IsNullOrWhiteSpace(hello.ClientVersion) || string.IsNullOrWhiteSpace(hello.BuildId) ||
++                hello.ProtocolVersion < 1 || string.IsNullOrWhiteSpace(hello.DataManifestId) ||
++                string.IsNullOrWhiteSpace(hello.Platform) || string.IsNullOrWhiteSpace(hello.Channel) ||
++                hello.Capabilities is null)
++                throw new InvalidDataException("Installed client version metadata is incomplete.");
++            return hello;
++        }
++        catch (Exception error) when (error is IOException or JsonException or UnauthorizedAccessException)
++        {
++            throw new ClientVersionMetadataException("Installed client version metadata requires repair.", error);
++        }
++    }
++
++    public void Dispose() => http.Dispose();
++
++    private sealed record GatewayCredentials(string Email, string Password, string HandshakeToken);
++    private sealed record GatewayRefreshRequest(Guid SessionId, string RefreshToken);
++    private sealed record GatewayLoginResponse(
++        string AccessToken, string RefreshToken, Guid AccountId, Guid SessionId, DateTime ExpiresAtUtc);
++    private sealed record GatewayPlacementEnvelope(PlacementDecision Decision, bool Duplicate);
++}
+diff --git a/src/Librelancer.Database/Migrations/20260926120000_TransferSnapshotImports.Designer.cs b/src/Librelancer.Database/Migrations/20260926120000_TransferSnapshotImports.Designer.cs
+new file mode 100644
+index 00000000..8f8d7cba
+--- /dev/null
++++ b/src/Librelancer.Database/Migrations/20260926120000_TransferSnapshotImports.Designer.cs
+@@ -0,0 +1,402 @@
++// <auto-generated />
++// <auto-generated />
++using System;
++using LibreLancer.Database;
++using Microsoft.EntityFrameworkCore;
++using Microsoft.EntityFrameworkCore.Infrastructure;
++using Microsoft.EntityFrameworkCore.Migrations;
++using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
++
++#nullable disable
++
++namespace LibreLancer.Database.Migrations
++{
++    [DbContext(typeof(LibreLancerContext))]
++    [Migration("20260926120000_TransferSnapshotImports")]
++    partial class TransferSnapshotImports : Migration
++    {
++        protected override void BuildTargetModel(ModelBuilder modelBuilder)
++        {
++#pragma warning disable 612, 618
++            modelBuilder.HasAnnotation("ProductVersion", "10.0.0");
++
++            modelBuilder.Entity("LibreLancer.Entities.Character.Account", b =>
++                {
++                    b.Property<long>("Id")
++                        .ValueGeneratedOnAdd()
++                        .HasColumnType("INTEGER");
++
++                    b.Property<Guid>("AccountIdentifier")
++                        .HasColumnType("TEXT");
++
++                    b.Property<double?>("BanExpiry")
++                        .HasColumnType("REAL");
++
++                    b.Property<double>("CreationDate")
++                        .HasColumnType("REAL");
++
++                    b.Property<double>("LastLogin")
++                        .HasColumnType("REAL");
++
++                    b.Property<double?>("UpdateDate")
++                        .HasColumnType("REAL");
++
++                    b.HasKey("Id");
++
++                    b.HasIndex("AccountIdentifier");
++
++                    b.ToTable("Accounts");
++                });
++
++            modelBuilder.Entity("LibreLancer.Entities.Character.TransferSnapshotImport", b =>
++                {
++                    b.Property<Guid>("TransferId")
++                        .HasColumnType("TEXT");
++
++                    b.Property<Guid>("AccountId")
++                        .HasColumnType("TEXT");
++
++                    b.Property<long>("CharacterId")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<bool>("Imported")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<long>("LeaseVersion")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<string>("SnapshotHash")
++                        .HasColumnType("TEXT");
++
++                    b.Property<string>("SourceInstanceId")
++                        .IsRequired()
++                        .HasColumnType("TEXT");
++
++                    b.Property<string>("TargetInstanceId")
++                        .IsRequired()
++                        .HasColumnType("TEXT");
++
++                    b.Property<string>("TargetSystemId")
++                        .IsRequired()
++                        .HasColumnType("TEXT");
++
++                    b.Property<string>("TicketHash")
++                        .IsRequired()
++                        .HasColumnType("TEXT");
++
++                    b.HasKey("TransferId");
++
++                    b.ToTable("TransferSnapshotImports");
++                });
++
++            modelBuilder.Entity("LibreLancer.Entities.Character.CargoItem", b =>
++                {
++                    b.Property<long>("Id")
++                        .ValueGeneratedOnAdd()
++                        .HasColumnType("INTEGER");
++
++                    b.Property<long?>("CharacterId")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<double>("CreationDate")
++                        .HasColumnType("REAL");
++
++                    b.Property<string>("Hardpoint")
++                        .HasColumnType("TEXT");
++
++                    b.Property<float>("Health")
++                        .HasColumnType("REAL");
++
++                    b.Property<bool>("IsMissionItem")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<long>("ItemCount")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<string>("ItemName")
++                        .HasColumnType("TEXT");
++
++                    b.Property<double?>("UpdateDate")
++                        .HasColumnType("REAL");
++
++                    b.HasKey("Id");
++
++                    b.HasIndex("CharacterId");
++
++                    b.ToTable("CargoItem");
++                });
++
++            modelBuilder.Entity("LibreLancer.Entities.Character.Character", b =>
++                {
++                    b.Property<long>("Id")
++                        .ValueGeneratedOnAdd()
++                        .HasColumnType("INTEGER");
++
++                    b.Property<long>("AccountId")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<string>("Affiliation")
++                        .HasColumnType("TEXT");
++
++                    b.Property<bool>("AffiliationLocked")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<string>("Base")
++                        .HasColumnType("TEXT");
++
++                    b.Property<long>("CapitalKills")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<string>("ComCostume")
++                        .HasColumnType("TEXT");
++
++                    b.Property<string>("Costume")
++                        .HasColumnType("TEXT");
++
++                    b.Property<double>("CreationDate")
++                        .HasColumnType("REAL");
++
++                    b.Property<string>("Description")
++                        .HasColumnType("TEXT");
++
++                    b.PrimitiveCollection<string>("DestroyedParts")
++                        .IsRequired()
++                        .HasColumnType("TEXT");
++
++                    b.Property<long>("FightersKilled")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<long>("FreightersKilled")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<bool>("IsAdmin")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<long>("MissionsCompleted")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<long>("MissionsFailed")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<long>("Money")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<string>("Name")
++                        .HasColumnType("TEXT COLLATE NOCASE");
++
++                    b.Property<long>("PlayersKilled")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<uint>("Rank")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<float>("RotationW")
++                        .HasColumnType("REAL");
++
++                    b.Property<float>("RotationX")
++                        .HasColumnType("REAL");
++
++                    b.Property<float>("RotationY")
++                        .HasColumnType("REAL");
++
++                    b.Property<float>("RotationZ")
++                        .HasColumnType("REAL");
++
++                    b.Property<string>("Ship")
++                        .HasColumnType("TEXT");
++
++                    b.Property<string>("System")
++                        .HasColumnType("TEXT");
++
++                    b.Property<double>("Time")
++                        .HasColumnType("REAL");
++
++                    b.Property<long>("TransportsKilled")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<double?>("UpdateDate")
++                        .HasColumnType("REAL");
++
++                    b.Property<string>("Voice")
++                        .HasColumnType("TEXT");
++
++                    b.Property<float>("X")
++                        .HasColumnType("REAL");
++
++                    b.Property<float>("Y")
++                        .HasColumnType("REAL");
++
++                    b.Property<float>("Z")
++                        .HasColumnType("REAL");
++
++                    b.HasKey("Id");
++
++                    b.HasIndex("AccountId");
++
++                    b.ToTable("Characters");
++                });
++
++            modelBuilder.Entity("LibreLancer.Entities.Character.Reputation", b =>
++                {
++                    b.Property<long>("Id")
++                        .ValueGeneratedOnAdd()
++                        .HasColumnType("INTEGER");
++
++                    b.Property<long>("CharacterId")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<double>("CreationDate")
++                        .HasColumnType("REAL");
++
++                    b.Property<string>("RepGroup")
++                        .HasColumnType("TEXT COLLATE NOCASE");
++
++                    b.Property<float>("ReputationValue")
++                        .HasColumnType("REAL");
++
++                    b.Property<double?>("UpdateDate")
++                        .HasColumnType("REAL");
++
++                    b.HasKey("Id");
++
++                    b.HasIndex("CharacterId");
++
++                    b.HasIndex("CharacterId", "RepGroup")
++                        .IsUnique();
++
++                    b.ToTable("Reputation");
++                });
++
++            modelBuilder.Entity("LibreLancer.Entities.Character.VisitEntry", b =>
++                {
++                    b.Property<long>("Id")
++                        .ValueGeneratedOnAdd()
++                        .HasColumnType("INTEGER");
++
++                    b.Property<long>("CharacterId")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<double>("CreationDate")
++                        .HasColumnType("REAL");
++
++                    b.Property<uint>("Hash")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<double?>("UpdateDate")
++                        .HasColumnType("REAL");
++
++                    b.Property<int>("VisitValue")
++                        .HasColumnType("INTEGER");
++
++                    b.HasKey("Id");
++
++                    b.HasIndex("CharacterId");
++
++                    b.HasIndex("CharacterId", "Hash")
++                        .IsUnique();
++
++                    b.ToTable("VisitEntry");
++                });
++
++            modelBuilder.Entity("LibreLancer.Entities.Character.VisitHistoryEntry", b =>
++                {
++                    b.Property<long>("Id")
++                        .ValueGeneratedOnAdd()
++                        .HasColumnType("INTEGER");
++
++                    b.Property<long>("CharacterId")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<double>("CreationDate")
++                        .HasColumnType("REAL");
++
++                    b.Property<uint>("Hash")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<int>("Kind")
++                        .HasColumnType("INTEGER");
++
++                    b.Property<double?>("UpdateDate")
++                        .HasColumnType("REAL");
++
++                    b.HasKey("Id");
++
++                    b.HasIndex("CharacterId");
++
++                    b.HasIndex("CharacterId", "Kind", "Hash")
++                        .IsUnique();
++
++                    b.ToTable("VisitHistoryEntry");
++                });
++
++            modelBuilder.Entity("LibreLancer.Entities.Character.CargoItem", b =>
++                {
++                    b.HasOne("LibreLancer.Entities.Character.Character", null)
++                        .WithMany("Items")
++                        .HasForeignKey("CharacterId")
++                        .OnDelete(DeleteBehavior.Cascade);
++                });
++
++            modelBuilder.Entity("LibreLancer.Entities.Character.Character", b =>
++                {
++                    b.HasOne("LibreLancer.Entities.Character.Account", "Account")
++                        .WithMany("Characters")
++                        .HasForeignKey("AccountId")
++                        .OnDelete(DeleteBehavior.Cascade)
++                        .IsRequired();
++
++                    b.Navigation("Account");
++                });
++
++            modelBuilder.Entity("LibreLancer.Entities.Character.Reputation", b =>
++                {
++                    b.HasOne("LibreLancer.Entities.Character.Character", "Character")
++                        .WithMany("Reputations")
++                        .HasForeignKey("CharacterId")
++                        .OnDelete(DeleteBehavior.Cascade)
++                        .IsRequired();
++
++                    b.Navigation("Character");
++                });
++
++            modelBuilder.Entity("LibreLancer.Entities.Character.VisitEntry", b =>
++                {
++                    b.HasOne("LibreLancer.Entities.Character.Character", "Character")
++                        .WithMany("VisitEntries")
++                        .HasForeignKey("CharacterId")
++                        .OnDelete(DeleteBehavior.Cascade)
++                        .IsRequired();
++
++                    b.Navigation("Character");
++                });
++
++            modelBuilder.Entity("LibreLancer.Entities.Character.VisitHistoryEntry", b =>
++                {
++                    b.HasOne("LibreLancer.Entities.Character.Character", "Character")
++                        .WithMany("VisitHistoryEntries")
++                        .HasForeignKey("CharacterId")
++                        .OnDelete(DeleteBehavior.Cascade)
++                        .IsRequired();
++
++                    b.Navigation("Character");
++                });
++
++            modelBuilder.Entity("LibreLancer.Entities.Character.Account", b =>
++                {
++                    b.Navigation("Characters");
++                });
++
++            modelBuilder.Entity("LibreLancer.Entities.Character.Character", b =>
++                {
++                    b.Navigation("Items");
++
++                    b.Navigation("Reputations");
++
++                    b.Navigation("VisitEntries");
++
++                    b.Navigation("VisitHistoryEntries");
++                });
++#pragma warning restore 612, 618
++        }
++    }
++}
+diff --git a/src/Librelancer.Database/Migrations/20260926120000_TransferSnapshotImports.cs b/src/Librelancer.Database/Migrations/20260926120000_TransferSnapshotImports.cs
+new file mode 100644
+index 00000000..e931e348
+--- /dev/null
++++ b/src/Librelancer.Database/Migrations/20260926120000_TransferSnapshotImports.cs
+@@ -0,0 +1,32 @@
++using System;
++using Microsoft.EntityFrameworkCore.Migrations;
++
++#nullable disable
++
++namespace LibreLancer.Database.Migrations;
++
++public partial class TransferSnapshotImports : Migration
++{
++    protected override void Up(MigrationBuilder migrationBuilder)
++    {
++        migrationBuilder.CreateTable(
++            name: "TransferSnapshotImports",
++            columns: table => new
++            {
++                TransferId = table.Column<Guid>(type: "TEXT", nullable: false),
++                AccountId = table.Column<Guid>(type: "TEXT", nullable: false),
++                CharacterId = table.Column<long>(type: "INTEGER", nullable: false),
++                SourceInstanceId = table.Column<string>(type: "TEXT", nullable: false),
++                TargetInstanceId = table.Column<string>(type: "TEXT", nullable: false),
++                TargetSystemId = table.Column<string>(type: "TEXT", nullable: false),
++                LeaseVersion = table.Column<long>(type: "INTEGER", nullable: false),
++                TicketHash = table.Column<string>(type: "TEXT", nullable: false),
++                SnapshotHash = table.Column<string>(type: "TEXT", nullable: true),
++                Imported = table.Column<bool>(type: "INTEGER", nullable: false)
++            },
++            constraints: table => table.PrimaryKey("PK_TransferSnapshotImports", x => x.TransferId));
++    }
++
++    protected override void Down(MigrationBuilder migrationBuilder) =>
++        migrationBuilder.DropTable(name: "TransferSnapshotImports");
++}
+diff --git a/src/LibreLancer/Exceptions/InvalidFreelancerDirectory.cs b/src/LibreLancer/Exceptions/InvalidFreelancerDirectory.cs
+--- a/src/LibreLancer/Exceptions/InvalidFreelancerDirectory.cs
++++ b/src/LibreLancer/Exceptions/InvalidFreelancerDirectory.cs
+@@ -8,7 +8,8 @@
+ {
+     public class InvalidFreelancerDirectory : Exception
+     {
+-        public InvalidFreelancerDirectory(string path) : base(path)
++        public InvalidFreelancerDirectory(string path) : base(
++            $"The Freelancer data directory '{path}' is invalid. Set freelancer_path to a Freelancer installation directory or data archive.")
+         { }
+     }
+ }

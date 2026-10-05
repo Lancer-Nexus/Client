@@ -258,7 +258,7 @@ float4 main(Input input) : SV_Target0
     color += AmbientColor.xyz * baseColor.xyz;
 
     #ifdef ET_ENABLED
-    color += SRGBtoLinear(EtTexture.Sample(EtSampler, GetTexCoord(1, input))).xyz;
+    color += SRGBtoLinear(float4(Ec.rgb * EtTexture.Sample(EtSampler, GetTexCoord(1, input)).rgb, 1)).rgb;
     #endif
 
     return  float4(pow(color,(float3)1.0/2.2), baseColor.a);

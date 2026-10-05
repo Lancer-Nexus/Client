@@ -79,4 +79,21 @@ public class CargoPodComponent : GameComponent
             solar?.Children.Remove(Parent);
         }
     }
+
+    internal List<BasicCargo> TakeLootableCargoForFuse()
+    {
+        var result = new List<BasicCargo>();
+        for (var i = Cargo.Count - 1; i >= 0; i--)
+        {
+            if (Cargo[i].Item.LootAppearance == null)
+            {
+                continue;
+            }
+
+            result.Add(Cargo[i]);
+            Cargo.RemoveAt(i);
+        }
+
+        return result;
+    }
 }
