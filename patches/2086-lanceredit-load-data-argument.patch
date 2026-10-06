@@ -1,0 +1,133 @@
+--- a/src/Editor/LancerEdit/Program.cs
++++ b/src/Editor/LancerEdit/Program.cs
+@@ -27,7 +27,18 @@ namespace LancerEdit
+         [SuppressMessage("ReSharper", "MethodSupportsCancellation")]
+         static void Main(string[] args)
+         {
+-            if (!OpenOnOther(args))
++            if (!TryParseArguments(args, out var startupDataPath, out var openFiles, out var showHelp))
++            {
++                Environment.ExitCode = 2;
++                return;
++            }
++            if (showHelp)
++            {
++                Console.WriteLine("Usage: LancerEdit [--data <Freelancer directory>] [file ...]");
++                Console.WriteLine("  --data <path>  Load this Freelancer installation on startup.");
++                return;
++            }
++            if (startupDataPath != null || !OpenOnOther(openFiles))
+             {
+                 MainWindow mw = null;
+                 Task pipeServer = null;
+@@ -35,7 +46,10 @@ namespace LancerEdit
+                 AppHandler.Run(() =>
+                 {
+                     var editorConfig = EditorConfiguration.Load(true);
+-                    mw = new MainWindow(editorConfig) { InitOpenFile = args };
++                    mw = new MainWindow(editorConfig, startupDataPath: startupDataPath)
++                    {
++                        InitOpenFile = openFiles
++                    };
+                     pipeServer = Task.Run(async () => await PipeServer(cts.Token, x =>
+                     {
+                         mw.QueueUIThread(() =>
+@@ -58,4 +69,52 @@ namespace LancerEdit
+             }
+         }
+ 
++        static bool TryParseArguments(string[] args, out string startupDataPath, out string[] openFiles,
++            out bool showHelp)
++        {
++            startupDataPath = null;
++            showHelp = false;
++            var files = new System.Collections.Generic.List<string>();
++            for (int i = 0; i < args.Length; i++)
++            {
++                var arg = args[i];
++                if (arg == "--help" || arg == "-h")
++                {
++                    showHelp = true;
++                    continue;
++                }
++                if (arg == "--data")
++                {
++                    if (i + 1 >= args.Length || args[i + 1].StartsWith("--", StringComparison.Ordinal))
++                    {
++                        Console.Error.WriteLine("Missing path after --data.");
++                        openFiles = System.Array.Empty<string>();
++                        return false;
++                    }
++                    if (startupDataPath != null)
++                    {
++                        Console.Error.WriteLine("Specify --data only once.");
++                        openFiles = System.Array.Empty<string>();
++                        return false;
++                    }
++                    startupDataPath = args[++i];
++                    continue;
++                }
++                if (arg.StartsWith("--data=", StringComparison.Ordinal))
++                {
++                    if (startupDataPath != null || arg.Length == "--data=".Length)
++                    {
++                        Console.Error.WriteLine("Specify --data once with a non-empty path.");
++                        openFiles = System.Array.Empty<string>();
++                        return false;
++                    }
++                    startupDataPath = arg["--data=".Length..];
++                    continue;
++                }
++                files.Add(arg);
++            }
++            openFiles = files.ToArray();
++            return true;
++        }
++
+         static async Task PipeServer(CancellationToken token, Action<string> openFile)
+--- a/src/Editor/LancerEdit/MainWindow.cs
++++ b/src/Editor/LancerEdit/MainWindow.cs
+@@ -79,7 +79,8 @@ namespace LancerEdit
+ 
+         Dictionary<string, ResourceUsage> ResourceIndex = new(StringComparer.OrdinalIgnoreCase);
+ 
+-        public MainWindow(EditorConfiguration editorConfig, GameConfiguration configuration = null) : base(editorConfig.WindowWidth, editorConfig.WindowHeight, true, configuration)
++        public MainWindow(EditorConfiguration editorConfig, GameConfiguration configuration = null,
++            string startupDataPath = null) : base(editorConfig.WindowWidth, editorConfig.WindowHeight, true, configuration)
+ 
+         {
+             Version = "LancerEdit " + Platform.GetInformationalVersion<MainWindow>();
+@@ -103,9 +104,8 @@ namespace LancerEdit
+             recentFiles = new RecentFilesHandler(OpenFile);
+             Updater = new UpdateChecks(this, GetBasePath());
+             EnableAudioConversion = Mp3Encoder.EncoderAvailable();
+-            if (!string.IsNullOrWhiteSpace(Config.AutoLoadPath))
+-            {
+-                QueueUIThread(() => LoadGameData(Config.AutoLoadPath));
+-            }
++            var dataPath = string.IsNullOrWhiteSpace(startupDataPath) ? Config.AutoLoadPath : startupDataPath;
++            if (!string.IsNullOrWhiteSpace(dataPath))
++                QueueUIThread(() => LoadGameData(dataPath));
+         }
+         double errorTimer = 0;
+--- a/docs/index.md
++++ b/docs/index.md
+@@ -2,6 +2,18 @@
+ 
+ Welcome to the documentation for LancerEdit $(VERSION).
+ 
++## Load a Freelancer installation on startup
++
++Pass `--data` with the installation directory to load that data directly:
++
++```sh
++LancerEdit --data "/path/to/Freelancer"
++```
++
++The equivalent `--data="/path/to/Freelancer"` form is supported. The command-line
++path overrides the saved auto-load directory for this run and does not change it.
++Files can follow the option to open them after launch.
++
+ ### Models
+ - [Model Importer](model-importer.md)
+ - [Model Tab](modeltab.md)
