@@ -1,0 +1,189 @@
+diff --git a/src/LibreLancer/Thn/Events/StartSpatialPropAnimEvent.cs b/src/LibreLancer/Thn/Events/StartSpatialPropAnimEvent.cs
+index f943aeb5..0b65844f 100644
+--- a/src/LibreLancer/Thn/Events/StartSpatialPropAnimEvent.cs
++++ b/src/LibreLancer/Thn/Events/StartSpatialPropAnimEvent.cs
+@@ -139,6 +139,7 @@ namespace LibreLancer.Thn.Events
+                         Event = this,
+                         HasPos = hasPos,
+                         HasQuat = hasQuat,
++                        StartPos = objA.Translate,
+                         This = objA,
+                         Follow = objB,
+                         OriginalRotate = objA.Rotate
+@@ -174,6 +175,7 @@ namespace LibreLancer.Thn.Events
+                         Event = this,
+                         HasPos = hasPos,
+                         HasQuat = hasQuat,
++                        StartPos = objA.Translate,
+                         EndPos = Pos,
+                         EndQuat = quat,
+                         This = objA,
+@@ -191,6 +193,7 @@ namespace LibreLancer.Thn.Events
+             public bool HasQuat;
+             public AxisRotation AxisRot;
+             public Quaternion OriginalRotate;
++            public Vector3 StartPos;
+             public required ThnSceneObject This;
+ 
+             private double time;
+@@ -198,15 +201,16 @@ namespace LibreLancer.Thn.Events
+             public override bool Run(double delta)
+             {
+                 time = MathHelper.Clamp(time + delta, 0, Event.Duration);
++                var t = Event.GetT((float)time);
+ 
+                 if (HasPos)
+                 {
+-                    This.Translate = GetPosition(delta);
++                    This.Translate = Vector3.Lerp(StartPos, PosEnd(), t);
+                 }
+ 
+                 if (HasQuat)
+                 {
+-                    This.Rotate = GetOrientation(delta);
++                    This.Rotate = Quaternion.Slerp(OriginalRotate, QEnd(), t);
+                 }
+ 
+                 if ((Event.SetFlags & AnimVars.AxisRot) != AnimVars.AxisRot)
+@@ -217,47 +221,11 @@ namespace LibreLancer.Thn.Events
+                 var ogAxis = Vector3.Transform(_axisTable[(int) AxisRot.Axis], OriginalRotate);
+                 This.Rotate = OriginalRotate *
+                               Quaternion.CreateFromAxisAngle(ogAxis,
+-                                  AxisRot.GetRads((float) (time / Event.Duration)));
++                                  AxisRot.GetRads(t));
+ 
+                 return time < Event.Duration;
+             }
+ 
+-            protected Vector3 GetPosition(double delta)
+-            {
+-                var end = PosEnd();
+-                if (time >= Event.Duration)
+-                {
+-                    return end;
+-                }
+-
+-                var len = (end - This.Translate).Length();
+-                if (len <= float.Epsilon)
+-                {
+-                    return end;
+-                }
+-
+-                var dir = (end - This.Translate).Normalized();
+-                var pct = (float) (delta / (Event.Duration - time));
+-                if (pct > 1)
+-                {
+-                    pct = 1;
+-                }
+-
+-                return This.Translate + (dir * len * pct);
+-            }
+-
+-            protected Quaternion GetOrientation(double delta)
+-            {
+-                var end = QEnd();
+-                if (time >= Event.Duration)
+-                {
+-                    return end;
+-                }
+-
+-                var pct = (float) (delta / (Event.Duration - time));
+-                return pct >= 1 ? end : Quaternion.Slerp(This.Rotate, end, pct);
+-            }
+-
+             protected abstract Quaternion QEnd();
+             protected abstract Vector3 PosEnd();
+         }
+diff --git a/src/LibreLancer.Tests/ThnSpatialPropAnimTests.cs b/src/LibreLancer.Tests/ThnSpatialPropAnimTests.cs
+new file mode 100644
+index 00000000..0ccecf57
+--- /dev/null
++++ b/src/LibreLancer.Tests/ThnSpatialPropAnimTests.cs
+@@ -0,0 +1,87 @@
++using System;
++using System.Numerics;
++using System.Runtime.CompilerServices;
++using LibreLancer.Thn;
++using LibreLancer.Thn.Events;
++using LibreLancer.World;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class ThnSpatialPropAnimTests
++{
++    [Fact]
++    public void StaticSpatialPositionUsesParameterCurve()
++    {
++        var ship = new ThnSceneObject();
++        var instance = CreateInstance();
++        instance.Objects["ship"] = ship;
++
++        new StartSpatialPropAnimEvent
++        {
++            Duration = 10,
++            Targets = ["ship"],
++            SetFlags = StartSpatialPropAnimEvent.AnimVars.Pos,
++            Pos = new Vector3(10, 0, 0),
++            ParamCurve = SmoothCurve()
++        }.Run(instance);
++
++        instance.Update(2.5);
++
++        Assert.Equal(new Vector3(1.5625f, 0, 0), ship.Translate);
++    }
++
++    [Fact]
++    public void FollowSpatialPositionUsesParameterCurve()
++    {
++        var ship = new ThnSceneObject();
++        var marker = new ThnSceneObject { Translate = new Vector3(10, 0, 0) };
++        var instance = CreateInstance();
++        instance.Objects["ship"] = ship;
++        instance.Objects["marker"] = marker;
++
++        new StartSpatialPropAnimEvent
++        {
++            Duration = 10,
++            Targets = ["ship", "marker"],
++            SetFlags = StartSpatialPropAnimEvent.AnimVars.Pos,
++            ParamCurve = SmoothCurve()
++        }.Run(instance);
++
++        instance.Update(2.5);
++
++        Assert.Equal(new Vector3(1.5625f, 0, 0), ship.Translate);
++    }
++
++    [Fact]
++    public void StaticSpatialOrientationUsesParameterCurve()
++    {
++        var ship = new ThnSceneObject { Rotate = Quaternion.Identity };
++        var instance = CreateInstance();
++        instance.Objects["ship"] = ship;
++        var target = Quaternion.CreateFromAxisAngle(Vector3.UnitY, MathF.PI / 2);
++
++        new StartSpatialPropAnimEvent
++        {
++            Duration = 10,
++            Targets = ["ship"],
++            SetFlags = StartSpatialPropAnimEvent.AnimVars.QOrient,
++            Q_Orient = target,
++            ParamCurve = SmoothCurve()
++        }.Run(instance);
++
++        instance.Update(2.5);
++
++        var expected = Quaternion.Slerp(Quaternion.Identity, target, 1.5625f / 10f);
++        Assert.True(MathF.Abs(Quaternion.Dot(expected, ship.Rotate)) > 0.99999f,
++            $"Expected {expected}, got {ship.Rotate}");
++    }
++
++    private static ParameterCurve SmoothCurve() => new(
++        PCurveType.Smooth,
++        [new Vector4(0, 0, 0, 0), new Vector4(1, 1, 0, 0)]);
++
++    private static ThnScriptInstance CreateInstance() => new(
++        (Cutscene)RuntimeHelpers.GetUninitializedObject(typeof(Cutscene)),
++        new ThnScript { Duration = 20, Events = [] });
++}

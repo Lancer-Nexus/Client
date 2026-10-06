@@ -1,0 +1,81 @@
+--- a/src/Editor/LancerEdit/MainWindow.cs
++++ b/src/Editor/LancerEdit/MainWindow.cs
+@@ -75,6 +75,8 @@
+ 
+         public bool EnableAudioConversion;
+ 
++        private bool initialDataLoadPending;
++
+         private const int LOG_SIZE = 128 * 1024; //128k UTF-16, 256k UTF-8
+ 
+         Dictionary<string, ResourceUsage> ResourceIndex = new(StringComparer.OrdinalIgnoreCase);
+@@ -106,7 +108,10 @@
+             EnableAudioConversion = Mp3Encoder.EncoderAvailable();
+             var dataPath = string.IsNullOrWhiteSpace(startupDataPath) ? Config.AutoLoadPath : startupDataPath;
+             if (!string.IsNullOrWhiteSpace(dataPath))
++            {
++                initialDataLoadPending = true;
+                 QueueUIThread(() => LoadGameData(dataPath));
++            }
+         }
+         double errorTimer = 0;
+         private ImTextureRef logoTexture;
+@@ -190,10 +195,10 @@
+                 var icon = (Texture2D)LibreLancer.ImageLib.Generic.TextureFromStream(RenderContext, stream);
+                 logoTexture = ImGuiHelper.RegisterTexture(icon);
+             }
+-            //Open passed in files!
+-            if (InitOpenFile != null)
+-                foreach (var f in InitOpenFile)
+-                    OpenFile(f);
++            // Open files after the initial data set finishes loading so preview tabs
++            // (such as THN scenes) have their game data context available.
++            if (!initialDataLoadPending)
++                OpenInitialFiles();
+             RichText = RenderContext.Renderer2D.RichText;
+             Fonts = new FontManager();
+             Fonts.ConstructDefaultFonts();
+@@ -331,6 +336,22 @@
+             }
+         }
+ 
++        private void OpenInitialFiles()
++        {
++            var files = InitOpenFile;
++            InitOpenFile = null;
++            if (files == null) return;
++            foreach (var f in files)
++                OpenFile(f);
++        }
++
++        private void CompleteInitialDataLoad()
++        {
++            if (!initialDataLoadPending) return;
++            initialDataLoadPending = false;
++            OpenInitialFiles();
++        }
++
+         public PopupManager Popups = new PopupManager();
+ 
+         private int bottomTab = 0;
+@@ -462,6 +483,7 @@
+             if (!GameConfig.CheckFLDirectory(folder))
+             {
+                 ErrorDialog($"'{folder}' is not a valid Freelancer folder");
++                CompleteInitialDataLoad();
+                 return;
+             }
+             QueueUIThread(() =>
+@@ -484,10 +506,12 @@
+                 {
+                     OpenDataContext = c;
+                     FinishLoadingSpinner();
++                    CompleteInitialDataLoad();
+                 }, e =>
+                 {
+                     FinishLoadingSpinner();
+                     ErrorDialog(GetExceptionText(e));
++                    CompleteInitialDataLoad();
+                 });
+             });
+         }

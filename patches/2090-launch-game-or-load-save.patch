@@ -1,0 +1,172 @@
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -15,15 +15,22 @@
+     {
+         if (args.Length == 1 && args[0] is "--help" or "-h")
+         {
+-            Console.WriteLine("Usage: lancer [configuration-path]");
++            Console.WriteLine("Usage: lancer [configuration-path] [--new-game | --load-save <savegame.fl>]");
+ #if DEBUG
+             Console.WriteLine("       lancer [configuration-path] --email=... --password=... [--character=...]");
+             Console.WriteLine("       lancer [configuration-path] --credentials-file=...");
+ #endif
+             return;
+         }
++        if (!TryParseStartupArguments(args, out var startupArgs, out var startNewGame,
++                out var loadSavePath, out var startupError))
++        {
++            Console.Error.WriteLine(startupError);
++            Environment.ExitCode = 2;
++            return;
++        }
+ #if DEBUG
+-        if (!TryParseArguments(args, out var configPath, out var email, out var password,
++        if (!TryParseArguments(startupArgs, out var configPath, out var email, out var password,
+                 out var character, out var error))
+         {
+             Console.Error.WriteLine(error);
+@@ -31,7 +38,7 @@
+             return;
+         }
+ #else
+-        foreach (var arg in args)
++        foreach (var arg in startupArgs)
+         {
+             if (arg.StartsWith("--email", StringComparison.Ordinal) ||
+                 arg.StartsWith("--password", StringComparison.Ordinal) ||
+@@ -49,13 +56,20 @@
+                 return;
+             }
+         }
+-        var configPath = args.Length > 0 ? args[0] : null;
++        var configPath = startupArgs.Length > 0 ? startupArgs[0] : null;
+ #endif
+         FreelancerGame? game = null;
+         AppHandler.Run(() =>
+         {
+             Func<string>? filePath = configPath is null ? null : () => configPath;
+             var cfg = GameConfig.Create(true, filePath);
++            if ((startNewGame || loadSavePath is not null) &&
++                !string.IsNullOrWhiteSpace(cfg.ClusterGatewayUrl))
++            {
++                Console.Error.WriteLine("--new-game and --load-save require standalone mode; Gateway mode uses the server list.");
++                Environment.ExitCode = 2;
++                return;
++            }
+ #if DEBUG
+             if (email is not null && string.IsNullOrWhiteSpace(cfg.ClusterGatewayUrl))
+             {
+@@ -63,7 +77,11 @@
+                 return;
+             }
+ #endif
+-            game = new FreelancerGame(cfg);
++            game = new FreelancerGame(cfg)
++            {
++                StartNewGameOnLaunch = startNewGame,
++                LoadSaveOnLaunch = loadSavePath
++            };
+ #if DEBUG
+             game.DebugLoginEmail = email;
+             game.DebugLoginPassword = password;
+@@ -73,6 +91,52 @@
+         }, () => game?.Crashed());
+     }
+ 
++    private static bool TryParseStartupArguments(string[] args, out string[] remainingArgs,
++        out bool startNewGame, out string? loadSavePath, out string? error)
++    {
++        var remaining = new System.Collections.Generic.List<string>();
++        startNewGame = false;
++        loadSavePath = null;
++        error = null;
++        for (var i = 0; i < args.Length; i++)
++        {
++            var arg = args[i];
++            if (arg == "--new-game")
++            {
++                if (startNewGame || loadSavePath is not null)
++                {
++                    error = "Choose only one of --new-game or --load-save.";
++                    remainingArgs = Array.Empty<string>();
++                    return false;
++                }
++                startNewGame = true;
++            }
++            else if (arg == "--load-save" || arg.StartsWith("--load-save=", StringComparison.Ordinal))
++            {
++                if (startNewGame || loadSavePath is not null)
++                {
++                    error = "Choose only one of --new-game or --load-save.";
++                    remainingArgs = Array.Empty<string>();
++                    return false;
++                }
++                var path = arg == "--load-save" ? (++i < args.Length ? args[i] : null) : arg[12..];
++                if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
++                {
++                    error = "--load-save requires an existing savegame path.";
++                    remainingArgs = Array.Empty<string>();
++                    return false;
++                }
++                loadSavePath = Path.GetFullPath(path);
++            }
++            else
++            {
++                remaining.Add(arg);
++            }
++        }
++        remainingArgs = remaining.ToArray();
++        return true;
++    }
++
+ #if DEBUG
+     private static bool TryParseArguments(string[] args, out string? configPath, out string? email,
+         out string? password, out string? character, out string? error)
+--- a/src/LibreLancer/FreelancerGame.cs
++++ b/src/LibreLancer/FreelancerGame.cs
+@@ -49,6 +49,9 @@
+         public string? DebugCharacterName { get; set; }
+ #endif
+ 
++        public bool StartNewGameOnLaunch { get; set; }
++        public string? LoadSaveOnLaunch { get; set; }
++
+         private GameConfig _cfg;
+ 		public FreelancerGame(GameConfig config) : base(config.BufferWidth, config.BufferHeight, false)
+ 		{
+--- a/src/LibreLancer/GameStates/LuaMenu.cs
++++ b/src/LibreLancer/GameStates/LuaMenu.cs
+@@ -75,6 +75,10 @@
+             FadeIn(0.1, 0.3);
+             if (!string.IsNullOrWhiteSpace(g.Config.ClusterGatewayUrl))
+                 ui.OpenScene("serverlist");
++            else if (g.StartNewGameOnLaunch)
++                api.NewGame();
++            else if (g.LoadSaveOnLaunch is { } savePath)
++                api.LoadSavePath(savePath);
+         }
+ 
+         private void TryRunScript(List<ResolvedThn> thnScripts)
+@@ -291,13 +295,20 @@
+             public void LoadSelectedGame()
+             {
+                 if (GatewayEnabled()) return;
++                var savePath = state.Game.Saves.SelectedFile;
++                if (savePath is not null)
++                    LoadSavePath(savePath);
++            }
++
++            public void LoadSavePath(string savePath)
++            {
++                if (GatewayEnabled()) return;
+                 state.FadeOut(0.2, () =>
+                 {
+                     var embeddedServer = new EmbeddedServer(state.Game.GameData, state.Game.ResourceManager,
+                         state.Game.GetSaveFolder());
+                     var session = new CGameSession(state.Game, embeddedServer);
+-                    embeddedServer.StartFromSave(state.Game.Saves.SelectedFile!,
+-                        File.ReadAllBytes(state.Game.Saves.SelectedFile!));
++                    embeddedServer.StartFromSave(savePath, File.ReadAllBytes(savePath));
+                     state.Game.ChangeState(new NetWaitState(session, state.Game));
+                 });
+             }

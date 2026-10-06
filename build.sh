@@ -26,7 +26,10 @@ fi
 
 # Apply the Lancer Nexus overlay before any managed/native projects are built.
 if [ -x "$SCRIPT_DIR/scripts/apply-lancer-nexus-patches.sh" ]; then
-    "$SCRIPT_DIR/scripts/apply-lancer-nexus-patches.sh"
+    "$SCRIPT_DIR/scripts/apply-lancer-nexus-patches.sh" || {
+        echo >&2 "ERROR: Lancer Nexus patch overlay is not complete."
+        exit 1
+    }
 fi
 
 ere_quote() {
