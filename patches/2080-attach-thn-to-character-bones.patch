@@ -1,101 +1,5 @@
-diff --git a/src/LibreLancer/Render/DfmSkeletonManager.cs b/src/LibreLancer/Render/DfmSkeletonManager.cs
---- a/src/LibreLancer/Render/DfmSkeletonManager.cs
-+++ b/src/LibreLancer/Render/DfmSkeletonManager.cs
-@@ -730,6 +730,38 @@
-             }
-         }
- 
-+        public bool TryGetBoneTransform(string name, Transform3D worldTransform, out Transform3D result)
-+        {
-+            if (BodySkinning.Bones.TryGetValue(name, out var bodyBone))
-+            {
-+                result = bodyBone.LocalTransform * worldTransform;
-+                return true;
-+            }
-+
-+            if (HeadSkinning != null && HeadConnection != null && HeadSkinning.Bones.TryGetValue(name, out var headBone))
-+            {
-+                result = headBone.LocalTransform * HeadConnection.Transform * worldTransform;
-+                return true;
-+            }
-+
-+            if (LeftHandSkinning != null && LeftHandConnection != null &&
-+                LeftHandSkinning.Bones.TryGetValue(name, out var leftHandBone))
-+            {
-+                result = leftHandBone.LocalTransform * LeftHandConnection.Transform * worldTransform;
-+                return true;
-+            }
-+
-+            if (RightHandSkinning != null && RightHandConnection != null &&
-+                RightHandSkinning.Bones.TryGetValue(name, out var rightHandBone))
-+            {
-+                result = rightHandBone.LocalTransform * RightHandConnection.Transform * worldTransform;
-+                return true;
-+            }
-+
-+            result = Transform3D.Identity;
-+            return false;
-+        }
-+
-         public void StartScript(Script anmScript, float start_time, float time_scale, float duration, bool loop = false,
-             float blendIn = 5f, float blendOut = 5f)
-         {
-diff --git a/src/LibreLancer/Thn/ThnSceneObject.cs b/src/LibreLancer/Thn/ThnSceneObject.cs
---- a/src/LibreLancer/Thn/ThnSceneObject.cs
-+++ b/src/LibreLancer/Thn/ThnSceneObject.cs
-@@ -206,7 +206,7 @@
- }
- 
- public class ThnObjectParent(ThnSceneObject obj, IRenderHardpoint? hardpoint, RigidModelPart? part,
--    bool characterRoot = false)
-+    bool characterRoot = false, string? characterBoneName = null)
-     : ThnAttachParent
- {
-     public static bool IsRootTarget(ThnSceneObject obj, string? targetPart) =>
-@@ -215,6 +215,10 @@
- 
-     public override Transform3D GetTransform(bool pathLookAt)
-     {
-+        if (characterBoneName != null && obj.Object?.RenderComponent is CharacterRenderer character &&
-+            character.Skeleton.TryGetBoneTransform(characterBoneName, obj.Object.WorldTransform, out var boneTransform))
-+            return boneTransform;
-+
-         var useCharacterWorldTransform =
-             obj.Object?.RenderComponent is CharacterRenderer && (characterRoot || hardpoint != null);
-         var tr = useCharacterWorldTransform
-diff --git a/src/LibreLancer/Thn/Events/AttachEntityEvent.cs b/src/LibreLancer/Thn/Events/AttachEntityEvent.cs
---- a/src/LibreLancer/Thn/Events/AttachEntityEvent.cs
-+++ b/src/LibreLancer/Thn/Events/AttachEntityEvent.cs
-@@ -85,6 +85,7 @@
-             IRenderHardpoint? hardpoint = null;
-             RigidModelPart? part = null;
-             var characterRoot = false;
-+            string? characterBoneName = null;
-             switch (TargetType)
-             {
-                 case TargetTypes.Hardpoint when !string.IsNullOrEmpty(TargetPart):
-@@ -107,6 +108,11 @@
-                     {
-                         characterRoot = true;
-                     }
-+                    else if (objB.Object?.RenderComponent is CharacterRenderer character &&
-+                             character.Skeleton.TryGetBoneTransform(TargetPart, objB.Object.WorldTransform, out _))
-+                    {
-+                        characterBoneName = TargetPart;
-+                    }
-                     else if (objB.Object?.Model?.RigidModel.Parts == null)
-                     {
-                         FLLog.Error("Thn", "Could not get parts on " + objB.Name);
-@@ -123,7 +129,7 @@
-                 }
-             }
- 
--            var tgt = new ThnObjectParent(objB, hardpoint, part, characterRoot);
-+            var tgt = new ThnObjectParent(objB, hardpoint, part, characterRoot, characterBoneName);
-             Quaternion lastRotate = Quaternion.Identity;
-             if ((Flags & AttachFlags.Orientation) == AttachFlags.Orientation &&
-                 (Flags & AttachFlags.OrientationRelative) == AttachFlags.OrientationRelative)
 diff --git a/src/LibreLancer.Tests/ThnCharacterRootAttachmentTests.cs b/src/LibreLancer.Tests/ThnCharacterRootAttachmentTests.cs
+index 0db12157..3330ee30 100644
 --- a/src/LibreLancer.Tests/ThnCharacterRootAttachmentTests.cs
 +++ b/src/LibreLancer.Tests/ThnCharacterRootAttachmentTests.cs
 @@ -1,4 +1,5 @@
@@ -104,7 +8,7 @@ diff --git a/src/LibreLancer.Tests/ThnCharacterRootAttachmentTests.cs b/src/Libr
  using System.Numerics;
  using System.Runtime.CompilerServices;
  using LibreLancer.Render;
-@@ -74,6 +75,40 @@
+@@ -73,6 +74,40 @@ public sealed class ThnCharacterRootAttachmentTests
          AssertTransformClose(hardpointTransform * rootMotionTransform, parent.GetTransform(pathLookAt: false));
      }
  
@@ -145,3 +49,103 @@ diff --git a/src/LibreLancer.Tests/ThnCharacterRootAttachmentTests.cs b/src/Libr
      private sealed class TestHardpoint(Transform3D transform) : IRenderHardpoint
      {
          public Transform3D Transform => transform;
+diff --git a/src/LibreLancer/Render/DfmSkeletonManager.cs b/src/LibreLancer/Render/DfmSkeletonManager.cs
+index 9d77094c..78d15247 100644
+--- a/src/LibreLancer/Render/DfmSkeletonManager.cs
++++ b/src/LibreLancer/Render/DfmSkeletonManager.cs
+@@ -730,6 +730,38 @@ namespace LibreLancer.Render
+             }
+         }
+ 
++        public bool TryGetBoneTransform(string name, Transform3D worldTransform, out Transform3D result)
++        {
++            if (BodySkinning.Bones.TryGetValue(name, out var bodyBone))
++            {
++                result = bodyBone.LocalTransform * worldTransform;
++                return true;
++            }
++
++            if (HeadSkinning != null && HeadConnection != null && HeadSkinning.Bones.TryGetValue(name, out var headBone))
++            {
++                result = headBone.LocalTransform * HeadConnection.Transform * worldTransform;
++                return true;
++            }
++
++            if (LeftHandSkinning != null && LeftHandConnection != null &&
++                LeftHandSkinning.Bones.TryGetValue(name, out var leftHandBone))
++            {
++                result = leftHandBone.LocalTransform * LeftHandConnection.Transform * worldTransform;
++                return true;
++            }
++
++            if (RightHandSkinning != null && RightHandConnection != null &&
++                RightHandSkinning.Bones.TryGetValue(name, out var rightHandBone))
++            {
++                result = rightHandBone.LocalTransform * RightHandConnection.Transform * worldTransform;
++                return true;
++            }
++
++            result = Transform3D.Identity;
++            return false;
++        }
++
+         public void StartScript(Script anmScript, float start_time, float time_scale, float duration, bool loop = false,
+             float blendIn = 5f, float blendOut = 5f)
+         {
+diff --git a/src/LibreLancer/Thn/Events/AttachEntityEvent.cs b/src/LibreLancer/Thn/Events/AttachEntityEvent.cs
+index 0cc3e85a..8427dca4 100644
+--- a/src/LibreLancer/Thn/Events/AttachEntityEvent.cs
++++ b/src/LibreLancer/Thn/Events/AttachEntityEvent.cs
+@@ -85,6 +85,7 @@ namespace LibreLancer.Thn.Events
+             IRenderHardpoint? hardpoint = null;
+             RigidModelPart? part = null;
+             var characterRoot = false;
++            string? characterBoneName = null;
+             switch (TargetType)
+             {
+                 case TargetTypes.Hardpoint when !string.IsNullOrEmpty(TargetPart):
+@@ -107,6 +108,11 @@ namespace LibreLancer.Thn.Events
+                     {
+                         characterRoot = true;
+                     }
++                    else if (objB.Object?.RenderComponent is CharacterRenderer character &&
++                             character.Skeleton.TryGetBoneTransform(TargetPart, objB.Object.WorldTransform, out _))
++                    {
++                        characterBoneName = TargetPart;
++                    }
+                     else if (objB.Object?.Model?.RigidModel.Parts == null)
+                     {
+                         FLLog.Error("Thn", "Could not get parts on " + objB.Name);
+@@ -123,7 +129,7 @@ namespace LibreLancer.Thn.Events
+                 }
+             }
+ 
+-            var tgt = new ThnObjectParent(objB, hardpoint, part, characterRoot);
++            var tgt = new ThnObjectParent(objB, hardpoint, part, characterRoot, characterBoneName);
+             Quaternion lastRotate = Quaternion.Identity;
+             if ((Flags & AttachFlags.Orientation) == AttachFlags.Orientation &&
+                 (Flags & AttachFlags.OrientationRelative) == AttachFlags.OrientationRelative)
+diff --git a/src/LibreLancer/Thn/ThnSceneObject.cs b/src/LibreLancer/Thn/ThnSceneObject.cs
+index f52a0994..8b89fba4 100644
+--- a/src/LibreLancer/Thn/ThnSceneObject.cs
++++ b/src/LibreLancer/Thn/ThnSceneObject.cs
+@@ -207,7 +207,7 @@ public class ThnPathParent(ThnSceneObject Path)
+ }
+ 
+ public class ThnObjectParent(ThnSceneObject obj, IRenderHardpoint? hardpoint, RigidModelPart? part,
+-    bool characterRoot = false)
++    bool characterRoot = false, string? characterBoneName = null)
+     : ThnAttachParent
+ {
+     public Transform3D ChildOffset = Transform3D.Identity;
+@@ -218,6 +218,10 @@ public class ThnObjectParent(ThnSceneObject obj, IRenderHardpoint? hardpoint, Ri
+ 
+     public override Transform3D GetTransform(bool pathLookAt)
+     {
++        if (characterBoneName != null && obj.Object?.RenderComponent is CharacterRenderer character &&
++            character.Skeleton.TryGetBoneTransform(characterBoneName, obj.Object.WorldTransform, out var boneTransform))
++            return boneTransform;
++
+         var useCharacterWorldTransform =
+             obj.Object?.RenderComponent is CharacterRenderer && (characterRoot || hardpoint != null);
+         var tr = useCharacterWorldTransform

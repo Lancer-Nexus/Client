@@ -1,63 +1,6 @@
-diff --git a/src/LibreLancer/Thn/Events/AttachEntityEvent.cs b/src/LibreLancer/Thn/Events/AttachEntityEvent.cs
---- a/src/LibreLancer/Thn/Events/AttachEntityEvent.cs
-+++ b/src/LibreLancer/Thn/Events/AttachEntityEvent.cs
-@@ -78,6 +78,7 @@
-             // Attach GameObjects to eachother
-             IRenderHardpoint? hardpoint = null;
-             RigidModelPart? part = null;
-+            var characterRoot = false;
-             switch (TargetType)
-             {
-                 case TargetTypes.Hardpoint when !string.IsNullOrEmpty(TargetPart):
-@@ -96,7 +97,11 @@
- 
-                 case TargetTypes.Part when !string.IsNullOrEmpty(TargetPart):
-                 {
--                    if (objB.Object?.Model?.RigidModel.Parts == null)
-+                    if (ThnObjectParent.IsCharacterRootTarget(objB, TargetPart))
-+                    {
-+                        characterRoot = true;
-+                    }
-+                    else if (objB.Object?.Model?.RigidModel.Parts == null)
-                     {
-                         FLLog.Error("Thn", "Could not get parts on " + objB.Name);
-                     }
-@@ -112,7 +117,7 @@
-                 }
-             }
- 
--            var tgt = new ThnObjectParent(objB, hardpoint, part);
-+            var tgt = new ThnObjectParent(objB, hardpoint, part, characterRoot);
-             Quaternion lastRotate = Quaternion.Identity;
-             if ((Flags & AttachFlags.Orientation) == AttachFlags.Orientation &&
-                 (Flags & AttachFlags.OrientationRelative) == AttachFlags.OrientationRelative)
-diff --git a/src/LibreLancer/Thn/ThnSceneObject.cs b/src/LibreLancer/Thn/ThnSceneObject.cs
---- a/src/LibreLancer/Thn/ThnSceneObject.cs
-+++ b/src/LibreLancer/Thn/ThnSceneObject.cs
-@@ -195,12 +195,19 @@
-     }
- }
- 
--public class ThnObjectParent(ThnSceneObject obj, IRenderHardpoint? hardpoint, RigidModelPart? part)
-+public class ThnObjectParent(ThnSceneObject obj, IRenderHardpoint? hardpoint, RigidModelPart? part,
-+    bool characterRoot = false)
-     : ThnAttachParent
- {
-+    public static bool IsCharacterRootTarget(ThnSceneObject obj, string? targetPart) =>
-+        obj.Object?.RenderComponent is CharacterRenderer &&
-+        string.Equals(targetPart, "Root", StringComparison.OrdinalIgnoreCase);
-+
-     public override Transform3D GetTransform(bool pathLookAt)
-     {
--        var tr = obj.GetTransform();
-+        var tr = characterRoot && obj.Object != null
-+            ? obj.Object.WorldTransform
-+            : obj.GetTransform();
-         if (part != null)
-         {
-             if (obj.HpMount != null)
 diff --git a/src/LibreLancer.Tests/ThnCharacterRootAttachmentTests.cs b/src/LibreLancer.Tests/ThnCharacterRootAttachmentTests.cs
 new file mode 100644
+index 00000000..86bb8e05
 --- /dev/null
 +++ b/src/LibreLancer.Tests/ThnCharacterRootAttachmentTests.cs
 @@ -0,0 +1,43 @@
@@ -104,3 +47,65 @@ new file mode 100644
 +        Assert.True(MathF.Abs(Quaternion.Dot(expected.Orientation, actual.Orientation)) > 0.9999f);
 +    }
 +}
+diff --git a/src/LibreLancer/Thn/Events/AttachEntityEvent.cs b/src/LibreLancer/Thn/Events/AttachEntityEvent.cs
+index 04a3ab34..bceac2f8 100644
+--- a/src/LibreLancer/Thn/Events/AttachEntityEvent.cs
++++ b/src/LibreLancer/Thn/Events/AttachEntityEvent.cs
+@@ -78,6 +78,7 @@ namespace LibreLancer.Thn.Events
+             // Attach GameObjects to eachother
+             IRenderHardpoint? hardpoint = null;
+             RigidModelPart? part = null;
++            var characterRoot = false;
+             switch (TargetType)
+             {
+                 case TargetTypes.Hardpoint when !string.IsNullOrEmpty(TargetPart):
+@@ -96,7 +97,11 @@ namespace LibreLancer.Thn.Events
+ 
+                 case TargetTypes.Part when !string.IsNullOrEmpty(TargetPart):
+                 {
+-                    if (objB.Object?.Model?.RigidModel.Parts == null)
++                    if (ThnObjectParent.IsCharacterRootTarget(objB, TargetPart))
++                    {
++                        characterRoot = true;
++                    }
++                    else if (objB.Object?.Model?.RigidModel.Parts == null)
+                     {
+                         FLLog.Error("Thn", "Could not get parts on " + objB.Name);
+                     }
+@@ -112,7 +117,7 @@ namespace LibreLancer.Thn.Events
+                 }
+             }
+ 
+-            var tgt = new ThnObjectParent(objB, hardpoint, part);
++            var tgt = new ThnObjectParent(objB, hardpoint, part, characterRoot);
+             Quaternion lastRotate = Quaternion.Identity;
+             if ((Flags & AttachFlags.Orientation) == AttachFlags.Orientation &&
+                 (Flags & AttachFlags.OrientationRelative) == AttachFlags.OrientationRelative)
+diff --git a/src/LibreLancer/Thn/ThnSceneObject.cs b/src/LibreLancer/Thn/ThnSceneObject.cs
+index 4f9df7a4..01aabe8f 100644
+--- a/src/LibreLancer/Thn/ThnSceneObject.cs
++++ b/src/LibreLancer/Thn/ThnSceneObject.cs
+@@ -196,13 +196,21 @@ public class ThnPathParent(ThnSceneObject Path)
+     }
+ }
+ 
+-public class ThnObjectParent(ThnSceneObject obj, IRenderHardpoint? hardpoint, RigidModelPart? part)
++public class ThnObjectParent(ThnSceneObject obj, IRenderHardpoint? hardpoint, RigidModelPart? part,
++    bool characterRoot = false)
+     : ThnAttachParent
+ {
+     public Transform3D ChildOffset = Transform3D.Identity;
++
++    public static bool IsCharacterRootTarget(ThnSceneObject obj, string? targetPart) =>
++        obj.Object?.RenderComponent is CharacterRenderer &&
++        string.Equals(targetPart, "Root", StringComparison.OrdinalIgnoreCase);
++
+     public override Transform3D GetTransform(bool pathLookAt)
+     {
+-        var tr = obj.GetTransform();
++        var tr = characterRoot && obj.Object != null
++            ? obj.Object.WorldTransform
++            : obj.GetTransform();
+         if (part != null)
+         {
+             if (obj.HpMount != null)

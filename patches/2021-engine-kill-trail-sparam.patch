@@ -1,73 +1,10 @@
-diff --git a/src/LibreLancer/Client/Components/CUpdateSParamComponent.cs b/src/LibreLancer/Client/Components/CUpdateSParamComponent.cs
---- a/src/LibreLancer/Client/Components/CUpdateSParamComponent.cs
-+++ b/src/LibreLancer/Client/Components/CUpdateSParamComponent.cs
-@@ -2,7 +2,9 @@
- // This file is subject to the terms and conditions defined in
- // LICENSE, which is part of this source code package
- 
-+using System;
- using LibreLancer.Render;
-+using LibreLancer.World.Components;
- using LibreLancer.World;
- 
- namespace LibreLancer.Client.Components
-@@ -13,23 +15,37 @@
-         {
-         }
- 
-+        internal static float CalculateSParam(bool engineKill, float engineSpeed, float velocity, float maxVelocity)
-+        {
-+            if (!engineKill)
-+                return engineSpeed;
-+            if (maxVelocity <= 0)
-+                return 0;
-+            return Math.Clamp(velocity / maxVelocity, 0, 1);
-+        }
-+
-         public override void Update(double time, GameWorld world)
-         {
--            if (Parent?.RenderComponent == null)
-+            if (Parent?.RenderComponent is not ParticleEffectRenderer renderer)
-+                return;
-+
-+            var ship = Parent.Parent;
-+            var engine = ship?.GetComponent<CEngineComponent>();
-+            if (engine == null)
-+                return;
-+
-+            var sparam = engine.Speed;
-+            if (engine.EngineKill && ship?.GetComponent<ShipPhysicsComponent>() is { } physics)
-             {
--                return;
-+                var velocity = ship.PhysicsComponent?.Body.LinearVelocity.Length() ?? 0;
-+                var totalDrag = physics.Ship.LinearDrag + engine.Engine.Def.LinearDrag;
-+                var maxVelocity = totalDrag > 0
-+                    ? engine.Engine.Def.MaxForce / totalDrag
-+                    : 0;
-+                sparam = CalculateSParam(true, engine.Speed, velocity, maxVelocity);
-             }
- 
--            float sparam = 0;
--
--            CEngineComponent? eng = Parent.Parent?.GetComponent<CEngineComponent>();
--
--            if (eng != null)
--            {
--                sparam = eng.Speed;
--            }
--
--            ((ParticleEffectRenderer) Parent.RenderComponent).SParam = sparam;
-+            renderer.SParam = sparam;
-         }
-     }
- }
 diff --git a/src/LibreLancer.Tests/EngineKillSParamTests.cs b/src/LibreLancer.Tests/EngineKillSParamTests.cs
 new file mode 100644
-index 00000000..79923ac
+index 00000000..0cc42870
 --- /dev/null
 +++ b/src/LibreLancer.Tests/EngineKillSParamTests.cs
 @@ -0,0 +1,27 @@
-+using LibreLancer.Client.Components;
++using LibreLancer.World.Equipments;
 +using Xunit;
 +
 +namespace LibreLancer.Tests;
@@ -77,20 +14,58 @@ index 00000000..79923ac
 +    [Fact]
 +    public void EngineKillSParamTracksRemainingShipVelocity()
 +    {
-+        Assert.Equal(0.5f, CUpdateSParamComponent.CalculateSParam(true, 0, 100, 200));
++        Assert.Equal(0.5f, Engine.CalculateSParam(true, 0, 100, 200));
 +    }
 +
 +    [Fact]
 +    public void EngineKillSParamClampsToValidRange()
 +    {
-+        Assert.Equal(1f, CUpdateSParamComponent.CalculateSParam(true, 0, 300, 200));
-+        Assert.Equal(0f, CUpdateSParamComponent.CalculateSParam(true, 0, 0, 200));
-+        Assert.Equal(0f, CUpdateSParamComponent.CalculateSParam(true, 0, 100, 0));
++        Assert.Equal(1f, Engine.CalculateSParam(true, 0, 300, 200));
++        Assert.Equal(0f, Engine.CalculateSParam(true, 0, 0, 200));
++        Assert.Equal(0f, Engine.CalculateSParam(true, 0, 100, 0));
 +    }
 +
 +    [Fact]
 +    public void NormalEngineSParamRemainsUnchanged()
 +    {
-+        Assert.Equal(0.72f, CUpdateSParamComponent.CalculateSParam(false, 0.72f, 100, 200));
++        Assert.Equal(0.72f, Engine.CalculateSParam(false, 0.72f, 100, 200));
 +    }
 +}
+diff --git a/src/LibreLancer/World/Equipments/Engine.cs b/src/LibreLancer/World/Equipments/Engine.cs
+index 2b02033b..2f38c032 100644
+--- a/src/LibreLancer/World/Equipments/Engine.cs
++++ b/src/LibreLancer/World/Equipments/Engine.cs
+@@ -46,6 +46,15 @@ public class Engine : EquipmentObject<EngineEquipment>
+ 
+     public Thruster[] Thrusters = [];
+ 
++    internal static float CalculateSParam(bool engineKill, float engineSpeed, float velocity, float maxVelocity)
++    {
++        if (!engineKill)
++            return engineSpeed;
++        if (maxVelocity <= 0)
++            return 0;
++        return Math.Clamp(velocity / maxVelocity, 0, 1);
++    }
++
+ 
+     public Engine(
+         GameObject parent,
+@@ -195,9 +204,16 @@ public class Engine : EquipmentObject<EngineEquipment>
+             killSound.Update();
+         }
+ 
++        var maxVelocity = Parent.PhysicsComponent is { } physics
++            ? (physics.Ship.LinearDrag + Equipment.Def.LinearDrag) > 0
++                ? Equipment.Def.MaxForce / (physics.Ship.LinearDrag + Equipment.Def.LinearDrag)
++                : 0
++            : 0;
++        var velocity = Parent.PhysicsComponent?.Body.LinearVelocity.Length() ?? 0;
++        var sparam = CalculateSParam(EngineKill, Speed, velocity, maxVelocity);
+         foreach (var fx in fireFx)
+         {
+-            fx.SParam = MathHelper.Clamp(Speed, 0, 1);
++            fx.SParam = sparam;
+         }
+     }
+ 

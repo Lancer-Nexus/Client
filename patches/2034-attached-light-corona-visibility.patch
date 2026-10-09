@@ -1,223 +1,6 @@
---- a/src/LibreLancer/Render/LightEquipRenderer.cs
-+++ b/src/LibreLancer/Render/LightEquipRenderer.cs
-@@ -8,6 +8,7 @@
- using LibreLancer.Data.GameData.Items;
- using LibreLancer.Graphics;
- using LibreLancer.Resources;
-+using LibreLancer.World;
- 
- namespace LibreLancer.Render
- {
-@@ -19,6 +20,7 @@
- 
-         private SystemRenderer? sys;
-         private LightEquipment equip;
-+        internal GameObject? OcclusionOwner { get; set; }
-         public bool LightOn = true;
-         private static Random rnd = new();
- 
-@@ -73,8 +75,9 @@
-                 new Vector2(shineshape.Dimensions.X + shineshape.Dimensions.Width,
-                     shineshape.Dimensions.Y + shineshape.Dimensions.Height),
-                 0,
--                SortLayers.OBJECT,
--                BlendMode.Additive
-+                SortLayers.CORONA,
-+                BlendMode.Additive,
-+                depthTest: false
-             );
-         }
- 
-@@ -108,49 +111,49 @@
-             if (bulbtex == null || shinetex == null)
-                 return;
- 
--            if (equip.FlareCone != null)
--            {
--                float cosAngle = Vector3.Dot(
--                    Vector3.Normalize(forward),
--                    Vector3.Normalize(sys!.Camera.Position - pos)
--                );
--
--                // flare cone is defined as outer, inner
--                float cosStart = MathF.Cos(equip.FlareCone.Value.Y * MathF.PI / 180f);
--                float cosEnd   = MathF.Cos(equip.FlareCone.Value.X   * MathF.PI / 180f);
--
--                float fade = MathHelper.Clamp(
--                    (cosAngle - cosEnd) / (cosStart - cosEnd),
--                    0f,
--                    1f
--                );
--                if(fade > 0)
--                    DrawShine(fade);
--            }
--            else
--            {
--                DrawShine(1);
--            }
--
-+            var fade = GetViewConeFade(forward, sys!.Camera.Position - pos, equip.FlareCone);
-+            if (fade <= 0)
-+                return;
- 
-+            DrawShine(fade);
- 
-             sys.Billboards.Draw(
-                 bulbtex,
-                 pos,
-                 new Vector2(equip.BulbSize) * 2,
--                new Color4(colorBulb, 1),
-+                new Color4(colorBulb, fade),
-                 new Vector2(bulbshape.Dimensions.X, bulbshape.Dimensions.Y),
-                 new Vector2(bulbshape.Dimensions.X + bulbshape.Dimensions.Width, bulbshape.Dimensions.Y),
-                 new Vector2(bulbshape.Dimensions.X, bulbshape.Dimensions.Y + bulbshape.Dimensions.Height),
-                 new Vector2(bulbshape.Dimensions.X + bulbshape.Dimensions.Width,
-                     bulbshape.Dimensions.Y + bulbshape.Dimensions.Height),
-                 0,
--                SortLayers.OBJECT,
--                BlendMode.Additive
-+                SortLayers.CORONA,
-+                BlendMode.Additive,
-+                depthTest: false
-             );
- 
-         }
- 
-+        internal static float GetViewConeFade(Vector3 lightForward, Vector3 cameraDirection,
-+            Vector2? flareCone)
-+        {
-+            if (flareCone == null)
-+                return 1f;
-+
-+            if (lightForward.LengthSquared() < 1e-8f || cameraDirection.LengthSquared() < 1e-8f)
-+                return 1f;
-+
-+            var cosAngle = Vector3.Dot(Vector3.Normalize(lightForward), Vector3.Normalize(cameraDirection));
-+            // Freelancer stores the flare cone as outer, inner angles.
-+            var cosStart = MathF.Cos(flareCone.Value.Y * MathF.PI / 180f);
-+            var cosEnd = MathF.Cos(flareCone.Value.X * MathF.PI / 180f);
-+            if (MathF.Abs(cosStart - cosEnd) < 1e-6f)
-+                return cosAngle >= cosStart ? 1f : 0f;
-+
-+            return MathHelper.Clamp((cosAngle - cosEnd) / (cosStart - cosEnd), 0f, 1f);
-+        }
-+
- 
-         private double timer = 0;
-         private bool lt_on = true;
-@@ -193,11 +196,28 @@
-                 !forceCull &&
-                 LightOn &&
-                 Vector3.DistanceSquared(camera.Position, pos) < CULL &&
--                camera.FrustumCheck(new BoundingSphere(pos, equip.BulbSize * 3))
-+                camera.FrustumCheck(new BoundingSphere(pos, equip.BulbSize * 3)) &&
-+                GetViewConeFade(forward, camera.Position - pos, equip.FlareCone) > 0
-             );
-             this.sys = sys;
-             var showLight = !equip.Animated || !lt_on;
- 
-+            if (visible && sys.World.Physics is { } physics)
-+            {
-+                var toLight = pos - camera.Position;
-+                var distance = toLight.Length();
-+                if (distance > 0.01f && physics.PointRaycast(
-+                        OcclusionOwner?.PhysicsComponent?.Body,
-+                        camera.Position,
-+                        toLight / distance,
-+                        Math.Max(0, distance - Math.Max(0.1f, equip.BulbSize)),
-+                        allowDynAsteroids: true,
-+                        out _, out _, out _))
-+                {
-+                    visible = false;
-+                }
-+            }
-+
-             if (equip.EmitRange > 0 && showLight && camera.FrustumCheck(new BoundingSphere(pos, equip.EmitRange)))
-             {
-                 // sys.PointLightDX(pos, equip.EmitRange, new Color4(equip.GlowColor, 1), equip.EmitAttenuation);
---- a/src/LibreLancer/Items/EquipmentHandlers.cs
-+++ b/src/LibreLancer/Items/EquipmentHandlers.cs
-@@ -178,7 +178,11 @@
-         if (type != EquipmentType.Server &&
-             type != EquipmentType.Cutscene)
-         {
--            obj.RenderComponent = new LightEquipRenderer(lq) { LightOn = !lq.DockingLight };
-+            obj.RenderComponent = new LightEquipRenderer(lq)
-+            {
-+                LightOn = !lq.DockingLight,
-+                OcclusionOwner = parent
-+            };
-         }
- 
-         return obj;
---- a/src/LibreLancer/Render/Billboards.cs
-+++ b/src/LibreLancer/Render/Billboards.cs
-@@ -66,13 +66,15 @@
- 			public ushort BlendMode;
- 			public ushort IndexStart;
-             public byte Triangle;
-+            public bool DepthTest;
- 
--            public RenderData(Texture tex, ushort blend, ushort idxStart)
-+            public RenderData(Texture tex, ushort blend, ushort idxStart, bool depthTest = true)
-             {
-                 Texture = tex;
-                 BlendMode = blend;
-                 IndexStart = idxStart;
-                 Triangle = 0;
-+                DepthTest = depthTest;
-             }
-             public static RenderData CreateTri(Texture tex, ushort blend, ushort idxStart)
- 			{
-@@ -85,6 +87,7 @@
- 					var hash = 17;
- 					hash += hash * 23 + Texture.GetHashCode();
- 					hash += hash * 23 + BlendMode.GetHashCode();
-+					hash += hash * 23 + DepthTest.GetHashCode();
- 					return hash;
- 				}
- 			}
-@@ -235,13 +238,15 @@
- 			Vector2 bottomright,
- 			float angle,
- 			int layer,
--			ushort blend = BlendMode.Normal
-+			ushort blend = BlendMode.Normal,
-+			bool depthTest = true
- 		)
- 		{
- 			rendat[billboardCount] = new RenderData(
- 				texture,
- 				blend,
--				(ushort)vertexCountBasic
-+				(ushort)vertexCountBasic,
-+				depthTest
- 			);
- 			CreateBillboard(
- 				Position,
-@@ -326,7 +331,11 @@
- 
-             rs.Textures[0] = rendat[datindex].Texture;
-             rs.Samplers[0] = new SamplerState(rs.PreferredFilterLevel, WrapMode.ClampToEdge, WrapMode.ClampToEdge);
-+            var depthEnabled = rs.DepthEnabled;
-+            if (!rendat[datindex].DepthTest)
-+                rs.DepthEnabled = false;
-             vboBasic.Draw(PrimitiveTypes.TriangleList, 0, start, count / 3);
-+            rs.DepthEnabled = depthEnabled;
-             rs.Cull = true;
-             lastDatHash = -1;
-         }
---- a/src/LibreLancer/Render/SortLayers.cs
-+++ b/src/LibreLancer/Render/SortLayers.cs
-@@ -10,7 +10,7 @@
- 		public const int NEBULA_INSIDE = 0;
- 		public const int SUN = 1;
- 		public const int OBJECT = 1;
-+		public const int CORONA = 2;
-         public const int OPAQUE = int.MaxValue;
- 	}
- }
--
+diff --git a/src/LibreLancer.Tests/LightCoronaVisibilityTests.cs b/src/LibreLancer.Tests/LightCoronaVisibilityTests.cs
+new file mode 100644
+index 00000000..07af8109
 --- /dev/null
 +++ b/src/LibreLancer.Tests/LightCoronaVisibilityTests.cs
 @@ -0,0 +1,49 @@
@@ -270,3 +53,213 @@
 +        Assert.Equal(1f, fade);
 +    }
 +}
+diff --git a/src/LibreLancer/Render/Billboards.cs b/src/LibreLancer/Render/Billboards.cs
+index 88ae742b..e7a5e92b 100644
+--- a/src/LibreLancer/Render/Billboards.cs
++++ b/src/LibreLancer/Render/Billboards.cs
+@@ -66,13 +66,15 @@ namespace LibreLancer.Render
+ 			public ushort BlendMode;
+ 			public ushort IndexStart;
+             public byte Triangle;
++            public bool DepthTest;
+ 
+-            public RenderData(Texture tex, ushort blend, ushort idxStart)
++            public RenderData(Texture tex, ushort blend, ushort idxStart, bool depthTest = true)
+             {
+                 Texture = tex;
+                 BlendMode = blend;
+                 IndexStart = idxStart;
+                 Triangle = 0;
++                DepthTest = depthTest;
+             }
+             public static RenderData CreateTri(Texture tex, ushort blend, ushort idxStart)
+ 			{
+@@ -85,6 +87,7 @@ namespace LibreLancer.Render
+ 					var hash = 17;
+ 					hash += hash * 23 + Texture.GetHashCode();
+ 					hash += hash * 23 + BlendMode.GetHashCode();
++					hash += hash * 23 + DepthTest.GetHashCode();
+ 					return hash;
+ 				}
+ 			}
+@@ -196,13 +199,15 @@ namespace LibreLancer.Render
+ 			Vector2 texc,
+ 			float angle,
+ 			int layer,
+-			ushort blend = BlendMode.Normal
++			ushort blend = BlendMode.Normal,
++			bool depthTest = true
+ 		)
+ 		{
+ 			rendat[billboardCount] = RenderData.CreateTri(
+ 				texture,
+ 				blend,
+-				(ushort)vertexCountBasic
++				(ushort)vertexCountBasic,
++				depthTest
+ 			);
+ 			CreateTriBillboard(
+ 				Position,
+@@ -326,7 +331,11 @@ namespace LibreLancer.Render
+ 
+             rs.Textures[0] = rendat[datindex].Texture;
+             rs.Samplers[0] = new SamplerState(rs.PreferredFilterLevel, WrapMode.ClampToEdge, WrapMode.ClampToEdge);
++            var depthEnabled = rs.DepthEnabled;
++            if (!rendat[datindex].DepthTest)
++                rs.DepthEnabled = false;
+             vboBasic.Draw(PrimitiveTypes.TriangleList, 0, start, count / 3);
++            rs.DepthEnabled = depthEnabled;
+             rs.Cull = true;
+             lastDatHash = -1;
+         }
+diff --git a/src/LibreLancer/Render/LightEquipRenderer.cs b/src/LibreLancer/Render/LightEquipRenderer.cs
+index c2934216..17fb3576 100644
+--- a/src/LibreLancer/Render/LightEquipRenderer.cs
++++ b/src/LibreLancer/Render/LightEquipRenderer.cs
+@@ -8,6 +8,7 @@ using LibreLancer.Data;
+ using LibreLancer.Data.GameData.Items;
+ using LibreLancer.Graphics;
+ using LibreLancer.Resources;
++using LibreLancer.World;
+ 
+ namespace LibreLancer.Render
+ {
+@@ -19,6 +20,7 @@ namespace LibreLancer.Render
+ 
+         private SystemRenderer? sys;
+         private LightEquipment equip;
++        internal GameObject? OcclusionOwner { get; set; }
+         public bool LightOn = true;
+         private static Random rnd = new();
+ 
+@@ -73,8 +75,9 @@ namespace LibreLancer.Render
+                 new Vector2(shineshape.Dimensions.X + shineshape.Dimensions.Width,
+                     shineshape.Dimensions.Y + shineshape.Dimensions.Height),
+                 0,
+-                SortLayers.OBJECT,
+-                BlendMode.Additive
++                SortLayers.CORONA,
++                BlendMode.Additive,
++                depthTest: false
+             );
+         }
+ 
+@@ -108,49 +111,42 @@ namespace LibreLancer.Render
+             if (bulbtex == null || shinetex == null)
+                 return;
+ 
+-            if (equip.FlareCone != null)
+-            {
+-                float cosAngle = Vector3.Dot(
+-                    Vector3.Normalize(forward),
+-                    Vector3.Normalize(sys!.Camera.Position - pos)
+-                );
+-
+-                // flare cone is defined as outer, inner
+-                float cosStart = MathF.Cos(equip.FlareCone.Value.Y * MathF.PI / 180f);
+-                float cosEnd   = MathF.Cos(equip.FlareCone.Value.X   * MathF.PI / 180f);
+-
+-                float fade = MathHelper.Clamp(
+-                    (cosAngle - cosEnd) / (cosStart - cosEnd),
+-                    0f,
+-                    1f
+-                );
+-                if(fade > 0)
+-                    DrawShine(fade);
+-            }
+-            else
+-            {
+-                DrawShine(1);
+-            }
+-
+-
++            var fade = GetViewConeFade(forward, sys!.Camera.Position - pos, equip.FlareCone);
++            if (fade <= 0)
++                return;
++            DrawShine(fade);
+ 
+             sys.Billboards.Draw(
+                 bulbtex,
+                 pos,
+                 new Vector2(equip.BulbSize) * 2,
+-                new Color4(colorBulb, 1),
++                new Color4(colorBulb, fade),
+                 new Vector2(bulbshape.Dimensions.X, bulbshape.Dimensions.Y),
+                 new Vector2(bulbshape.Dimensions.X + bulbshape.Dimensions.Width, bulbshape.Dimensions.Y),
+                 new Vector2(bulbshape.Dimensions.X, bulbshape.Dimensions.Y + bulbshape.Dimensions.Height),
+                 new Vector2(bulbshape.Dimensions.X + bulbshape.Dimensions.Width,
+                     bulbshape.Dimensions.Y + bulbshape.Dimensions.Height),
+                 0,
+-                SortLayers.OBJECT,
+-                BlendMode.Additive
++                SortLayers.CORONA,
++                BlendMode.Additive,
++                depthTest: false
+             );
+ 
+         }
+ 
++        internal static float GetViewConeFade(Vector3 lightForward, Vector3 cameraDirection,
++            Vector2? flareCone)
++        {
++            if (flareCone == null || lightForward.LengthSquared() < 1e-8f || cameraDirection.LengthSquared() < 1e-8f)
++                return 1f;
++            var cosAngle = Vector3.Dot(Vector3.Normalize(lightForward), Vector3.Normalize(cameraDirection));
++            var cosStart = MathF.Cos(flareCone.Value.Y * MathF.PI / 180f);
++            var cosEnd = MathF.Cos(flareCone.Value.X * MathF.PI / 180f);
++            if (MathF.Abs(cosStart - cosEnd) < 1e-6f)
++                return cosAngle >= cosStart ? 1f : 0f;
++            return MathHelper.Clamp((cosAngle - cosEnd) / (cosStart - cosEnd), 0f, 1f);
++        }
++
+         private double timer = 0;
+         private bool lt_on = true;
+         private Color3f colorBulb;
+@@ -199,10 +195,22 @@ namespace LibreLancer.Render
+                 LightOn &&
+                 Vector3.DistanceSquared(camera.Position, pos) < CULL &&
+                 camera.FrustumCheck(new BoundingSphere(pos, equip.BulbSize * 3))
++                && GetViewConeFade(forward, camera.Position - pos, equip.FlareCone) > 0
+             );
+             this.sys = sys;
+             var showLight = !equip.Animated || !lt_on;
+ 
++            if (visible && sys.World.Physics is { } physics)
++            {
++                var toLight = pos - camera.Position;
++                var distance = toLight.Length();
++                if (distance > 0.01f && physics.PointRaycast(
++                        OcclusionOwner?.PhysicsComponent?.Body, camera.Position, toLight / distance,
++                        Math.Max(0, distance - Math.Max(0.1f, equip.BulbSize)), true,
++                        out _, out _, out _))
++                    visible = false;
++            }
++
+             if (equip.EmitRange > 0 && showLight && camera.FrustumCheck(new BoundingSphere(pos, equip.EmitRange)))
+             {
+                 // sys.PointLightDX(pos, equip.EmitRange, new Color4(equip.GlowColor, 1), equip.EmitAttenuation);
+diff --git a/src/LibreLancer/Render/SortLayers.cs b/src/LibreLancer/Render/SortLayers.cs
+index 234af8d8..ec023218 100644
+--- a/src/LibreLancer/Render/SortLayers.cs
++++ b/src/LibreLancer/Render/SortLayers.cs
+@@ -10,6 +10,7 @@ namespace LibreLancer.Render
+ 		public const int NEBULA_INSIDE = 0;
+ 		public const int SUN = 1;
+ 		public const int OBJECT = 1;
++		public const int CORONA = 2;
+         public const int OPAQUE = int.MaxValue;
+ 	}
+ }
+diff --git a/src/LibreLancer/World/Equipments/Light.cs b/src/LibreLancer/World/Equipments/Light.cs
+index 5ddda667..d66ed5e8 100644
+--- a/src/LibreLancer/World/Equipments/Light.cs
++++ b/src/LibreLancer/World/Equipments/Light.cs
+@@ -11,7 +11,7 @@ public sealed class Light : EquipmentObject<LightEquipment>
+         : base(parent, attachment, light, type, false, true)
+     {
+         if (type != EquipmentType.Server)
+-            renderer = new LightEquipRenderer(light) { LightOn = !light.DockingLight };
++            renderer = new LightEquipRenderer(light) { LightOn = !light.DockingLight, OcclusionOwner = parent };
+     }
+ 
+     public override void RenderUpdate(double delta)

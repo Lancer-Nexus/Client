@@ -1,218 +1,8 @@
---- a/src/LibreLancer/World/Components/AnimationComponent.cs
-+++ b/src/LibreLancer/World/Components/AnimationComponent.cs
-@@ -8,6 +8,7 @@
- using System.Numerics;
- using LibreLancer.Net.Protocol;
- using LibreLancer.Render;
-+using LibreLancer.Utf;
- using LibreLancer.Utf.Anm;
- 
- namespace LibreLancer.World.Components
-@@ -27,6 +28,10 @@
-             public float TimeScale;
-             public bool Reverse;
-             public bool Loop;
-+            public HashSet<string> SuppressedJoints = new(StringComparer.OrdinalIgnoreCase);
-+            public Dictionary<AbstractConstruct, Transform3D> BlendFrom = [];
-+            public double BlendStartTime;
-+            public float BlendInDuration;
-             public int[] ObjectCursors;
-             public int[] JointCursors;
- 
-@@ -61,6 +66,7 @@
-         private Func<double> getTotalTime;
- 
-         private double accumTime;
-+        private const float DefaultClipBlendIn = 0.25f;
- 
-         public IEnumerable<NetCmpAnimation> Serialize() =>
-             animations.Select(x => new NetCmpAnimation()
-@@ -159,16 +165,17 @@
-                     var currTime = getTotalTime();
-                     var t = animation.StartT + (currTime - animation.WorldStartTime) * animation.TimeScale;
-                     t = MathHelper.Clamp(t, 0, animation.ScriptDuration);
-+                    BeginClipTransition(animation, script, start_time, duration);
-                     animation.StartT = (float) (animation.ScriptDuration - t);
-                     animation.Reverse = reverse;
--                    animation.WorldStartTime = getTotalTime();
-+                    animation.WorldStartTime = currTime;
-                     animation.Duration = duration;
-                     animation.Loop = loop;
-                 }
-             }
-             else
-             {
--                animations.Add(new ActiveAnimation(script, script.Name)
-+                var next = new ActiveAnimation(script, script.Name)
-                 {
-                     WorldStartTime = getTotalTime(),
-                     Loop = loop,
-@@ -176,9 +183,10 @@
-                     StartT = start_time,
-                     TimeScale = time_scale,
-                     Reverse = reverse,
--                });
--
--                active[script] = animations[^1];
-+                };
-+                BeginClipTransition(next, script, start_time, duration);
-+                animations.Add(next);
-+                active[script] = next;
-             }
-         }
- 
-@@ -195,9 +203,60 @@
-             }
-         }
- 
-+        private RigidModel? GetAnimationModel() => Parent == null ? rm : Parent.Model?.RigidModel;
-+
-+        private void BeginClipTransition(ActiveAnimation animation, Script script, float startTime, float duration)
-+        {
-+            animation.BlendFrom.Clear();
-+            animation.SuppressedJoints.Clear();
-+            var model = GetAnimationModel();
-+            if (model == null)
-+                return;
-+
-+            var jointNames = script.JointMaps.Select(jm => jm.ChildName)
-+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-+            var previousPoseAvailable = completeAnimations.Any(previous =>
-+                previous.Script.JointMaps.Any(jm => jointNames.Contains(jm.ChildName))) ||
-+                animations.Any(previous => previous.Script.JointMaps.Any(jm =>
-+                    jointNames.Contains(jm.ChildName) && !previous.SuppressedJoints.Contains(jm.ChildName)));
-+            if (!previousPoseAvailable)
-+                return;
-+
-+            foreach (var jointName in jointNames)
-+            {
-+                var part = model.Parts[jointName];
-+                var construct = part.Construct;
-+                if (construct == null)
-+                    continue;
-+
-+                animation.BlendFrom[construct] = construct.LocalTransform;
-+                foreach (var previous in animations)
-+                {
-+                    if (!ReferenceEquals(previous, animation) && previous.Script.JointMaps.Any(jm =>
-+                            jm.ChildName.Equals(jointName, StringComparison.OrdinalIgnoreCase)))
-+                        previous.SuppressedJoints.Add(jointName);
-+                }
-+            }
-+
-+            if (animation.BlendFrom.Count == 0)
-+                return;
-+
-+            var remainingDuration = duration > 0 ? duration : script.JointMaps
-+                .Select(jm => jm.Channel.Duration - startTime)
-+                .Where(d => d > 0)
-+                .DefaultIfEmpty(DefaultClipBlendIn)
-+                .Min();
-+            animation.BlendInDuration = MathF.Min(DefaultClipBlendIn, remainingDuration);
-+            animation.BlendStartTime = getTotalTime();
-+        }
-+
-         public void ResetAnimations()
-         {
-             animations.Clear();
-+            completeAnimations.Clear();
-+            foreach (var part in GetAnimationModel()?.AllParts ?? [])
-+                if (part.Construct != null)
-+                    part.Construct.OverrideTransform = null;
- 
-             if ((GameObject?)Parent != null)
-             {
-@@ -268,19 +327,23 @@
-             accumTime += time;
-             int c = animations.Count;
- 
--            for (int i = animations.Count - 1; i >= 0; i--)
-+            for (int i = 0; i < animations.Count;)
-             {
--                if (ProcessAnimation(animations[i]))
-+                var animation = animations[i];
-+                if (ProcessAnimation(animation))
-                 {
--                    if (AnimationCompleted != null)
--                    {
--                        AnimationCompleted(animations[i].Name);
--                    }
--
--                    active.Remove(animations[i].Script);
--                    completeAnimations.Add(animations[i]);
-+                    foreach (var joint in animation.BlendFrom.Keys)
-+                        joint.OverrideTransform = null;
-+                    animation.BlendFrom.Clear();
-+                    AnimationCompleted?.Invoke(animation.Name);
-+                    active.Remove(animation.Script);
-+                    completeAnimations.Add(animation);
-                     animations.RemoveAt(i);
-                 }
-+                else
-+                {
-+                    i++;
-+                }
-             }
- 
-             if (c > 0 && Parent != null)
-@@ -310,8 +373,9 @@
- 
-             for (int i = 0; i < a.Script.JointMaps.Count; i++)
-             {
--                if (!ProcessJointMap(ref a.Script.JointMaps[i], ref a.JointCursors[i], a.StartT, a.WorldStartTime, ts, a.Loop,
--                        a.Reverse))
-+                ref var jointMap = ref a.Script.JointMaps[i];
-+                if (!ProcessJointMap(ref jointMap, ref a.JointCursors[i], a.StartT, a.WorldStartTime, ts, a.Loop,
-+                        a.Reverse, a.SuppressedJoints.Contains(jointMap.ChildName), a))
-                 {
-                     finished = false;
-                 }
-@@ -325,8 +389,8 @@
-             return false;
-         }
- 
--        private bool ProcessJointMap(ref JointMap jm, ref int cur, float initialTime, double startTime, float timeScale, bool loop,
--            bool reverse)
-+        private bool ProcessJointMap(ref JointMap jm, ref int cur, float initialTime, double startTime,
-+            float timeScale, bool loop, bool reverse, bool suppressed, ActiveAnimation animation)
-         {
-             var mdl = Parent == null ? rm : Parent.Model!.RigidModel;
-             var joint = mdl.Parts[jm.ChildName].Construct;
-@@ -362,7 +426,30 @@
-                 quat = jm.Channel.QuaternionAtTime((float) t, ref cur);
-             }
- 
--            joint?.Update(angle, quat);
-+            if (joint == null || suppressed)
-+                return done;
-+
-+            joint.OverrideTransform = null;
-+            joint.Update(angle, quat);
-+            if (animation.BlendFrom.TryGetValue(joint, out var startPose))
-+            {
-+                var blend = animation.BlendInDuration <= 0
-+                    ? 1f
-+                    : MathHelper.Clamp((float)((getTotalTime() - animation.BlendStartTime) /
-+                                               animation.BlendInDuration), 0f, 1f);
-+                if (blend >= 1f)
-+                {
-+                    animation.BlendFrom.Remove(joint);
-+                    joint.OverrideTransform = null;
-+                }
-+                else
-+                {
-+                    var target = joint.LocalTransform;
-+                    joint.OverrideTransform = new Transform3D(
-+                        Vector3.Lerp(startPose.Position, target.Position, blend),
-+                        Quaternion.Slerp(startPose.Orientation, target.Orientation, blend));
-+                }
-+            }
-             return done;
-         }
- 
+diff --git a/src/LibreLancer.Tests/MultipartLoopAnimationTests.cs b/src/LibreLancer.Tests/MultipartLoopAnimationTests.cs
+index e3472b4e..9fc6dabb 100644
 --- a/src/LibreLancer.Tests/MultipartLoopAnimationTests.cs
 +++ b/src/LibreLancer.Tests/MultipartLoopAnimationTests.cs
-@@ -101,6 +101,97 @@
+@@ -101,6 +101,97 @@ public sealed class MultipartLoopAnimationTests
          Assert.InRange(model.Parts["Valve"].Construct!.LocalTransform.Position.X, 1.499f, 1.501f);
      }
  
@@ -310,3 +100,225 @@
      private static void AddTrack(Script script, string name, float duration, float lastValue)
      {
          var buffer = new AnmBuffer { Buffer = new byte[8] };
+diff --git a/src/LibreLancer/World/Components/AnimationComponent.cs b/src/LibreLancer/World/Components/AnimationComponent.cs
+index ad721b1c..321d935f 100644
+--- a/src/LibreLancer/World/Components/AnimationComponent.cs
++++ b/src/LibreLancer/World/Components/AnimationComponent.cs
+@@ -8,6 +8,7 @@ using System.Linq;
+ using System.Numerics;
+ using LibreLancer.Net.Protocol;
+ using LibreLancer.Render;
++using LibreLancer.Utf;
+ using LibreLancer.Utf.Anm;
+ 
+ namespace LibreLancer.World.Components
+@@ -27,6 +28,10 @@ namespace LibreLancer.World.Components
+             public float TimeScale;
+             public bool Reverse;
+             public bool Loop;
++            public HashSet<string> SuppressedJoints = new(StringComparer.OrdinalIgnoreCase);
++            public Dictionary<AbstractConstruct, Transform3D> BlendFrom = [];
++            public double BlendStartTime;
++            public float BlendInDuration;
+             public int[] ObjectCursors;
+             public int[] JointCursors;
+ 
+@@ -61,6 +66,7 @@ namespace LibreLancer.World.Components
+         private Func<double> getTotalTime;
+ 
+         private double accumTime;
++        private const float DefaultClipBlendIn = 0.25f;
+ 
+         public IEnumerable<NetCmpAnimation> Serialize() =>
+             animations.Select(x => new NetCmpAnimation()
+@@ -164,16 +170,17 @@ namespace LibreLancer.World.Components
+                     var currTime = getTotalTime();
+                     var t = animation.StartT + (currTime - animation.WorldStartTime) * animation.TimeScale;
+                     t = MathHelper.Clamp(t, 0, animation.ScriptDuration);
++                    BeginClipTransition(animation, script, start_time, duration);
+                     animation.StartT = (float) (animation.ScriptDuration - t);
+                     animation.Reverse = reverse;
+-                    animation.WorldStartTime = getTotalTime();
++                    animation.WorldStartTime = currTime;
+                     animation.Duration = duration;
+                     animation.Loop = loop;
+                 }
+             }
+             else
+             {
+-                animations.Add(new ActiveAnimation(script, script.Name)
++                var next = new ActiveAnimation(script, script.Name)
+                 {
+                     WorldStartTime = getTotalTime(),
+                     Loop = loop,
+@@ -181,9 +188,10 @@ namespace LibreLancer.World.Components
+                     StartT = start_time,
+                     TimeScale = time_scale,
+                     Reverse = reverse,
+-                });
+-
+-                active[script] = animations[^1];
++                };
++                BeginClipTransition(next, script, start_time, duration);
++                animations.Add(next);
++                active[script] = next;
+             }
+         }
+ 
+@@ -200,9 +208,60 @@ namespace LibreLancer.World.Components
+             }
+         }
+ 
++        private RigidModel? GetAnimationModel() => Parent == null ? rm : Parent.Model?.RigidModel;
++
++        private void BeginClipTransition(ActiveAnimation animation, Script script, float startTime, float duration)
++        {
++            animation.BlendFrom.Clear();
++            animation.SuppressedJoints.Clear();
++            var model = GetAnimationModel();
++            if (model == null)
++                return;
++
++            var jointNames = script.JointMaps.Select(jm => jm.ChildName)
++                .ToHashSet(StringComparer.OrdinalIgnoreCase);
++            var previousPoseAvailable = completeAnimations.Any(previous =>
++                previous.Script.JointMaps.Any(jm => jointNames.Contains(jm.ChildName))) ||
++                animations.Any(previous => previous.Script.JointMaps.Any(jm =>
++                    jointNames.Contains(jm.ChildName) && !previous.SuppressedJoints.Contains(jm.ChildName)));
++            if (!previousPoseAvailable)
++                return;
++
++            foreach (var jointName in jointNames)
++            {
++                var part = model.Parts[jointName];
++                var construct = part.Construct;
++                if (construct == null)
++                    continue;
++
++                animation.BlendFrom[construct] = construct.LocalTransform;
++                foreach (var previous in animations)
++                {
++                    if (!ReferenceEquals(previous, animation) && previous.Script.JointMaps.Any(jm =>
++                            jm.ChildName.Equals(jointName, StringComparison.OrdinalIgnoreCase)))
++                        previous.SuppressedJoints.Add(jointName);
++                }
++            }
++
++            if (animation.BlendFrom.Count == 0)
++                return;
++
++            var remainingDuration = duration > 0 ? duration : script.JointMaps
++                .Select(jm => jm.Channel.Duration - startTime)
++                .Where(d => d > 0)
++                .DefaultIfEmpty(DefaultClipBlendIn)
++                .Min();
++            animation.BlendInDuration = MathF.Min(DefaultClipBlendIn, remainingDuration);
++            animation.BlendStartTime = getTotalTime();
++        }
++
+         public void ResetAnimations()
+         {
+             animations.Clear();
++            completeAnimations.Clear();
++            foreach (var part in GetAnimationModel()?.AllParts ?? [])
++                if (part.Construct != null)
++                    part.Construct.OverrideTransform = null;
+ 
+             if ((GameObject?)Parent != null)
+             {
+@@ -281,19 +340,23 @@ namespace LibreLancer.World.Components
+             accumTime += time;
+             int c = animations.Count;
+ 
+-            for (int i = animations.Count - 1; i >= 0; i--)
++            for (int i = 0; i < animations.Count;)
+             {
+-                if (ProcessAnimation(animations[i]))
++                var animation = animations[i];
++                if (ProcessAnimation(animation))
+                 {
+-                    if (AnimationCompleted != null)
+-                    {
+-                        AnimationCompleted(animations[i].Name);
+-                    }
+-
+-                    active.Remove(animations[i].Script);
+-                    completeAnimations.Add(animations[i]);
++                    foreach (var joint in animation.BlendFrom.Keys)
++                        joint.OverrideTransform = null;
++                    animation.BlendFrom.Clear();
++                    AnimationCompleted?.Invoke(animation.Name);
++                    active.Remove(animation.Script);
++                    completeAnimations.Add(animation);
+                     animations.RemoveAt(i);
+                 }
++                else
++                {
++                    i++;
++                }
+             }
+ 
+             if (c > 0 && Parent != null)
+@@ -323,8 +386,9 @@ namespace LibreLancer.World.Components
+ 
+             for (int i = 0; i < a.Script.JointMaps.Count; i++)
+             {
+-                if (!ProcessJointMap(ref a.Script.JointMaps[i], ref a.JointCursors[i], a.StartT, a.WorldStartTime, ts, a.Loop,
+-                        a.Reverse))
++                ref var jointMap = ref a.Script.JointMaps[i];
++                if (!ProcessJointMap(ref jointMap, ref a.JointCursors[i], a.StartT, a.WorldStartTime, ts, a.Loop,
++                        a.Reverse, a.SuppressedJoints.Contains(jointMap.ChildName), a))
+                 {
+                     finished = false;
+                 }
+@@ -338,8 +402,8 @@ namespace LibreLancer.World.Components
+             return false;
+         }
+ 
+-        private bool ProcessJointMap(ref JointMap jm, ref int cur, float initialTime, double startTime, float timeScale, bool loop,
+-            bool reverse)
++        private bool ProcessJointMap(ref JointMap jm, ref int cur, float initialTime, double startTime,
++            float timeScale, bool loop, bool reverse, bool suppressed, ActiveAnimation animation)
+         {
+             var mdl = Parent == null ? rm : Parent.Model!.RigidModel;
+             var part = mdl.Parts[jm.ChildName];
+@@ -362,7 +426,10 @@ namespace LibreLancer.World.Components
+                 t = jm.Channel.Duration - t;
+             }
+ 
+-            if (joint != null)
++            if (joint == null || suppressed)
++                return done;
++
++            {
+             {
+                 ChannelFloat angle = 0;
+ 
+@@ -377,7 +444,27 @@ namespace LibreLancer.World.Components
+                 {
+                     quat = jm.Channel.QuaternionAtTime((float) t, ref cur);
+                 }
++                joint.OverrideTransform = null;
+                 joint.Update(angle, quat);
++                if (animation.BlendFrom.TryGetValue(joint, out var startPose))
++                {
++                    var blend = animation.BlendInDuration <= 0
++                        ? 1f
++                        : MathHelper.Clamp((float)((getTotalTime() - animation.BlendStartTime) /
++                                                   animation.BlendInDuration), 0f, 1f);
++                    if (blend >= 1f)
++                    {
++                        animation.BlendFrom.Remove(joint);
++                        joint.OverrideTransform = null;
++                    }
++                    else
++                    {
++                        var target = joint.LocalTransform;
++                        joint.OverrideTransform = new Transform3D(
++                            Vector3.Lerp(startPose.Position, target.Position, blend),
++                            Quaternion.Slerp(startPose.Orientation, target.Orientation, blend));
++                    }
++                }
+                 part.MarkUpdated();
+             }
+             return done;
