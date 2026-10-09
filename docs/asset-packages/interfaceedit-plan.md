@@ -2,11 +2,11 @@
 
 ## Current state
 
-`InterfaceEdit/Project.cs::Load` creates `FileSystem.FromPath(FlFolder)` and then constructs `GameResourceManager`, `FreelancerIni`, fonts, rollover/HUD data, and other interface resources from that VFS. It does not mount `packages/active.json` or an editor workspace. This means InterfaceEdit cannot currently read assets that exist only in an active NAP snapshot.
+`InterfaceEdit/Project.cs::Load` creates `FileSystem.FromPath(FlFolder)` and then constructs `GameResourceManager`, `FreelancerIni`, fonts, rollover/HUD data, and other interface resources from that VFS. Patch 2117 now mounts the verified `packages/active.json` snapshot and shared editor workspace before constructing game resources. Assets present only in active NAP packages are therefore available in InterfaceEdit.
 
-The separate `LancerEdit` path already mounts `NexusPackageFileProvider.LoadActive(AppContext.BaseDirectory)` and puts `NexusPackageWorkspaceFileProvider` above it. Package-backed file paths resolve to persistent workspace files. Its Data menu already handles NAP pack/unpack/export; those operations should remain in LancerEdit/CLI unless InterfaceEdit develops a specific package-authoring workflow.
+The shared `LibreLancer.Data.NexusEditorDataMount` helper mounts the active snapshot and persistent workspace for both LancerEdit and InterfaceEdit. It retains LancerEdit’s existing workspace identity/location so existing edits stay visible. NAP pack/unpack/export remain in LancerEdit/CLI.
 
-`InterfaceEdit/ResourceWindow.cs` saves Freelancer's `resources.xml` through `FileSystem.GetBackingFileName`. By contrast, project XML/Lua files and `Project.WriteResources()` are stored under the InterfaceEdit project folder. The integration must preserve that distinction.
+`InterfaceEdit/ResourceWindow.cs` saves Freelancer's `resources.xml` through `FileSystem.GetBackingFileName`. By contrast, project XML/Lua files and `Project.WriteResources()` are stored under the InterfaceEdit project folder. The integration preserves that distinction: `resources.xml` uses the writable VFS path, while project XML/Lua files and `Project.WriteResources()` remain in the project folder.
 
 ## Intended behavior
 
@@ -16,15 +16,21 @@ The separate `LancerEdit` path already mounts `NexusPackageFileProvider.LoadActi
 - InterfaceEdit project files remain in the project folder; only game-data resources use the NAP workspace.
 - Invalid active snapshot or package integrity errors are surfaced to the user and prevent silently loading a partial package set.
 
+## Implementation status
+
+Implemented in patch 2117: common mount helper; InterfaceEdit snapshot/workspace mounting before resource loading; workspace-backed `resources.xml` path resolution with an explicit error when no writable backing path exists; two synthetic tests for package precedence, workspace persistence after refresh, and loose-only mode. Linux Release build and focused tests passed.
+
+Still open: GUI save/restart smoke test, Windows build/test/runtime, visible mount/workspace state and open-workspace action, corrupt-snapshot user experience, broader OS-specific backing-path audit, and expanded edge-case coverage (traversal/reparse points and pre-existing workspace fixture).
+
 ## Implementation sequence
 
-1. **Share package mount setup.** Extract the active-snapshot and workspace-provider setup used by LancerEdit into a small reusable editor integration helper. It should accept an application directory, selected game-data directory, and workspace root, and return the configured VFS plus mount/workspace metadata. Both editors must retain the order `loose DATA -> active packages -> workspace`.
-2. **Define one workspace identity and migrate safely.** Use the canonical full Freelancer installation path to derive a stable ID, with case handling that works on Windows and Linux. Move the current LancerEdit-only workspace convention to a shared editor namespace; detect existing LancerEdit workspaces and preserve them or provide a non-destructive migration. Do not silently start a second empty workspace and hide prior edits.
-3. **Mount packages in InterfaceEdit.** Configure `UiData.FileSystem` through the shared helper before creating `GameResourceManager`, `FreelancerIni`, fonts, HUD and rollover resources. Keep `ProjectConfiguration.DataFolder` semantics intact and continue to allow ordinary loose installations.
-4. **Route game-data writes through the workspace.** Audit all InterfaceEdit writes. Resolve `resources.xml` using the VFS writable backing path and report a clear error if a packaged path has no writable destination. Keep project-local stylesheet, XML/Lua editor files, generated designer files and compiler output in their existing project/output directories. Do not redirect them into the game-data workspace.
-5. **Expose mount state.** Show whether an active NAP snapshot was loaded and where the shared workspace lives, with a way to open the workspace directory. Report snapshot validation errors instead of silently falling back to loose DATA when a snapshot was present but invalid.
-6. **Add synthetic integration coverage.** Build a tiny NAP containing an interface resource and a referenced asset. Verify InterfaceEdit's configured VFS resolves it from NAP with loose DATA absent; verify saving a packaged resource creates/updates only its workspace copy and a reload sees the workspace override. Also cover loose-only mode, corrupt active snapshots, traversal/reparse-point rejection, and preservation of pre-existing LancerEdit workspace files.
-7. **Verify both platforms and the editor path.** Build InterfaceEdit on Linux and Windows, run the synthetic tests on both, and perform a GUI smoke test that opens a project against a NAP-only fixture, edits/saves a packaged resource, restarts, and sees the saved override. Keep all LibreLancer source changes in a focused patch registered in `patches/series`; validate the patch stack from a clean reconstruction.
+1. **Share package mount setup — implemented.** `NexusEditorDataMount.Attach` accepts the application directory, selected game-data directory and optional workspace base, and attaches package/workspace providers above loose DATA. Both editors use it.
+2. **Share workspace identity — implemented with compatibility preservation.** The helper retains the existing LancerEdit workspace root and install ID, so existing workspace edits remain visible without copying or moving files. Cross-platform case behavior still needs Windows verification.
+3. **Mount packages in InterfaceEdit — implemented.** `Project.Load` calls the helper immediately after creating the loose-data VFS and before game-resource initialization. Loose-only mode remains supported.
+4. **Route game-data writes through the workspace — partially implemented.** `resources.xml` resolves its writable path through the VFS and fails clearly when unavailable. Project files remain project-local. Audit other OS backing-path consumers and interactive saves before calling this complete.
+5. **Expose mount state — open.** The workspace path is logged, but there is no mount-state UI or open-workspace action. Snapshot validation errors propagate from loading; user-facing error presentation needs a GUI check.
+6. **Add synthetic integration coverage — partial.** Tests cover NAP-over-loose precedence, workspace destination, persistence after refresh, and loose-only mode. Corrupt snapshots, traversal/reparse points and preservation of a pre-existing workspace fixture remain to add or verify.
+7. **Verify platforms/editor path — partial.** The focused tests and Release build pass on Linux; a fresh patch-series reconstruction applies through patch 2117. Windows tests/build, GUI save/restart smoke test and a fresh interactive InterfaceEdit session remain.
 
 ## Boundaries
 

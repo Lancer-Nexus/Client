@@ -1,19 +1,3 @@
-diff --git a/README.md b/README.md
-index 4fcd0a3..06b2da1 100644
---- a/README.md
-+++ b/README.md
-@@ -46,9 +46,9 @@ The Lancer Nexus collector stages Linux client builds with the `lancer` apphost
- 
- `BuildLL` packages Linux and Windows engine and SDK releases as one-root-directory `tar.zst` archives. The packager preserves Unix modes and fails if a release tree contains symbolic links, which are not accepted by the updater's safe extractor.
- 
--`NexusGatewayLogin` reads `client-version.json` from the running client release directory, POSTs `ClientVersionHello` before credentials, then requests placement with the authenticated session. The client connects to the assigned endpoint with the Gateway JoinTicket. A required update displays a prompt and exits with code 42 after acknowledgement. Missing or damaged local version metadata requests repair with exit code 43. The updater can stage and atomically activate a verified client-only release, then launch its `lancer` executable. Required data packages block activation until their installer is implemented; automatic rollback after an unhealthy startup remains pending.
-+`NexusGatewayLogin` reads `client-version.json` from the running client release directory, POSTs `ClientVersionHello` before credentials, then requests placement with the authenticated session. The client connects to the assigned endpoint with the Gateway JoinTicket. A required update displays a prompt and exits with code 42 after acknowledgement. Missing or damaged local version metadata requests repair with exit code 43. The Updater validates signed NAP data packages, including their structure and content hashes, stages them with the client into one release and atomically activates the combined snapshot. The Client acknowledges startup after game data and its first UI state load; the Updater can restore the previous healthy release if that signal times out. A Linux smoke test loaded the full game-data container with loose `DATA` absent and reached the first UI state on 2026-10-09; runtime rollback verification remains pending.
- 
--NAP V1 currently provides a standalone `Nexus.Assets` reader/writer and `nexus-pack` CLI for local packaging, inspection and verification. It is not yet mounted by the game and does not unlock required data-package activation. See `docs/asset-packages/implementation-status.md`; package only assets you have rights to distribute.
-+NAP V1 provides the `Nexus.Assets` reader/writer and `nexus-pack` CLI for `pack`, `inspect`, `verify`, overlay `diff` and `compact`. The Client and LLServer mount packages listed in the local `packages/active.json` snapshot after validating each package's path, size and SHA-256. The Updater stages required and selected signed `.nap` packages plus their dependency/override closure beside the client release and activates the combined snapshot. Rollback after an unhealthy start is implemented but still needs runtime validation. LancerEdit continues to use loose DATA files until archived-file materialization and editing are implemented. See `docs/asset-packages/implementation-status.md`; package only assets you have rights to distribute.
- 
- ## Dedicated server runtime status
- 
 diff --git a/docs/asset-packages/active-snapshot.md b/docs/asset-packages/active-snapshot.md
 new file mode 100644
 index 0000000..6ea17c4
@@ -83,39 +67,6 @@ index 9ae5d60..9dace7d 100644
 +The Updater resumes hash-addressed downloads using validated byte ranges and retains partial data after transport interruption. It checks available volume space before package download, client extraction and data-package copies. Real disk-full injection and Windows filesystem behavior still need verification.
 +
 +`src/Nexus.Assets/NapOverlayBuilder.cs` builds `.nap` overlays from two verified archives and compacts an active package mount. The CLI diff sidecar describes the one base package dependency/override relationship; publishers must review and merge it into their signed manifest.
-diff --git a/docs/asset-packages/implementation-status.md b/docs/asset-packages/implementation-status.md
-index 9d28f49..c614756 100644
---- a/docs/asset-packages/implementation-status.md
-+++ b/docs/asset-packages/implementation-status.md
-@@ -1,6 +1,6 @@
- # Nexus Asset Packages Implementation Status
- 
--Status updated 2026-10-09.
-+Status updated 2026-10-09 after the full-data NAP-only Linux game smoke test.
- 
- | Area | State | Evidence / remaining work |
- |---|---|---|
-@@ -8,12 +8,14 @@ Status updated 2026-10-09.
- | NAP V1 header/index/chunks | implemented | `src/Nexus.Assets`; frozen layout in `nap-v1-format.md`, golden vector test |
- | Reader / seek stream | implemented | Bounds checks, strict paths, per-chunk SHA-256, Zstd expansion limit, configurable bounded LRU cache |
- | Writer / deterministic output | implemented | Directory and entry-based writer, chunk deduplication, `none`/Zstd selection, atomic temporary output, tombstones |
--| CLI | implemented | `pack`, `inspect`, `verify` in `src/Nexus.Packaging.Cli` |
--| Unit tests | implemented | Synthetic assets, roundtrip, seeks, concurrent streams, determinism, golden vector, tombstones, unsafe paths, corruption |
--| VFS provider and unified enumeration | planned | Requires provider priority adapter, tombstone-effective views, DATA fallback integration and regression tests |
--| `GetBackingFileName` consumers | partial | Audit locations listed; per-consumer migration/materialization policy not implemented |
--| Signed release manifest / updater | planned | Required data packages still block activation; snapshot rollback and health acknowledgement remain open |
--| Overlay diff/compaction | planned | Depends on VFS and manifest resolution |
-+| CLI | implemented | `pack`, `inspect`, `verify`, `diff` and `compact` in `src/Nexus.Packaging.Cli` |
-+| Unit tests | implemented | Synthetic assets, roundtrip, seeks, concurrent streams, determinism, golden vector, tombstones, unsafe paths, corruption, VFS fallback/overrides/enumeration, active snapshot validation, and diff-to-mounted-target tree/byte parity |
-+| VFS provider and unified enumeration | implemented | `NexusPackageFileProvider` mounts local active packages; `IOverlayFileProvider` masks lower providers for reads/existence/backing paths and filters file/directory enumeration; Client and LLServer attach it |
-+| Active package snapshot validation | partial | Client/LLServer reject unsafe paths, reparse points, size/hash mismatch and malformed NAP indexes; Updater verifies NAP V1 structure, content version and all chunk/file hashes before writing the staged snapshot, then rechecks package hashes before reuse |
-+| Download resume and storage checks | partial | `ArtifactDownloader` resumes digest-scoped `.part` files with validated HTTP Range responses and exclusive per-digest locking; download, TAR extraction and NAP staging check available volume space. Interrupted-response and mocked insufficient-space tests pass; real ENOSPC and cross-platform filesystem behavior remain unverified |
-+| `GetBackingFileName` consumers | partial | Archived entries intentionally have no OS backing path. LancerEdit remains on loose DATA until materialization/export behavior is implemented |
-+| Signed release manifest / updater | partial | `Updater/Manifest.cs` verifies signed NAP metadata; `DataPackageStager` installs required packages, selected optional packages and their dependency/override closure into the client release and emits `packages/active.json` only after full NAP V1 structural/content verification and signed content-version matching; atomic client+data activation, a Client UI-ready acknowledgement and one-generation failed-start rollback are integrated. Full game DATA packaged into one NAP passed a Linux runtime smoke with loose DATA absent and reached the first UI state. Automated Linux tests cover missing-ack timeout, client-process termination, restoration of the old release and failed-snapshot suppression. Windows runtime and real updater-process interruption between activation steps remain open |
-+| Overlay diff/compaction | partial | `NapOverlayBuilder` builds content-hash diffs with tombstones and compacts active package layers. A synthetic end-to-end test mounts the generated diff on its baseline and verifies the complete virtual path set and bytes against the target archive. `diff` writes an advisory dependency/override plan. Multi-package manifest authoring remains manual; compaction does not include loose DATA fallback |
- | NAPD | planned | Optional after complete V1 overlay flow |
- | Audio pipeline | planned | Deferred until VFS/updater; codec and runtime audit still required |
- 
 diff --git a/src/LLServer.Core/LLServer.Core.csproj b/src/LLServer.Core/LLServer.Core.csproj
 index 2a79f5d..905d743 100644
 --- a/src/LLServer.Core/LLServer.Core.csproj
