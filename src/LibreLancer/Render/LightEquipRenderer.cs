@@ -160,7 +160,7 @@ namespace LibreLancer.Render
         {
             pos = transform.Position;
             if (equip.FlareCone != null)
-                forward = Vector3.Transform(Vector3.UnitZ, transform.Orientation);
+                forward = Vector3.Transform(new(0,0,-1), transform.Orientation);
         }
 
         public override void Update(double time, Transform3D transform)
