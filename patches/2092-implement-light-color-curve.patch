@@ -1,0 +1,395 @@
+--- a/src/LibreLancer.Data/Schema/FloatGraph.cs
++++ b/src/LibreLancer.Data/Schema/FloatGraph.cs
+@@ -6,6 +6,8 @@
+ using System.Collections.Generic;
+ using System.Numerics;
+ 
++using System.Linq;
++
+ namespace LibreLancer.Data.Schema;
+ 
+ public class FloatGraph
+@@ -13,3 +15,84 @@
+     public string? Name;
+     public List<Vector2> Points = [];
+ }
++
++public readonly record struct ColorGraphPoint(float Time, uint Color);
++
++public class ColorGraph
++{
++    public string? Name;
++    public List<ColorGraphPoint> Points = [];
++
++    public uint EvaluatePackedColor(double time, float period)
++    {
++        if (Points.Count == 0)
++            return uint.MaxValue;
++        if (Points.Count == 1)
++            return Points[0].Color;
++
++        var minTime = Points.Min(p => p.Time);
++        var maxTime = Points.Max(p => p.Time);
++        var range = maxTime - minTime;
++        if (!float.IsFinite(range) || range <= float.Epsilon)
++            return Points[^1].Color;
++
++        float normalized;
++        if (float.IsFinite(period) && period > 0)
++        {
++            var cycle = time % period;
++            if (cycle < 0)
++                cycle += period;
++            normalized = (float)(cycle / period);
++        }
++        else
++        {
++            normalized = (float)Math.Clamp(time, 0, 1);
++        }
++
++        var sampleTime = minTime + range * normalized;
++        var upper = UpperBound(sampleTime);
++        if (upper <= 0)
++            return Points[0].Color;
++        if (upper >= Points.Count)
++            return Points[^1].Color;
++
++        var left = Points[upper - 1];
++        var right = Points[upper];
++        var span = right.Time - left.Time;
++        if (!float.IsFinite(span) || span <= float.Epsilon)
++            return right.Color;
++
++        var amount = Math.Clamp((sampleTime - left.Time) / span, 0, 1);
++        return LerpColor(left.Color, right.Color, amount);
++    }
++
++    private int UpperBound(float time)
++    {
++        var low = 0;
++        var high = Points.Count;
++        while (low < high)
++        {
++            var middle = low + ((high - low) / 2);
++            if (Points[middle].Time <= time)
++                low = middle + 1;
++            else
++                high = middle;
++        }
++        return low;
++    }
++
++    private static uint LerpColor(uint left, uint right, float amount)
++    {
++        static uint Channel(uint a, uint b, int shift, float t)
++        {
++            var first = (a >> shift) & 0xff;
++            var second = (b >> shift) & 0xff;
++            return (uint)Math.Clamp((int)MathF.Round(first + ((int)second - (int)first) * t), 0, 255);
++        }
++
++        return (Channel(left, right, 24, amount) << 24) |
++               (Channel(left, right, 16, amount) << 16) |
++               (Channel(left, right, 8, amount) << 8) |
++               Channel(left, right, 0, amount);
++    }
++}
+--- a/src/LibreLancer.Data/Schema/GraphIni.cs
++++ b/src/LibreLancer.Data/Schema/GraphIni.cs
+@@ -14,11 +14,18 @@
+ public class GraphIni
+ {
+     public List<FloatGraph> FloatGraphs = [];
++    public List<ColorGraph> ColorGraphs = [];
+ 
+     public FloatGraph? FindFloatGraph(string nickname)
+     {
+         var result = FloatGraphs.Where(s => string.Equals(s.Name, nickname, StringComparison.InvariantCultureIgnoreCase)).ToArray();
+         return result.Count() == 1 ? result.First() : null;
++    }
++
++    public ColorGraph? FindColorGraph(string nickname)
++    {
++        var result = ColorGraphs.Where(s => string.Equals(s.Name, nickname, StringComparison.InvariantCultureIgnoreCase)).ToArray();
++        return result.Length == 1 ? result[0] : null;
+     }
+ 
+     public void AddGraphIni(string path, FileSystem vfs, IniStringPool? stringPool = null)
+@@ -29,6 +36,7 @@
+                 throw new Exception("Unexpected section in Graph ini: " + section.Name);
+             string? nickname = null;
+             FloatGraph? fg = null;
++            ColorGraph? cg = null;
+             bool skip = false;
+             foreach (var e in section)
+             {
+@@ -43,26 +51,34 @@
+                         var t = e[0].ToString().ToUpperInvariant();
+                         if (t == "FLOAT")
+                             fg = new FloatGraph();
++                        else if (t == "COLOR")
++                            cg = new ColorGraph();
+                         else
+                             skip = true;
+                         break;
+                     case "point":
+-                        if (fg == null)
++                        if (fg == null && cg == null)
+                             throw new Exception("Point appearing after type");
+-                        fg.Points.Add(
+-                            new Vector2(
+-                                e[0].ToInt32(),
+-                                e[1].ToSingle()
+-                            )
+-                        );
++                        if (fg != null)
++                            fg.Points.Add(new Vector2(e[0].ToInt32(), e[1].ToSingle()));
++                        else
++                            cg!.Points.Add(new ColorGraphPoint(e[0].ToSingle(), unchecked((uint)e[1].ToInt32())));
+                         break;
+                 }
+             }
+             if (skip)
+                 continue;
+ 
+-            fg!.Name = nickname!;
+-            FloatGraphs.Add(fg);
++            if (fg != null)
++            {
++                fg.Name = nickname!;
++                FloatGraphs.Add(fg);
++            }
++            else if (cg != null)
++            {
++                cg.Name = nickname!;
++                ColorGraphs.Add(cg);
++            }
+         }
+     }
+ }
+--- a/src/LibreLancer.Data/Schema/Universe/LightSource.cs
++++ b/src/LibreLancer.Data/Schema/Universe/LightSource.cs
+@@ -27,4 +27,13 @@
+     public Vector3? Attenuation;
+     [Entry("direction")]
+     public Vector3? Direction;
++    public string? ColorCurve;
++    public float? ColorCurvePeriod;
++
++    [EntryHandler("color_curve", MinComponents = 2)]
++    private void ParseColorCurve(Entry entry)
++    {
++        ColorCurve = entry[0].ToString();
++        ColorCurvePeriod = entry[1].ToSingle();
++    }
+ }
+--- a/src/LibreLancer.Data/GameData/World/LightSource.cs
++++ b/src/LibreLancer.Data/GameData/World/LightSource.cs
+@@ -1,11 +1,21 @@
++using LibreLancer.Data.Schema;
++
+ namespace LibreLancer.Data.GameData.World;
+ 
+ public class LightSource : NicknameItem
+ {
+     public required string? AttenuationCurveName;
++    public ColorGraph? ColorCurve;
++    public float ColorCurvePeriod;
+     public bool Disabled; // Editor use only, not saved.
+     public RenderLight Light;
+ 
+     public LightSource Clone() => new()
+-        { Nickname = Nickname, AttenuationCurveName = AttenuationCurveName, Light = Light };
++    {
++        Nickname = Nickname,
++        AttenuationCurveName = AttenuationCurveName,
++        ColorCurve = ColorCurve,
++        ColorCurvePeriod = ColorCurvePeriod,
++        Light = Light
++    };
+ }
+--- a/src/LibreLancer.Data/GameItemDb.cs
++++ b/src/LibreLancer.Data/GameItemDb.cs
+@@ -1521,8 +1521,22 @@
+                         lt.Attenuation = GetQuadratic(src.AttenCurve);
+                     }
+ 
++                    ColorGraph? colorCurve = null;
++                    if (src.ColorCurve != null)
++                    {
++                        colorCurve = flData.Graphs.FindColorGraph(src.ColorCurve);
++                        if (colorCurve == null)
++                            FLLog.Warning("Light", $"{inisys.Nickname}: Light Source {src.Nickname} references missing color graph {src.ColorCurve}");
++                    }
++
+                     sys.LightSources.Add(new LightSource()
+-                        { Light = lt, AttenuationCurveName = src.AttenCurve, Nickname = src.Nickname });
++                    {
++                        Light = lt,
++                        AttenuationCurveName = src.AttenCurve,
++                        ColorCurve = colorCurve,
++                        ColorCurvePeriod = src.ColorCurvePeriod ?? 0,
++                        Nickname = src.Nickname
++                    });
+                 }
+             }
+ 
+--- a/src/LibreLancer/Render/DynamicLight.cs
++++ b/src/LibreLancer/Render/DynamicLight.cs
+@@ -3,6 +3,7 @@
+ // LICENSE, which is part of this source code package
+ 
+ using LibreLancer.Data.GameData;
++using LibreLancer.Data.Schema;
+ 
+ namespace LibreLancer.Render
+ {
+@@ -11,5 +12,22 @@
+ 		public int LightGroup = 0;
+ 		public bool Active = true;
+ 		public RenderLight Light;
++		public Color3f BaseColor = Color3f.White;
++		public ColorGraph? ColorCurve;
++		public float ColorCurvePeriod;
++
++		public void UpdateColorCurve(double time)
++		{
++			if (ColorCurve == null)
++				return;
++			var packed = ColorCurve.EvaluatePackedColor(time, ColorCurvePeriod);
++			var curveColor = new Color3f(
++				((packed >> 16) & 0xff) / 255f,
++				((packed >> 8) & 0xff) / 255f,
++				(packed & 0xff) / 255f);
++			var light = Light;
++			light.Color = BaseColor * curveColor;
++			Light = light;
++		}
+ 	}
+ }
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -159,7 +159,13 @@
+ 
+             foreach (var lt in system.LightSources)
+             {
+-                SystemLighting.Lights.Add(new DynamicLight() { Light = lt.Light });
++                SystemLighting.Lights.Add(new DynamicLight()
++                {
++                    Light = lt.Light,
++                    BaseColor = lt.Light.Color,
++                    ColorCurve = lt.ColorCurve,
++                    ColorCurvePeriod = lt.ColorCurvePeriod
++                });
+             }
+         }
+ 
+@@ -172,6 +178,9 @@
+ 
+         public void Update(double elapsed)
+         {
++            foreach (var dynamicLight in SystemLighting.Lights)
++                dynamicLight.UpdateColorCurve(game.TotalTime);
++
+             foreach (var model in StarSphereModels)
+             {
+                 model.Update(game.TotalTime);
+--- /dev/null
++++ b/src/LibreLancer.Tests/ColorGraphTests.cs
+@@ -0,0 +1,96 @@
++using System;
++using System.IO;
++using System.Linq;
++using LibreLancer.Data.GameData;
++using LibreLancer.Data.Ini;
++using LibreLancer.Data.IO;
++using LibreLancer.Data.Schema;
++using LibreLancer.Data.Schema.Universe;
++using LibreLancer.Render;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class ColorGraphTests
++{
++    [Fact]
++    public void GraphIniLoadsColorGraphsWithoutDroppingFloatGraphs()
++    {
++        var root = Path.Combine(Path.GetTempPath(), "igraph-color-" + Guid.NewGuid().ToString("N"));
++        Directory.CreateDirectory(root);
++        try
++        {
++            File.WriteAllText(Path.Combine(root, "igraph.ini"), """
++                [IGraph]
++                nickname = existing_float
++                type = FLOAT
++                point = 0, 1.0
++                point = 1, 0.0
++
++                [IGraph]
++                nickname = lair_flicker
++                type = COLOR
++                point = 1, -6238016
++                point = 3, -4128800
++                point = 5, -6238016
++                """);
++
++            var graphs = new GraphIni();
++            graphs.AddGraphIni("igraph.ini", FileSystem.FromPath(root));
++
++            Assert.Single(graphs.FloatGraphs);
++            var graph = Assert.IsType<ColorGraph>(graphs.FindColorGraph("LAIR_FLICKER"));
++            Assert.Equal(3, graph.Points.Count);
++            Assert.Equal(0xffa0d0c0u, graph.Points[0].Color);
++            Assert.Equal(0xffc0ffe0u, graph.Points[1].Color);
++        }
++        finally
++        {
++            Directory.Delete(root, true);
++        }
++    }
++
++    [Fact]
++    public void LightSourceParsesColorCurveNameAndPeriod()
++    {
++        using var input = new MemoryStream(System.Text.Encoding.UTF8.GetBytes("""
++            [LightSource]
++            nickname = lair_light
++            color_curve = lair_flicker, 0.500000
++            """));
++        var section = Assert.Single(IniFile.ParseFile("light.ini", input, true, false));
++
++        Assert.True(LightSource.TryParse(section, out var source));
++        Assert.Equal("lair_flicker", source!.ColorCurve);
++        Assert.Equal(0.5f, source.ColorCurvePeriod);
++    }
++
++    [Fact]
++    public void ColorGraphCyclesAndModulatesStaticLightColor()
++    {
++        var graph = new ColorGraph
++        {
++            Name = "flicker",
++            Points =
++            [
++                new ColorGraphPoint(0, 0xff000000),
++                new ColorGraphPoint(10, 0xffffffff)
++            ]
++        };
++        var light = new DynamicLight
++        {
++            Light = new RenderLight { Color = new Color3f(1, 0.5f, 0.25f) },
++            BaseColor = new Color3f(1, 0.5f, 0.25f),
++            ColorCurve = graph,
++            ColorCurvePeriod = 0.5f
++        };
++
++        light.UpdateColorCurve(0.25);
++        Assert.Equal(128 / 255f, light.Light.Color.R, 0.00001f);
++        Assert.Equal(64 / 255f, light.Light.Color.G, 0.00001f);
++        Assert.Equal(32 / 255f, light.Light.Color.B, 0.00001f);
++
++        light.UpdateColorCurve(0.5);
++        Assert.Equal(Color3f.Black, light.Light.Color);
++    }
++}

@@ -1,0 +1,855 @@
+diff --git a/README.md b/README.md
+index 4fcd0a3..06b2da1 100644
+--- a/README.md
++++ b/README.md
+@@ -46,9 +46,9 @@ The Lancer Nexus collector stages Linux client builds with the `lancer` apphost
+ 
+ `BuildLL` packages Linux and Windows engine and SDK releases as one-root-directory `tar.zst` archives. The packager preserves Unix modes and fails if a release tree contains symbolic links, which are not accepted by the updater's safe extractor.
+ 
+-`NexusGatewayLogin` reads `client-version.json` from the running client release directory, POSTs `ClientVersionHello` before credentials, then requests placement with the authenticated session. The client connects to the assigned endpoint with the Gateway JoinTicket. A required update displays a prompt and exits with code 42 after acknowledgement. Missing or damaged local version metadata requests repair with exit code 43. The updater can stage and atomically activate a verified client-only release, then launch its `lancer` executable. Required data packages block activation until their installer is implemented; automatic rollback after an unhealthy startup remains pending.
++`NexusGatewayLogin` reads `client-version.json` from the running client release directory, POSTs `ClientVersionHello` before credentials, then requests placement with the authenticated session. The client connects to the assigned endpoint with the Gateway JoinTicket. A required update displays a prompt and exits with code 42 after acknowledgement. Missing or damaged local version metadata requests repair with exit code 43. The Updater validates signed NAP data packages, including their structure and content hashes, stages them with the client into one release and atomically activates the combined snapshot. The Client acknowledges startup after game data and its first UI state load; the Updater can restore the previous healthy release if that signal times out. A Linux smoke test loaded the full game-data container with loose `DATA` absent and reached the first UI state on 2026-10-09; runtime rollback verification remains pending.
+ 
+-NAP V1 currently provides a standalone `Nexus.Assets` reader/writer and `nexus-pack` CLI for local packaging, inspection and verification. It is not yet mounted by the game and does not unlock required data-package activation. See `docs/asset-packages/implementation-status.md`; package only assets you have rights to distribute.
++NAP V1 provides the `Nexus.Assets` reader/writer and `nexus-pack` CLI for `pack`, `inspect`, `verify`, overlay `diff` and `compact`. The Client and LLServer mount packages listed in the local `packages/active.json` snapshot after validating each package's path, size and SHA-256. The Updater stages required and selected signed `.nap` packages plus their dependency/override closure beside the client release and activates the combined snapshot. Rollback after an unhealthy start is implemented but still needs runtime validation. LancerEdit continues to use loose DATA files until archived-file materialization and editing are implemented. See `docs/asset-packages/implementation-status.md`; package only assets you have rights to distribute.
+ 
+ ## Dedicated server runtime status
+ 
+diff --git a/docs/asset-packages/active-snapshot.md b/docs/asset-packages/active-snapshot.md
+new file mode 100644
+index 0000000..6ea17c4
+--- /dev/null
++++ b/docs/asset-packages/active-snapshot.md
+@@ -0,0 +1,32 @@
++# Local NAP Active Snapshot
++
++The Client and LLServer look for `packages/active.json` below their application directory. If the file is absent, the package provider is not added and the existing loose DATA/overlay behavior remains in effect. If it exists but is malformed or references invalid packages, startup fails closed.
++
++V1 snapshot shape:
++
++```json
++{
++  "schemaVersion": 1,
++  "manifestId": "data-release-id",
++  "packages": [
++    {
++      "id": "core",
++      "version": 3,
++      "path": "core/game-config.nap",
++      "size": 1234567,
++      "sha256": "<64 lowercase hex characters>",
++      "required": true,
++      "priority": 100,
++      "mountOrder": 1,
++      "dependencies": [],
++      "overrides": []
++    }
++  ]
++}
++```
++
++Package paths are relative to `packages/`; traversal, rooted paths, reparse points, mismatched sizes and SHA-256 values are rejected. NAP content and its index are checked when opened. Packages are ordered by `(priority ASC, mountOrder ASC, packageId ASC)`. Two packages at the same priority must use different mount orders. A later package that defines an already-defined virtual path must name the currently winning package ID in `overrides`; tombstones follow the same conflict rule.
++
++`active.json` is an installation snapshot, not the signed release manifest. The runtime validates its shape and every referenced package digest, but does not authenticate the snapshot itself. The updater validates the signed manifest and each NAP V1 structure, chunk and file hash before writing this snapshot into a staging release, then atomically activates the client and data release together. A Linux smoke test using a full game-data container with loose `DATA` absent reached the first UI state on 2026-10-09. Runtime rollback after an unhealthy start remains pending. Do not treat a manually edited snapshot as a trusted release decision.
++
++The Client and LLServer mount this provider above their existing loose DATA/overlay providers. VFS lookup masks fallback files for package overrides and tombstones. File and directory enumeration reports only effective visible entries. `GetBackingFileName()` returns no physical path for archived files. LancerEdit does not mount active packages yet, because its save operations require a deliberate materialization/export strategy.
+diff --git a/docs/asset-packages/code-audit.md b/docs/asset-packages/code-audit.md
+index 9ae5d60..9dace7d 100644
+--- a/docs/asset-packages/code-audit.md
++++ b/docs/asset-packages/code-audit.md
+@@ -7,6 +7,7 @@ Auditstand: 2026-10-09. Quellen wurden im aktuellen Client-Checkout geprüft; de
+ - `src/LibreLancer.Data/IO/FileSystem.cs`: `IFileProvider` hat `Open`, `FileExists`, `GetBackingFileName`, `GetFiles`, `GetDirectories` und `Refresh`. Dateiöffnung und Existenzprüfung fragen Provider rückwärts ab, daher gewinnt der zuletzt gemountete Provider.
+ - `FileSystem.GetFiles` und `GetDirectories` führen Provider-Ergebnisse mit case-insensitive HashSets zusammen. Die Methoden kennen keine Tombstones und entfernen keine maskierten älteren Einträge. Korrekte Sichtbarkeit maskierter Dateien benötigt einen effektiven Index oder eine gezielte VFS-Erweiterung.
+ - `patches/2070-package-and-mount-data-overlays.patch` ist in `patches/series` eingetragen. `FreelancerDataOverlayFileProvider` mappt DATA-Pfade auf ein Verzeichnis. `GameConfig.CreateFreelancerFileSystem()` bindet `lib/data` ein; `LLServer.Core.ServerApp` bindet sein Serveroverlay ein. Das ist Verzeichnisfallback, kein Containerreader.
++- Phase 2 adds `IOverlayFileProvider` interception to `FileSystem` and `NexusPackageFileProvider`. Client startup (`GameConfig.CreateFreelancerFileSystem`) and LLServer startup load `packages/active.json`; absent snapshots keep the previous loose-data path. The mount checks package path confinement, reparse points, size and whole-package SHA-256 before loading the NAP index. The separate Updater validates NAP V1 section bounds, index/path/reference structure, decompressed chunk hashes, complete file hashes and signed content-version agreement before publishing the staged active snapshot.
+ 
+ ## Physische Pfadconsumer
+ 
+@@ -21,7 +22,7 @@ Vor VFS-Mounting muss jeder dieser Consumer klassifiziert werden. Containerarchi
+ ## Updater und Gateway
+ 
+ - `src/LibreLancer/Net/NexusGatewayLogin.cs` lädt `client-version.json`, sendet `ClientVersionHello` an `/api/v1/client/version` und blockiert Login bei Update-/Protokollinkompatibilität. Der Clientvertrag enthält `DataManifestId` und Gateway-Antwort `RequiredDataManifestId` im Protocol-Submodule.
+-- `README.md` dokumentiert: Updater kann verifizierte Client-Releases aktivieren, erforderliche Datenpakete blockieren noch die Aktivierung, Rollback nach ungesundem Start ist offen. Login-Acknowledgements verwenden Exitcode 42, fehlende/defekte Clientmetadaten Exitcode 43.
++- `README.md` dokumentiert gemeinsame Client-/NAP-Aktivierung; ein Linux-Start mit vollständigem NAP-Container und ohne loses `DATA` erreichte am 2026-10-09 das erste UI. Der Updater weist NAP-Strukturfehler vor Aktivierung zurück. Updater-Tests decken den fehlenden UI-Health-Ack-Timeout einschließlich Prozessbeendigung und Rückkehr zum vorherigen Release ab. Windows-Runtime und ein echter Updater-Prozessabbruch zwischen Aktivierungsschritten bleiben unvalidiert. Login-Acknowledgements verwenden Exitcode 42, fehlende/defekte Clientmetadaten Exitcode 43.
+ - `src/Editor/LancerEdit/Updater/UpdateChecks.cs` und `UpdateDownloader.cs` behandeln Editorupdates. Sie sind kein installierter Spielcontent-Updater und sollten nicht ohne gesonderte Prüfung als NAP-Installationspfad verwendet werden.
+ 
+ ## Build und Tests
+@@ -32,4 +33,8 @@ Vor VFS-Mounting muss jeder dieser Consumer klassifiziert werden. Containerarchi
+ 
+ ## Folgeabhängigkeiten
+ 
+-VFS-Mounting braucht noch: effektive providerübergreifende Datei-/Verzeichnisauflösung, klare Override-Regeln, Tombstone-Semantik, sowie gelöste `GetBackingFileName()`-Schreib- und Leseconsumer. Updater-Integration braucht signiertes Manifest, Paketdownload, Snapshotjournal, atomare Aktivierung, Repair, Health-Acknowledgement und Rollback. Gateway-/Protocol-Verträge müssen entscheiden, ob `DataManifestId` die ganze Release oder ein Gameplay-kritisches Teilmanifest bezeichnet.
++LancerEdit remains on loose DATA because editor save and physical-path consumers need a materialization/export policy before packages can be mounted there. The separate Updater repository verifies signed NAP package metadata and the complete NAP V1 structure/content, downloads required/selected packages with dependency and override closure, writes `packages/active.json` in the Client staging release, and activates Client plus data through one release pointer. The Client acknowledges readiness after its first UI state loads; the Updater can restore the previous release and records failed package identity to prevent an activation loop. A full DATA image in one NAP passed a Linux launch with no loose DATA and reached the first UI on 2026-10-09. Linux tests cover a missing-ack timeout, process termination, old-release restoration and failed-snapshot suppression. Windows runtime and real process interruption between activation steps remain open. Gateway-/Protocol-Verträge must decide whether `DataManifestId` identifies the whole release or a gameplay-critical subset.
++
++The Updater resumes hash-addressed downloads using validated byte ranges and retains partial data after transport interruption. It checks available volume space before package download, client extraction and data-package copies. Real disk-full injection and Windows filesystem behavior still need verification.
++
++`src/Nexus.Assets/NapOverlayBuilder.cs` builds `.nap` overlays from two verified archives and compacts an active package mount. The CLI diff sidecar describes the one base package dependency/override relationship; publishers must review and merge it into their signed manifest.
+diff --git a/docs/asset-packages/implementation-status.md b/docs/asset-packages/implementation-status.md
+index 9d28f49..c614756 100644
+--- a/docs/asset-packages/implementation-status.md
++++ b/docs/asset-packages/implementation-status.md
+@@ -1,6 +1,6 @@
+ # Nexus Asset Packages Implementation Status
+ 
+-Status updated 2026-10-09.
++Status updated 2026-10-09 after the full-data NAP-only Linux game smoke test.
+ 
+ | Area | State | Evidence / remaining work |
+ |---|---|---|
+@@ -8,12 +8,14 @@ Status updated 2026-10-09.
+ | NAP V1 header/index/chunks | implemented | `src/Nexus.Assets`; frozen layout in `nap-v1-format.md`, golden vector test |
+ | Reader / seek stream | implemented | Bounds checks, strict paths, per-chunk SHA-256, Zstd expansion limit, configurable bounded LRU cache |
+ | Writer / deterministic output | implemented | Directory and entry-based writer, chunk deduplication, `none`/Zstd selection, atomic temporary output, tombstones |
+-| CLI | implemented | `pack`, `inspect`, `verify` in `src/Nexus.Packaging.Cli` |
+-| Unit tests | implemented | Synthetic assets, roundtrip, seeks, concurrent streams, determinism, golden vector, tombstones, unsafe paths, corruption |
+-| VFS provider and unified enumeration | planned | Requires provider priority adapter, tombstone-effective views, DATA fallback integration and regression tests |
+-| `GetBackingFileName` consumers | partial | Audit locations listed; per-consumer migration/materialization policy not implemented |
+-| Signed release manifest / updater | planned | Required data packages still block activation; snapshot rollback and health acknowledgement remain open |
+-| Overlay diff/compaction | planned | Depends on VFS and manifest resolution |
++| CLI | implemented | `pack`, `inspect`, `verify`, `diff` and `compact` in `src/Nexus.Packaging.Cli` |
++| Unit tests | implemented | Synthetic assets, roundtrip, seeks, concurrent streams, determinism, golden vector, tombstones, unsafe paths, corruption, VFS fallback/overrides/enumeration, active snapshot validation, and diff-to-mounted-target tree/byte parity |
++| VFS provider and unified enumeration | implemented | `NexusPackageFileProvider` mounts local active packages; `IOverlayFileProvider` masks lower providers for reads/existence/backing paths and filters file/directory enumeration; Client and LLServer attach it |
++| Active package snapshot validation | partial | Client/LLServer reject unsafe paths, reparse points, size/hash mismatch and malformed NAP indexes; Updater verifies NAP V1 structure, content version and all chunk/file hashes before writing the staged snapshot, then rechecks package hashes before reuse |
++| Download resume and storage checks | partial | `ArtifactDownloader` resumes digest-scoped `.part` files with validated HTTP Range responses and exclusive per-digest locking; download, TAR extraction and NAP staging check available volume space. Interrupted-response and mocked insufficient-space tests pass; real ENOSPC and cross-platform filesystem behavior remain unverified |
++| `GetBackingFileName` consumers | partial | Archived entries intentionally have no OS backing path. LancerEdit remains on loose DATA until materialization/export behavior is implemented |
++| Signed release manifest / updater | partial | `Updater/Manifest.cs` verifies signed NAP metadata; `DataPackageStager` installs required packages, selected optional packages and their dependency/override closure into the client release and emits `packages/active.json` only after full NAP V1 structural/content verification and signed content-version matching; atomic client+data activation, a Client UI-ready acknowledgement and one-generation failed-start rollback are integrated. Full game DATA packaged into one NAP passed a Linux runtime smoke with loose DATA absent and reached the first UI state. Automated Linux tests cover missing-ack timeout, client-process termination, restoration of the old release and failed-snapshot suppression. Windows runtime and real updater-process interruption between activation steps remain open |
++| Overlay diff/compaction | partial | `NapOverlayBuilder` builds content-hash diffs with tombstones and compacts active package layers. A synthetic end-to-end test mounts the generated diff on its baseline and verifies the complete virtual path set and bytes against the target archive. `diff` writes an advisory dependency/override plan. Multi-package manifest authoring remains manual; compaction does not include loose DATA fallback |
+ | NAPD | planned | Optional after complete V1 overlay flow |
+ | Audio pipeline | planned | Deferred until VFS/updater; codec and runtime audit still required |
+ 
+diff --git a/src/LLServer.Core/LLServer.Core.csproj b/src/LLServer.Core/LLServer.Core.csproj
+index 2a79f5d..905d743 100644
+--- a/src/LLServer.Core/LLServer.Core.csproj
++++ b/src/LLServer.Core/LLServer.Core.csproj
+@@ -14,6 +14,7 @@
+         <ProjectReference Include="..\Librelancer.Database\LibreLancer.Database.csproj" />
+         <ProjectReference Include="..\LibreLancer.Entities\LibreLancer.Entities.csproj" />
+         <ProjectReference Include="..\LibreLancer\LibreLancer.csproj" />
++        <ProjectReference Include="..\Nexus.Assets\Nexus.Assets.csproj" />
+     </ItemGroup>
+ 
+     <ItemGroup>
+diff --git a/src/LLServer.Core/ServerApp.cs b/src/LLServer.Core/ServerApp.cs
+index 8aedeef..43da8e2 100644
+--- a/src/LLServer.Core/ServerApp.cs
++++ b/src/LLServer.Core/ServerApp.cs
+@@ -14,6 +14,7 @@ using LibreLancer.Data;
+ using LibreLancer.Data.IO;
+ using LibreLancer.Net;
+ using LibreLancer.Server;
++using Nexus.Assets;
+ using LancerNexus.Protocol;
+ using Microsoft.EntityFrameworkCore;
+ 
+@@ -101,6 +102,9 @@ public class ServerApp(ServerConfig config)
+             npcDataOverlay = Path.Combine(GetBasePath(), "data");
+         if (Directory.Exists(npcDataOverlay))
+             gameFiles.FileProviders.Add(new NpcDataOverlayFileProvider(npcDataOverlay));
++        var packageProvider = NexusPackageFileProvider.LoadActive(GetBasePath());
++        if (packageProvider is not null)
++            gameFiles.FileProviders.Add(packageProvider);
+         Server = new GameServer(gameFiles)
+         {
+             DbContextFactory = ctxFactory,
+diff --git a/src/LibreLancer.Data/IO/FileSystem.cs b/src/LibreLancer.Data/IO/FileSystem.cs
+index 9f81ec3..30db766 100644
+--- a/src/LibreLancer.Data/IO/FileSystem.cs
++++ b/src/LibreLancer.Data/IO/FileSystem.cs
+@@ -66,6 +66,13 @@ public class FileSystem
+     {
+         for (int i = FileProviders.Count - 1; i >= 0; i--)
+         {
++            if (FileProviders[i] is IOverlayFileProvider overlay &&
++                overlay.TryResolveOverlayFile(filename, out var overlayExists))
++            {
++                if (!overlayExists)
++                    throw new FileNotFoundException(filename);
++                return FileProviders[i].Open(filename) ?? throw new FileNotFoundException(filename);
++            }
+             Stream? stream = FileProviders[i].Open(filename);
+             if (stream != null)
+             {
+@@ -109,10 +116,26 @@ public class FileSystem
+             }
+         }
+ 
+-        return files.ToArray();
++        return files.Where(file => FileExists(JoinVfsPath(path, file))).ToArray();
+     }
+ 
+     public string[] GetDirectories(string path)
++    {
++        var dirs = GetDirectoriesRaw(path);
++        var visible = new List<string>();
++        foreach (var directory in dirs)
++        {
++            var candidate = JoinVfsPath(path, directory);
++            var affectedByTombstone = FileProviders.OfType<IOverlayFileProvider>()
++                .Any(x => x.HasTombstonesUnder(candidate));
++            if (!affectedByTombstone ||
++                HasVisibleFiles(candidate, new HashSet<string>(StringComparer.OrdinalIgnoreCase)))
++                visible.Add(directory);
++        }
++        return visible.ToArray();
++    }
++
++    private HashSet<string> GetDirectoriesRaw(string path)
+     {
+         HashSet<string> dirs = new(StringComparer.OrdinalIgnoreCase);
+         for (int i = FileProviders.Count - 1; i >= 0; i--)
+@@ -123,13 +146,30 @@ public class FileSystem
+             }
+         }
+ 
+-        return dirs.ToArray();
++        return dirs;
+     }
+ 
++    private bool HasVisibleFiles(string path, HashSet<string> visited)
++    {
++        if (!visited.Add(path)) return false;
++        if (GetFiles(path).Length != 0) return true;
++        foreach (var directory in GetDirectoriesRaw(path))
++            if (HasVisibleFiles(JoinVfsPath(path, directory), visited)) return true;
++        return false;
++    }
++
++    private static string JoinVfsPath(string directory, string name) =>
++        string.IsNullOrEmpty(directory) || directory is "/" or "\\"
++            ? name
++            : directory.TrimEnd('/', '\\') + "/" + name;
++
+     public string? GetBackingFileName(string path)
+     {
+         for (int i = FileProviders.Count - 1; i >= 0; i--)
+         {
++            if (FileProviders[i] is IOverlayFileProvider overlay &&
++                overlay.TryResolveOverlayFile(path, out _))
++                return null;
+             if (FileProviders[i].GetBackingFileName(path, out var fname))
+             {
+                 return fname;
+@@ -148,6 +188,9 @@ public class FileSystem
+ 
+         for (int i = FileProviders.Count - 1; i >= 0; i--)
+         {
++            if (FileProviders[i] is IOverlayFileProvider overlay &&
++                overlay.TryResolveOverlayFile(filename, out var overlayExists))
++                return overlayExists;
+             if (FileProviders[i].FileExists(filename))
+             {
+                 return true;
+@@ -167,6 +210,13 @@ public interface IFileProvider
+     void Refresh();
+ }
+ 
++/// <summary>Reports files and tombstones that shadow lower-priority VFS providers.</summary>
++public interface IOverlayFileProvider : IFileProvider
++{
++    bool HasTombstonesUnder(string directory);
++    bool TryResolveOverlayFile(string filename, out bool exists);
++}
++
+ /// <summary>
+ /// Case-insensitive implementation of IFileProvider that does not cache directories on case-sensitive systems
+ /// Use when you only want to open a couple of files
+diff --git a/src/LibreLancer/GameConfig.cs b/src/LibreLancer/GameConfig.cs
+index b2a41d9..518b638 100644
+--- a/src/LibreLancer/GameConfig.cs
++++ b/src/LibreLancer/GameConfig.cs
+@@ -7,6 +7,7 @@ using System;
+ using System.IO;
+ using System.Linq;
+ using System.Xml.Serialization;
++using Nexus.Assets;
+ using LibreLancer.Data.Ini;
+ 
+ namespace LibreLancer
+@@ -72,6 +73,9 @@ namespace LibreLancer
+                     var overlayDirectory = Path.Combine(AppContext.BaseDirectory, "lib", "data");
+                     if (Directory.Exists(overlayDirectory))
+                         fs.FileProviders.Add(new Data.IO.FreelancerDataOverlayFileProvider(overlayDirectory));
++                    var packageProvider = NexusPackageFileProvider.LoadActive(AppContext.BaseDirectory);
++                    if (packageProvider is not null)
++                        fs.FileProviders.Add(packageProvider);
+                     return fs;
+                 }
+             }
+diff --git a/src/LibreLancer/LibreLancer.csproj b/src/LibreLancer/LibreLancer.csproj
+index 55f168d..4f89643 100644
+--- a/src/LibreLancer/LibreLancer.csproj
++++ b/src/LibreLancer/LibreLancer.csproj
+@@ -24,6 +24,7 @@
+     <ProjectReference Include="..\LibreLancer.Base\LibreLancer.Base.csproj" />
+     <ProjectReference Include="..\Librelancer.Database\LibreLancer.Database.csproj" />
+     <ProjectReference Include="..\LibreLancer.Data\LibreLancer.Data.csproj" />
++    <ProjectReference Include="..\Nexus.Assets\Nexus.Assets.csproj" />
+     <ProjectReference Include="..\LibreLancer.Data.Generator\LibreLancer.Data.Generator.csproj" ReferenceOutputAssembly="false" OutputItemType="Analyzer" />
+     <ProjectReference Include="..\LibreLancer.Entities\LibreLancer.Entities.csproj" />
+     <ProjectReference Include="..\LibreLancer.Media\LibreLancer.Media.csproj" />
+diff --git a/src/Nexus.Assets.Tests/Nexus.Assets.Tests.csproj b/src/Nexus.Assets.Tests/Nexus.Assets.Tests.csproj
+index 28f9d18..4d1cea6 100644
+--- a/src/Nexus.Assets.Tests/Nexus.Assets.Tests.csproj
++++ b/src/Nexus.Assets.Tests/Nexus.Assets.Tests.csproj
+@@ -15,5 +15,6 @@
+   </ItemGroup>
+   <ItemGroup>
+     <ProjectReference Include="..\Nexus.Assets\Nexus.Assets.csproj" />
++    <ProjectReference Include="..\LibreLancer.Data\LibreLancer.Data.csproj" />
+   </ItemGroup>
+ </Project>
+diff --git a/src/Nexus.Assets.Tests/NexusPackageFileProviderTests.cs b/src/Nexus.Assets.Tests/NexusPackageFileProviderTests.cs
+new file mode 100644
+index 0000000..8490316
+--- /dev/null
++++ b/src/Nexus.Assets.Tests/NexusPackageFileProviderTests.cs
+@@ -0,0 +1,180 @@
++using System.Security.Cryptography;
++using System.Text.Json;
++using LibreLancer.Data.IO;
++using Nexus.Assets;
++using Xunit;
++
++namespace Nexus.Assets.Tests;
++
++public sealed class NexusPackageFileProviderTests
++{
++    [Fact]
++    public void MissingActiveSnapshotLeavesStandaloneDataFilesystemAlone()
++    {
++        using var fixture = new Fixture();
++        Assert.Null(NexusPackageFileProvider.LoadActive(fixture.ApplicationDirectory));
++    }
++
++    [Fact]
++    public void ActivePackagesOverrideFallbackMaskFilesAndEnumerateEffectiveDirectories()
++    {
++        using var fixture = new Fixture();
++        fixture.WriteInstall("ships/data.ini", "base version");
++        fixture.WriteInstall("ships/base-only.ini", "base only");
++        fixture.WriteInstall("removal/sub/removed.ini", "remove me");
++        fixture.WriteInstall("removal/keep.ini", "keep me");
++        fixture.WritePackage("ships/data.ini", "package version"u8.ToArray());
++        fixture.WritePackage("ships/new.ini", "new package file"u8.ToArray());
++        fixture.AddTombstone("removal/sub/removed.ini");
++        _ = fixture.Pack();
++        fixture.Activate();
++
++        var provider = NexusPackageFileProvider.LoadActive(fixture.ApplicationDirectory);
++        Assert.NotNull(provider);
++        var fs = FileSystem.FromPath(fixture.InstallDirectory);
++        fs.FileProviders.Add(provider);
++
++        Assert.Equal("package version", fs.ReadAllText("EXE/../DATA/ships/data.ini"));
++        Assert.Equal("package version", fs.ReadAllText("EXE\\..\\data//ships/data.ini"));
++        Assert.Equal("base only", fs.ReadAllText("DATA/ships/base-only.ini"));
++        Assert.False(fs.FileExists("DATA/removal/sub/removed.ini"));
++        Assert.Throws<FileNotFoundException>(() => fs.Open("DATA/removal/sub/removed.ini"));
++        Assert.Null(fs.GetBackingFileName("DATA/ships/data.ini"));
++        Assert.NotNull(fs.GetBackingFileName("DATA/ships/base-only.ini"));
++        Assert.Equal(new[] { "base-only.ini", "data.ini", "new.ini" }.Order(StringComparer.OrdinalIgnoreCase),
++            fs.GetFiles("DATA/ships").Order(StringComparer.OrdinalIgnoreCase));
++        Assert.DoesNotContain("sub", fs.GetDirectories("DATA/removal"));
++        Assert.Equal("keep.ini", Assert.Single(fs.GetFiles("DATA/removal")));
++    }
++
++    [Fact]
++    public void PackageConflictsRequireExplicitOverrideAndMountOrderIsUnique()
++    {
++        using var fixture = new Fixture();
++        fixture.WritePackage("same.ini", [1]);
++        var first = NapArchive.Open(fixture.Pack("first.nap"));
++        fixture.WritePackage("same.ini", [2]);
++        var second = NapArchive.Open(fixture.Pack("second.nap"));
++        var empty = new HashSet<string>(StringComparer.Ordinal);
++
++        Assert.Throws<InvalidDataException>(() => new NexusPackageFileProvider(
++        [
++            new NexusPackageMount("base", first, 10, 1, empty),
++            new NexusPackageMount("hotfix", second, 20, 1, empty)
++        ]));
++
++        Assert.Throws<InvalidDataException>(() => new NexusPackageFileProvider(
++        [
++            new NexusPackageMount("base", first, 10, 1, empty),
++            new NexusPackageMount("another", second, 10, 1, empty)
++        ]));
++
++        var overlay = new NexusPackageFileProvider(
++        [
++            new NexusPackageMount("base", first, 10, 1, empty),
++            new NexusPackageMount("hotfix", second, 20, 1, new HashSet<string>(["base"], StringComparer.Ordinal))
++        ]);
++        using var stream = overlay.Open("same.ini");
++        Assert.Equal(2, stream!.ReadByte());
++    }
++
++    [Fact]
++    public void ActiveSnapshotRejectsPackageHashMismatchAndPathTraversal()
++    {
++        using var fixture = new Fixture();
++        fixture.WritePackage("asset.dat", [1, 2, 3]);
++        var path = fixture.Pack("core.nap");
++        fixture.Activate();
++        var damaged = File.ReadAllBytes(path);
++        damaged[^1] ^= 0xff;
++        File.WriteAllBytes(path, damaged);
++        Assert.Throws<InvalidDataException>(() => NexusPackageFileProvider.LoadActive(fixture.ApplicationDirectory));
++
++        fixture.Activate(relativePackagePath: "../outside.nap");
++        Assert.Throws<InvalidDataException>(() => NexusPackageFileProvider.LoadActive(fixture.ApplicationDirectory));
++    }
++
++    private sealed class Fixture : IDisposable
++    {
++        private readonly string root = Path.Combine(Path.GetTempPath(), "nap-mount-tests-" + Guid.NewGuid().ToString("N"));
++        private readonly string packageSource;
++        private readonly List<string> tombstones = [];
++        public string ApplicationDirectory => Path.Combine(root, "application");
++        public string InstallDirectory => Path.Combine(root, "freelancer");
++        private string PackagesDirectory => Path.Combine(ApplicationDirectory, "packages");
++
++        public Fixture()
++        {
++            packageSource = Path.Combine(root, "source");
++            Directory.CreateDirectory(packageSource);
++            Directory.CreateDirectory(Path.Combine(InstallDirectory, "EXE"));
++            File.WriteAllText(Path.Combine(InstallDirectory, "EXE", "freelancer.ini"), "[Freelancer]");
++        }
++
++        public void WriteInstall(string path, string contents)
++        {
++            var full = Path.Combine(InstallDirectory, "DATA", path.Replace('/', Path.DirectorySeparatorChar));
++            Directory.CreateDirectory(Path.GetDirectoryName(full)!);
++            File.WriteAllText(full, contents);
++        }
++
++        public void WritePackage(string path, byte[] contents)
++        {
++            var full = Path.Combine(packageSource, path.Replace('/', Path.DirectorySeparatorChar));
++            Directory.CreateDirectory(Path.GetDirectoryName(full)!);
++            File.WriteAllBytes(full, contents);
++        }
++
++        public void AddTombstone(string path)
++        {
++            tombstones.Add(path);
++        }
++
++        public string Pack(string file = "core.nap")
++        {
++            Directory.CreateDirectory(PackagesDirectory);
++            var output = Path.Combine(PackagesDirectory, file);
++            var entries = Directory.EnumerateFiles(packageSource, "*", SearchOption.AllDirectories)
++                .Select(path => new NapSourceEntry(
++                    Path.GetRelativePath(packageSource, path).Replace(Path.DirectorySeparatorChar, '/'), path))
++                .Concat(tombstones.Select(path => new NapSourceEntry(path, null)));
++            NapWriter.Pack(entries, output);
++            return output;
++        }
++
++        public void Activate(string relativePackagePath = "core.nap")
++        {
++            Directory.CreateDirectory(PackagesDirectory);
++            var packagePath = Path.Combine(PackagesDirectory, relativePackagePath);
++            var metadata = new FileInfo(packagePath);
++            var hash = metadata.Exists
++                ? Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(packagePath))).ToLowerInvariant()
++                : new string('0', 64);
++            var active = new
++            {
++                schemaVersion = 1,
++                packages = new[]
++                {
++                    new
++                    {
++                        id = "core",
++                        path = relativePackagePath,
++                        size = metadata.Exists ? metadata.Length : 1,
++                        sha256 = hash,
++                        required = true,
++                        priority = 100,
++                        mountOrder = 1,
++                        dependencies = Array.Empty<string>(),
++                        overrides = Array.Empty<string>()
++                    }
++                }
++            };
++            File.WriteAllText(Path.Combine(PackagesDirectory, "active.json"), JsonSerializer.Serialize(active));
++        }
++
++        public void Dispose()
++        {
++            if (Directory.Exists(root)) Directory.Delete(root, true);
++        }
++    }
++}
+diff --git a/src/Nexus.Assets/NapArchive.cs b/src/Nexus.Assets/NapArchive.cs
+index c4a7501..048d6f9 100644
+--- a/src/Nexus.Assets/NapArchive.cs
++++ b/src/Nexus.Assets/NapArchive.cs
+@@ -38,6 +38,16 @@ public sealed class NapArchive
+         ArgumentException.ThrowIfNullOrWhiteSpace(fileName);
+         if (chunkCacheBytes < 0) throw new ArgumentOutOfRangeException(nameof(chunkCacheBytes));
+         using var stream = new FileStream(fileName, FileMode.Open, FileAccess.Read, FileShare.Read);
++        return Open(stream, fileName, chunkCacheBytes);
++    }
++
++    internal static NapArchive Open(Stream stream, string fileName, int chunkCacheBytes = 32 * 1024 * 1024)
++    {
++        ArgumentNullException.ThrowIfNull(stream);
++        ArgumentException.ThrowIfNullOrWhiteSpace(fileName);
++        if (!stream.CanRead || !stream.CanSeek) throw new ArgumentException("NAP stream must be readable and seekable.", nameof(stream));
++        if (chunkCacheBytes < 0) throw new ArgumentOutOfRangeException(nameof(chunkCacheBytes));
++        stream.Position = 0;
+         if (stream.Length < NapLimits.HeaderLength)
+             throw new InvalidDataException("NAP header is truncated.");
+         using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
+diff --git a/src/Nexus.Assets/Nexus.Assets.csproj b/src/Nexus.Assets/Nexus.Assets.csproj
+index 3ef41e3..4e4fc56 100644
+--- a/src/Nexus.Assets/Nexus.Assets.csproj
++++ b/src/Nexus.Assets/Nexus.Assets.csproj
+@@ -5,6 +5,7 @@
+     <ImplicitUsings>enable</ImplicitUsings>
+   </PropertyGroup>
+   <ItemGroup>
++    <ProjectReference Include="..\LibreLancer.Data\LibreLancer.Data.csproj" />
+     <PackageReference Include="ZstdSharp.Port" Version="0.8.6" />
+   </ItemGroup>
+ </Project>
+diff --git a/src/Nexus.Assets/NexusPackageFileProvider.cs b/src/Nexus.Assets/NexusPackageFileProvider.cs
+new file mode 100644
+index 0000000..7d8e2b1
+--- /dev/null
++++ b/src/Nexus.Assets/NexusPackageFileProvider.cs
+@@ -0,0 +1,331 @@
++using System.Security.Cryptography;
++using System.Text;
++using System.Text.Json;
++using LibreLancer.Data.IO;
++
++namespace Nexus.Assets;
++
++public sealed class NexusPackageFileProvider : IOverlayFileProvider
++{
++    private sealed record Package(string Id, NapArchive Archive, int Priority, int MountOrder,
++        HashSet<string> Overrides);
++    private sealed record EffectiveEntry(Package Package, NapEntry Entry);
++    private sealed record ActiveSnapshot
++    {
++        public int SchemaVersion { get; init; }
++        public ActivePackage[]? Packages { get; init; }
++    }
++    private sealed record ActivePackage
++    {
++        public string? Id { get; init; }
++        public string? Path { get; init; }
++        public long Size { get; init; }
++        public string? Sha256 { get; init; }
++        public bool Required { get; init; }
++        public ulong? Version { get; init; }
++        public int Priority { get; init; }
++        public int MountOrder { get; init; }
++        public string[]? Dependencies { get; init; }
++        public string[]? Overrides { get; init; }
++    }
++
++    private readonly Dictionary<string, EffectiveEntry> files;
++    private readonly HashSet<string> tombstoneParentDirectories;
++
++    public NexusPackageFileProvider(IEnumerable<NexusPackageMount> mounts)
++    {
++        ArgumentNullException.ThrowIfNull(mounts);
++        var requested = mounts.ToArray();
++        if (requested.Any(x => x is null))
++            throw new ArgumentException("Package mounts cannot contain null entries.", nameof(mounts));
++        var sorted = requested.OrderBy(x => x.Priority)
++            .ThenBy(x => x.MountOrder)
++            .ThenBy(x => x.Id, StringComparer.Ordinal)
++            .ToArray();
++        if (sorted.Length == 0) throw new ArgumentException("At least one NAP package is required.", nameof(mounts));
++
++        var packageIds = new HashSet<string>(StringComparer.Ordinal);
++        var mountOrders = new HashSet<(int Priority, int MountOrder)>();
++        foreach (var mount in sorted)
++        {
++            if (mount is null || mount.Overrides is null)
++                throw new ArgumentException("Package mounts and override lists cannot be null.", nameof(mounts));
++            ValidateId(mount.Id);
++            if (!packageIds.Add(mount.Id)) throw new InvalidDataException($"Duplicate NAP package ID: {mount.Id}");
++            if (!mountOrders.Add((mount.Priority, mount.MountOrder)))
++                throw new InvalidDataException("Packages at the same priority require distinct mount orders.");
++        }
++        foreach (var mount in sorted)
++            foreach (var overrideId in mount.Overrides)
++                if (!packageIds.Contains(overrideId) || overrideId == mount.Id)
++                    throw new InvalidDataException($"Package {mount.Id} has an invalid override reference: {overrideId}");
++
++        files = new Dictionary<string, EffectiveEntry>(StringComparer.OrdinalIgnoreCase);
++        foreach (var mount in sorted)
++        {
++            var package = new Package(mount.Id, mount.Archive, mount.Priority, mount.MountOrder,
++                new HashSet<string>(mount.Overrides, StringComparer.Ordinal));
++            foreach (var entry in mount.Archive.Entries)
++            {
++                if (files.TryGetValue(entry.Path, out var previous) && !package.Overrides.Contains(previous.Package.Id))
++                    throw new InvalidDataException(
++                        $"Package {package.Id} conflicts with {previous.Package.Id} at {entry.Path} without an explicit override.");
++                files[entry.Path] = new EffectiveEntry(package, entry);
++            }
++        }
++        tombstoneParentDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
++        foreach (var entry in files.Values.Where(x => x.Entry.Tombstone))
++        {
++            var directory = entry.Entry.Path;
++            var separator = directory.LastIndexOf('/');
++            directory = separator < 0 ? "" : directory[..separator];
++            while (true)
++            {
++                tombstoneParentDirectories.Add(directory);
++                var parentSeparator = directory.LastIndexOf('/');
++                if (parentSeparator < 0) break;
++                directory = directory[..parentSeparator];
++            }
++        }
++    }
++
++    /// <summary>Loads a local activated snapshot from &lt;applicationDirectory&gt;/packages/active.json.</summary>
++    public static NexusPackageFileProvider? LoadActive(string applicationDirectory)
++    {
++        ArgumentException.ThrowIfNullOrWhiteSpace(applicationDirectory);
++        var root = Path.GetFullPath(Path.Combine(applicationDirectory, "packages"));
++        var activePath = Path.Combine(root, "active.json");
++        if (!File.Exists(activePath)) return null;
++        EnsureNoReparsePoints(root, activePath);
++        var info = new FileInfo(activePath);
++        if (info.Length is <= 0 or > 4 * 1024 * 1024)
++            throw new InvalidDataException("Active NAP snapshot metadata has an invalid size.");
++
++        ActiveSnapshot snapshot;
++        using (var input = new FileStream(activePath, FileMode.Open, FileAccess.Read, FileShare.Read))
++            snapshot = JsonSerializer.Deserialize<ActiveSnapshot>(input,
++                new JsonSerializerOptions(JsonSerializerDefaults.Web))
++                ?? throw new InvalidDataException("Active NAP snapshot metadata is empty.");
++        if (snapshot.SchemaVersion != 1 || snapshot.Packages is null || snapshot.Packages.Length > 1024)
++            throw new InvalidDataException("Active NAP snapshot schema or package count is invalid.");
++
++        var ids = new HashSet<string>(StringComparer.Ordinal);
++        foreach (var item in snapshot.Packages)
++        {
++            if (item.Id is null) throw new InvalidDataException("Active NAP package ID is missing.");
++            ValidateId(item.Id);
++            if (!ids.Add(item.Id)) throw new InvalidDataException($"Duplicate active NAP package ID: {item.Id}");
++        }
++        foreach (var item in snapshot.Packages)
++        {
++            foreach (var dependency in item.Dependencies ?? [])
++                if (!ids.Contains(dependency) || dependency == item.Id)
++                    throw new InvalidDataException($"Package {item.Id} has a missing or invalid dependency: {dependency}");
++            foreach (var overridden in item.Overrides ?? [])
++                if (!ids.Contains(overridden) || overridden == item.Id)
++                    throw new InvalidDataException($"Package {item.Id} has an invalid override reference: {overridden}");
++        }
++
++        var mounts = new List<NexusPackageMount>(snapshot.Packages.Length);
++        foreach (var item in snapshot.Packages)
++        {
++            var packagePath = ResolvePackagePath(root, item.Path);
++            EnsureNoReparsePoints(root, packagePath);
++            var fileInfo = new FileInfo(packagePath);
++            if (!fileInfo.Exists || item.Size <= 0 || fileInfo.Length != item.Size)
++                throw new InvalidDataException($"Active NAP package size does not match: {item.Id}");
++            if (item.Sha256 is null || item.Sha256.Length != 64 || !IsHex(item.Sha256))
++                throw new InvalidDataException($"Active NAP package hash is invalid: {item.Id}");
++            using var packageStream = new FileStream(packagePath, FileMode.Open, FileAccess.Read, FileShare.Read);
++            byte[] actualHash = SHA256.HashData(packageStream);
++            if (!CryptographicOperations.FixedTimeEquals(actualHash, Convert.FromHexString(item.Sha256)))
++                throw new InvalidDataException($"Active NAP package hash mismatch: {item.Id}");
++
++            // Parse the exact file handle whose bytes were hashed; an atomic path replacement
++            // between verification and parsing must not select a different archive.
++            var archive = NapArchive.Open(packageStream, packagePath);
++            if (item.Version.HasValue && item.Version.Value != archive.ContentVersion)
++                throw new InvalidDataException($"Active NAP package version does not match: {item.Id}");
++            mounts.Add(new NexusPackageMount(item.Id!, archive, item.Priority, item.MountOrder,
++                new HashSet<string>(item.Overrides ?? [], StringComparer.Ordinal)));
++        }
++        return mounts.Count == 0 ? null : new NexusPackageFileProvider(mounts);
++    }
++
++    public Stream? Open(string filename)
++    {
++        if (!TryGet(filename, out var effective) || effective.Entry.Tombstone) return null;
++        return effective.Package.Archive.OpenFile(effective.Entry.Path);
++    }
++
++    public bool FileExists(string filename) =>
++        TryGet(filename, out var effective) && !effective.Entry.Tombstone;
++
++    public bool GetBackingFileName(string path, out string? fileName)
++    {
++        fileName = null;
++        return TryGet(path, out _);
++    }
++
++    public bool TryResolveOverlayFile(string filename, out bool exists)
++    {
++        if (TryGet(filename, out var effective))
++        {
++            exists = !effective.Entry.Tombstone;
++            return true;
++        }
++        exists = false;
++        return false;
++    }
++
++    public bool HasTombstonesUnder(string directory) =>
++        TryNormalizeDirectory(directory, out var normalized) &&
++        tombstoneParentDirectories.Contains(normalized);
++
++    public IEnumerable<string> GetFiles(string path)
++    {
++        if (!TryNormalizeDirectory(path, out var directory)) return Array.Empty<string>();
++        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
++        foreach (var pair in files)
++        {
++            if (pair.Value.Entry.Tombstone || !TryDirectChild(directory, pair.Key, out var child, out var isFile))
++                continue;
++            if (isFile) result.Add(child);
++        }
++        return result;
++    }
++
++    public IEnumerable<string> GetDirectories(string path)
++    {
++        if (!TryNormalizeDirectory(path, out var directory)) return Array.Empty<string>();
++        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
++        foreach (var pair in files)
++        {
++            if (pair.Value.Entry.Tombstone || !TryDirectChild(directory, pair.Key, out var child, out var isFile))
++                continue;
++            if (!isFile) result.Add(child);
++        }
++        return result;
++    }
++
++    public void Refresh() { }
++
++    private bool TryGet(string path, out EffectiveEntry effective)
++    {
++        try
++        {
++            var key = NormalizeFilePath(path);
++            return files.TryGetValue(key, out effective!);
++        }
++        catch (InvalidDataException)
++        {
++            effective = null!;
++            return false;
++        }
++    }
++
++    private static string NormalizeFilePath(string path)
++    {
++        var value = StripDataRoot(path);
++        return NapPath.Normalize(value);
++    }
++
++    private static bool TryNormalizeDirectory(string path, out string directory)
++    {
++        try
++        {
++            var value = StripDataRoot(path).TrimEnd('/');
++            directory = value.Length == 0 ? "" : NapPath.Normalize(value);
++            return true;
++        }
++        catch (InvalidDataException)
++        {
++            directory = "";
++            return false;
++        }
++    }
++
++    private static string StripDataRoot(string path)
++    {
++        var value = path.Replace('\\', '/');
++        if (value.Contains("//", StringComparison.Ordinal))
++        {
++            var normalized = new StringBuilder(value.Length);
++            var previousWasSlash = false;
++            foreach (var character in value)
++            {
++                if (character == '/' && previousWasSlash) continue;
++                normalized.Append(character);
++                previousWasSlash = character == '/';
++            }
++            value = normalized.ToString();
++        }
++        foreach (var prefix in new[] { "EXE/../DATA/", "../DATA/", "DATA/" })
++            if (value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
++                return value[prefix.Length..];
++        if (value.Equals("DATA", StringComparison.OrdinalIgnoreCase) ||
++            value.Equals("../DATA", StringComparison.OrdinalIgnoreCase) ||
++            value.Equals("EXE/../DATA", StringComparison.OrdinalIgnoreCase))
++            return "";
++        return value;
++    }
++
++    private static bool TryDirectChild(string directory, string path, out string child, out bool isFile)
++    {
++        var prefix = directory.Length == 0 ? "" : directory + "/";
++        if (!path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) || path.Length <= prefix.Length)
++        {
++            child = "";
++            isFile = false;
++            return false;
++        }
++        var remainder = path[prefix.Length..];
++        var separator = remainder.IndexOf('/');
++        isFile = separator < 0;
++        child = isFile ? remainder : remainder[..separator];
++        return child.Length != 0;
++    }
++
++    private static string ResolvePackagePath(string packagesRoot, string? relativePath)
++    {
++        if (string.IsNullOrWhiteSpace(relativePath) || relativePath.Contains('\0') || relativePath.Contains(':') ||
++            relativePath.StartsWith('/') || relativePath.StartsWith('\\'))
++            throw new InvalidDataException("Active NAP package path must be relative.");
++        var normalized = relativePath.Replace('\\', '/');
++        if (normalized.Split('/').Any(x => x.Length == 0 || x is "." or ".."))
++            throw new InvalidDataException("Active NAP package path contains an unsafe component.");
++        var fullPath = Path.GetFullPath(Path.Combine(packagesRoot,
++            normalized.Replace('/', Path.DirectorySeparatorChar)));
++        var relative = Path.GetRelativePath(packagesRoot, fullPath);
++        if (Path.IsPathRooted(relative) || relative == ".." ||
++            relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal))
++            throw new InvalidDataException("Active NAP package path escapes its package root.");
++        return fullPath;
++    }
++
++    private static void EnsureNoReparsePoints(string packagesRoot, string filePath)
++    {
++        if (!Directory.Exists(packagesRoot) || (File.GetAttributes(packagesRoot) & FileAttributes.ReparsePoint) != 0)
++            throw new InvalidDataException("Active NAP package root is missing or is a reparse point.");
++        var relative = Path.GetRelativePath(packagesRoot, filePath);
++        var current = packagesRoot;
++        foreach (var component in relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
++        {
++            current = Path.Combine(current, component);
++            if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
++                throw new InvalidDataException("Active NAP metadata and packages cannot use symbolic links or reparse points.");
++        }
++    }
++
++    private static void ValidateId(string? id)
++    {
++        if (string.IsNullOrEmpty(id) || id.Length > 96 ||
++            id.Any(c => !(char.IsAsciiLetterOrDigit(c) || c is '-' or '_' or '.')))
++            throw new InvalidDataException($"NAP package ID is invalid: {id}");
++    }
++
++    private static bool IsHex(string value) => value.All(Uri.IsHexDigit);
++}
++
++public sealed record NexusPackageMount(string Id, NapArchive Archive, int Priority, int MountOrder,
++    IReadOnlyCollection<string> Overrides);

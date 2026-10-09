@@ -1,0 +1,426 @@
+diff --git a/docs/asset-packages/overlay-patch-builder.md b/docs/asset-packages/overlay-patch-builder.md
+new file mode 100644
+index 0000000..0e6beab
+--- /dev/null
++++ b/docs/asset-packages/overlay-patch-builder.md
+@@ -0,0 +1,9 @@
++# NAP Overlay Patch Builder
++
++`nexus-pack diff <base.nap> <target.nap> <patch.nap> <base-package-id>` verifies both source archives, compares normalized case-insensitive paths and complete file hashes, and emits only added/changed files plus tombstones for deletions. It also writes `<patch.nap>.plan.json` with the base package dependency/override declaration. Review that plan and merge it into the signed release manifest; the sidecar is advisory and is not signed.
++
++The base ID must identify the package layer represented by `<base.nap>`. The patch is mounted after that layer and its manifest entry must declare the listed dependency and override. If the base snapshot contains multiple packages, build against the effective package state and declare all package relationships needed by the signed release plan; the simple CLI command takes one base ID.
++
++`nexus-pack compact <application-dir> <output.nap> [--version N] [--workspace <dir>]` loads `packages/active.json`, compacts the effective NAP package tree into a new full package, removes obsolete layers and tombstones, and verifies the result. If supplied, `--workspace` overlays persistent LancerEdit changes above the active packages. The output must be outside the active application and workspace directories. Compaction does not include loose DATA fallback files or sign/activate a release; update the signed manifest through the publisher workflow.
++
++Both commands use temporary files for source materialization. `diff` preserves the target archive content version. Compaction defaults to content version 1 unless `--version` is supplied. Neither command creates `.napd` transport deltas.
+diff --git a/src/Nexus.Assets.Tests/NapOverlayBuilderTests.cs b/src/Nexus.Assets.Tests/NapOverlayBuilderTests.cs
+new file mode 100644
+index 0000000..ab92991
+--- /dev/null
++++ b/src/Nexus.Assets.Tests/NapOverlayBuilderTests.cs
+@@ -0,0 +1,194 @@
++using LibreLancer.Data.IO;
++using Xunit;
++
++namespace Nexus.Assets.Tests;
++
++public sealed class NapOverlayBuilderTests
++{
++    [Fact]
++    public void DiffContainsOnlyChangedFilesAndDeletions()
++    {
++        using var fixture = new Fixture();
++        var baselinePath = fixture.PackDirectory("baseline", new Dictionary<string, string>
++        {
++            ["same.ini"] = "same",
++            ["change.ini"] = "old",
++            ["removed.ini"] = "remove"
++        });
++        var targetPath = fixture.PackDirectory("target", new Dictionary<string, string>
++        {
++            ["same.ini"] = "same",
++            ["change.ini"] = "new",
++            ["added.ini"] = "add"
++        }, 7);
++        var patchPath = Path.Combine(fixture.Root, "update.nap");
++
++        var result = NapOverlayBuilder.BuildDiff(NapArchive.Open(baselinePath), NapArchive.Open(targetPath),
++            "base-data", patchPath);
++        var patch = NapArchive.Open(patchPath);
++        patch.VerifyAll();
++
++        Assert.Equal(2, result.ChangedFiles);
++        Assert.Equal(1, result.Tombstones);
++        Assert.Equal(7UL, result.ContentVersion);
++        Assert.Equal(new[] { "added.ini", "change.ini", "removed.ini" },
++            patch.Entries.Select(x => x.Path).Order(StringComparer.Ordinal).ToArray());
++        Assert.True(Assert.Single(patch.Entries, x => x.Path == "removed.ini").Tombstone);
++        Assert.DoesNotContain(patch.Entries, x => x.Path == "same.ini");
++        using var changed = patch.OpenFile("change.ini");
++        using var reader = new StreamReader(changed);
++        Assert.Equal("new", reader.ReadToEnd());
++    }
++
++    [Fact]
++    public void DiffMountedOnBaselineProducesTheExactTargetVirtualTree()
++    {
++        using var fixture = new Fixture();
++        var baselinePath = fixture.PackDirectory("diff-baseline", new Dictionary<string, string>
++        {
++            ["keep/base.ini"] = "base",
++            ["change.ini"] = "old",
++            ["remove/nested.ini"] = "remove"
++        });
++        var targetPath = fixture.PackDirectory("diff-target", new Dictionary<string, string>
++        {
++            ["keep/base.ini"] = "base",
++            ["change.ini"] = "new",
++            ["add/nested.ini"] = "added"
++        }, 9);
++        var patchPath = Path.Combine(fixture.Root, "diff-patch.nap");
++
++        NapOverlayBuilder.BuildDiff(NapArchive.Open(baselinePath), NapArchive.Open(targetPath),
++            "baseline", patchPath);
++        var provider = new NexusPackageFileProvider(
++        [
++            new NexusPackageMount("baseline", NapArchive.Open(baselinePath), 1, 1,
++                new HashSet<string>(StringComparer.Ordinal)),
++            new NexusPackageMount("update", NapArchive.Open(patchPath), 2, 1,
++                new HashSet<string>(["baseline"], StringComparer.Ordinal))
++        ]);
++        var fileSystem = new FileSystem(provider);
++        var target = NapArchive.Open(targetPath);
++        var actualPaths = EnumerateFiles(fileSystem, "").Order(StringComparer.Ordinal).ToArray();
++        Assert.Equal(target.Entries.Select(x => x.Path).Order(StringComparer.Ordinal), actualPaths);
++        foreach (var entry in target.Entries)
++        {
++            using var expected = target.OpenFile(entry.Path);
++            using var actual = fileSystem.Open("DATA/" + entry.Path);
++            using var expectedBytes = new MemoryStream();
++            using var actualBytes = new MemoryStream();
++            expected.CopyTo(expectedBytes);
++            actual.CopyTo(actualBytes);
++            Assert.Equal(expectedBytes.ToArray(), actualBytes.ToArray());
++        }
++        Assert.False(fileSystem.FileExists("remove/nested.ini"));
++    }
++
++    [Fact]
++    public void CompactWritesTheEffectiveOverlayTreeWithoutTombstones()
++    {
++        using var fixture = new Fixture();
++        var basePath = fixture.PackDirectory("base", new Dictionary<string, string>
++        {
++            ["ships/base.ini"] = "base",
++            ["ships/change.ini"] = "old",
++            ["remove.ini"] = "remove"
++        });
++        var overlaySource = fixture.CreateSource("overlay", new Dictionary<string, string>
++        {
++            ["ships/change.ini"] = "new",
++            ["ships/add.ini"] = "added"
++        });
++        var targetPath = fixture.PackDirectory("target", new Dictionary<string, string>
++        {
++            ["ships/base.ini"] = "base",
++            ["ships/change.ini"] = "new",
++            ["ships/add.ini"] = "added"
++        }, 8);
++        var overlayPath = Path.Combine(fixture.Root, "overlay.nap");
++        NapWriter.Pack(
++        [
++            .. Directory.EnumerateFiles(overlaySource, "*", SearchOption.AllDirectories)
++                .Select(path => new NapSourceEntry(
++                    Path.GetRelativePath(overlaySource, path).Replace(Path.DirectorySeparatorChar, '/'), path)),
++            new NapSourceEntry("remove.ini", null)
++        ], overlayPath);
++        var baseArchive = NapArchive.Open(basePath);
++        var overlayArchive = NapArchive.Open(overlayPath);
++        var provider = new NexusPackageFileProvider(
++        [
++            new NexusPackageMount("base", baseArchive, 1, 1, new HashSet<string>(StringComparer.Ordinal)),
++            new NexusPackageMount("patch", overlayArchive, 2, 1, new HashSet<string>(["base"], StringComparer.Ordinal))
++        ]);
++        var compactPath = Path.Combine(fixture.Root, "compact.nap");
++
++        NapOverlayBuilder.Compact(provider, compactPath, 8);
++        var compact = NapArchive.Open(compactPath);
++        compact.VerifyAll();
++
++        Assert.Equal(8UL, compact.ContentVersion);
++        Assert.Equal(new[] { "ships/add.ini", "ships/base.ini", "ships/change.ini" },
++            compact.Entries.Select(x => x.Path).Order(StringComparer.Ordinal).ToArray());
++        Assert.DoesNotContain(compact.Entries, x => x.Tombstone);
++        var target = NapArchive.Open(targetPath);
++        Assert.Equal(target.Entries.Select(x => x.Path).Order(StringComparer.Ordinal),
++            compact.Entries.Select(x => x.Path).Order(StringComparer.Ordinal));
++        foreach (var entry in target.Entries)
++        {
++            using var expected = target.OpenFile(entry.Path);
++            using var actual = compact.OpenFile(entry.Path);
++            using var expectedBytes = new MemoryStream();
++            using var actualBytes = new MemoryStream();
++            expected.CopyTo(expectedBytes);
++            actual.CopyTo(actualBytes);
++            Assert.Equal(expectedBytes.ToArray(), actualBytes.ToArray());
++        }
++        using var changed = compact.OpenFile("ships/change.ini");
++        using var reader = new StreamReader(changed);
++        Assert.Equal("new", reader.ReadToEnd());
++    }
++
++    private sealed class Fixture : IDisposable
++    {
++        public string Root { get; } = Path.Combine(Path.GetTempPath(), "nap-overlay-tests-" + Guid.NewGuid().ToString("N"));
++
++        public Fixture() => Directory.CreateDirectory(Root);
++
++        public string CreateSource(string name, IReadOnlyDictionary<string, string> files)
++        {
++            var root = Path.Combine(Root, name);
++            foreach (var pair in files)
++            {
++                var path = Path.Combine(root, pair.Key.Replace('/', Path.DirectorySeparatorChar));
++                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
++                File.WriteAllText(path, pair.Value);
++            }
++            return root;
++        }
++
++        public string PackDirectory(string name, IReadOnlyDictionary<string, string> files, ulong version = 1)
++        {
++            var source = CreateSource(name, files);
++            var output = Path.Combine(Root, name + ".nap");
++            NapWriter.PackDirectory(source, output, new NapPackOptions { ContentVersion = version });
++            return output;
++        }
++
++        public void Dispose()
++        {
++            if (Directory.Exists(Root)) Directory.Delete(Root, recursive: true);
++        }
++    }
++
++    private static IEnumerable<string> EnumerateFiles(FileSystem fileSystem, string directory)
++    {
++        foreach (var file in fileSystem.GetFiles(directory))
++            yield return directory.Length == 0 ? file : directory + "/" + file;
++        foreach (var child in fileSystem.GetDirectories(directory))
++        {
++            var childPath = directory.Length == 0 ? child : directory + "/" + child;
++            foreach (var file in EnumerateFiles(fileSystem, childPath))
++                yield return file;
++        }
++    }
++}
+diff --git a/src/Nexus.Assets/NapOverlayBuilder.cs b/src/Nexus.Assets/NapOverlayBuilder.cs
+new file mode 100644
+index 0000000..2dfca3d
+--- /dev/null
++++ b/src/Nexus.Assets/NapOverlayBuilder.cs
+@@ -0,0 +1,107 @@
++namespace Nexus.Assets;
++
++public sealed record NapDiffResult(string BasePackageId, Guid PackageGuid, int ChangedFiles, int Tombstones,
++    ulong ContentVersion);
++
++/// <summary>Builds versioned overlay packages and compacts an effective package mount into one NAP.</summary>
++public static class NapOverlayBuilder
++{
++    public static NapDiffResult BuildDiff(NapArchive baseline, NapArchive target, string basePackageId,
++        string outputFile)
++    {
++        ArgumentNullException.ThrowIfNull(baseline);
++        ArgumentNullException.ThrowIfNull(target);
++        ValidatePackageId(basePackageId);
++        baseline.VerifyAll();
++        target.VerifyAll();
++
++        var oldFiles = baseline.Entries.Where(e => !e.Tombstone)
++            .ToDictionary(e => e.Path, StringComparer.OrdinalIgnoreCase);
++        var newFiles = target.Entries.Where(e => !e.Tombstone)
++            .ToDictionary(e => e.Path, StringComparer.OrdinalIgnoreCase);
++        var changed = newFiles.Values.Where(entry =>
++                !oldFiles.TryGetValue(entry.Path, out var previous) ||
++                previous.Length != entry.Length || !previous.Sha256.AsSpan().SequenceEqual(entry.Sha256))
++            .OrderBy(e => e.Path, StringComparer.Ordinal).ToArray();
++        var deleted = oldFiles.Keys.Where(path => !newFiles.ContainsKey(path))
++            .OrderBy(path => path, StringComparer.Ordinal).ToArray();
++
++        var temporaryRoot = Path.Combine(Path.GetTempPath(), "nexus-nap-diff-" + Guid.NewGuid().ToString("N"));
++        Directory.CreateDirectory(temporaryRoot);
++        try
++        {
++            var entries = new List<NapSourceEntry>(changed.Length + deleted.Length);
++            foreach (var entry in changed)
++            {
++                var destination = Path.Combine(temporaryRoot, entry.Path.Replace('/', Path.DirectorySeparatorChar));
++                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
++                using var source = target.OpenFile(entry.Path);
++                using var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None);
++                source.CopyTo(output);
++                output.Flush(flushToDisk: true);
++                entries.Add(new NapSourceEntry(entry.Path, destination));
++            }
++            entries.AddRange(deleted.Select(path => new NapSourceEntry(path, null)));
++            NapWriter.Pack(entries, outputFile, new NapPackOptions { ContentVersion = target.ContentVersion });
++            var result = NapArchive.Open(outputFile);
++            result.VerifyAll();
++            return new NapDiffResult(basePackageId, result.PackageId, changed.Length, deleted.Length, target.ContentVersion);
++        }
++        finally
++        {
++            if (Directory.Exists(temporaryRoot)) Directory.Delete(temporaryRoot, recursive: true);
++        }
++    }
++
++    public static Guid Compact(NexusPackageFileProvider provider, string outputFile, ulong contentVersion = 1)
++    {
++        ArgumentNullException.ThrowIfNull(provider);
++        var temporaryRoot = Path.Combine(Path.GetTempPath(), "nexus-nap-compact-" + Guid.NewGuid().ToString("N"));
++        Directory.CreateDirectory(temporaryRoot);
++        try
++        {
++            var fileSystem = new LibreLancer.Data.IO.FileSystem(provider);
++            var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
++            CopyDirectory("", temporaryRoot, fileSystem, visited);
++            NapWriter.PackDirectory(temporaryRoot, outputFile, new NapPackOptions { ContentVersion = contentVersion });
++            var archive = NapArchive.Open(outputFile);
++            archive.VerifyAll();
++            return archive.PackageId;
++        }
++        finally
++        {
++            if (Directory.Exists(temporaryRoot)) Directory.Delete(temporaryRoot, recursive: true);
++        }
++    }
++
++    private static void CopyDirectory(string virtualDirectory, string outputDirectory,
++        LibreLancer.Data.IO.FileSystem fileSystem, HashSet<string> visited)
++    {
++        var normalized = virtualDirectory.Replace('\\', '/').Trim('/');
++        if (!visited.Add(normalized)) return;
++        foreach (var file in fileSystem.GetFiles(virtualDirectory))
++        {
++            var virtualPath = normalized.Length == 0 ? file : normalized + "/" + file;
++            var safePath = NapPath.Normalize(virtualPath);
++            var destination = Path.Combine(outputDirectory, safePath.Replace('/', Path.DirectorySeparatorChar));
++            Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
++            using var input = fileSystem.Open(virtualPath);
++            using var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None);
++            input.CopyTo(output);
++        }
++        foreach (var directory in fileSystem.GetDirectories(virtualDirectory))
++        {
++            var childVirtual = normalized.Length == 0 ? directory : normalized + "/" + directory;
++            var childOutput = Path.Combine(outputDirectory, directory);
++            Directory.CreateDirectory(childOutput);
++            CopyDirectory(childVirtual, outputDirectory, fileSystem, visited);
++        }
++    }
++
++    private static void ValidatePackageId(string id)
++    {
++        if (string.IsNullOrEmpty(id) || id.Length > 96 ||
++            id.Any(c => !(char.IsAsciiLetterOrDigit(c) || c is '-' or '_' or '.')))
++            throw new ArgumentException("Base package ID is invalid.", nameof(id));
++    }
++}
+diff --git a/src/Nexus.Packaging.Cli/Program.cs b/src/Nexus.Packaging.Cli/Program.cs
+index b36bfa0..698088f 100644
+--- a/src/Nexus.Packaging.Cli/Program.cs
++++ b/src/Nexus.Packaging.Cli/Program.cs
+@@ -1,8 +1,9 @@
+ using Nexus.Assets;
++using System.Text.Json;
+ 
+ static int Usage()
+ {
+-    Console.Error.WriteLine("Usage:\n  nexus-pack pack <source-dir> <output.nap> [--version N] [--chunk-size BYTES] [--compression-level N]\n  nexus-pack inspect <file.nap>\n  nexus-pack verify <file.nap>");
++    Console.Error.WriteLine("Usage:\n  nexus-pack pack <source-dir> <output.nap> [--version N] [--chunk-size BYTES] [--compression-level N]\n  nexus-pack inspect <file.nap>\n  nexus-pack verify <file.nap>\n  nexus-pack diff <base.nap> <target.nap> <patch.nap> <base-package-id>\n  nexus-pack compact <application-dir> <output.nap> [--version N]");
+     return 2;
+ }
+ 
+@@ -46,12 +47,81 @@ try
+                 Console.WriteLine($"Verified {archive.Entries.Count} entries in {Path.GetFullPath(args[1])}");
+                 return 0;
+             }
++        case "diff" when args.Length == 5:
++            {
++                var basePath = Path.GetFullPath(args[1]);
++                var targetPath = Path.GetFullPath(args[2]);
++                var outputPath = Path.GetFullPath(args[3]);
++                var pathComparer = OperatingSystem.IsWindows()
++                    ? StringComparer.OrdinalIgnoreCase
++                    : StringComparer.Ordinal;
++                if (pathComparer.Equals(outputPath, basePath) || pathComparer.Equals(outputPath, targetPath) ||
++                    pathComparer.Equals(outputPath + ".plan.json", basePath) ||
++                    pathComparer.Equals(outputPath + ".plan.json", targetPath))
++                    throw new ArgumentException("Diff output and its sidecar must not replace either input archive.");
++                var result = NapOverlayBuilder.BuildDiff(
++                    NapArchive.Open(basePath), NapArchive.Open(targetPath), args[4], outputPath);
++                var plan = new
++                {
++                    schemaVersion = 1,
++                    packageGuid = result.PackageGuid,
++                    basePackageId = result.BasePackageId,
++                    dependencies = new[] { result.BasePackageId },
++                    overrides = new[] { result.BasePackageId },
++                    contentVersion = result.ContentVersion,
++                    changedFiles = result.ChangedFiles,
++                    tombstones = result.Tombstones
++                };
++                WriteJsonAtomically(outputPath + ".plan.json", plan);
++                Console.WriteLine($"Built {outputPath}: {result.ChangedFiles} changed files, {result.Tombstones} tombstones.");
++                Console.WriteLine($"The signed release manifest must declare dependencies/overrides: {result.BasePackageId}.");
++                return 0;
++            }
++        case "compact" when args.Length is 3 or 5:
++            {
++                ulong version = 1;
++                if (args.Length == 5 && (args[3] != "--version" || !ulong.TryParse(args[4], out version)))
++                    return Usage();
++                var applicationDirectory = Path.GetFullPath(args[1]);
++                var outputPath = Path.GetFullPath(args[2]);
++                var relativeOutput = Path.GetRelativePath(applicationDirectory, outputPath);
++                if (!Path.IsPathRooted(relativeOutput) && relativeOutput != ".." &&
++                    !relativeOutput.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal))
++                    throw new ArgumentException("Compaction output must be outside the active application directory.");
++                var provider = NexusPackageFileProvider.LoadActive(applicationDirectory)
++                    ?? throw new InvalidDataException("Application directory has no active NAP package snapshot.");
++                var packageGuid = NapOverlayBuilder.Compact(provider, outputPath, version);
++                Console.WriteLine($"Compacted the effective package tree to {outputPath} (package {packageGuid:D}).");
++                return 0;
++            }
+         default:
+             return Usage();
+     }
+ }
+-catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException or InvalidDataException or OverflowException)
++catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException or InvalidDataException or OverflowException or InvalidOperationException)
+ {
+     Console.Error.WriteLine($"nexus-pack: {exception.Message}");
+     return 1;
+ }
++
++static void WriteJsonAtomically<T>(string outputPath, T value)
++{
++    var path = Path.GetFullPath(outputPath);
++    var directory = Path.GetDirectoryName(path)!;
++    Directory.CreateDirectory(directory);
++    var temporary = Path.Combine(directory, "." + Path.GetFileName(path) + "." + Guid.NewGuid().ToString("N") + ".tmp");
++    try
++    {
++        using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None,
++                   4096, FileOptions.WriteThrough))
++        {
++            JsonSerializer.Serialize(output, value, new JsonSerializerOptions(JsonSerializerDefaults.Web));
++            output.Flush(flushToDisk: true);
++        }
++        File.Move(temporary, path, overwrite: true);
++    }
++    finally
++    {
++        if (File.Exists(temporary)) File.Delete(temporary);
++    }
++}

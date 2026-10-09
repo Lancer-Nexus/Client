@@ -1,0 +1,453 @@
+--- a/src/Editor/LancerEdit/GameContent/WritableDataPath.cs
++++ b/src/Editor/LancerEdit/GameContent/WritableDataPath.cs
+@@ -0,0 +1,15 @@
++using System.IO;
++using LibreLancer.Data.IO;
++
++namespace LancerEdit.GameContent;
++
++/// <summary>Resolves a VFS asset to its writable loose or editor-workspace path.</summary>
++internal static class WritableDataPath
++{
++    public static string Resolve(FileSystem vfs, string virtualPath)
++    {
++        var path = vfs.GetBackingFileName(virtualPath);
++        if (!string.IsNullOrWhiteSpace(path)) return path;
++        throw new IOException($"No writable backing file is available for '{virtualPath}'.");
++    }
++}
+--- a/src/Editor/LancerEdit/GameContent/NewsSaveStrategy.cs
++++ b/src/Editor/LancerEdit/GameContent/NewsSaveStrategy.cs
+@@ -10,7 +10,7 @@
+     {
+         tab.Data.GameData.Items.News = tab.News.Clone();
+         var newsPath = tab.Data.GameData.Items.DataPath("MISSIONS/news.ini");
+-        var filePath = tab.Data.GameData.VFS.GetBackingFileName(newsPath);
++        var filePath = WritableDataPath.Resolve(tab.Data.GameData.VFS, newsPath);
+         IniWriter.WriteIniFile(filePath, IniSerializer.SerializeNews(tab.News));
+         tab.Dirty = false;
+         tab.OnSaved();
+--- a/src/Editor/LancerEdit/GameContent/UniverseSaveStrategy.cs
++++ b/src/Editor/LancerEdit/GameContent/UniverseSaveStrategy.cs
+@@ -12,7 +12,8 @@
+     {
+         foreach (var s in Tab.AllSystems)
+             s.System.UniversePosition = s.Position;
+-        var path = Tab.Data.GameData.VFS.GetBackingFileName(Tab.Data.GameData.Items.Ini.Freelancer.UniversePath);
++        var path = WritableDataPath.Resolve(Tab.Data.GameData.VFS,
++            Tab.Data.GameData.Items.Ini.Freelancer.UniversePath);
+         IniWriter.WriteIniFile(path, IniSerializer.SerializeUniverse(Tab.Data.GameData.Items.Systems, Tab.Data.GameData.Items.Bases));
+         Tab.Dirty = false;
+         Tab.OnSaved();
+--- a/src/Editor/LancerEdit/GameContent/AsteroidFieldList.cs
++++ b/src/Editor/LancerEdit/GameContent/AsteroidFieldList.cs
+@@ -45,7 +45,7 @@
+             if (!DataEquality.ObjectEquals(f, OriginalFields[f]))
+             {
+                 var sections = IniSerializer.SerializeAsteroidField(f);
+-                var filename = gameData.VFS.GetBackingFileName(gameData.Items.DataPath(f.SourceFile));
++                var filename = WritableDataPath.Resolve(gameData.VFS, gameData.Items.DataPath(f.SourceFile));
+                 IniWriter.WriteIniFile(filename, sections);
+                 FLLog.Info("Ini", $"Saved to {filename}");
+             }
+--- a/src/Editor/LancerEdit/GameContent/StarSystemSaveStrategy.cs
++++ b/src/Editor/LancerEdit/GameContent/StarSystemSaveStrategy.cs
+@@ -59,21 +59,21 @@
+ 
+         if (!ShortestPathWriter.PathInisEqual(allNew, await all))
+         {
+-            var resolved = tab.Data.GameData.VFS.GetBackingFileName(fileAll);
++            var resolved = WritableDataPath.Resolve(tab.Data.GameData.VFS, fileAll);
+             IniWriter.WriteIniFile(resolved, ShortestPathWriter.Serialize(allNew));
+             FLLog.Info("Ini", $"Saved to {resolved}");
+         }
+ 
+         if (!ShortestPathWriter.PathInisEqual(legalNew, await legal))
+         {
+-            var resolved = tab.Data.GameData.VFS.GetBackingFileName(fileLegal);
++            var resolved = WritableDataPath.Resolve(tab.Data.GameData.VFS, fileLegal);
+             IniWriter.WriteIniFile(resolved, ShortestPathWriter.Serialize(legalNew));
+             FLLog.Info("Ini", $"Saved to {resolved}");
+         }
+ 
+         if (!ShortestPathWriter.PathInisEqual(illegalNew, await illegal))
+         {
+-            var resolved = tab.Data.GameData.VFS.GetBackingFileName(fileIllegal);
++            var resolved = WritableDataPath.Resolve(tab.Data.GameData.VFS, fileIllegal);
+             IniWriter.WriteIniFile(resolved, ShortestPathWriter.Serialize(illegalNew));
+             FLLog.Info("Ini", $"Saved to {resolved}");
+         }
+@@ -91,12 +91,14 @@
+         tab.ResetOriginalObjects();
+         var paths = WriteShortestPaths();
+ 
+-        var resolved = tab.Data.GameData.VFS.GetBackingFileName(tab.Data.UniverseVfsFolder + tab.CurrentSystem.SourceFile);
++        var resolved = WritableDataPath.Resolve(tab.Data.GameData.VFS,
++            tab.Data.UniverseVfsFolder + tab.CurrentSystem.SourceFile);
+         IniWriter.WriteIniFile(resolved, IniSerializer.SerializeStarSystem(tab.CurrentSystem));
+         FLLog.Info("Ini", $"Saved to {resolved}");
+         if (writeUniverse)
+         {
+-            var path = tab.Data.GameData.VFS.GetBackingFileName(tab.Data.GameData.Items.Ini.Freelancer.UniversePath);
++            var path = WritableDataPath.Resolve(tab.Data.GameData.VFS,
++                tab.Data.GameData.Items.Ini.Freelancer.UniversePath);
+             IniWriter.WriteIniFile(path, IniSerializer.SerializeUniverse(tab.Data.GameData.Items.Systems, tab.Data.GameData.Items.Bases));
+             FLLog.Info("Ini", $"Saved to {path}");
+         }
+--- a/src/Editor/LancerEdit/GameContent/UniverseEditorTab.cs
++++ b/src/Editor/LancerEdit/GameContent/UniverseEditorTab.cs
+@@ -183,8 +183,8 @@
+ 
+     void NewSystem(string nickname, Vector2 position)
+     {
+-        var systemsFolder =
+-            Data.GameData.VFS.GetBackingFileName(Data.GameData.Items.Ini.Freelancer.DataPath + "/UNIVERSE/SYSTEMS");
++        var systemsFolder = WritableDataPath.Resolve(Data.GameData.VFS,
++            Data.GameData.Items.Ini.Freelancer.DataPath + "/UNIVERSE/SYSTEMS");
+         var newFolder = Path.Combine(systemsFolder, nickname);
+         Directory.CreateDirectory(newFolder);
+         var system = new StarSystem()
+@@ -200,7 +200,8 @@
+             UniversePosition = position,
+         };
+         Data.GameData.Items.Systems.Add(system);
+-        var universePath = Data.GameData.VFS.GetBackingFileName(Data.GameData.Items.Ini.Freelancer.UniversePath);
++        var universePath = WritableDataPath.Resolve(Data.GameData.VFS,
++            Data.GameData.Items.Ini.Freelancer.UniversePath);
+         using (var stream = File.Create(Path.Combine(newFolder, $"{nickname}.ini")))
+         {
+             var sections = IniSerializer.SerializeStarSystem(system);
+--- a/src/Editor/LancerEdit/GameContent/MissionEditor/MissionScriptDocument.cs
++++ b/src/Editor/LancerEdit/GameContent/MissionEditor/MissionScriptDocument.cs
+@@ -38,15 +38,9 @@
+         var srcNpcIni = iniFile?.Info?.NpcShipFile ?? "";
+         if (!string.IsNullOrWhiteSpace(srcNpcIni))
+         {
+-            var npcPath = gameData.GameData.VFS.GetBackingFileName(gameData.GameData.Items.DataPath(srcNpcIni));
+-            if (npcPath is not null)
+-            {
+-                iniFile.ShipIni = new NPCShipIni(npcPath, null);
+-            }
+-            else
+-            {
+-                srcNpcIni = "";
+-            }
++            var npcPath = WritableDataPath.Resolve(gameData.GameData.VFS,
++                gameData.GameData.Items.DataPath(srcNpcIni));
++            iniFile.ShipIni = new NPCShipIni(npcPath, null);
+         }
+         var gameScript = new MissionScript(iniFile, gameData.GameData.Items);
+         var missionIni = new MissionScriptDocument(gameScript);
+@@ -81,14 +75,12 @@
+     {
+         if (!string.IsNullOrWhiteSpace(Info.NpcShipFile))
+         {
+-            var npcPath = gameData.GameData.VFS.GetBackingFileName(gameData.GameData.Items.DataPath(Info.NpcShipFile));
+-            if (npcPath is not null)
+-            {
+-                var npcBuilder = new IniBuilder();
+-                foreach(var npc in NpcShips)
+-                    IniSerializer.SerializeShipArch(npc.Value, npcBuilder);
+-                IniWriter.WriteIniFile(npcPath, npcBuilder.Sections);
+-            }
++            var npcPath = WritableDataPath.Resolve(gameData.GameData.VFS,
++                gameData.GameData.Items.DataPath(Info.NpcShipFile));
++            var npcBuilder = new IniBuilder();
++            foreach(var npc in NpcShips)
++                IniSerializer.SerializeShipArch(npc.Value, npcBuilder);
++            IniWriter.WriteIniFile(npcPath, npcBuilder.Sections);
+         }
+ 
+         IniBuilder ini = new();
+--- a/src/Editor/LancerEdit/MainWindow.cs
++++ b/src/Editor/LancerEdit/MainWindow.cs
+@@ -35,6 +35,7 @@
+ using LibreLancer.Resources;
+ using LibreLancer.Shaders;
+ using LibreLancer.Utf.Ale;
++using Nexus.Assets;
+ 
+ namespace LancerEdit
+ {
+@@ -478,6 +479,100 @@
+             });
+         }
+ 
++        void UnpackNap()
++        {
++            FileDialog.Open(packagePath =>
++            {
++                if (string.IsNullOrWhiteSpace(packagePath)) return;
++                FileDialog.ChooseFolder(outputParent =>
++                {
++                    if (string.IsNullOrWhiteSpace(outputParent)) return;
++                    Task.Run(() =>
++                    {
++                        try
++                        {
++                            var archive = NapArchive.Open(packagePath);
++                            var output = archive.ExtractToDirectory(outputParent);
++                            QueueUIThread(() => Popups.MessageBox("NAP", $"Unpacked to {output}"));
++                        }
++                        catch (Exception exception)
++                        {
++                            QueueUIThread(() => ErrorDialog($"Could not unpack NAP: {exception.Message}"));
++                        }
++                    });
++                });
++            }, new FileDialogFilters(new FileFilter("Nexus Asset Package", "nap")));
++        }
++
++        void PackNap()
++        {
++            FileDialog.ChooseFolder(sourceDirectory =>
++            {
++                if (string.IsNullOrWhiteSpace(sourceDirectory)) return;
++                FileDialog.Save(outputPath =>
++                {
++                    if (string.IsNullOrWhiteSpace(outputPath)) return;
++                    if (!outputPath.EndsWith(".nap", StringComparison.OrdinalIgnoreCase))
++                        outputPath += ".nap";
++                    Task.Run(() =>
++                    {
++                        try
++                        {
++                            NapWriter.PackDirectory(sourceDirectory, outputPath);
++                            QueueUIThread(() => Popups.MessageBox("NAP", $"Packed to {outputPath}"));
++                        }
++                        catch (Exception exception)
++                        {
++                            QueueUIThread(() => ErrorDialog($"Could not pack NAP: {exception.Message}"));
++                        }
++                    });
++                }, new FileDialogFilters(new FileFilter("Nexus Asset Package", "nap")));
++            });
++        }
++
++        void ExportEditedNap()
++        {
++            var workspace = OpenDataContext?.WorkspaceDirectory;
++            if (string.IsNullOrWhiteSpace(workspace))
++            {
++                ErrorDialog("Load an active NAP package snapshot before exporting editor changes.");
++                return;
++            }
++            FileDialog.Save(outputPath =>
++            {
++                if (string.IsNullOrWhiteSpace(outputPath)) return;
++                if (!outputPath.EndsWith(".nap", StringComparison.OrdinalIgnoreCase))
++                    outputPath += ".nap";
++                Task.Run(() =>
++                {
++                    try
++                    {
++                        var fullOutput = Path.GetFullPath(outputPath);
++                        EnsureOutside(fullOutput, AppContext.BaseDirectory, "active application directory");
++                        EnsureOutside(fullOutput, workspace, "editor workspace");
++                        var provider = NexusPackageFileProvider.LoadActive(AppContext.BaseDirectory)
++                            ?? throw new InvalidDataException("No active NAP package snapshot was found.");
++                        var fileSystem = new LibreLancer.Data.IO.FileSystem(provider);
++                        fileSystem.FileProviders.Add(new NexusPackageWorkspaceFileProvider(workspace, provider));
++                        var packageId = NapOverlayBuilder.Compact(fileSystem, fullOutput);
++                        QueueUIThread(() => Popups.MessageBox("NAP", $"Exported edited package snapshot to {fullOutput}\nPackage: {packageId:D}"));
++                    }
++                    catch (Exception exception)
++                    {
++                        QueueUIThread(() => ErrorDialog($"Could not export edited NAP snapshot: {exception.Message}"));
++                    }
++                });
++            }, new FileDialogFilters(new FileFilter("Nexus Asset Package", "nap")));
++        }
++
++        static void EnsureOutside(string filePath, string protectedDirectory, string description)
++        {
++            var relative = Path.GetRelativePath(Path.GetFullPath(protectedDirectory), filePath);
++            if (!Path.IsPathRooted(relative) && relative != ".." &&
++                !relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal))
++                throw new InvalidOperationException($"NAP output must be outside the {description}.");
++        }
++
+         void LoadGameData(string folder)
+         {
+             if (!GameConfig.CheckFLDirectory(folder))
+@@ -651,6 +746,14 @@
+                     else
+                         LoadGameData(OpenDataContext!.Folder);
+                 }
++                ImGui.Separator();
++                if (Theme.IconMenuItem(Icons.BoxOpen, "Unpack NAP Container...", true))
++                    UnpackNap();
++                if (Theme.IconMenuItem(Icons.Save, "Pack Folder as NAP...", true))
++                    PackNap();
++                if (Theme.IconMenuItem(Icons.Save, "Export Edited NAP Snapshot...",
++                        OpenDataContext?.WorkspaceDirectory != null))
++                    ExportEditedNap();
+                 ImGui.Separator();
+                 if (Theme.IconMenuItem(Icons.BookOpen, "Infocard Browser", OpenDataContext != null))
+                     AddTab(new InfocardBrowserTab(OpenDataContext, this));
+--- a/src/Nexus.Assets/NapArchive.cs
++++ b/src/Nexus.Assets/NapArchive.cs
+@@ -135,6 +135,49 @@
+                 hash.AppendData(buffer, 0, read);
+             if (!hash.GetHashAndReset().AsSpan().SequenceEqual(entry.Sha256))
+                 throw new InvalidDataException($"NAP file hash mismatch: {entry.Path}");
++        }
++    }
++
++    /// <summary>Verifies and extracts this archive into a new child directory.</summary>
++    public string ExtractToDirectory(string parentDirectory)
++    {
++        ArgumentException.ThrowIfNullOrWhiteSpace(parentDirectory);
++        VerifyAll();
++        var parent = Path.GetFullPath(parentDirectory);
++        if (!Directory.Exists(parent)) throw new DirectoryNotFoundException(parent);
++        var directoryName = Path.GetFileNameWithoutExtension(fileName);
++        if (string.IsNullOrWhiteSpace(directoryName) || directoryName is "." or ".." ||
++            !string.Equals(NapPath.Normalize(directoryName), directoryName, StringComparison.Ordinal))
++            throw new InvalidDataException("NAP filename cannot be used as an extraction directory name.");
++        var destination = Path.Combine(parent, directoryName);
++        if (Directory.Exists(destination) || File.Exists(destination))
++            throw new IOException($"Unpack destination already exists: {destination}");
++
++        var staging = Path.Combine(parent, ".nap-unpack-" + Guid.NewGuid().ToString("N"));
++        Directory.CreateDirectory(staging);
++        try
++        {
++            foreach (var entry in entries.Values)
++            {
++                if (entry.Tombstone) continue;
++                var relative = NapPath.Normalize(entry.Path).Replace('/', Path.DirectorySeparatorChar);
++                var outputPath = Path.GetFullPath(Path.Combine(staging, relative));
++                var outputRelative = Path.GetRelativePath(staging, outputPath);
++                if (Path.IsPathRooted(outputRelative) || outputRelative == ".." ||
++                    outputRelative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal))
++                    throw new InvalidDataException($"NAP entry escapes extraction directory: {entry.Path}");
++                Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
++                using var input = OpenFile(entry.Path);
++                using var output = new FileStream(outputPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
++                input.CopyTo(output);
++                output.Flush(flushToDisk: true);
++            }
++            Directory.Move(staging, destination);
++            return destination;
++        }
++        finally
++        {
++            if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
+         }
+     }
+ 
+--- a/src/Nexus.Assets.Tests/NapArchiveTests.cs
++++ b/src/Nexus.Assets.Tests/NapArchiveTests.cs
+@@ -1,4 +1,5 @@
+ using System.Security.Cryptography;
++using System.Buffers.Binary;
+ using Nexus.Assets;
+ using Xunit;
+ 
+@@ -124,6 +125,61 @@
+         Assert.Throws<FileNotFoundException>(() => archive.OpenFile("DATA/deleted-from-base.txt"));
+     }
+ 
++    [Fact]
++    public void ExtractsVerifiedFilesIntoNewDirectoryAndOmitsTombstones()
++    {
++        using var fixture = new Fixture();
++        fixture.Write("nested/hello.txt", "hello from NAP"u8.ToArray());
++        var packagePath = fixture.PathFor("editable-package.nap");
++        NapWriter.Pack(
++        [
++            new NapSourceEntry("nested/hello.txt", Path.Combine(fixture.Source, "nested", "hello.txt")),
++            new NapSourceEntry("removed.ini", null)
++        ], packagePath);
++        var unpackParent = fixture.PathFor("unpacked");
++        Directory.CreateDirectory(unpackParent);
++
++        var destination = NapArchive.Open(packagePath).ExtractToDirectory(unpackParent);
++
++        Assert.Equal(Path.Combine(unpackParent, "editable-package"), destination);
++        Assert.Equal("hello from NAP", File.ReadAllText(Path.Combine(destination, "nested", "hello.txt")));
++        Assert.False(File.Exists(Path.Combine(destination, "removed.ini")));
++    }
++
++    [Fact]
++    public void ExtractionRejectsExistingDestinationWithoutOverwritingIt()
++    {
++        using var fixture = new Fixture();
++        fixture.Write("hello.txt", "package content"u8.ToArray());
++        var archive = NapArchive.Open(fixture.Package("existing.nap"));
++        var parent = fixture.PathFor("unpacked");
++        var destination = Path.Combine(parent, "existing");
++        Directory.CreateDirectory(destination);
++        File.WriteAllText(Path.Combine(destination, "keep.txt"), "keep");
++
++        Assert.Throws<IOException>(() => archive.ExtractToDirectory(parent));
++        Assert.Equal("keep", File.ReadAllText(Path.Combine(destination, "keep.txt")));
++    }
++
++    [Fact]
++    public void ExtractionRejectsPayloadCorruptionWithoutLeavingPartialOutput()
++    {
++        using var fixture = new Fixture();
++        fixture.Write("nested/first.bin", RandomNumberGenerator.GetBytes(8192));
++        fixture.Write("nested/second.bin", RandomNumberGenerator.GetBytes(8192));
++        var packagePath = fixture.Package("corrupted-after-open.nap", chunkSize: 4096);
++        var archive = NapArchive.Open(packagePath);
++        var packageBytes = File.ReadAllBytes(packagePath);
++        var payloadOffset = checked((int)BinaryPrimitives.ReadUInt64LittleEndian(packageBytes.AsSpan(80, 8)));
++        packageBytes[payloadOffset] ^= 0xff;
++        File.WriteAllBytes(packagePath, packageBytes);
++        var parent = fixture.PathFor("unpacked");
++        Directory.CreateDirectory(parent);
++
++        Assert.Throws<InvalidDataException>(() => archive.ExtractToDirectory(parent));
++        Assert.Empty(Directory.GetFileSystemEntries(parent));
++    }
++
+     private static string ReadText(Stream stream)
+     {
+         using (stream)
+--- a/docs/asset-packages/implementation-status.md
++++ b/docs/asset-packages/implementation-status.md
+@@ -9,12 +9,12 @@
+ | Reader / seek stream | implemented | Bounds checks, strict paths, per-chunk SHA-256, Zstd expansion limit, configurable bounded LRU cache |
+ | Writer / deterministic output | implemented | Directory and entry-based writer, chunk deduplication, `none`/Zstd selection, atomic temporary output, tombstones |
+ | CLI | implemented | `pack`, `inspect`, `verify`, `diff` and `compact` in `src/Nexus.Packaging.Cli` |
+-| Unit tests | implemented | Synthetic assets, roundtrip, seeks, concurrent streams, determinism, golden vector, tombstones, unsafe paths, corruption, VFS fallback/overrides/enumeration, active snapshot validation, and diff-to-mounted-target tree/byte parity |
++| Unit tests | implemented | Synthetic assets, roundtrip, seeks, concurrent streams, determinism, golden vector, tombstones, unsafe paths, corruption rejection before extraction with no partial output, verified NAP extraction, no-overwrite destination handling, VFS fallback/overrides/enumeration, active snapshot validation, and diff-to-mounted-target tree/byte parity |
+ | VFS provider and unified enumeration | implemented | `NexusPackageFileProvider` mounts local active packages; `IOverlayFileProvider` masks lower providers for reads/existence/backing paths and filters file/directory enumeration; Client and LLServer attach it |
+-| LancerEdit workspace and export | partial | LancerEdit mounts the active Client package snapshot above selected loose DATA and writes package-backed saves to a persistent workspace; `nexus-pack compact --workspace` exports package content plus workspace edits. Provider/compaction tests and a synthetic CLI smoke pass; interactive editor saves and Windows behavior remain to verify |
++| LancerEdit workspace and package tools | partial | LancerEdit mounts the active Client package snapshot above selected loose DATA and writes package-backed saves to a persistent workspace. The Data menu can unpack a verified NAP into a new folder, pack a selected folder as NAP, and export the active package snapshot with workspace edits. Provider/compaction tests and a synthetic CLI smoke pass; interactive editor save/export flows and Windows behavior remain to verify |
+ | Active package snapshot validation | partial | Client/LLServer reject unsafe paths, reparse points, size/hash mismatch and malformed NAP indexes; Updater verifies NAP V1 structure, content version and all chunk/file hashes before writing the staged snapshot, then rechecks package hashes before reuse |
+ | Download resume and storage checks | partial | `ArtifactDownloader` resumes digest-scoped `.part` files with validated HTTP Range responses and exclusive per-digest locking; download, TAR extraction and NAP staging check available volume space. Interrupted-response and mocked insufficient-space tests pass; real ENOSPC and cross-platform filesystem behavior remain unverified |
+-| `GetBackingFileName` consumers | partial | Runtime package entries return no OS backing path. LancerEdit resolves package-backed save paths to the persistent workspace and can compact that workspace into a full NAP; OS-specific editor consumers and interactive save flows still need runtime verification |
++| `GetBackingFileName` consumers | partial | Runtime package entries return no OS backing path. LancerEdit routes package-backed save paths through a checked writable-path helper into its persistent workspace; missing paths now fail clearly instead of being passed to INI writers as null. Commodity and MBases saves retain explicit status handling. InterfaceEdit and other OS-specific consumers plus interactive save flows still need runtime verification |
+ | Signed release manifest / updater | partial | `Updater/Manifest.cs` verifies signed NAP metadata; `DataPackageStager` installs required packages, selected optional packages and their dependency/override closure into the client release and emits `packages/active.json` only after full NAP V1 structural/content verification and signed content-version matching; an install-root lock that serializes concurrent Updater processes, atomic client+data activation, a Client UI-ready acknowledgement and one-generation failed-start rollback are integrated. Full game DATA packaged into one NAP passed a Linux runtime smoke with loose DATA absent and reached the first UI state. Automated Linux tests cover missing-ack timeout, client-process termination, restoration of the old release and failed-snapshot suppression. Abrupt child-process exits after the release move, after the flushed temporary pointer is written, and after the atomic pointer replacement verify the old-or-new complete snapshot invariant on Linux; a retry succeeds with the stale temporary pointer present. The Updater CI matrix targets Ubuntu and Windows; the Windows CI result is still pending because GitHub Actions could not be queried from this environment. Windows game runtime remains open |
+ | Overlay diff/compaction | partial | `NapOverlayBuilder` builds content-hash diffs with tombstones and compacts active package layers. A synthetic end-to-end test mounts the generated diff on its baseline and verifies the complete virtual path set and bytes against the target archive. `diff` writes an advisory dependency/override plan. Multi-package manifest authoring remains manual; compaction does not include loose DATA fallback |
+ | NAPD | planned | Optional after complete V1 overlay flow |
+--- a/docs/asset-packages/code-audit.md
++++ b/docs/asset-packages/code-audit.md
+@@ -19,7 +19,9 @@
+ - **Verzeichnis-/Mehrdatei-Saves:** `UniverseEditorTab.NewSystem` benötigt einen physischen Systems-Ordner, legt Unterverzeichnisse und neue INIs direkt an und aktualisiert danach die Universe-Datei.
+ - **Interface-Editor:** `src/Editor/InterfaceEdit/ResourceWindow.cs` schreibt `resources.xml` mit `File.WriteAllText` an den Backing-Pfad.
+ 
+-Package-backed saves resolve to the persistent workspace above package and loose DATA providers. `nexus-pack compact --workspace` exports the effective package tree and workspace edits as a verified full NAP; it does not sign or activate a release. DLL resource editing uses the workspace path stored in `ResourceDll.SavePath`. Interactive LancerEdit save flows and Windows behavior remain to verify.
++Package-backed saves resolve to the persistent workspace above package and loose DATA providers. The LancerEdit Data menu now offers NAP extraction, directory packing, and export of the active package snapshot plus workspace edits. Extraction verifies every entry before writing into a staging directory and moves the completed directory into the selected parent; tombstones are omitted. Packing and export run off the UI thread and report completion or errors through editor dialogs. Export produces a verified full NAP but does not sign or activate a release. DLL resource editing uses the workspace path stored in `ResourceDll.SavePath`. These new interactive flows and Windows behavior still need runtime verification.
++
++Package-backed INI saves in `NewsSaveStrategy`, `UniverseSaveStrategy`, `StarSystemSaveStrategy`, `AsteroidFieldList`, `UniverseEditorTab`, and `MissionScriptDocument` now resolve through `WritableDataPath`. A missing physical target raises an explicit `IOException`, and mission NPC references are no longer silently discarded when no writable path can be resolved. `BaseNpcSaveStrategy` and commodity market saves retain their existing explicit failure handling.
+ 
+ ## Updater und Gateway
+ 
+--- a/docs/NEXUS-ASSET-PACKAGES.md
++++ b/docs/NEXUS-ASSET-PACKAGES.md
+@@ -209,6 +209,10 @@
+ 
+ Die konkreten Projektnamen und CLI-Flags werden an die tatsächliche Solution/Buildstruktur angepasst. Keine separate redundante VFS-Implementierung im Launcher schaffen.
+ 
++### LancerEdit
++
++Im Menü **Data** kann ein NAP-Container über **Unpack NAP Container...** in einen neu angelegten Unterordner extrahiert oder ein ausgewählter Ordner über **Pack Folder as NAP...** gepackt werden. Vor dem Entpacken werden alle Einträge verifiziert; vorhandene Ziele werden nicht überschrieben. Nach dem Laden eines aktiven NAP-Snapshots steht **Export Edited NAP Snapshot...** bereit. Diese Aktion fasst Paketstand und persistente Workspace-Änderungen zu einem vollständigen NAP zusammen. Signierung und Aktivierung bleiben Publisher-/Updater-Schritte.
++
+ ## 11. Test- und Abnahmekriterien
+ 
+ 1. Roundtrip für INI, BMP/DDS, CMP/3DB, ALE/Animation, WAV/OGG und zufällige Binärdateien, einschließlich leerer Dateien.
