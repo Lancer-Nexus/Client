@@ -18,9 +18,9 @@ The shared `LibreLancer.Data.NexusEditorDataMount` helper mounts the active snap
 
 ## Implementation status
 
-Implemented in patch 2117: common mount helper; InterfaceEdit snapshot/workspace mounting before resource loading; workspace-backed `resources.xml` path resolution with an explicit error when no writable backing path exists; two synthetic tests for package precedence, workspace persistence after refresh, and loose-only mode. Linux Release build and focused tests passed.
+Implemented in patches 2117/2118: common mount helper; InterfaceEdit snapshot/workspace mounting before resource loading; workspace-backed `resources.xml` path resolution with an explicit error when no writable backing path exists; two synthetic tests for package precedence, workspace persistence after refresh, and loose-only mode. Linux Release build and focused tests passed.
 
-Still open: GUI save/restart smoke test, Windows build/test/runtime, visible mount/workspace state and open-workspace action, corrupt-snapshot user experience, broader OS-specific backing-path audit, and expanded edge-case coverage (traversal/reparse points and pre-existing workspace fixture).
+Still open: GUI save/restart smoke test, Windows build/test/runtime, corrupt-snapshot user experience, broader OS-specific backing-path audit, and expanded edge-case coverage (traversal/reparse points and pre-existing workspace fixture).
 
 ## Implementation sequence
 
@@ -28,7 +28,7 @@ Still open: GUI save/restart smoke test, Windows build/test/runtime, visible mou
 2. **Share workspace identity — implemented with compatibility preservation.** The helper retains the existing LancerEdit workspace root and install ID, so existing workspace edits remain visible without copying or moving files. Cross-platform case behavior still needs Windows verification.
 3. **Mount packages in InterfaceEdit — implemented.** `Project.Load` calls the helper immediately after creating the loose-data VFS and before game-resource initialization. Loose-only mode remains supported.
 4. **Route game-data writes through the workspace — partially implemented.** `resources.xml` resolves its writable path through the VFS and fails clearly when unavailable. Project files remain project-local. Audit other OS backing-path consumers and interactive saves before calling this complete.
-5. **Expose mount state — open.** The workspace path is logged, but there is no mount-state UI or open-workspace action. Snapshot validation errors propagate from loading; user-facing error presentation needs a GUI check.
+5. **Expose mount state — implemented.** The Data menu shows whether the active snapshot is mounted and the workspace path; it can open the workspace using the desktop file manager. Open failures are shown in the editor. Snapshot load errors propagate from loading; user-facing error presentation still needs a GUI check.
 6. **Add synthetic integration coverage — partial.** Tests cover NAP-over-loose precedence, workspace destination, persistence after refresh, and loose-only mode. Corrupt snapshots, traversal/reparse points and preservation of a pre-existing workspace fixture remain to add or verify.
 7. **Verify platforms/editor path — partial.** The focused tests and Release build pass on Linux; a fresh patch-series reconstruction applies through patch 2117. Windows tests/build, GUI save/restart smoke test and a fresh interactive InterfaceEdit session remain.
 
