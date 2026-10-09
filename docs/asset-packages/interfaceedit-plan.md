@@ -18,7 +18,7 @@ The shared `LibreLancer.Data.NexusEditorDataMount` helper mounts the active snap
 
 ## Implementation status
 
-Implemented in patches 2117–2119: common mount helper; InterfaceEdit snapshot/workspace mounting before resource loading; workspace-backed `resources.xml` path resolution with an explicit error when no writable backing path exists; two synthetic tests for package precedence, workspace persistence after refresh, and loose-only mode. Linux Release build and focused tests passed.
+Implemented in patches 2117–2119: common mount helper; InterfaceEdit snapshot/workspace mounting before resource loading; workspace-backed `resources.xml` path resolution with an explicit error when no writable backing path exists; four synthetic assertions across three tests for package precedence, workspace persistence after refresh and remount, loose-only mode, and rejection of a corrupt snapshot without changing the VFS. Linux Release build and focused tests passed.
 
 Still open: GUI save/restart smoke test, Windows build/test/runtime, GUI verification of corrupt-snapshot error presentation, broader OS-specific backing-path audit, and expanded edge-case coverage (traversal/reparse points and pre-existing workspace fixture).
 
@@ -29,7 +29,7 @@ Still open: GUI save/restart smoke test, Windows build/test/runtime, GUI verific
 3. **Mount packages in InterfaceEdit — implemented.** `Project.Load` calls the helper immediately after creating the loose-data VFS and before game-resource initialization. Loose-only mode remains supported.
 4. **Route game-data writes through the workspace — partially implemented.** `resources.xml` resolves its writable path through the VFS and fails clearly when unavailable. Project files remain project-local. Audit other OS backing-path consumers and interactive saves before calling this complete.
 5. **Expose mount state — implemented.** The Data menu shows whether the active snapshot is mounted and the workspace path; it can open the workspace using the desktop file manager. Open failures are shown in the editor. Snapshot load and resource-save failures are caught and shown in the editor; verify the corrupt-snapshot flow in a GUI session.
-6. **Add synthetic integration coverage — partial.** Tests cover NAP-over-loose precedence, workspace destination, persistence after refresh, and loose-only mode. Corrupt snapshots, traversal/reparse points and preservation of a pre-existing workspace fixture remain to add or verify.
+6. **Add synthetic integration coverage — partial.** Tests cover NAP-over-loose precedence, workspace destination, persistence after refresh, and loose-only mode. Traversal/reparse points and a separately pre-seeded legacy workspace fixture remain to add or verify.
 7. **Verify platforms/editor path — partial.** The focused tests and Release build pass on Linux; a fresh patch-series reconstruction applies through patch 2117. Windows tests/build, GUI save/restart smoke test and a fresh interactive InterfaceEdit session remain.
 
 ## Boundaries
