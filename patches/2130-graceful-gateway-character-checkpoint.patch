@@ -1,0 +1,446 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index 3f4504d77..0d9d34b67 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -11,7 +11,7 @@ Maintain the Lancer Nexus client fork while preserving compatibility with upstre
+ - The active game instance remains authoritative until the MySQL-backed lease changes atomically at `Committed`; the client must handle rejection, expiry and recovery states.
+ - Shared, versioned MessagePack contracts and capabilities belong in `Protocol`; Redis is never exposed to the client.
+ 
+-For clustered LLServer character persistence, register the new display name and initial SaveGame with Gateway under the active account/session before publishing it to the character menu; roll the local compatibility row back on rejection. Read the account roster from Gateway and map Gateway IDs to separate local SQLite cache IDs. Rebuild missing cache rows only from a validated Gateway snapshot; if both a snapshot and local row are absent, omit that legacy character rather than inventing state. Resolve the Gateway-owned character ID and acquire its lease after selection. Load a lease-fenced Gateway SaveGame snapshot when present; only bootstrap revision 1 from the matching local SQLite row when no Gateway snapshot exists. Persist explicit saves, one-minute live checkpoints and committed transfer snapshots using sequential Gateway snapshot revisions. Delete through Gateway's history-preserving tombstone before removing the local cache row. Treat lease rejection, invalid snapshots and unavailable snapshot storage as fail-closed conditions. An awaited shutdown checkpoint remains open until separately implemented and verified.
++For clustered LLServer character persistence, register the new display name and initial SaveGame with Gateway under the active account/session before publishing it to the character menu; roll the local compatibility row back on rejection. Read the account roster from Gateway and map Gateway IDs to separate local SQLite cache IDs. Rebuild missing cache rows only from a validated Gateway snapshot; if both a snapshot and local row are absent, omit that legacy character rather than inventing state. Resolve the Gateway-owned character ID and acquire its lease after selection. Load a lease-fenced Gateway SaveGame snapshot when present; only bootstrap revision 1 from the matching local SQLite row when no Gateway snapshot exists. Persist explicit saves, one-minute live checkpoints and committed transfer snapshots using sequential Gateway snapshot revisions. Delete through Gateway's history-preserving tombstone before removing the local cache row. On graceful shutdown, stop new logins, drain in-flight login tasks, pause world simulation, capture each active leased character on the simulation loop, and await its Gateway snapshot write before stopping the server. Characters in a committed transfer use the transfer snapshot path; abrupt termination cannot run this checkpoint. Treat lease rejection, invalid snapshots and unavailable snapshot storage as fail-closed conditions.
+ 
+ ## Rules
+ 
+diff --git a/README.md b/README.md
+index 745ffe125..1869008b1 100644
+--- a/README.md
++++ b/README.md
+@@ -99,7 +99,7 @@ For a deployable Cluster LLServer package, use `./build.sh --nexus-cluster-serve
+ 
+ Cluster permission revision synchronization is opt-in at build time with `-p:EnableClusterIntegration=true`. Cluster instances require the per-instance `LANCER_NEXUS_GAME_INSTANCE_KEY` and the internal Redis `LANCER_NEXUS_PERMISSION_REDIS_ENDPOINT=host:port`. LLServer reports `IsReady=false` until it has subscribed to Redis, loaded and activated the current Gateway SQL permission snapshot, and received its revision ACK. Redis carries invalidations only; a disconnected listener makes the instance unready. Standalone builds remain independent of Cluster.
+ 
+-Clustered character creation registers the exact display name and initial SaveGame with Gateway under the active account/session; a Gateway rejection rolls back the local compatibility row. LLServer loads the authoritative Gateway roster, reconstructs missing local cache rows only from validated Gateway snapshots, and deletes through Gateway's history-preserving tombstone before removing a local row. A legacy character without a Gateway snapshot is available only on instances that still have its local SQLite row; missing legacy state is omitted instead of replaced with a default pilot. After selection, LLServer acquires the fenced lease and loads the latest Gateway SaveGame snapshot. If no snapshot exists yet, it imports the matching local SQLite row once as revision 1. LLServer checkpoints the live SaveGame to Gateway every minute, persists explicit Freelancer saves, and writes a transferred SaveGame under the target lease fence after transfer commit. Gateway validates each read and write against the active instance, session, lease token and version. Durable persistence on an unclean process stop still needs a verified shutdown hook; do not treat the local SQLite bootstrap as the cluster persistence authority.
++Clustered character creation registers the exact display name and initial SaveGame with Gateway under the active account/session; a Gateway rejection rolls back the local compatibility row. LLServer loads the authoritative Gateway roster, reconstructs missing local cache rows only from validated Gateway snapshots, and deletes through Gateway's history-preserving tombstone before removing a local row. A legacy character without a Gateway snapshot is available only on instances that still have its local SQLite row; missing legacy state is omitted instead of replaced with a default pilot. After selection, LLServer acquires the fenced lease and loads the latest Gateway SaveGame snapshot. If no snapshot exists yet, it imports the matching local SQLite row once as revision 1. LLServer checkpoints the live SaveGame to Gateway every minute, persists explicit Freelancer saves, and writes a transferred SaveGame under the target lease fence after transfer commit. Gateway validates each read and write against the active instance, session, lease token and version. On graceful `StopServer`, LLServer rejects new logins, drains active login work, pauses world simulation, captures each active leased character on the simulation loop, and waits for the final Gateway snapshot write before stopping the loop. Characters already in transfer use the transfer snapshot protocol. A forced process kill cannot run the shutdown checkpoint; local SQLite remains a compatibility/bootstrap cache, not the cluster persistence authority.
+ 
+ ## NPC retirement recovery infrastructure
+ 
+diff --git a/patches/series b/patches/series
+index f1781ad75..bc2f68639 100644
+--- a/patches/series
++++ b/patches/series
+@@ -130,3 +130,4 @@ client 2126-flhookcompat-cluster-event-transport.patch
+ client 2127-flhook-durable-before-plugin-notifications.patch
+ client 2128-gateway-character-lease-acquisition.patch
+ client 2129-gateway-authoritative-character-roster.patch
++client 2130-graceful-gateway-character-checkpoint.patch
+diff --git a/src/LLServer.Core/ServerApp.cs b/src/LLServer.Core/ServerApp.cs
+index 7ebf40d4f..29556b5d0 100644
+--- a/src/LLServer.Core/ServerApp.cs
++++ b/src/LLServer.Core/ServerApp.cs
+@@ -251,6 +251,24 @@ public class ServerApp(ServerConfig config)
+         {
+             FLLog.Error("Server", $"Transfer resolver stopped: {exception.Message}");
+         }
++        if (Server is { } stoppingServer)
++        {
++            stoppingServer.BeginGracefulShutdown();
++            try
++            {
++                stoppingServer.Listener?.WaitForPendingConnectionTasksAsync().GetAwaiter().GetResult();
++                stoppingServer.BeginShutdownCheckpointing();
++                var snapshots = stoppingServer.FlushGatewayCharacterSnapshotsAsync().GetAwaiter().GetResult();
++                FLLog.Info("Gateway", $"Shutdown character snapshots completed: {snapshots.Saved} saved, {snapshots.Skipped} skipped.");
++                if (snapshots.Failed > 0)
++                    FLLog.Error("Gateway", $"Shutdown could not persist {snapshots.Failed} active character snapshot(s).");
++                stoppingServer.Listener?.Stop();
++            }
++            catch (Exception exception)
++            {
++                FLLog.Error("Gateway", $"Shutdown character snapshot phase failed ({exception.GetType().Name}).");
++            }
++        }
+         statusCancellation?.Cancel();
+ #if LANCER_NEXUS_CLUSTER
+         if (permissionSyncRuntime is not null)
+diff --git a/src/LibreLancer/Net/GameListener.cs b/src/LibreLancer/Net/GameListener.cs
+index a74206139..31b2e153f 100644
+--- a/src/LibreLancer/Net/GameListener.cs
++++ b/src/LibreLancer/Net/GameListener.cs
+@@ -35,6 +35,11 @@ namespace LibreLancer.Net
+ 
+         private bool running = false;
+         private Thread netThread = null!;
++		private readonly object lifecycleSync = new();
++		private bool stopRequested;
++		private readonly object connectionTasksSync = new();
++		private int activeConnectionTasks;
++		private TaskCompletionSource connectionTasksDrained = CompletedConnectionTasks();
+ 		public NetManager Server = null!;
+         private HttpClient http = null!;
+ 
+@@ -45,20 +50,63 @@ namespace LibreLancer.Net
+ 
+ 		public void Start()
+ 		{
+-			running = true;
+-            netThread = new Thread(NetThread)
++			lock (lifecycleSync)
+             {
+-                Name = "Server Listener"
+-            };
+-            netThread.Start();
++				if (stopRequested || netThread != null) return;
++				running = true;
++				stopHandle = new AutoResetEvent(false);
++				netThread = new Thread(NetThread)
++				{
++					Name = "Server Listener"
++				};
++				netThread.Start();
++			}
+ 		}
+ 
+         private AutoResetEvent stopHandle = null!;
+         private DateTime lastKeyPrint = DateTime.UnixEpoch;
+ 
++		private static TaskCompletionSource CompletedConnectionTasks()
++		{
++			var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
++			completion.SetResult();
++			return completion;
++		}
++
++		private void RunConnectionTask(Action reject, Func<Task> action)
++		{
++			lock (connectionTasksSync)
++			{
++				if (game.IsStopping)
++				{
++					reject();
++					return;
++				}
++				if (activeConnectionTasks++ == 0)
++					connectionTasksDrained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
++			}
++			_ = Task.Run(async () =>
++			{
++				try { await action().ConfigureAwait(false); }
++				finally
++				{
++					lock (connectionTasksSync)
++					{
++						if (--activeConnectionTasks == 0)
++							connectionTasksDrained.TrySetResult();
++					}
++				}
++			});
++		}
++
++		public Task WaitForPendingConnectionTasksAsync()
++		{
++			lock (connectionTasksSync)
++				return connectionTasksDrained.Task;
++		}
++
+         private void NetThread()
+         {
+-            stopHandle = new AutoResetEvent(false);
+             http = new HttpClient();
+             EventBasedNetListener listener = new EventBasedNetListener();
+             EventBasedNetListener broadcastListener = new EventBasedNetListener();
+@@ -66,6 +114,11 @@ namespace LibreLancer.Net
+             var unique = Guid.NewGuid();
+             listener.ConnectionRequestEvent += request =>
+             {
++                if (game.IsStopping)
++                {
++                    request.Reject();
++                    return;
++                }
+                 if (!new PacketReader(request.Data).TryGetString(out var key))
+                 {
+                     FLLog.Debug("Server", $"Connect with no key {request.RemoteEndPoint}");
+@@ -107,8 +160,13 @@ namespace LibreLancer.Net
+                     }
+                     else
+                     {
+-                        Task.Run(async () =>
++                        RunConnectionTask(request.Reject, async () =>
+                         {
++                            if (game.IsStopping)
++                            {
++                                request.Reject();
++                                return;
++                            }
+                             if (token.StartsWith("lnx-transfer:", StringComparison.Ordinal))
+                             {
+                                 var parts = token.Split(':', 3);
+@@ -131,7 +189,7 @@ namespace LibreLancer.Net
+                                     };
+                                     transferPeer.Tag = transferPlayer;
+                                     lock (game.ConnectedPlayers) game.ConnectedPlayers.Add(transferPlayer);
+-                                    _ = Task.Run(async () => await transferPlayer.OnLoggedIn());
++                                    await transferPlayer.OnLoggedIn().ConfigureAwait(false);
+                                 }
+                                 catch (Exception error)
+                                 {
+@@ -141,6 +199,11 @@ namespace LibreLancer.Net
+                                 return;
+                             }
+                             var identity = await http.VerifyGameIdentity(game.LoginUrl, token);
++                            if (game.IsStopping)
++                            {
++                                request.Reject();
++                                return;
++                            }
+                             if (identity.guid == Guid.Empty)
+                             {
+                                 FLLog.Info("Login", $"Login failed for {request.RemoteEndPoint}");
+@@ -155,11 +218,11 @@ namespace LibreLancer.Net
+                                 var p = new Player(remote,
+                                     game, identity.guid) { GatewaySessionId = identity.sessionId };
+                                 peer.Tag = p;
+-                                _ = Task.Run(async () => await p.OnLoggedIn());
+                                 lock (game.ConnectedPlayers)
+                                 {
+                                     game.ConnectedPlayers.Add(p);
+                                 }
++                                await p.OnLoggedIn().ConfigureAwait(false);
+                             }
+                         });
+                     }
+@@ -178,6 +241,12 @@ namespace LibreLancer.Net
+                 FLLog.Info("Server", $"Disconnected: {peer.Address}. Reason: {info.Reason}");
+                 if (peer.Tag is Player player)
+                 {
++                    if (game.IsStopping)
++                    {
++                        lock (game.ConnectedPlayers)
++                            game.ConnectedPlayers.Remove(player);
++                        return;
++                    }
+                     player.Disconnected();
+                     if (!player.TransferInProgress)
+                         lock (game.ConnectedPlayers)
+@@ -226,10 +295,16 @@ namespace LibreLancer.Net
+             {
+                 try
+                 {
++                    if (game.IsStopping) return;
+                     var reader = new PacketReader(msg);
+                     var pkt = Packets.Read(reader);
+                     if (peer.Tag is DateTime)
+                     {
++                        if (game.IsStopping)
++                        {
++                            peer.Disconnect();
++                            return;
++                        }
+                         if (pkt is AuthenticationReplyPacket auth)
+                         {
+                             if (auth.Guid == Guid.Empty)
+@@ -309,7 +384,6 @@ namespace LibreLancer.Net
+                 throw new InvalidOperationException("Game listener could not bind the configured address and port.");
+             FLLog.Info("Server", "Listening on port " + Port);
+             stopHandle.WaitOne();
+-            http.Dispose();
+             Server.Stop();
+             broadcastServer.Stop();
+         }
+@@ -324,9 +398,19 @@ namespace LibreLancer.Net
+ 
+ 		public void Stop()
+         {
+-            stopHandle.Set();
+-			running = false;
+-			netThread.Join();
++			Thread? thread;
++			lock (lifecycleSync)
++			{
++				if (stopRequested) return;
++				stopRequested = true;
++				running = false;
++				thread = netThread;
++				if (thread is null) return;
++				stopHandle.Set();
++			}
++			thread.Join();
++			WaitForPendingConnectionTasksAsync().GetAwaiter().GetResult();
++			http?.Dispose();
+         }
+ 	}
+ }
+diff --git a/src/LibreLancer/Server/GameServer.cs b/src/LibreLancer/Server/GameServer.cs
+index bfdc72f99..eced42bfe 100644
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -1855,6 +1855,10 @@ namespace LibreLancer.Server
+         public BaselinePriceBundle BaselineGoodPrices;
+ 
+         private volatile bool running = false;
++        private int isStopping;
++        private int shutdownCheckpointing;
++        public bool IsStopping => Volatile.Read(ref isStopping) != 0;
++        private bool IsShutdownCheckpointing => Volatile.Read(ref shutdownCheckpointing) != 0;
+ 
+         public GameListener? Listener;
+         private Thread gameThread = null!;
+@@ -1959,6 +1963,7 @@ namespace LibreLancer.Server
+ 
+         public void Stop()
+         {
++            BeginGracefulShutdown();
+             running = false;
+             gameThread.Join();
+             foreach (var allocator in npcIdentityAllocators.Values)
+@@ -1970,6 +1975,10 @@ namespace LibreLancer.Server
+             updateRunner.Dispose();
+         }
+ 
++        public void BeginGracefulShutdown() => Interlocked.Exchange(ref isStopping, 1);
++
++        public void BeginShutdownCheckpointing() => Interlocked.Exchange(ref shutdownCheckpointing, 1);
++
+         private Dictionary<StarSystem, ServerWorld> worlds = new();
+         private ConcurrentQueue<Action> worldRequests = new();
+         private ConcurrentQueue<IPacket> localPackets = new();
+@@ -2043,6 +2052,26 @@ namespace LibreLancer.Server
+ 
+         public IEnumerable<Player> AllPlayers => GetConnectedPlayers();
+ 
++        public async Task<(int Saved, int Skipped, int Failed)> FlushGatewayCharacterSnapshotsAsync()
++        {
++            var players = GetConnectedPlayers().ToArray();
++            var results = await Task.WhenAll(players.Select(async player =>
++            {
++                try
++                {
++                    return (Saved: await player.QueueGatewayShutdownSnapshot().ConfigureAwait(false), Failed: false);
++                }
++                catch (Exception error)
++                {
++                    FLLog.Error("Gateway", $"Shutdown snapshot failed for character {player.StableCharacterId} ({error.GetType().Name}).");
++                    return (Saved: false, Failed: true);
++                }
++            })).ConfigureAwait(false);
++            var saved = results.Count(result => result.Saved);
++            var failed = results.Count(result => result.Failed);
++            return (saved, players.Length - saved - failed, failed);
++        }
++
+         public Player? GetConnectedPlayer(string name) =>
+             GetConnectedPlayers().FirstOrDefault(x => x.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+ 
+@@ -2644,6 +2673,16 @@ namespace LibreLancer.Server
+         {
+             CurrentTick = currentTick;
+             var startTime = serverTiming.Elapsed;
++            if (IsShutdownCheckpointing)
++            {
++                var players = GetConnectedPlayers();
++                foreach (var player in players)
++                    player.RunSave();
++                if (LocalPlayer is { } shutdownLocalPlayer && !players.Contains(shutdownLocalPlayer))
++                    shutdownLocalPlayer.RunSave();
++                if (!running) processingLoop.Stop();
++                return;
++            }
+             while (!localPackets.IsEmpty && localPackets.TryDequeue(out var local))
+                 LocalPlayer!.ProcessPacketDirect(local);
+             if (worldRequests.Count > 0 && worldRequests.TryDequeue(out var a))
+@@ -2652,7 +2691,7 @@ namespace LibreLancer.Server
+             var connectedPlayers = GetConnectedPlayers();
+             foreach (var player in connectedPlayers)
+             {
+-                if (!player.TransferInProgress && !(player.Space?.World?.Paused ?? false))
++                if (!player.TransferInProgress && !player.IsShutdownFrozen && !(player.Space?.World?.Paused ?? false))
+                     player.UpdateMissionRuntime(time.TotalSeconds);
+                 player.QueueGatewaySnapshotIfDue();
+                 player.RunSave();
+diff --git a/src/LibreLancer/Server/Player.cs b/src/LibreLancer/Server/Player.cs
+index 2a0fc0026..6039ddca0 100644
+--- a/src/LibreLancer/Server/Player.cs
++++ b/src/LibreLancer/Server/Player.cs
+@@ -77,9 +77,11 @@ namespace LibreLancer.Server
+         private const int TransferFreezing = 1;
+         private const int TransferFrozen = 2;
+         private const int TransferReleased = 3;
++        private const int ShutdownFrozen = 4;
+         private const int MaxTransferSnapshotBytes = 16 * 1024 * 1024;
+ 
+         public bool TransferInProgress => Volatile.Read(ref transferState) is TransferFreezing or TransferFrozen;
++        public bool IsShutdownFrozen => Volatile.Read(ref transferState) == ShutdownFrozen;
+ 
+         public (Guid TransferId, long CharacterId)? PendingTransfer
+         {
+@@ -1796,7 +1798,7 @@ namespace LibreLancer.Server
+         public void QueueGatewaySnapshotIfDue()
+         {
+             if (GatewayCharacterId <= 0 || string.IsNullOrWhiteSpace(GatewayLeaseToken) ||
+-                GatewayLeaseVersion <= 0 || Character == null || TransferInProgress)
++                GatewayLeaseVersion <= 0 || Character == null || TransferInProgress || IsShutdownFrozen)
+                 return;
+             var now = DateTime.UtcNow.Ticks;
+             var next = Volatile.Read(ref nextGatewaySnapshotUtcTicks);
+@@ -1819,6 +1821,61 @@ namespace LibreLancer.Server
+             });
+         }
+ 
++        public async Task<bool> QueueGatewayShutdownSnapshot()
++        {
++            if (GatewayCharacterId <= 0 || string.IsNullOrWhiteSpace(GatewayLeaseToken) ||
++                GatewayLeaseVersion <= 0 || Character == null || TransferInProgress)
++                return false;
++
++            await packetProcessingGate.WaitAsync().ConfigureAwait(false);
++            try
++            {
++                lock (transferSync)
++                {
++                    if (transferState != TransferActive || Character == null)
++                        return false;
++                    Volatile.Write(ref transferState, ShutdownFrozen);
++                }
++            }
++            finally { packetProcessingGate.Release(); }
++
++            var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
++            saveActions.Enqueue(() =>
++            {
++                if (Character == null || TransferInProgress)
++                {
++                    completion.TrySetResult(false);
++                    return;
++                }
++
++                try
++                {
++                    var save = CaptureGatewaySaveGame();
++                    _ = PersistGatewayShutdownSnapshotAsync(save, completion);
++                }
++                catch (Exception error)
++                {
++                    completion.TrySetException(error);
++                }
++            });
++            return await completion.Task.ConfigureAwait(false);
++        }
++
++        private async Task PersistGatewayShutdownSnapshotAsync(SaveGame save,
++            TaskCompletionSource<bool> completion)
++        {
++            try
++            {
++                await PersistGatewaySnapshotAsync(save).ConfigureAwait(false);
++                completion.TrySetResult(true);
++            }
++            catch (Exception error)
++            {
++                FLLog.Error("Gateway", $"Shutdown character snapshot failed ({error.GetType().Name}).");
++                completion.TrySetException(error);
++            }
++        }
++
+         private void ScheduleNextGatewaySnapshot()
+         {
+             var stagger = TimeSpan.FromSeconds(GatewayCharacterId % 60).Ticks;
