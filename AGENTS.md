@@ -11,6 +11,8 @@ Maintain the Lancer Nexus client fork while preserving compatibility with upstre
 - The active game instance remains authoritative until the MySQL-backed lease changes atomically at `Committed`; the client must handle rejection, expiry and recovery states.
 - Shared, versioned MessagePack contracts and capabilities belong in `Protocol`; Redis is never exposed to the client.
 
+For clustered LLServer character persistence, resolve the display name to the Gateway-owned character ID and acquire the Gateway lease after selection. Load a lease-fenced Gateway SaveGame snapshot when present; only bootstrap revision 1 from the local SQLite row when no Gateway snapshot exists. Keep the SQLite row ID separate from the Gateway ID. Persist explicit saves, one-minute live checkpoints and committed transfer snapshots using sequential Gateway snapshot revisions. Treat lease rejection, invalid snapshots and unavailable snapshot storage as fail-closed conditions. Character creation/deletion and an awaited shutdown checkpoint remain incomplete until separately implemented and verified.
+
 ## Rules
 
 - Keep the LibreLancer fork baseline untouched while authoring Nexus work. Store every Nexus client or engine modification only in a focused patch under `patches/`, register it in `patches/series`, and let the build patch applier apply it immediately before compilation.
