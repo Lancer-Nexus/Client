@@ -51,6 +51,15 @@ class OverlayVerificationTests(unittest.TestCase):
         (self.root / "engine.cs").write_bytes(b"new\r\n")
         self.assertEqual(0, self.verify())
 
+    def test_pinned_baseline_is_used_after_head_overlay_changes(self):
+        baseline = subprocess.run(
+            ["git", "-C", str(self.root), "rev-parse", "HEAD"], check=True,
+            text=True, stdout=subprocess.PIPE
+        ).stdout.strip()
+        (self.root / "patches/base-client-commit").write_text(baseline + "\n")
+        (self.root / "engine.cs").write_text("new\n")
+        self.assertEqual(0, self.verify())
+
     def test_later_patch_can_change_earlier_patch_output(self):
         (self.root / "patches/second.patch").write_text(
             "--- a/engine.cs\n+++ b/engine.cs\n@@ -1 +1 @@\n-new\n+final\n"

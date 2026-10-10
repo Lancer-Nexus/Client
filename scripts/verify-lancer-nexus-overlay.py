@@ -30,6 +30,15 @@ def patch_paths(patch):
 
 
 def verify(root):
+    def base_ref(target):
+        configured = root / "patches" / f"base-{target}-commit"
+        reference = configured.read_text().strip() if configured.is_file() else "HEAD"
+        repo = root if target == "client" else root / "Protocol"
+        resolved = run("git", "-C", str(repo), "rev-parse", "--verify", "--quiet", f"{reference}^{{commit}}")
+        if resolved.returncode:
+            raise ValueError(f"Patch baseline for {target} is unavailable: {reference}")
+        return reference
+
     targets = {}
     for line in (root / "patches/series").read_text().splitlines():
         if not line.strip() or line.lstrip().startswith("#"):
@@ -44,15 +53,16 @@ def verify(root):
     checked = 0
     for target, patches in targets.items():
         repo = root if target == "client" else root / "Protocol"
+        reference = base_ref(target)
         paths = set().union(*(paths for _, paths in patches))
         with tempfile.TemporaryDirectory(prefix="nexus-overlay-check-") as temporary:
             baseline = Path(temporary)
             for path in sorted(paths):
-                original = run("git", "-C", str(repo), "show", f"HEAD:{path}")
+                original = run("git", "-C", str(repo), "show", f"{reference}:{path}")
                 if original.returncode:
-                    absent = run("git", "-C", str(repo), "ls-tree", "HEAD", "--", path)
+                    absent = run("git", "-C", str(repo), "ls-tree", reference, "--", path)
                     if absent.returncode or absent.stdout:
-                        raise ValueError(f"Cannot read baseline: {target}/{path}")
+                        raise ValueError(f"Cannot read baseline {reference}: {target}/{path}")
                     continue
                 destination = baseline / path
                 destination.parent.mkdir(parents=True, exist_ok=True)

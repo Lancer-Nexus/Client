@@ -66,6 +66,9 @@ target_fingerprint() {
     {
         git -C "$target_root" rev-parse HEAD
         sha256sum "$series"
+        if [[ -f "$client_dir/patches/base-$target_name-commit" ]]; then
+            sha256sum "$client_dir/patches/base-$target_name-commit"
+        fi
         for ((index = 0; index < ${#patch_files[@]}; index++)); do
             [[ "${patch_targets[index]}" == "$target_name" ]] || continue
             sha256sum "${patch_files[index]}"

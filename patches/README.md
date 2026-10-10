@@ -1,6 +1,6 @@
 # Client patch groups
 
-`series` applies ordered patches against the committed LibreLancer baseline.
+`series` applies ordered client patches against the commit pinned in `base-client-commit`. Advance that pin when rebasing the patch stack onto a new upstream base. Shared Protocol contracts stay in the Protocol repository and are not duplicated as client patches.
 Patches `2000`–`2005` establish the main functional overlays:
 
 1. `2000-gateway-player-transfer.patch` — Gateway login, character transfer,
@@ -19,4 +19,5 @@ Patches from `2006` onward carry upstream adoptions, issue fixes, and regression
 coverage as separate reviewable changes. Keep them in `series` order; later
 patches may depend on earlier ones.
 Use `python3 scripts/verify-lancer-nexus-overlay.py` to compare the applied
-workspace with a clean reconstruction of the series.
+workspace with a clean reconstruction of the series. CI fetches full history so it can read
+the pinned baseline commit.
