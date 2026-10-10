@@ -1,0 +1,545 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index d096bd8e7..3f4504d77 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -11,6 +11,8 @@ Maintain the Lancer Nexus client fork while preserving compatibility with upstre
+ - The active game instance remains authoritative until the MySQL-backed lease changes atomically at `Committed`; the client must handle rejection, expiry and recovery states.
+ - Shared, versioned MessagePack contracts and capabilities belong in `Protocol`; Redis is never exposed to the client.
+ 
++For clustered LLServer character persistence, register the new display name and initial SaveGame with Gateway under the active account/session before publishing it to the character menu; roll the local compatibility row back on rejection. Read the account roster from Gateway and map Gateway IDs to separate local SQLite cache IDs. Rebuild missing cache rows only from a validated Gateway snapshot; if both a snapshot and local row are absent, omit that legacy character rather than inventing state. Resolve the Gateway-owned character ID and acquire its lease after selection. Load a lease-fenced Gateway SaveGame snapshot when present; only bootstrap revision 1 from the matching local SQLite row when no Gateway snapshot exists. Persist explicit saves, one-minute live checkpoints and committed transfer snapshots using sequential Gateway snapshot revisions. Delete through Gateway's history-preserving tombstone before removing the local cache row. Treat lease rejection, invalid snapshots and unavailable snapshot storage as fail-closed conditions. An awaited shutdown checkpoint remains open until separately implemented and verified.
++
+ ## Rules
+ 
+ - Keep the LibreLancer fork baseline untouched while authoring Nexus work. Store every Nexus client or engine modification only in a focused patch under `patches/`, register it in `patches/series`, and let the build patch applier apply it immediately before compilation.
+@@ -37,6 +39,7 @@ Maintain the Lancer Nexus client fork while preserving compatibility with upstre
+ - The primary automated test project is `src/LibreLancer.Tests/LibreLancer.Tests.csproj`. Run the relevant test subset after client changes; use the full solution build when the change crosses shared engine or project boundaries.
+ - Native components are configured through the existing `CMakeLists.txt` and dependencies checked by `scripts/depcheck_unix`; do not replace this with a service-style `dotnet restore`-only workflow.
+ - The current project files target `net10.0`. Keep cluster functionality optional and isolated behind existing configuration/capability boundaries while upstream synchronization remains possible.
++- LLServer's managed FLHook compatibility adapter is optional. Build it only with `-p:EnableFlHookCompat=true`; its runtime stays disabled unless `FlHookCompatEnabled` is explicitly set in a clustered server profile. Keep all related LibreLancer changes in numbered patches under `patches/series`.
+ - `src/LibreLancer/LibreLancer.csproj` references the shared `Protocol` submodule for the optional Gateway version handshake; initialize that submodule before building the client.
+ 
+ ## Working-model escalation
+@@ -52,7 +55,7 @@ Permission changes use typed Gateway requests and are authorized centrally by Ad
+ 
+ Every player-facing server command that is currently guarded by `Character.Admin` must receive its own `command.<name>` permission and be checked fail-closed through Gateway with the account, session, character lease, instance and system context before execution. Keep the command-to-permission catalog in [Administration's permission guide](../Administration/docs/permission-system.md#permissions-fuer-bestehende-librelancer-adminbefehle). Do not silently retain the legacy flag as a clustered fallback; standalone OP fallback must remain explicitly isolated.
+ 
+-See [the Administration permission system guide](../Administration/docs/permission-system.md) for the command syntax, local operator boundaries, and the fact that LLServer revision-sync startup is still pending.
++Cluster builds opt into LLServer permission revision synchronization with `-p:EnableClusterIntegration=true`. A clustered instance requires `LANCER_NEXUS_GAME_INSTANCE_KEY` and `LANCER_NEXUS_PERMISSION_REDIS_ENDPOINT=host:port`; runtime status stays not-ready until the Redis subscription is live and the Gateway SQL snapshot is activated and acknowledged. Standalone builds keep cluster integration disabled. See [the Administration permission system guide](../Administration/docs/permission-system.md) for the command syntax and local operator boundaries.
+ 
+ 1. Identify whether the change belongs in the client or in Gateway/Protocol/Cluster.
+ 2. Keep the smallest possible patch against the upstream fork.
+diff --git a/README.md b/README.md
+index e398a67f2..745ffe125 100644
+--- a/README.md
++++ b/README.md
+@@ -99,7 +99,7 @@ For a deployable Cluster LLServer package, use `./build.sh --nexus-cluster-serve
+ 
+ Cluster permission revision synchronization is opt-in at build time with `-p:EnableClusterIntegration=true`. Cluster instances require the per-instance `LANCER_NEXUS_GAME_INSTANCE_KEY` and the internal Redis `LANCER_NEXUS_PERMISSION_REDIS_ENDPOINT=host:port`. LLServer reports `IsReady=false` until it has subscribed to Redis, loaded and activated the current Gateway SQL permission snapshot, and received its revision ACK. Redis carries invalidations only; a disconnected listener makes the instance unready. Standalone builds remain independent of Cluster.
+ 
+-Clustered character creation registers the exact display name with Gateway under the active account/session after creating the local compatibility row; a Gateway conflict rolls that local row back. Character deletion is disabled in cluster mode until a Gateway-owned deletion operation can preserve lease, transfer and snapshot history. After selection, LLServer acquires the fenced lease and loads the latest Gateway SaveGame snapshot. If no snapshot exists yet, it imports the matching local SQLite row once as revision 1. LLServer checkpoints the live SaveGame to Gateway every minute, persists explicit Freelancer saves, and writes a transferred SaveGame under the target lease fence after transfer commit. Gateway validates each read and write against the active instance, session, lease token and version. Durable persistence on an unclean process stop still needs a verified shutdown hook; do not treat the local SQLite bootstrap as the cluster persistence authority.
++Clustered character creation registers the exact display name and initial SaveGame with Gateway under the active account/session; a Gateway rejection rolls back the local compatibility row. LLServer loads the authoritative Gateway roster, reconstructs missing local cache rows only from validated Gateway snapshots, and deletes through Gateway's history-preserving tombstone before removing a local row. A legacy character without a Gateway snapshot is available only on instances that still have its local SQLite row; missing legacy state is omitted instead of replaced with a default pilot. After selection, LLServer acquires the fenced lease and loads the latest Gateway SaveGame snapshot. If no snapshot exists yet, it imports the matching local SQLite row once as revision 1. LLServer checkpoints the live SaveGame to Gateway every minute, persists explicit Freelancer saves, and writes a transferred SaveGame under the target lease fence after transfer commit. Gateway validates each read and write against the active instance, session, lease token and version. Durable persistence on an unclean process stop still needs a verified shutdown hook; do not treat the local SQLite bootstrap as the cluster persistence authority.
+ 
+ ## NPC retirement recovery infrastructure
+ 
+diff --git a/patches/series b/patches/series
+index d132a92d6..f1781ad75 100644
+--- a/patches/series
++++ b/patches/series
+@@ -1,4 +1,4 @@
+-# Functional overlays, each generated against the committed LibreLancer baseline.
++# Functional overlays, applied to patches/base-client-commit.
+ client 2000-gateway-player-transfer.patch
+ client 2001-npc-population-lifecycle.patch
+ client 2002-server-operations-permissions.patch
+@@ -56,7 +56,6 @@ client 2050-handle-empty-ale-curve-animations.patch
+ 
+ client 2051-restore-dust-field-radius-clipping.patch
+ client 2052-finite-fxperp-direction.patch
+-client 2053-reparent-player-ship-on-room-switch.patch
+ client 2054-sysfolder-case-insensitive-path-resolution.patch
+ client 2055-parse-vanilla-fuse-and-explosion-entries.patch
+ client 2056-register-generic-vanilla-hardpoints.patch
+@@ -90,9 +89,7 @@ client 2079-rebuild-empty-shader-bundles.patch
+ 
+ client 2080-attach-thn-to-character-bones.patch
+ client 2081-preserve-thn-path-animation-end-transform.patch
+-client 2082-preserve-thn-attachment-end-transform.patch
+ client 2083-follow-intro-engine-particle-orientation.patch
+-client 2084-fix-thn-relative-orientation-composition.patch
+ client 2085-test-thn-end-transform-detachment.patch
+ client 2086-lanceredit-load-data-argument.patch
+ 
+@@ -118,10 +115,18 @@ client 2102-nap-updater-serialization-docs.patch
+ client 2103-nap-audio-audit-and-stream-read.patch
+ client 2104-lanceredit-nap-workspace-and-tools.patch
+ client 2106-nap-deferred-file-dialogs.patch
+-client 2108-nap-windows-library-ci.patch
+ client 2113-native-file-dialog-buffer-lifetime.patch
+ client 2115-editor-nap-pack-unpack-roundtrip-test.patch
+ client 2117-interfaceedit-nap-mount.patch
+ client 2118-interfaceedit-nap-status-ui.patch
+ client 2119-interfaceedit-nap-error-reporting.patch
+ client 2120-test-editor-nap-recovery-paths.patch
++client 2121-align-nap-editor-overlay.patch
++client 2122-upstream-api-compat-build.patch
++client 2123-flhookcompat-llserver-events.patch
++client 2124-cluster-permission-readiness.patch
++client 2125-build-cluster-server-option.patch
++client 2126-flhookcompat-cluster-event-transport.patch
++client 2127-flhook-durable-before-plugin-notifications.patch
++client 2128-gateway-character-lease-acquisition.patch
++client 2129-gateway-authoritative-character-roster.patch
+diff --git a/src/LibreLancer.Tests/GatewayCharacterLeaseClientTests.cs b/src/LibreLancer.Tests/GatewayCharacterLeaseClientTests.cs
+index 42237a53d..a25532c20 100644
+--- a/src/LibreLancer.Tests/GatewayCharacterLeaseClientTests.cs
++++ b/src/LibreLancer.Tests/GatewayCharacterLeaseClientTests.cs
+@@ -121,7 +121,69 @@ public sealed class GatewayCharacterLeaseClientTests
+         Assert.Equal("/api/v1/game/characters/snapshot/write", handler.Paths[^1]);
+     }
+ 
+-    private sealed class Handler(bool mismatchCorrelation = false, bool rejectIdentity = false) : HttpMessageHandler
++    [Fact]
++    public async Task LoadsAuthoritativeRosterBootstrapsNewCharacterAndDeletesByGatewayId()
++    {
++        var handler = new Handler();
++        using var http = new HttpClient(handler);
++        var client = new GatewayCharacterLeaseClient(new Uri("https://gateway.test"), new string('k', 32), http);
++        var account = Guid.NewGuid();
++        var session = Guid.NewGuid();
++
++        var roster = await client.ListCharactersAsync(account, session);
++        var characterId = await client.RegisterNewCharacterAsync(account, session, "Pilot One", [1, 2, 3]);
++        var preview = await client.ReadCharacterPreviewAsync(account, session, characterId);
++        await client.DeleteCharacterAsync(account, session, characterId);
++
++        Assert.Equal(918, roster[0].CharacterId);
++        Assert.Equal("Pilot One", roster[0].DisplayName);
++        Assert.Equal(918, characterId);
++        Assert.Equal(new byte[] { 5, 6, 7 }, preview!.Payload);
++        Assert.Equal(918, handler.BootstrapRequest!.CharacterId);
++        Assert.Equal(new byte[] { 1, 2, 3 }, handler.BootstrapRequest.Payload);
++        Assert.Equal(918, handler.PreviewRequest!.CharacterId);
++        Assert.Equal(918, handler.DeleteRequest!.CharacterId);
++        Assert.Equal(new[]
++        {
++            "/api/v1/game/characters/list",
++            "/api/v1/game/characters/resolve-identity",
++            "/api/v1/game/characters/bootstrap",
++            "/api/v1/game/characters/snapshot/preview",
++            "/api/v1/game/characters/delete"
++        }, handler.Paths);
++        Assert.All(handler.Authorizations, value => Assert.Equal("Bearer " + new string('k', 32), value));
++    }
++
++    [Fact]
++    public async Task RejectsDeletionWhenGatewayReportsActiveOwnership()
++    {
++        var handler = new Handler(rejectDeletion: true);
++        using var http = new HttpClient(handler);
++        var client = new GatewayCharacterLeaseClient(new Uri("https://gateway.test"), new string('k', 32), http);
++
++        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
++            client.DeleteCharacterAsync(Guid.NewGuid(), Guid.NewGuid(), 918));
++
++        Assert.Contains("character_in_use", error.Message);
++        Assert.Single(handler.Paths);
++        Assert.Equal(918, handler.DeleteRequest!.CharacterId);
++    }
++
++    [Fact]
++    public async Task AllowsNoSnapshotPreviewOnlyForACharacterWithoutLegacySnapshot()
++    {
++        var handler = new Handler(noPreview: true);
++        using var http = new HttpClient(handler);
++        var client = new GatewayCharacterLeaseClient(new Uri("https://gateway.test"), new string('k', 32), http);
++
++        var preview = await client.ReadCharacterPreviewAsync(Guid.NewGuid(), Guid.NewGuid(), 918);
++
++        Assert.Null(preview);
++        Assert.Single(handler.Paths);
++    }
++
++    private sealed class Handler(bool mismatchCorrelation = false, bool rejectIdentity = false,
++        bool rejectDeletion = false, bool noPreview = false) : HttpMessageHandler
+     {
+         public List<string> Paths { get; } = [];
+         public List<string?> Authorizations { get; } = [];
+@@ -129,12 +191,72 @@ public sealed class GatewayCharacterLeaseClientTests
+         public CharacterLeaseRenewRequestV1? RenewRequest { get; private set; }
+         public CharacterSaveSnapshotReadRequestV1? SnapshotReadRequest { get; private set; }
+         public CharacterSaveSnapshotWriteRequestV1? SnapshotWriteRequest { get; private set; }
++        public CharacterRosterRequestV1? RosterRequest { get; private set; }
++        public CharacterBootstrapRequestV1? BootstrapRequest { get; private set; }
++        public CharacterSnapshotPreviewRequestV1? PreviewRequest { get; private set; }
++        public CharacterDeletionRequestV1? DeleteRequest { get; private set; }
+ 
+         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,
+             CancellationToken cancellationToken)
+         {
+             Paths.Add(request.RequestUri!.AbsolutePath);
+             Authorizations.Add(request.Headers.Authorization?.ToString());
++            if (request.RequestUri.AbsolutePath.EndsWith("characters/list", StringComparison.Ordinal))
++            {
++                RosterRequest = await request.Content!.ReadFromJsonAsync<CharacterRosterRequestV1>(
++                    cancellationToken: cancellationToken);
++                return new HttpResponseMessage(HttpStatusCode.OK)
++                {
++                    Content = JsonContent.Create(new CharacterRosterResultV1
++                    {
++                        CorrelationId = RosterRequest!.CorrelationId, Accepted = true, ReasonCode = "listed",
++                        Characters = [new CharacterRosterEntryV1 { CharacterId = 918, DisplayName = "Pilot One" }]
++                    })
++                };
++            }
++
++            if (request.RequestUri.AbsolutePath.EndsWith("characters/bootstrap", StringComparison.Ordinal))
++            {
++                BootstrapRequest = await request.Content!.ReadFromJsonAsync<CharacterBootstrapRequestV1>(
++                    cancellationToken: cancellationToken);
++                return new HttpResponseMessage(HttpStatusCode.OK)
++                {
++                    Content = JsonContent.Create(new CharacterBootstrapResultV1
++                    {
++                        CorrelationId = BootstrapRequest!.CorrelationId, Accepted = true, ReasonCode = "stored"
++                    })
++                };
++            }
++
++            if (request.RequestUri.AbsolutePath.EndsWith("snapshot/preview", StringComparison.Ordinal))
++            {
++                PreviewRequest = await request.Content!.ReadFromJsonAsync<CharacterSnapshotPreviewRequestV1>(
++                    cancellationToken: cancellationToken);
++                if (noPreview) return new HttpResponseMessage(HttpStatusCode.NotFound);
++                return new HttpResponseMessage(HttpStatusCode.OK)
++                {
++                    Content = JsonContent.Create(new CharacterSaveSnapshotV1
++                    {
++                        CorrelationId = PreviewRequest!.CorrelationId, CharacterId = PreviewRequest.CharacterId,
++                        LeaseVersion = 1, Revision = 1, Payload = [5, 6, 7]
++                    })
++                };
++            }
++
++            if (request.RequestUri.AbsolutePath.EndsWith("characters/delete", StringComparison.Ordinal))
++            {
++                DeleteRequest = await request.Content!.ReadFromJsonAsync<CharacterDeletionRequestV1>(
++                    cancellationToken: cancellationToken);
++                return new HttpResponseMessage(rejectDeletion ? HttpStatusCode.Conflict : HttpStatusCode.OK)
++                {
++                    Content = JsonContent.Create(new CharacterDeletionResultV1
++                    {
++                        CorrelationId = DeleteRequest!.CorrelationId, Accepted = !rejectDeletion,
++                        ReasonCode = rejectDeletion ? "character_in_use" : "deleted"
++                    })
++                };
++            }
++
+             if (request.RequestUri.AbsolutePath.EndsWith("resolve-identity", StringComparison.Ordinal))
+             {
+                 var body = await request.Content!.ReadFromJsonAsync<CharacterIdentityResolveRequestV1>(
+diff --git a/src/LibreLancer/Server/GameServer.cs b/src/LibreLancer/Server/GameServer.cs
+index 501bf7728..bfdc72f99 100644
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -1718,6 +1718,25 @@ namespace LibreLancer.Server
+                 cancellationToken);
+         }
+ 
++        public Task<long> RegisterNewCharacterAsync(Guid accountId, Guid sessionId, string displayName,
++            byte[] initialSaveGame, CancellationToken cancellationToken = default) =>
++            GetGatewayCharacterLeaseClient().RegisterNewCharacterAsync(accountId, sessionId, displayName,
++                initialSaveGame, cancellationToken);
++
++        public Task<CharacterRosterEntryV1[]> ListGatewayCharactersAsync(Guid accountId, Guid sessionId,
++            CancellationToken cancellationToken = default) =>
++            GetGatewayCharacterLeaseClient().ListCharactersAsync(accountId, sessionId, cancellationToken);
++
++        public Task<CharacterSaveSnapshotV1?> ReadCharacterPreviewAsync(Guid accountId, Guid sessionId,
++            long characterId, CancellationToken cancellationToken = default) =>
++            GetGatewayCharacterLeaseClient().ReadCharacterPreviewAsync(accountId, sessionId, characterId,
++                cancellationToken);
++
++        public Task DeleteGatewayCharacterAsync(Guid accountId, Guid sessionId, long characterId,
++            CancellationToken cancellationToken = default) =>
++            GetGatewayCharacterLeaseClient().DeleteCharacterAsync(accountId, sessionId, characterId,
++                cancellationToken);
++
+         public Task<GatewayCharacterLease> RenewCharacterLeaseAsync(long characterId, string leaseToken,
+             long leaseVersion, CancellationToken cancellationToken = default)
+         {
+diff --git a/src/LibreLancer/Server/GatewayCharacterLeaseClient.cs b/src/LibreLancer/Server/GatewayCharacterLeaseClient.cs
+index dedc5da51..2cd0a7315 100644
+--- a/src/LibreLancer/Server/GatewayCharacterLeaseClient.cs
++++ b/src/LibreLancer/Server/GatewayCharacterLeaseClient.cs
+@@ -80,6 +80,103 @@ public sealed class GatewayCharacterLeaseClient
+         return identity.CharacterId!.Value;
+     }
+ 
++    public async Task<long> RegisterNewCharacterAsync(Guid accountId, Guid sessionId, string displayName,
++        byte[] initialSaveGame, CancellationToken cancellationToken = default)
++    {
++        ArgumentNullException.ThrowIfNull(initialSaveGame);
++        var characterId = await ResolveCharacterIdentityAsync(accountId, sessionId, displayName, cancellationToken)
++            .ConfigureAwait(false);
++        var requestBody = new CharacterBootstrapRequestV1
++        {
++            CorrelationId = Guid.NewGuid(), AccountId = accountId, SessionId = sessionId,
++            CharacterId = characterId, Payload = initialSaveGame
++        };
++        if (!requestBody.IsValid())
++            throw new ArgumentException("Character bootstrap request is invalid.", nameof(initialSaveGame));
++        using var message = new HttpRequestMessage(HttpMethod.Post,
++            new Uri(gateway, "api/v1/game/characters/bootstrap"));
++        message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", instanceKey);
++        message.Content = JsonContent.Create(requestBody);
++        using var response = await http.SendAsync(message, cancellationToken).ConfigureAwait(false);
++        var result = await response.Content.ReadFromJsonAsync<CharacterBootstrapResultV1>(
++            cancellationToken: cancellationToken).ConfigureAwait(false);
++        if (result is null || !result.IsValid() || result.CorrelationId != requestBody.CorrelationId)
++            throw new InvalidDataException("Gateway character bootstrap response is invalid.");
++        if (!response.IsSuccessStatusCode || !result.Accepted)
++            throw new InvalidOperationException($"Gateway character bootstrap rejected: {result.ReasonCode}.");
++        return characterId;
++    }
++
++    public async Task<CharacterRosterEntryV1[]> ListCharactersAsync(Guid accountId, Guid sessionId,
++        CancellationToken cancellationToken = default)
++    {
++        var requestBody = new CharacterRosterRequestV1
++        {
++            CorrelationId = Guid.NewGuid(), AccountId = accountId, SessionId = sessionId
++        };
++        if (!requestBody.IsValid())
++            throw new ArgumentException("Character roster request is invalid.");
++        using var message = new HttpRequestMessage(HttpMethod.Post,
++            new Uri(gateway, "api/v1/game/characters/list"));
++        message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", instanceKey);
++        message.Content = JsonContent.Create(requestBody);
++        using var response = await http.SendAsync(message, cancellationToken).ConfigureAwait(false);
++        if (!response.IsSuccessStatusCode)
++            throw new HttpRequestException($"Gateway character roster request failed with HTTP {(int)response.StatusCode}.");
++        var roster = await response.Content.ReadFromJsonAsync<CharacterRosterResultV1>(
++            cancellationToken: cancellationToken).ConfigureAwait(false);
++        if (roster is null || !roster.IsValid() || roster.CorrelationId != requestBody.CorrelationId || !roster.Accepted)
++            throw new InvalidDataException("Gateway character roster response is invalid or rejected.");
++        return roster.Characters;
++    }
++
++    public async Task<CharacterSaveSnapshotV1?> ReadCharacterPreviewAsync(Guid accountId, Guid sessionId,
++        long characterId, CancellationToken cancellationToken = default)
++    {
++        var requestBody = new CharacterSnapshotPreviewRequestV1
++        {
++            CorrelationId = Guid.NewGuid(), AccountId = accountId, SessionId = sessionId, CharacterId = characterId
++        };
++        if (!requestBody.IsValid())
++            throw new ArgumentException("Character snapshot preview request is invalid.");
++        using var message = new HttpRequestMessage(HttpMethod.Post,
++            new Uri(gateway, "api/v1/game/characters/snapshot/preview"));
++        message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", instanceKey);
++        message.Content = JsonContent.Create(requestBody);
++        using var response = await http.SendAsync(message, cancellationToken).ConfigureAwait(false);
++        if (response.StatusCode == System.Net.HttpStatusCode.NotFound) return null;
++        if (!response.IsSuccessStatusCode)
++            throw new HttpRequestException($"Gateway character preview request failed with HTTP {(int)response.StatusCode}.");
++        var snapshot = await response.Content.ReadFromJsonAsync<CharacterSaveSnapshotV1>(
++            cancellationToken: cancellationToken).ConfigureAwait(false);
++        if (snapshot is null || !snapshot.IsValid() || snapshot.CorrelationId != requestBody.CorrelationId ||
++            snapshot.CharacterId != characterId)
++            throw new InvalidDataException("Gateway character preview response is invalid.");
++        return snapshot;
++    }
++
++    public async Task DeleteCharacterAsync(Guid accountId, Guid sessionId, long characterId,
++        CancellationToken cancellationToken = default)
++    {
++        var requestBody = new CharacterDeletionRequestV1
++        {
++            CorrelationId = Guid.NewGuid(), AccountId = accountId, SessionId = sessionId, CharacterId = characterId
++        };
++        if (!requestBody.IsValid())
++            throw new ArgumentException("Character deletion request is invalid.");
++        using var message = new HttpRequestMessage(HttpMethod.Post,
++            new Uri(gateway, "api/v1/game/characters/delete"));
++        message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", instanceKey);
++        message.Content = JsonContent.Create(requestBody);
++        using var response = await http.SendAsync(message, cancellationToken).ConfigureAwait(false);
++        var result = await response.Content.ReadFromJsonAsync<CharacterDeletionResultV1>(
++            cancellationToken: cancellationToken).ConfigureAwait(false);
++        if (result is null || !result.IsValid() || result.CorrelationId != requestBody.CorrelationId)
++            throw new InvalidDataException("Gateway character deletion response is invalid.");
++        if (!response.IsSuccessStatusCode || !result.Accepted)
++            throw new InvalidOperationException($"Gateway character deletion rejected: {result.ReasonCode}.");
++    }
++
+     private async Task<CharacterIdentityResolveResultV1> ResolveIdentityAsync(Guid accountId, Guid sessionId,
+         string displayName, CancellationToken cancellationToken)
+     {
+diff --git a/src/LibreLancer/Server/Player.cs b/src/LibreLancer/Server/Player.cs
+index 65672058f..2a0fc0026 100644
+--- a/src/LibreLancer/Server/Player.cs
++++ b/src/LibreLancer/Server/Player.cs
+@@ -125,6 +125,7 @@ namespace LibreLancer.Server
+         public long GatewayLeaseVersion { get; internal set; }
+         public DateTimeOffset GatewayLeaseValidUntilUtc { get; internal set; }
+         public long StableCharacterId => GatewayCharacterId > 0 ? GatewayCharacterId : Character?.ID ?? 0;
++        private readonly ConcurrentDictionary<long, long> gatewayCharacterIds = new();
+         private CancellationTokenSource? gatewayLeaseRenewalCancellation;
+         private Task? gatewayLeaseRenewalTask;
+         private readonly SemaphoreSlim gatewaySnapshotWriteGate = new(1, 1);
+@@ -1302,6 +1303,47 @@ namespace LibreLancer.Server
+                 throw new InvalidOperationException("Mission NPC identity allocation is still pending.");
+         }
+ 
++        private async Task LoadGatewayCharacterRosterAsync()
++        {
++            var localByName = CharacterList.ToDictionary(character => character.Name, StringComparer.Ordinal);
++            var gatewayRoster = await Game.ListGatewayCharactersAsync(playerGuid, GatewaySessionId);
++            var reconciled = new List<SelectableCharacter>(gatewayRoster.Length);
++            var identityMap = new Dictionary<long, long>();
++            foreach (var entry in gatewayRoster)
++            {
++                localByName.TryGetValue(entry.DisplayName, out var local);
++                SelectableCharacter selectable;
++                if (local is not null)
++                {
++                    selectable = local;
++                }
++                else
++                {
++                    var preview = await Game.ReadCharacterPreviewAsync(playerGuid, GatewaySessionId,
++                        entry.CharacterId);
++                    if (preview is null)
++                    {
++                        FLLog.Warning("Gateway", $"Character '{entry.DisplayName}' has no local cache or Gateway snapshot and was omitted from this instance's roster.");
++                        continue;
++                    }
++                    var save = SaveGame.FromString($"gateway-preview-{entry.CharacterId}.fl",
++                        new UTF8Encoding(false, true).GetString(preview.Payload));
++                    if (save.Player?.Name is not { } storedName ||
++                        !storedName.Equals(entry.DisplayName, StringComparison.Ordinal))
++                        throw new InvalidDataException("Gateway character preview name does not match its roster identity.");
++                    var localId = await Game.Database.EnsureGatewayCharacterCacheAsync(playerGuid,
++                        entry.DisplayName, db => NetCharacter.SaveToDbCharacter(Game, save, db));
++                    selectable = NetCharacter.OpenSaveGame(Game, save, localId).ToSelectable();
++                }
++                reconciled.Add(selectable);
++                identityMap[selectable.Id] = entry.CharacterId;
++            }
++            CharacterList = reconciled;
++            gatewayCharacterIds.Clear();
++            foreach (var pair in identityMap)
++                gatewayCharacterIds[pair.Key] = pair.Value;
++        }
++
+         public async Task OnLoggedIn()
+         {
+             try
+@@ -1324,6 +1366,20 @@ namespace LibreLancer.Server
+                     return;
+                 }
+ 
++                if (Game.ClusterTransfersEnabled)
++                {
++                    try
++                    {
++                        await LoadGatewayCharacterRosterAsync();
++                    }
++                    catch (Exception error)
++                    {
++                        FLLog.Warning("Gateway", $"Authoritative character roster load failed ({error.GetType().Name}).");
++                        Client.Disconnect(DisconnectReason.LoginError);
++                        return;
++                    }
++                }
++
+                 Client.SendPacket(new LoginSuccessPacket(), PacketDeliveryMethod.ReliableOrdered);
+                 packetQueueTask = Task.Factory.StartNew(ProcessPacketQueue, TaskCreationOptions.LongRunning);
+                 if (transferLoginCharacterId is long gatewayCharacterId)
+@@ -1856,12 +1912,26 @@ namespace LibreLancer.Server
+         {
+             if (index < 0 || index >= CharacterList.Count)
+                 return false;
++            var sc = CharacterList[index];
+             if (Game.ClusterTransfersEnabled)
+             {
+-                FLLog.Warning("Gateway", "Character deletion is disabled until Gateway deletion is implemented.");
+-                return false;
++                if (!gatewayCharacterIds.TryGetValue(sc.Id, out var gatewayCharacterId))
++                    return false;
++                try
++                {
++                    await Game.DeleteGatewayCharacterAsync(playerGuid, GatewaySessionId, gatewayCharacterId);
++                }
++                catch (Exception error)
++                {
++                    FLLog.Warning("Gateway", $"Character deletion was rejected ({error.GetType().Name}).");
++                    return false;
++                }
++                if (!await Game.Database.DeleteCharacterAsync(sc.Id))
++                    FLLog.Warning("Gateway", "Gateway deleted the character, but its local compatibility row could not be removed.");
++                gatewayCharacterIds.TryRemove(sc.Id, out _);
++                CharacterList.Remove(sc);
++                return true;
+             }
+-            var sc = CharacterList[index];
+             if (!await Game.Database.DeleteCharacterAsync(sc.Id)) return false;
+             CharacterList.Remove(sc);
+             return true;
+@@ -1872,13 +1942,19 @@ namespace LibreLancer.Server
+             if (!Game.Database.NameInUse(name))
+             {
+                 FLLog.Info("Player", $"New char: {name}");
++                var newCharacter = Game.NewCharacter(name, index);
+                 long id = await Game.Database.AddCharacter(playerGuid,
+-                    (db) => { NetCharacter.SaveToDbCharacter(Game, Game.NewCharacter(name, index), db); });
++                    (db) => { NetCharacter.SaveToDbCharacter(Game, newCharacter, db); });
+                 if (Game.ClusterTransfersEnabled)
+                 {
+                     try
+                     {
+-                        await Game.ResolveCharacterIdentityAsync(playerGuid, GatewaySessionId, name);
++                        using var initialSave = new MemoryStream();
++                        IniWriter.WriteIni(initialSave, newCharacter.ToIni());
++                        var initialPayload = initialSave.ToArray();
++                        var gatewayId = await Game.RegisterNewCharacterAsync(playerGuid, GatewaySessionId, name,
++                            initialPayload);
++                        gatewayCharacterIds[id] = gatewayId;
+                     }
+                     catch (Exception error)
+                     {
+diff --git a/src/LibreLancer/Server/ServerDatabase.cs b/src/LibreLancer/Server/ServerDatabase.cs
+index fdef16484..d7c064a80 100644
+--- a/src/LibreLancer/Server/ServerDatabase.cs
++++ b/src/LibreLancer/Server/ServerDatabase.cs
+@@ -339,6 +339,30 @@ namespace LibreLancer.Server
+             });
+         }
+ 
++        public Task<long> EnsureGatewayCharacterCacheAsync(Guid playerGuid, string characterName,
++            Action<Character> fillCharacter) =>
++            Run(async () =>
++            {
++                await using var ctx = CreateDbContext();
++                var existingId = await ctx.Characters
++                    .Where(character => character.Account.AccountIdentifier == playerGuid &&
++                                        character.Name == characterName)
++                    .Select(character => (long?)character.Id)
++                    .FirstOrDefaultAsync();
++                if (existingId.HasValue) return existingId.Value;
++                var account = await ctx.Accounts.FirstAsync(value => value.AccountIdentifier == playerGuid);
++                var character = new Character
++                {
++                    Account = account,
++                    UpdateDate = DateTime.UtcNow,
++                    CreationDate = DateTime.UtcNow
++                };
++                fillCharacter(character);
++                ctx.Characters.Add(character);
++                await ctx.SaveChangesAsync();
++                return character.Id;
++            });
++
+         public Task<TransferSnapshotImportRecord?> GetTransferSnapshotImportAsync(Guid transferId) =>
+             Run(async () =>
+             {
