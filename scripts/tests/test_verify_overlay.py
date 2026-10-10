@@ -98,6 +98,21 @@ class OverlayVerificationTests(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr.decode())
         self.assertTrue((self.root / ".git/lancer-nexus-patches-state").is_file())
 
+    def test_normal_applier_records_a_complete_existing_overlay(self):
+        applier = self.copy_applier()
+        (self.root / "engine.cs").write_text("new\n")
+        result = subprocess.run(["bash", str(applier)], capture_output=True, text=True)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("Recorded verified complete overlay state", result.stdout)
+        self.assertTrue((self.root / ".git/lancer-nexus-patches-state").is_file())
+
+    def test_normal_applier_still_applies_patches_to_the_baseline(self):
+        applier = self.copy_applier()
+        result = subprocess.run(["bash", str(applier)], capture_output=True, text=True)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("new\n", (self.root / "engine.cs").read_text())
+        self.assertIn("Applied change.patch", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

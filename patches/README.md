@@ -20,4 +20,4 @@ coverage as separate reviewable changes. Keep them in `series` order; later
 patches may depend on earlier ones.
 Use `python3 scripts/verify-lancer-nexus-overlay.py` to compare the applied
 workspace with a clean reconstruction of the series. CI fetches full history so it can read
-the pinned baseline commit.
+the pinned baseline commit. The patch applier records a verified complete overlay on first use; on a baseline checkout it applies the series in order.

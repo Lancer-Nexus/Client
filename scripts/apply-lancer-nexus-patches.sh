@@ -105,6 +105,20 @@ for target in "${targets[@]}"; do
     pending_targets+=("$target")
 done
 
+if [[ "$record_current" == false && ${#pending_targets[@]} -gt 0 ]] &&
+    python3 "$client_dir/scripts/verify-lancer-nexus-overlay.py" >/dev/null 2>&1; then
+    for target in "${pending_targets[@]}"; do
+        case "$target" in
+            client) target_dir="$client_dir" ;;
+            protocol) target_dir="$client_dir/Protocol" ;;
+        esac
+        marker="$(git -C "$target_dir" rev-parse --absolute-git-dir)/lancer-nexus-patches-state"
+        target_fingerprint "$target" "$target_dir" > "$marker"
+        printf 'Recorded verified complete overlay state for %s.\n' "$target"
+    done
+    exit 0
+fi
+
 if [[ "$record_current" == true ]]; then
     exit 0
 fi
