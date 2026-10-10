@@ -19,10 +19,10 @@ index 697595e40..edc68026c 100644
                  var changed = serverEvent.GetPayload<PlayerSystemChangedEventPayload>();
 diff --git a/src/LibreLancer.Tests/GatewayCharacterLeaseClientTests.cs b/src/LibreLancer.Tests/GatewayCharacterLeaseClientTests.cs
 new file mode 100644
-index 000000000..11508ffd7
+index 000000000..b6af0824e
 --- /dev/null
 +++ b/src/LibreLancer.Tests/GatewayCharacterLeaseClientTests.cs
-@@ -0,0 +1,123 @@
+@@ -0,0 +1,177 @@
 +using System;
 +using System.Collections.Generic;
 +using System.IO;
@@ -93,12 +93,38 @@ index 000000000..11508ffd7
 +        Assert.Single(handler.Paths);
 +    }
 +
++    [Fact]
++    public async Task ReadsAndWritesTheFencedSaveSnapshot()
++    {
++        var handler = new Handler();
++        using var http = new HttpClient(handler);
++        var client = new GatewayCharacterLeaseClient(new Uri("https://gateway.test"), new string('k', 32), http);
++        var lease = await client.ResolveAndAcquireAsync(Guid.NewGuid(), Guid.NewGuid(), "Pilot One");
++
++        var loaded = await client.ReadSnapshotAsync(lease.CharacterId, lease.LeaseToken, lease.LeaseVersion);
++        var revision = await client.WriteSnapshotAsync(lease.CharacterId, lease.LeaseToken, lease.LeaseVersion,
++            8, [1, 2, 3]);
++
++        Assert.Equal(7, loaded!.Revision);
++        Assert.Equal(new byte[] { 9, 8, 7 }, loaded.Payload);
++        Assert.Equal(8, revision);
++        Assert.Equal(lease.CharacterId, handler.SnapshotReadRequest!.CharacterId);
++        Assert.Equal(lease.LeaseVersion, handler.SnapshotReadRequest.LeaseVersion);
++        Assert.Equal(lease.LeaseToken, handler.SnapshotWriteRequest!.LeaseToken);
++        Assert.Equal(8, handler.SnapshotWriteRequest.Revision);
++        Assert.Equal(new byte[] { 1, 2, 3 }, handler.SnapshotWriteRequest.Payload);
++        Assert.Equal("/api/v1/game/characters/snapshot/read", handler.Paths[^2]);
++        Assert.Equal("/api/v1/game/characters/snapshot/write", handler.Paths[^1]);
++    }
++
 +    private sealed class Handler(bool mismatchCorrelation = false) : HttpMessageHandler
 +    {
 +        public List<string> Paths { get; } = [];
 +        public List<string?> Authorizations { get; } = [];
 +        public CharacterLeaseAcquireRequestV1? AcquireRequest { get; private set; }
 +        public CharacterLeaseRenewRequestV1? RenewRequest { get; private set; }
++        public CharacterSaveSnapshotReadRequestV1? SnapshotReadRequest { get; private set; }
++        public CharacterSaveSnapshotWriteRequestV1? SnapshotWriteRequest { get; private set; }
 +
 +        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,
 +            CancellationToken cancellationToken)
@@ -129,6 +155,34 @@ index 000000000..11508ffd7
 +                    {
 +                        CorrelationId = RenewRequest!.CorrelationId, Accepted = true, ReasonCode = "renewed",
 +                        LeaseVersion = RenewRequest.LeaseVersion, ValidUntilUtc = DateTimeOffset.UtcNow.AddMinutes(15)
++                    })
++                };
++            }
++
++            if (request.RequestUri.AbsolutePath.EndsWith("snapshot/read", StringComparison.Ordinal))
++            {
++                SnapshotReadRequest = await request.Content!.ReadFromJsonAsync<CharacterSaveSnapshotReadRequestV1>(
++                    cancellationToken: cancellationToken);
++                return new HttpResponseMessage(HttpStatusCode.OK)
++                {
++                    Content = JsonContent.Create(new CharacterSaveSnapshotV1
++                    {
++                        CorrelationId = SnapshotReadRequest!.CorrelationId, CharacterId = SnapshotReadRequest.CharacterId,
++                        LeaseVersion = SnapshotReadRequest.LeaseVersion, Revision = 7, Payload = [9, 8, 7]
++                    })
++                };
++            }
++
++            if (request.RequestUri.AbsolutePath.EndsWith("snapshot/write", StringComparison.Ordinal))
++            {
++                SnapshotWriteRequest = await request.Content!.ReadFromJsonAsync<CharacterSaveSnapshotWriteRequestV1>(
++                    cancellationToken: cancellationToken);
++                return new HttpResponseMessage(HttpStatusCode.OK)
++                {
++                    Content = JsonContent.Create(new CharacterSaveSnapshotWriteResultV1
++                    {
++                        CorrelationId = SnapshotWriteRequest!.CorrelationId, Accepted = true,
++                        ReasonCode = "stored", Revision = SnapshotWriteRequest.Revision
 +                    })
 +                };
 +            }
@@ -183,7 +237,7 @@ index 7f59b93a9..a74206139 100644
                                          GatewayTransferId = imported.TransferId
                                      };
 diff --git a/src/LibreLancer/Server/GameServer.cs b/src/LibreLancer/Server/GameServer.cs
-index dc5a40056..32a7da2b3 100644
+index dc5a40056..abd0bd8fd 100644
 --- a/src/LibreLancer/Server/GameServer.cs
 +++ b/src/LibreLancer/Server/GameServer.cs
 @@ -575,7 +575,7 @@ namespace LibreLancer.Server
@@ -224,7 +278,7 @@ index dc5a40056..32a7da2b3 100644
                  player.MissionRuntime != null && string.Equals(player.MissionRuntime.MissionNickname,
                      context.MissionNickname, StringComparison.OrdinalIgnoreCase))?.MissionRuntime;
          }
-@@ -1694,6 +1694,36 @@ namespace LibreLancer.Server
+@@ -1694,6 +1694,57 @@ namespace LibreLancer.Server
              return Convert.ToBase64String(HMACSHA256.HashData(key, payload))
                  .TrimEnd('=').Replace('+', '-').Replace('/', '_');
          }
@@ -258,10 +312,31 @@ index dc5a40056..32a7da2b3 100644
 +            return client.RenewAsync(characterId, leaseToken, leaseVersion, cancellationToken);
 +        }
 +
++        public Task<LancerNexus.Protocol.CharacterSaveSnapshotV1?> ReadCharacterSnapshotAsync(long characterId,
++            string leaseToken, long leaseVersion, CancellationToken cancellationToken = default) =>
++            GetGatewayCharacterLeaseClient().ReadSnapshotAsync(characterId, leaseToken, leaseVersion, cancellationToken);
++
++        public Task<long> WriteCharacterSnapshotAsync(long characterId, string leaseToken, long leaseVersion,
++            long revision, byte[] payload, CancellationToken cancellationToken = default) =>
++            GetGatewayCharacterLeaseClient().WriteSnapshotAsync(characterId, leaseToken, leaseVersion, revision,
++                payload, cancellationToken);
++
++        private GatewayCharacterLeaseClient GetGatewayCharacterLeaseClient()
++        {
++            if (!ClusterTransfersEnabled)
++                throw new InvalidOperationException("Gateway character persistence is not configured.");
++            lock (gatewayCharacterLeaseClientLock)
++            {
++                gatewayCharacterLeaseClient ??= new GatewayCharacterLeaseClient(
++                    new Uri(LoginUrl!, UriKind.Absolute), TransferInstanceKey!, transferHttp);
++                return gatewayCharacterLeaseClient;
++            }
++        }
++
      public int? TestNewCharacterRank { get; set; }
      public string? TestMissionNickname { get; set; }
  
-@@ -1703,6 +1733,8 @@ namespace LibreLancer.Server
+@@ -1703,6 +1754,8 @@ namespace LibreLancer.Server
          Timeout = TimeSpan.FromSeconds(30)
      };
      private readonly ConcurrentDictionary<Guid, long> transferLeaseVersions = new();
@@ -270,7 +345,7 @@ index dc5a40056..32a7da2b3 100644
  
          public async Task<LancerNexus.Protocol.AdminQueryResponse> QueryAdministrationAsync(
              LancerNexus.Protocol.GameAdminQueryRequest body)
-@@ -1750,7 +1782,7 @@ namespace LibreLancer.Server
+@@ -1750,7 +1803,7 @@ namespace LibreLancer.Server
                  GetTransferGatewayUrl("/api/v1/game/admin/permissions/check"));
              request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", TransferInstanceKey!);
              request.Content = JsonContent.Create(new GamePermissionCheckRequest(player.AccountId,
@@ -279,7 +354,7 @@ index dc5a40056..32a7da2b3 100644
              using var response = await transferHttp.SendAsync(request, timeout.Token);
              if (!response.IsSuccessStatusCode) return false;
              var result = await response.Content.ReadFromJsonAsync<GamePermissionCheckResponse>(timeout.Token);
-@@ -1974,7 +2006,7 @@ namespace LibreLancer.Server
+@@ -1974,7 +2027,7 @@ namespace LibreLancer.Server
          {
              if (transferId == Guid.Empty || characterId <= 0)
                  throw new ArgumentException("Transfer and character IDs must be valid.");
@@ -288,7 +363,7 @@ index dc5a40056..32a7da2b3 100644
              if (player == null)
                  return Task.FromException<byte[]>(new InvalidOperationException("Character is not connected to this instance."));
              return player.FreezeForTransferAsync(transferId, characterId, targetSystem, target);
-@@ -2189,7 +2221,7 @@ namespace LibreLancer.Server
+@@ -2189,7 +2242,7 @@ namespace LibreLancer.Server
              }
              var npcSnapshot = await WaitForNpcTransferCommitAsync(transferId, cancellationToken)
                  .ConfigureAwait(false);
@@ -297,7 +372,7 @@ index dc5a40056..32a7da2b3 100644
              if (acceptedPlayer != null)
                  acceptedPlayer.GatewayTransferId = transferId;
              return new TransferSnapshotTargetReadyResult(transferId, import.AccountId, import.CharacterId,
-@@ -2416,7 +2448,7 @@ namespace LibreLancer.Server
+@@ -2416,7 +2469,7 @@ namespace LibreLancer.Server
              if (!string.Equals(status.SourceInstanceId, InstanceId, StringComparison.Ordinal))
                  throw new InvalidDataException("Transfer belongs to another source instance.");
  
@@ -306,7 +381,7 @@ index dc5a40056..32a7da2b3 100644
              switch (status.State)
              {
                  case LancerNexus.Protocol.TransferState.Committed:
-@@ -2505,10 +2537,10 @@ namespace LibreLancer.Server
+@@ -2505,10 +2558,10 @@ namespace LibreLancer.Server
          private sealed record TransferSourceReleasedResponse(Guid TransferId, string InstanceId, string State);
  
          public bool AbortCharacterTransfer(Guid transferId, long characterId) =>
@@ -321,10 +396,10 @@ index dc5a40056..32a7da2b3 100644
          /// <summary>Read-only local diagnostics captured between simulation updates.</summary>
 diff --git a/src/LibreLancer/Server/GatewayCharacterLeaseClient.cs b/src/LibreLancer/Server/GatewayCharacterLeaseClient.cs
 new file mode 100644
-index 000000000..7abb5d4cd
+index 000000000..164b70e23
 --- /dev/null
 +++ b/src/LibreLancer/Server/GatewayCharacterLeaseClient.cs
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,168 @@
 +using System;
 +using System.IO;
 +using System.Net.Http;
@@ -441,6 +516,57 @@ index 000000000..7abb5d4cd
 +            throw new InvalidDataException("Gateway character lease renewal response is invalid or rejected.");
 +        return new GatewayCharacterLease(characterId, leaseToken, leaseVersion, renewed.ValidUntilUtc!.Value);
 +    }
++
++    public async Task<CharacterSaveSnapshotV1?> ReadSnapshotAsync(long characterId, string leaseToken,
++        long leaseVersion, CancellationToken cancellationToken = default)
++    {
++        var requestBody = new CharacterSaveSnapshotReadRequestV1
++        {
++            CorrelationId = Guid.NewGuid(), CharacterId = characterId,
++            LeaseToken = leaseToken, LeaseVersion = leaseVersion
++        };
++        if (!requestBody.IsValid())
++            throw new ArgumentException("Character snapshot read request is invalid.");
++        using var message = new HttpRequestMessage(HttpMethod.Post,
++            new Uri(gateway, "api/v1/game/characters/snapshot/read"));
++        message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", instanceKey);
++        message.Content = JsonContent.Create(requestBody);
++        using var response = await http.SendAsync(message, cancellationToken).ConfigureAwait(false);
++        if (response.StatusCode == System.Net.HttpStatusCode.NotFound) return null;
++        if (!response.IsSuccessStatusCode)
++            throw new HttpRequestException($"Gateway character snapshot read failed with HTTP {(int)response.StatusCode}.");
++        var snapshot = await response.Content.ReadFromJsonAsync<CharacterSaveSnapshotV1>(
++            cancellationToken: cancellationToken).ConfigureAwait(false);
++        if (snapshot is null || !snapshot.IsValid() || snapshot.CorrelationId != requestBody.CorrelationId ||
++            snapshot.CharacterId != characterId || snapshot.LeaseVersion != leaseVersion)
++            throw new InvalidDataException("Gateway character snapshot response is invalid.");
++        return snapshot;
++    }
++
++    public async Task<long> WriteSnapshotAsync(long characterId, string leaseToken, long leaseVersion,
++        long revision, byte[] payload, CancellationToken cancellationToken = default)
++    {
++        var requestBody = new CharacterSaveSnapshotWriteRequestV1
++        {
++            CorrelationId = Guid.NewGuid(), CharacterId = characterId, LeaseToken = leaseToken,
++            LeaseVersion = leaseVersion, Revision = revision, Payload = payload
++        };
++        if (!requestBody.IsValid())
++            throw new ArgumentException("Character snapshot write request is invalid.");
++        using var message = new HttpRequestMessage(HttpMethod.Post,
++            new Uri(gateway, "api/v1/game/characters/snapshot/write"));
++        message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", instanceKey);
++        message.Content = JsonContent.Create(requestBody);
++        using var response = await http.SendAsync(message, cancellationToken).ConfigureAwait(false);
++        if (!response.IsSuccessStatusCode)
++            throw new HttpRequestException($"Gateway character snapshot write failed with HTTP {(int)response.StatusCode}.");
++        var result = await response.Content.ReadFromJsonAsync<CharacterSaveSnapshotWriteResultV1>(
++            cancellationToken: cancellationToken).ConfigureAwait(false);
++        if (result is null || !result.IsValid() || result.CorrelationId != requestBody.CorrelationId ||
++            !result.Accepted || result.Revision != revision)
++            throw new InvalidDataException("Gateway character snapshot write was rejected or invalid.");
++        return result.Revision!.Value;
++    }
 +}
 diff --git a/src/LibreLancer/Server/NPCManager.cs b/src/LibreLancer/Server/NPCManager.cs
 index 5b8613db2..681aa2e57 100644
@@ -464,11 +590,30 @@ index 5b8613db2..681aa2e57 100644
                  "nickname" when !string.IsNullOrWhiteSpace(reference.Nickname) =>
                      World.GameWorld.GetObject(reference.Nickname),
                  _ => null
+diff --git a/src/LibreLancer/Server/NetCharacter.cs b/src/LibreLancer/Server/NetCharacter.cs
+index dbfc5c935..61d47e27b 100644
+--- a/src/LibreLancer/Server/NetCharacter.cs
++++ b/src/LibreLancer/Server/NetCharacter.cs
+@@ -504,8 +504,12 @@ namespace LibreLancer.Server
+         public static void SaveToDbCharacter(GameServer game, SaveGame sg, Character db) =>
+             FromSaveGameInternal(game, sg, db);
+ 
+-        public static NetCharacter OpenSaveGame(GameServer game, SaveGame sg) =>
+-            FromSaveGameInternal(game, sg);
++        public static NetCharacter OpenSaveGame(GameServer game, SaveGame sg, long characterId = 0)
++        {
++            var character = FromSaveGameInternal(game, sg);
++            character.charId = characterId;
++            return character;
++        }
+ 
+         public static async Task<NetCharacter> FromDb(long id, GameServer game)
+         {
 diff --git a/src/LibreLancer/Server/Player.cs b/src/LibreLancer/Server/Player.cs
-index 77c7710e6..0f094f7c3 100644
+index 77c7710e6..c70376a8e 100644
 --- a/src/LibreLancer/Server/Player.cs
 +++ b/src/LibreLancer/Server/Player.cs
-@@ -120,6 +120,13 @@ namespace LibreLancer.Server
+@@ -120,6 +120,15 @@ namespace LibreLancer.Server
          // Populated exclusively from Gateway admission, never from a client chat payload.
          public Guid GatewaySessionId { get; internal set; }
          public Guid GatewayTransferId { get; internal set; }
@@ -479,10 +624,12 @@ index 77c7710e6..0f094f7c3 100644
 +        public long StableCharacterId => GatewayCharacterId > 0 ? GatewayCharacterId : Character?.ID ?? 0;
 +        private CancellationTokenSource? gatewayLeaseRenewalCancellation;
 +        private Task? gatewayLeaseRenewalTask;
++        private readonly SemaphoreSlim gatewaySnapshotWriteGate = new(1, 1);
++        private long gatewaySnapshotRevision;
          private int adminQueryRunning;
          private long lastAdminQuery;
  
-@@ -157,7 +164,7 @@ namespace LibreLancer.Server
+@@ -157,7 +166,7 @@ namespace LibreLancer.Server
                      try
                      {
                          var result = await Game.MutateAdministrationPermissionAsync(new GamePermissionMutationRequest(
@@ -491,7 +638,7 @@ index 77c7710e6..0f094f7c3 100644
                          rpcClient.OnConsoleMessage(result.Status switch
                          {
                              "ok" => "Admin: Rechteänderung synchronisiert.",
-@@ -194,7 +201,7 @@ namespace LibreLancer.Server
+@@ -194,7 +203,7 @@ namespace LibreLancer.Server
                  return;
              }
              lastAdminQuery = now;
@@ -500,7 +647,7 @@ index 77c7710e6..0f094f7c3 100644
              _ = Task.Run(async () =>
              {
                  try
-@@ -222,7 +229,8 @@ namespace LibreLancer.Server
+@@ -222,7 +231,8 @@ namespace LibreLancer.Server
  
          public Player(IPacketClient client, GameServer game, Guid playerGuid, long? transferLoginCharacterId = null,
              SaveGame? transferLoginSaveGame = null,
@@ -510,7 +657,7 @@ index 77c7710e6..0f094f7c3 100644
          {
              this.Client = client;
              this.Game = game;
-@@ -230,6 +238,13 @@ namespace LibreLancer.Server
+@@ -230,6 +240,13 @@ namespace LibreLancer.Server
              this.transferLoginCharacterId = transferLoginCharacterId;
              this.transferLoginSaveGame = transferLoginSaveGame;
              this.transferLoginNpcSnapshot = transferLoginNpcSnapshot;
@@ -524,7 +671,7 @@ index 77c7710e6..0f094f7c3 100644
              ID = Interlocked.Increment(ref _gid);
              ResponseHandler = new NetResponseHandler();
              rpcClient = new RemoteClientPlayer(client, ResponseHandler);
-@@ -1317,6 +1332,7 @@ namespace LibreLancer.Server
+@@ -1317,6 +1334,7 @@ namespace LibreLancer.Server
                          return;
                      }
                      BeginGame(await NetCharacter.FromDb(characterId, Game), transferLoginSaveGame);
@@ -532,7 +679,7 @@ index 77c7710e6..0f094f7c3 100644
                  }
                  else
                  {
-@@ -1364,7 +1380,7 @@ namespace LibreLancer.Server
+@@ -1364,7 +1382,7 @@ namespace LibreLancer.Server
              string targetSystem, string target, string targetInstanceId, string targetEndpoint)
          {
              if (!Guid.TryParseExact(transferId, "N", out var id) || !Game.ClusterTransfersEnabled ||
@@ -541,7 +688,7 @@ index 77c7710e6..0f094f7c3 100644
              {
                  rpcClient.TransferSnapshotStaged(transferId, false);
                  return;
-@@ -1544,6 +1560,25 @@ namespace LibreLancer.Server
+@@ -1544,6 +1562,64 @@ namespace LibreLancer.Server
                      return false;
                  }
  
@@ -564,18 +711,59 @@ index 77c7710e6..0f094f7c3 100644
 +                    }
 +                }
 +
++                SaveGame? selectedSave = null;
++                NetCharacter selectedCharacter;
++                try
++                {
++                    if (acquiredLease is not null)
++                    {
++                        var stored = await Game.ReadCharacterSnapshotAsync(acquiredLease.CharacterId,
++                            acquiredLease.LeaseToken, acquiredLease.LeaseVersion);
++                        if (stored is not null)
++                        {
++                            selectedSave = SaveGame.FromString($"gateway-{acquiredLease.CharacterId}.fl",
++                                new UTF8Encoding(false, true).GetString(stored.Payload));
++                            if (selectedSave.Player?.Name is not { } storedName ||
++                                !storedName.Equals(sc.Name, StringComparison.Ordinal))
++                                throw new InvalidDataException("Gateway snapshot character name does not match the selected character.");
++                            gatewaySnapshotRevision = stored.Revision;
++                            selectedCharacter = NetCharacter.OpenSaveGame(Game, selectedSave, sc.Id);
++                        }
++                        else
++                        {
++                            var localCharacter = await NetCharacter.FromDb(sc.Id, Game);
++                            selectedSave = SaveWriter.CreateSave(localCharacter, null, 0, DateTime.UtcNow,
++                                Game.GameData, null, null, null);
++                            await PersistGatewaySnapshotAsync(selectedSave, acquiredLease);
++                            selectedCharacter = NetCharacter.OpenSaveGame(Game, selectedSave, sc.Id);
++                        }
++                    }
++                    else
++                    {
++                        selectedCharacter = await NetCharacter.FromDb(sc.Id, Game);
++                    }
++                }
++                catch (Exception error)
++                {
++                    Game.CharactersInUse.Remove(sc.Id);
++                    FLLog.Warning("Gateway", $"Character snapshot load failed ({error.GetType().Name}).");
++                    return false;
++                }
++
                  SaveGame? testMission = null;
  #if DEBUG
                  if (!string.IsNullOrWhiteSpace(Game.TestMissionNickname))
-@@ -1560,6 +1595,7 @@ namespace LibreLancer.Server
+@@ -1559,7 +1635,8 @@ namespace LibreLancer.Server
+                     };
                  }
  #endif
-                 BeginGame(await NetCharacter.FromDb(sc.Id, Game), testMission);
+-                BeginGame(await NetCharacter.FromDb(sc.Id, Game), testMission);
++                BeginGame(selectedCharacter, selectedSave ?? testMission);
 +                if (acquiredLease is not null) StartGatewayLeaseRenewal();
                  return true;
              }
              else
-@@ -1568,6 +1604,62 @@ namespace LibreLancer.Server
+@@ -1568,6 +1645,110 @@ namespace LibreLancer.Server
              }
          }
  
@@ -635,10 +823,58 @@ index 77c7710e6..0f094f7c3 100644
 +        private void StopGatewayLeaseRenewal() =>
 +            Interlocked.Exchange(ref gatewayLeaseRenewalCancellation, null)?.Cancel();
 +
++        private async Task<long> PersistGatewaySnapshotAsync(SaveGame save,
++            GatewayCharacterLease? lease = null, CancellationToken cancellationToken = default)
++        {
++            var characterId = lease?.CharacterId ?? GatewayCharacterId;
++            var token = lease?.LeaseToken ?? GatewayLeaseToken;
++            var leaseVersion = lease?.LeaseVersion ?? GatewayLeaseVersion;
++            if (characterId <= 0 || string.IsNullOrWhiteSpace(token) || leaseVersion <= 0)
++                throw new InvalidOperationException("A current Gateway character lease is required for snapshot persistence.");
++
++            using var payloadStream = new MemoryStream();
++            IniWriter.WriteIni(payloadStream, save.ToIni());
++            if (payloadStream.Length is 0 or > LancerNexus.Protocol.CharacterSaveSnapshotWriteRequestV1.MaxPayloadBytes)
++                throw new InvalidDataException("Character snapshot size is outside the supported limit.");
++            var payload = payloadStream.ToArray();
++            await gatewaySnapshotWriteGate.WaitAsync(cancellationToken).ConfigureAwait(false);
++            try
++            {
++                var revision = checked(gatewaySnapshotRevision + 1);
++                var storedRevision = await Game.WriteCharacterSnapshotAsync(characterId, token, leaseVersion,
++                    revision, payload, cancellationToken).ConfigureAwait(false);
++                if (storedRevision != revision)
++                    throw new InvalidDataException("Gateway stored an unexpected character snapshot revision.");
++                Interlocked.Exchange(ref gatewaySnapshotRevision, revision);
++                return revision;
++            }
++            finally
++            {
++                global::System.Security.Cryptography.CryptographicOperations.ZeroMemory(payload);
++                gatewaySnapshotWriteGate.Release();
++            }
++        }
++
++        private async Task CompleteGatewaySaveAsync(SaveGame save, string path,
++            TaskCompletionSource<string> completionSource)
++        {
++            try
++            {
++                await PersistGatewaySnapshotAsync(save).ConfigureAwait(false);
++                completionSource.TrySetResult(path);
++            }
++            catch (Exception error)
++            {
++                FLLog.Warning("Gateway", $"Character snapshot save failed ({error.GetType().Name}).");
++                Client.Disconnect(DisconnectReason.LoginError);
++                completionSource.TrySetException(error);
++            }
++        }
++
          Task<bool> IServerPlayer.DeleteCharacter(int index)
          {
              if (index < 0 || index >= CharacterList.Count)
-@@ -1863,7 +1955,7 @@ namespace LibreLancer.Server
+@@ -1863,7 +2044,7 @@ namespace LibreLancer.Server
                      }
                      else
                      {
@@ -647,7 +883,7 @@ index 77c7710e6..0f094f7c3 100644
                              throw new InvalidOperationException("Character is not eligible for a space transfer.");
                          transferId = id;
                          transferCharacterId = expectedCharacterId;
-@@ -1894,7 +1986,7 @@ namespace LibreLancer.Server
+@@ -1894,7 +2075,7 @@ namespace LibreLancer.Server
                  byte[] snapshot;
                  lock (saveSync)
                  {
@@ -656,7 +892,7 @@ index 77c7710e6..0f094f7c3 100644
                          throw new InvalidOperationException("Character ownership changed during transfer freeze.");
  
                      RunSave();
-@@ -1978,7 +2070,10 @@ namespace LibreLancer.Server
+@@ -1978,7 +2159,10 @@ namespace LibreLancer.Server
              if (Volatile.Read(ref sourceDisconnected) != 0)
                  FinalizeDisconnectedTransfer();
              else
@@ -667,7 +903,7 @@ index 77c7710e6..0f094f7c3 100644
              return true;
          }
  
-@@ -1990,6 +2085,7 @@ namespace LibreLancer.Server
+@@ -1990,6 +2174,7 @@ namespace LibreLancer.Server
                  if (transferState != TransferFrozen || transferId != id || Character == null)
                      return false;
                  var characterId = Character.ID;
@@ -675,7 +911,19 @@ index 77c7710e6..0f094f7c3 100644
                  Volatile.Write(ref transferState, TransferReleased);
                  Game.CharactersInUse.Remove(characterId);
                  Game.PublishServerEvent(new ServerEvent
-@@ -2112,6 +2208,7 @@ namespace LibreLancer.Server
+@@ -2098,7 +2283,10 @@ namespace LibreLancer.Server
+                     }
+ 
+                     IniWriter.WriteIniFile(path, sg.ToIni());
+-                    completionSource.SetResult(path);
++                    if (GatewayCharacterId > 0)
++                        _ = CompleteGatewaySaveAsync(sg, path, completionSource);
++                    else
++                        completionSource.SetResult(path);
+ 
+                     if (isAutoSave || ids != 0)
+                     {
+@@ -2112,6 +2300,7 @@ namespace LibreLancer.Server
  
          private void LoggedOut()
          {
@@ -683,7 +931,7 @@ index 77c7710e6..0f094f7c3 100644
              if (Character != null)
              {
                  using var c = Character.BeginTransaction();
-@@ -2186,7 +2283,7 @@ namespace LibreLancer.Server
+@@ -2186,7 +2375,7 @@ namespace LibreLancer.Server
                      return;
                  pendingClusterJumpers = jumpers;
                  pendingClusterJumpSourceWorld = Space?.World;
