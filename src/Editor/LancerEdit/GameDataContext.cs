@@ -25,6 +25,7 @@ using LibreLancer.Data.IO;
 using LibreLancer.ImageLib;
 using LibreLancer.Resources;
 using LibreLancer.Sounds;
+using Nexus.Assets;
 using Archetype = LibreLancer.Data.GameData.Archetype;
 
 namespace LancerEdit;
@@ -50,6 +51,7 @@ public class GameDataContext : IDisposable
 
     public string Folder;
     public string UniverseVfsFolder;
+    public string? WorkspaceDirectory { get; private set; }
 
     private string cacheDir;
 
@@ -62,7 +64,7 @@ public class GameDataContext : IDisposable
 
     static string CacheID(string path)
     {
-        var data = SHA256.HashData(Encoding.UTF8.GetBytes(path.ToUpper()));
+        var data = SHA256.HashData(Encoding.UTF8.GetBytes(path.ToUpperInvariant()));
         var builder = new StringBuilder();
         // Get the first 192 bits of hash, don't need all 256 for this purpose
         var val = new BigInteger(data.AsSpan().Slice(0,24), true);
@@ -74,6 +76,13 @@ public class GameDataContext : IDisposable
         }
 
         return builder.ToString();
+    }
+
+    static string WorkspaceBaseDirectory()
+    {
+        var directory = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (!string.IsNullOrWhiteSpace(directory)) return Path.Combine(directory, "LancerEdit");
+        return Path.Combine(AppContext.BaseDirectory, "user-data", "LancerEdit");
     }
 
     T YieldAndWait<T>(Task<T> task)
@@ -174,6 +183,14 @@ public class GameDataContext : IDisposable
         {
             try
             {
+                var packageProvider = NexusPackageFileProvider.LoadActive(AppContext.BaseDirectory);
+                if (packageProvider is not null)
+                {
+                    vfs.FileProviders.Add(packageProvider);
+                    WorkspaceDirectory = Path.Combine(WorkspaceBaseDirectory(), "NAPWorkspace", CacheID(folder));
+                    vfs.FileProviders.Add(new NexusPackageWorkspaceFileProvider(WorkspaceDirectory, packageProvider));
+                    FLLog.Info("NAP", $"LancerEdit package workspace: {WorkspaceDirectory}");
+                }
                 var sw = Stopwatch.StartNew();
                 GameData = new GameDataManager(new GameItemDb(vfs), Resources);
                 GameData.LoadData(win);

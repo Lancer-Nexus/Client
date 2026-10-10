@@ -85,6 +85,11 @@ namespace LibreLancer.Input
 
         private void Keyboard_KeyDown(KeyEventArgs e)
         {
+            ProcessKeyDown(e);
+        }
+
+        internal void ProcessKeyDown(KeyEventArgs e)
+        {
             if (KeyCaptureContext.Capturing(KeyCapture))
             {
                 if (e.Key == Keys.Escape || e.Key == Keys.F1)
@@ -136,6 +141,11 @@ namespace LibreLancer.Input
             Keys.LeftAlt or Keys.RightAlt;
 
         private void Keyboard_KeyUp(KeyEventArgs e)
+        {
+            ProcessKeyUp(e);
+        }
+
+        internal void ProcessKeyUp(KeyEventArgs e)
         {
             if (KeyCaptureContext.Capturing(KeyCapture))
             {

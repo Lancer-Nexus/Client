@@ -2,6 +2,7 @@
 // This file is subject to the terms and conditions defined in
 // LICENSE, which is part of this source code package
 
+using System;
 using System.Collections.Generic;
 using LibreLancer.Net.Protocol;
 using LibreLancer.Render;
@@ -20,19 +21,40 @@ namespace LibreLancer.Client.Components
 
         private int renIndex = 0;
 
-        private List<ParticleEffectRenderer> spawned = [];
+        private Dictionary<uint, List<ParticleEffectRenderer>> spawned = [];
 
         private void Spawn(SpawnedEffect effect, GameWorld world)
         {
-
             var fx = GetGameData(world).Items?.Effects?.Get(effect.Effect);
-            var pfx = fx?.GetEffect(world?.Renderer?.ResourceManager!);
-
-            if (pfx is null)
+            if (fx is null)
             {
+                spawned[effect.ID] = [];
                 return;
             }
 
+            if (fx.Sound is not null && world.Sounds is not null)
+            {
+                var sound = world.Sounds.GetInstance(fx.Sound.Nickname, 0, -1, -1,
+                    Parent?.WorldTransform.Position);
+                sound?.Play();
+            }
+
+            var pfx = fx.GetEffect(world.Renderer?.ResourceManager!);
+            if (pfx is null)
+            {
+                spawned[effect.ID] = [];
+                return;
+            }
+
+            if (effect.Hardpoints.Length == 0)
+            {
+                var fxobj = new ParticleEffectRenderer(pfx) { Index = renIndex++ };
+                Parent?.ExtraRenderers.Add(fxobj);
+                spawned.Add(effect.ID, [fxobj]);
+                return;
+            }
+
+            var attachedRenderers = new List<ParticleEffectRenderer>();
             foreach (var fxhp in effect.Hardpoints)
             {
                 var hp = Parent?.GetHardpoint(fxhp);
@@ -44,24 +66,28 @@ namespace LibreLancer.Client.Components
 
                 var fxobj = new ParticleEffectRenderer(pfx) {Index = renIndex++, Attachment = hp};
                 Parent?.ExtraRenderers.Add(fxobj);
-                spawned.Add(fxobj);
+                attachedRenderers.Add(fxobj);
             }
+            spawned[effect.ID] = attachedRenderers;
         }
 
         public void UpdateEffects(SpawnedEffect[] fx, GameWorld world)
         {
             foreach (var f in fx)
             {
-                bool found = false;
-                foreach (var f2 in effects) {
-                    if (f2.ID == f.ID)
-                    {
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) Spawn(f, world);
+                if (!spawned.ContainsKey(f.ID)) Spawn(f, world);
             }
+
+            foreach (var old in effects)
+            {
+                if (Array.Exists(fx, current => current.ID == old.ID))
+                    continue;
+                if (!spawned.Remove(old.ID, out var renderers))
+                    continue;
+                foreach (var renderer in renderers)
+                    Parent?.ExtraRenderers.Remove(renderer);
+            }
+
             effects = fx;
         }
     }

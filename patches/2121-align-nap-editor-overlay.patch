@@ -1,0 +1,499 @@
+diff --git a/docs/NEXUS-ASSET-PACKAGES.md b/docs/NEXUS-ASSET-PACKAGES.md
+--- a/docs/NEXUS-ASSET-PACKAGES.md
++++ b/docs/NEXUS-ASSET-PACKAGES.md
+@@ -2,7 +2,7 @@
+ 
+ **Projekt:** Lancer-Nexus/Client  
+ **Status:** V1-Umsetzung und Linux-Spielstart verifiziert; Windows-Ausführung und einzelne Recovery-/Editorpfade sind offen. Maßgeblich für den konkreten Stand ist [`asset-packages/implementation-status.md`](asset-packages/implementation-status.md).  
+-**Version:** 0.1 (2026-10-08)  
++**Version:** 0.1 (2026-10-09)  
+ **Formate:** `.nap` (Assetcontainer), `.napd` (Delta-/Patchtransport)
+ 
+ ## 1. Ziel und Randbedingungen
+@@ -13,14 +13,14 @@
+ 
+ **Rechtlicher Hinweis:** Originale Freelancer-Spieldaten dürfen nicht automatisch mit Builds verteilt werden. Verpackung und Distribution ausschließlich mit entsprechenden Nutzungsrechten; für reine Entwicklungsinstallationen lokale Konvertierung bereitstellen.
+ 
+-## 2. Repository-Ausgangslage (Stand Prüfung 08.10.2026)
+-
+-- `src/LibreLancer.Data/IO/FileSystem.cs`: `IFileProvider` mit `Open`, `FileExists`, `GetBackingFileName`, `GetFiles`, `GetDirectories`, `Refresh`. `FileSystem.Open` durchsucht Provider in umgekehrter Einfügereihenfolge – Priorität explizit deterministisch abbilden.
+-- Patch `patches/2070-package-and-mount-data-overlays.patch` ergänzt `FreelancerDataOverlayFileProvider` und Overlay-Mounts für Client und Server (`lib/data`, Fallback Server `data`). Dies ist **ein Verzeichnis-Overlay, noch kein Containerleser**.
+-- `README.md`: aktueller Updater kann eine verifizierte Client-Release aktivieren, aber erforderliche Datenpakete blockieren derzeit die Aktivierung; automatisches Rollback nach ungesundem Start ist noch offen.
+-- Anpassungen müssen die bestehende Patchserie und Standalone-Option erhalten. Pfad-/Konfigurations- und Versions-APIs vor Umsetzung im Checkout erneut prüfen.
+-
+-Quellen: https://github.com/Lancer-Nexus/Client/blob/main/src/LibreLancer.Data/IO/FileSystem.cs ; https://github.com/Lancer-Nexus/Client/blob/main/patches/2070-package-and-mount-data-overlays.patch ; https://github.com/Lancer-Nexus/Client/blob/main/README.md
++## 2. Repository-Ausgangslage (Stand Prüfung 09.10.2026)
++
++- `src/LibreLancer.Data/IO/FileSystem.cs`: `IFileProvider` bietet `Open`, `FileExists`, `GetBackingFileName`, `GetFiles`, `GetDirectories` und `Refresh`; Provider werden bei der Auflösung rückwärts durchsucht. `IOverlayFileProvider` ergänzt Maskierung und Tombstone-aware Enumeration.
++- Patch 2070 stellt weiterhin das lose DATA-Verzeichnis-Overlay bereit. Die späteren NAP-Patches ergänzen den Containerprovider, Tombstones, effektive Enumeration, Client-/LLServer-Mounts und den LancerEdit-Workspace.
++- Der Updater prüft signierte Client- und NAP-Artefakte, erstellt im Staging einen gemeinsamen Release-Snapshot und aktiviert ihn über einen Release-Pointer. Client plus NAP werden im DownloadServer/Updater-Integrationstest gemeinsam verifiziert und aktiviert; der Linux-Spielstart mit vollständigem NAP und ohne loses `DATA` erreichte das erste UI. Windows-Spiel-/Editorlaufzeit, reale ENOSPC-Prüfung, produktive Veröffentlichung mit provisioniertem Trust Root und einzelne Editor-/Recoverypfade bleiben offen. Details und aktuelle Prüfergebnisse stehen in [`asset-packages/implementation-status.md`](asset-packages/implementation-status.md).
++- Client-/Engine-Änderungen bleiben gemäß `AGENTS.md` patch-only; README- und Statusdokumentation wird direkt im jeweiligen Repository gepflegt. Standalone-Betrieb ohne aktiven Snapshot bleibt erhalten.
++
++Quellen: `AGENTS.md`, `README.md`, `patches/series`, `src/LibreLancer.Data/IO/FileSystem.cs`, `src/Nexus.Assets/NexusPackageFileProvider.cs`, `src/LibreLancer/GameConfig.cs`, `src/LLServer.Core/ServerApp.cs`, sowie der verlinkte Statusbericht.
+ 
+ ## 3. Architektur
+ 
+@@ -68,7 +68,7 @@
+ 1. Normalisiere den *virtuellen* Pfad (Backslash zu Slash, bekannte `EXE/../DATA/`-Schreibweise canonicalisieren). Akzeptiere niemals absolute Pfade, `..`-Traversal, NUL oder Gerätepfade.
+ 2. Der Manifest-Mount-Plan ordnet alle Provider nach `(priority ASC, mountOrder ASC, packageId ASC)`; **letzter Provider gewinnt**, entsprechend der existierenden VFS-Suche. Gleiche Priorität ohne eindeutige Mount-Reihenfolge wird beim Manifest-Build abgewiesen.
+ 3. Innerhalb eines Pakets sind doppelte normalisierte Pfade verboten; Vergleich für Freelancer kompatibel case-insensitive ordinal. Gleichnamige Einträge mehrerer Pakete benötigen explizite Override-Deklaration oder werden im CI abgelehnt.
+-4. Tombstone-Einträge maskieren ältere Dateien. Da das heutige `IFileProvider` nur `Stream?` kennt, muss der Mount Manager einen konsolidierten effektiven Index anbieten oder die VFS-Schnittstelle kompatibel um Tombstone-Semantik erweitern; ein `null`-Stream allein reicht nicht.
++4. Tombstone-Einträge maskieren ältere Dateien. Das ist in V1 über `IOverlayFileProvider` und die Tombstone-Prüfungen in `FileSystem` umgesetzt; `Open() => null` allein wird nicht als Löschsignal interpretiert. Regressionstests prüfen Maskierung und Verzeichnisenumeration.
+ 5. `GetFiles`/`GetDirectories` liefern den **vereinheitlichten effektiven** Verzeichnisstand ohne maskierte Ressourcen.
+ 6. Ältere, entpackte `DATA`-Installationen bleiben als unterste Fallback-Schicht optional erhalten.
+ 
+diff --git a/docs/asset-packages/code-audit.md b/docs/asset-packages/code-audit.md
+--- a/docs/asset-packages/code-audit.md
++++ b/docs/asset-packages/code-audit.md
+@@ -18,6 +18,8 @@
+ - **Datei-Saves:** `StarSystemSaveStrategy`, `UniverseSaveStrategy`, `NewsSaveStrategy`, `BaseNpcSaveStrategy` und `TradingPlannerTab.Markets` schreiben INI-Dateien direkt über den zurückgegebenen OS-Pfad. `MissionScriptDocument` lädt und schreibt referenzierte NPC-Schiffdateien ebenfalls über physische Pfade.
+ - **Verzeichnis-/Mehrdatei-Saves:** `UniverseEditorTab.NewSystem` benötigt einen physischen Systems-Ordner, legt Unterverzeichnisse und neue INIs direkt an und aktualisiert danach die Universe-Datei.
+ - **Interface-Editor:** `src/Editor/InterfaceEdit/ResourceWindow.cs` schreibt `resources.xml` mit `File.WriteAllText` an den Backing-Pfad.
++
++`InterfaceEdit/Project.cs::Load` erstellt aktuell nur `FileSystem.FromPath(FlFolder)` und lädt weder den aktiven Client-Paketsnapshot noch den persistenten NAP-Workspace. Damit ist der direkte `resources.xml`-Schreibpfad derzeit ein reiner Loose-Data-Pfad und kein NAP-Workspace-Save. Die NAP-Pack-/Entpack-Integration ist in LancerEdit umgesetzt; InterfaceEdit bleibt als separates Editor-Integrationspaket offen.
+ 
+ Package-backed saves resolve to the persistent workspace above package and loose DATA providers. The LancerEdit Data menu now offers NAP extraction, directory packing, and export of the active package snapshot plus workspace edits. Extraction verifies every entry before writing into a staging directory and moves the completed directory into the selected parent; tombstones are omitted. Packing and export run off the UI thread and report completion or errors through editor dialogs. Export produces a verified full NAP but does not sign or activate a release. DLL resource editing uses the workspace path stored in `ResourceDll.SavePath`. These new interactive flows and Windows behavior still need runtime verification.
+ 
+diff --git a/src/Editor/InterfaceEdit/MainWindow.cs b/src/Editor/InterfaceEdit/MainWindow.cs
+--- a/src/Editor/InterfaceEdit/MainWindow.cs
++++ b/src/Editor/InterfaceEdit/MainWindow.cs
+@@ -8,7 +8,6 @@
+ using System.IO;
+ using System.Linq;
+ using System.Numerics;
+-using System.Diagnostics;
+ using System.Text;
+ using LibreLancer;
+ using LibreLancer.ImUI;
+@@ -155,59 +154,52 @@
+     private void OpenGui(string? path)
+     {
+         Project = new Project(this);
+-        try
+-        {
+-            if (Project.Open(path!))
+-            {
+-                Project.UiData.ResourceManager.LoadResourceFile(
+-                    Project.UiData.DataPath + (@"ships\rheinland\rh_playerships.mat"));
+-                Project.UiData.ResourceManager.LoadResourceFile(
+-                    Project.UiData.DataPath + (@"ships\liberty\li_playerships.mat"));
+-                recentFiles.FileOpened(path!);
+-                resourceEditor = new ResourceWindow(this, Project.UiData)
+-                {
+-                    IsOpen = true
+-                };
+-
+-                projectWindow = new ProjectWindow(Project.XmlFolder, this)
+-                {
+-                    IsOpen = true
+-                };
+-
+-                tabControl.Tabs.Add(new StylesheetEditor(Project.XmlFolder, Project.XmlLoader, Project.UiData));
+-                TestApi._Infocard = Project.TestingInfocard;
+-                TestApi._ScannedInfocard = Project.ShipInfocard;
+-                var str = new StringDeduplication();
+-                var anm = new AnmFile();
+-                using (var f = Project.UiData.FileSystem.Open(Project.UiData.DataPath +
+-                                                              @"characters\animations\bodygenericmale.anm"))
+-                    AnmFile.ParseToTable(anm.Scripts, anm.Buffer, str, f, @"characters\animations\bodygenericmale.anm");
+-                using (var f = Project.UiData.FileSystem.Open(Project.UiData.DataPath +
+-                                                              @"characters\animations\facialmale.anm"))
+-                    AnmFile.ParseToTable(anm.Scripts, anm.Buffer, str, f, @"characters\animations\facialmale.anm");
+-                anm.Buffer.Commit();
+-                CommApp = new CommAppearance()
+-                {
+-                    Head = (Project.UiData.ResourceManager.GetDrawable(
+-                        Project.UiData.DataPath + @"characters\heads\br_brighton_head.dfm")!.Drawable as DfmFile)!,
+-                    Body = (Project.UiData.ResourceManager.GetDrawable(
+-                        Project.UiData.DataPath + @"characters\bodies\br_brighton_body.dfm")!.Drawable as DfmFile)!,
+-                    Male = true,
+-                };
+-                CommApp.Scripts.Add(anm.Scripts["SC_MLHEAD_MOTION_WALLA_CASL_000LV_XA_%"]);
+-                CommApp.Scripts.Add(anm.Scripts["SC_MLBODY_CHRB_IDLE_SMALL_000LV_XA_07"]);
+-            }
+-            else
+-            {
+-                ErrorDialog($"Could not find data folder:\n{Project.FlFolder ?? "NULL"}\n"
+-                            + "Check your project file and editor variables");
+-                Project = null;
+-            }
+-        }
+-        catch (Exception e)
+-        {
++
++        if (Project.Open(path!))
++        {
++            Project.UiData.ResourceManager.LoadResourceFile(
++                Project.UiData.DataPath + (@"ships\rheinland\rh_playerships.mat"));
++            Project.UiData.ResourceManager.LoadResourceFile(
++                Project.UiData.DataPath + (@"ships\liberty\li_playerships.mat"));
++            recentFiles.FileOpened(path!);
++            resourceEditor = new ResourceWindow(this, Project.UiData)
++            {
++                IsOpen = true
++            };
++
++            projectWindow = new ProjectWindow(Project.XmlFolder, this)
++            {
++                IsOpen = true
++            };
++
++            tabControl.Tabs.Add(new StylesheetEditor(Project.XmlFolder, Project.XmlLoader, Project.UiData));
++            TestApi._Infocard = Project.TestingInfocard;
++            TestApi._ScannedInfocard = Project.ShipInfocard;
++            var str = new StringDeduplication();
++            var anm = new AnmFile();
++            using (var f = Project.UiData.FileSystem.Open(Project.UiData.DataPath +
++                                                          @"characters\animations\bodygenericmale.anm"))
++                AnmFile.ParseToTable(anm.Scripts, anm.Buffer, str, f, @"characters\animations\bodygenericmale.anm");
++            using (var f = Project.UiData.FileSystem.Open(Project.UiData.DataPath +
++                                                          @"characters\animations\facialmale.anm"))
++                AnmFile.ParseToTable(anm.Scripts, anm.Buffer, str, f, @"characters\animations\facialmale.anm");
++            anm.Buffer.Commit();
++            CommApp = new CommAppearance()
++            {
++                Head = (Project.UiData.ResourceManager.GetDrawable(
++                    Project.UiData.DataPath + @"characters\heads\br_brighton_head.dfm")!.Drawable as DfmFile)!,
++                Body = (Project.UiData.ResourceManager.GetDrawable(
++                    Project.UiData.DataPath + @"characters\bodies\br_brighton_body.dfm")!.Drawable as DfmFile)!,
++                Male = true,
++            };
++            CommApp.Scripts.Add(anm.Scripts["SC_MLHEAD_MOTION_WALLA_CASL_000LV_XA_%"]);
++            CommApp.Scripts.Add(anm.Scripts["SC_MLBODY_CHRB_IDLE_SMALL_000LV_XA_07"]);
++        }
++        else
++        {
++            ErrorDialog($"Could not find data folder:\n{Project.FlFolder ?? "NULL"}\n"
++                        + "Check your project file and editor variables");
+             Project = null;
+-            ErrorDialog($"Could not load InterfaceEdit project or game data:\n{e.Message}");
+         }
+     }
+ 
+@@ -273,31 +265,6 @@
+                 Exit();
+             }
+ 
+-            ImGui.EndMenu();
+-        }
+-
+-        if (Project != null && ImGui.BeginMenu("Data"))
+-        {
+-            if (Project.PackageMount is { } mount)
+-            {
+-                ImGui.TextDisabled("Active NAP snapshot mounted");
+-                ImGui.TextDisabled(mount.WorkspaceDirectory);
+-                if (ImGui.MenuItem("Open NAP workspace"))
+-                {
+-                    try
+-                    {
+-                        Process.Start(new ProcessStartInfo(mount.WorkspaceDirectory) { UseShellExecute = true });
+-                    }
+-                    catch (Exception e)
+-                    {
+-                        ErrorDialog($"Could not open NAP workspace:\n{e.Message}");
+-                    }
+-                }
+-            }
+-            else
+-            {
+-                ImGui.TextDisabled("Loose DATA only (no active NAP snapshot)");
+-            }
+             ImGui.EndMenu();
+         }
+ 
+diff --git a/src/Editor/InterfaceEdit/Project.cs b/src/Editor/InterfaceEdit/Project.cs
+--- a/src/Editor/InterfaceEdit/Project.cs
++++ b/src/Editor/InterfaceEdit/Project.cs
+@@ -30,7 +30,6 @@
+ 
+ 
+     public string ProjectFile = null!;
+-    public NexusEditorDataMount? PackageMount { get; private set; }
+ 
+     public Infocard TestingInfocard = null!;
+     public Infocard ShipInfocard = null!;
+@@ -56,9 +55,6 @@
+     {
+         UiData.FlDirectory = FlFolder;
+         UiData.FileSystem = FileSystem.FromPath(FlFolder);
+-        PackageMount = NexusEditorDataMount.Attach(UiData.FileSystem, AppContext.BaseDirectory, FlFolder);
+-        if (PackageMount is not null)
+-            FLLog.Info("NAP", $"InterfaceEdit package workspace: {PackageMount.WorkspaceDirectory}");
+         UiData.ResourceManager = new GameResourceManager(window, UiData.FileSystem);
+         UiData.Fonts = window.Fonts;
+         var flIni = new FreelancerIni(UiData.FileSystem);
+diff --git a/src/Editor/InterfaceEdit/ResourceWindow.cs b/src/Editor/InterfaceEdit/ResourceWindow.cs
+--- a/src/Editor/InterfaceEdit/ResourceWindow.cs
++++ b/src/Editor/InterfaceEdit/ResourceWindow.cs
+@@ -52,23 +52,9 @@
+ 
+             if (ImGui.Button("Save"))
+             {
+-                var virtualPath = Path.Combine(context.XInterfacePath!, "resources.xml");
+-                var path = context.FileSystem.GetBackingFileName(virtualPath);
+-                if (string.IsNullOrWhiteSpace(path))
+-                {
+-                    mainWindow.ErrorDialog($"No writable workspace path is available for '{virtualPath}'.");
+-                }
+-                else
+-                {
+-                    try
+-                    {
+-                        File.WriteAllText(path, resources.ToXml());
+-                    }
+-                    catch (Exception e)
+-                    {
+-                        mainWindow.ErrorDialog($"Could not save '{virtualPath}':\n{e.Message}");
+-                    }
+-                }
++                var path = context.FileSystem.GetBackingFileName(Path.Combine(context.XInterfacePath!,
++                    "resources.xml"));
++                File.WriteAllText(path!, resources.ToXml());
+             }
+ 
+             ImGui.BeginTabBar("##tabbar", ImGuiTabBarFlags.None);
+diff --git a/src/Editor/LancerEdit/GameDataContext.cs b/src/Editor/LancerEdit/GameDataContext.cs
+--- a/src/Editor/LancerEdit/GameDataContext.cs
++++ b/src/Editor/LancerEdit/GameDataContext.cs
+@@ -25,6 +25,7 @@
+ using LibreLancer.ImageLib;
+ using LibreLancer.Resources;
+ using LibreLancer.Sounds;
++using Nexus.Assets;
+ using Archetype = LibreLancer.Data.GameData.Archetype;
+ 
+ namespace LancerEdit;
+@@ -75,6 +76,13 @@
+         }
+ 
+         return builder.ToString();
++    }
++
++    static string WorkspaceBaseDirectory()
++    {
++        var directory = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
++        if (!string.IsNullOrWhiteSpace(directory)) return Path.Combine(directory, "LancerEdit");
++        return Path.Combine(AppContext.BaseDirectory, "user-data", "LancerEdit");
+     }
+ 
+     T YieldAndWait<T>(Task<T> task)
+@@ -175,10 +183,12 @@
+         {
+             try
+             {
+-                var packageMount = NexusEditorDataMount.Attach(vfs, AppContext.BaseDirectory, folder);
+-                if (packageMount is not null)
+-                {
+-                    WorkspaceDirectory = packageMount.WorkspaceDirectory;
++                var packageProvider = NexusPackageFileProvider.LoadActive(AppContext.BaseDirectory);
++                if (packageProvider is not null)
++                {
++                    vfs.FileProviders.Add(packageProvider);
++                    WorkspaceDirectory = Path.Combine(WorkspaceBaseDirectory(), "NAPWorkspace", CacheID(folder));
++                    vfs.FileProviders.Add(new NexusPackageWorkspaceFileProvider(WorkspaceDirectory, packageProvider));
+                     FLLog.Info("NAP", $"LancerEdit package workspace: {WorkspaceDirectory}");
+                 }
+                 var sw = Stopwatch.StartNew();
+diff --git a/src/LibreLancer.Tests/LibreLancer.Tests.csproj b/src/LibreLancer.Tests/LibreLancer.Tests.csproj
+--- a/src/LibreLancer.Tests/LibreLancer.Tests.csproj
++++ b/src/LibreLancer.Tests/LibreLancer.Tests.csproj
+@@ -20,7 +20,6 @@
+       <ProjectReference Include="..\Editor\LancerEdit\LancerEdit.csproj" />
+       <ProjectReference Include="..\Editor\LibreLancer.ContentEdit\LibreLancer.ContentEdit.csproj" />
+       <ProjectReference Include="..\LibreLancer\LibreLancer.csproj" />
+-      <ProjectReference Include="..\Nexus.Assets\Nexus.Assets.csproj" />
+       <ProjectReference Include="..\LLServer.Core\LLServer.Core.csproj" />
+     </ItemGroup>
+ 
+diff --git a/src/LibreLancer.Tests/NexusEditorDataMountTests.cs b/src/LibreLancer.Tests/NexusEditorDataMountTests.cs
+deleted file mode 100644
+--- a/src/LibreLancer.Tests/NexusEditorDataMountTests.cs
++++ /dev/null
+@@ -1,108 +0,0 @@
+-using System;
+-using System.IO;
+-using System.Security.Cryptography;
+-using System.Text.Json;
+-using LibreLancer.Data;
+-using LibreLancer.Data.IO;
+-using Nexus.Assets;
+-using Xunit;
+-
+-namespace LibreLancer.Tests;
+-
+-public sealed class NexusEditorDataMountTests : IDisposable
+-{
+-    private readonly string root = Path.Combine(Path.GetTempPath(), "nap-editor-mount-" + Guid.NewGuid().ToString("N"));
+-    private string ApplicationDirectory => Path.Combine(root, "application");
+-    private string InstallDirectory => Path.Combine(root, "freelancer");
+-    private string PackageDirectory => Path.Combine(ApplicationDirectory, "packages");
+-
+-    [Fact]
+-    public void SharedEditorMountReadsActiveNapAndWritesPackagedFilesToPersistentWorkspace()
+-    {
+-        var source = Path.Combine(root, "source");
+-        Directory.CreateDirectory(Path.Combine(source, "interface"));
+-        File.WriteAllText(Path.Combine(source, "interface", "resources.xml"), "package resources");
+-        Directory.CreateDirectory(Path.Combine(InstallDirectory, "DATA", "interface"));
+-        File.WriteAllText(Path.Combine(InstallDirectory, "DATA", "interface", "resources.xml"), "loose resources");
+-        Directory.CreateDirectory(PackageDirectory);
+-        var package = Path.Combine(PackageDirectory, "core.nap");
+-        NapWriter.PackDirectory(source, package);
+-        var hash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(package))).ToLowerInvariant();
+-        var info = new FileInfo(package);
+-        var snapshot = new
+-        {
+-            schemaVersion = 1,
+-            packages = new[]
+-            {
+-                new
+-                {
+-                    id = "core",
+-                    path = "core.nap",
+-                    size = info.Length,
+-                    sha256 = hash,
+-                    required = true,
+-                    priority = 100,
+-                    mountOrder = 1,
+-                    dependencies = Array.Empty<string>(),
+-                    overrides = Array.Empty<string>()
+-                }
+-            }
+-        };
+-        File.WriteAllText(Path.Combine(PackageDirectory, "active.json"), JsonSerializer.Serialize(snapshot));
+-
+-        var fileSystem = FileSystem.FromPath(InstallDirectory);
+-        var workspaceBase = Path.Combine(root, "editor-data");
+-        var mount = NexusEditorDataMount.Attach(fileSystem, ApplicationDirectory, InstallDirectory, workspaceBase);
+-
+-        Assert.NotNull(mount);
+-        Assert.Equal("package resources", fileSystem.ReadAllText("DATA/interface/resources.xml"));
+-        var backingPath = fileSystem.GetBackingFileName("DATA/interface/resources.xml");
+-        Assert.NotNull(backingPath);
+-        Assert.StartsWith(mount.WorkspaceDirectory, backingPath, StringComparison.Ordinal);
+-        Assert.StartsWith(workspaceBase, mount.WorkspaceDirectory, StringComparison.Ordinal);
+-
+-        File.WriteAllText(backingPath, "editor override");
+-        fileSystem.Refresh();
+-        Assert.Equal("editor override", fileSystem.ReadAllText("DATA/interface/resources.xml"));
+-
+-        var reopenedFileSystem = FileSystem.FromPath(InstallDirectory);
+-        var reopenedMount = NexusEditorDataMount.Attach(reopenedFileSystem, ApplicationDirectory,
+-            InstallDirectory, workspaceBase);
+-        Assert.NotNull(reopenedMount);
+-        Assert.Equal(mount.WorkspaceDirectory, reopenedMount.WorkspaceDirectory);
+-        Assert.Equal("editor override", reopenedFileSystem.ReadAllText("DATA/interface/resources.xml"));
+-        Assert.Equal("loose resources", File.ReadAllText(Path.Combine(InstallDirectory,
+-            "DATA", "interface", "resources.xml")));
+-    }
+-
+-    [Fact]
+-    public void InvalidActiveSnapshotFailsBeforeChangingTheVfs()
+-    {
+-        Directory.CreateDirectory(InstallDirectory);
+-        Directory.CreateDirectory(PackageDirectory);
+-        File.WriteAllText(Path.Combine(PackageDirectory, "active.json"), "{ invalid json");
+-        var fileSystem = FileSystem.FromPath(InstallDirectory);
+-        var providerCount = fileSystem.FileProviders.Count;
+-
+-        Assert.ThrowsAny<Exception>(() => NexusEditorDataMount.Attach(fileSystem, ApplicationDirectory,
+-            InstallDirectory, Path.Combine(root, "editor-data")));
+-        Assert.Equal(providerCount, fileSystem.FileProviders.Count);
+-    }
+-
+-    [Fact]
+-    public void SharedEditorMountPreservesLooseOnlyModeWithoutAnActiveSnapshot()
+-    {
+-        Directory.CreateDirectory(InstallDirectory);
+-        var fileSystem = FileSystem.FromPath(InstallDirectory);
+-        var providerCount = fileSystem.FileProviders.Count;
+-
+-        Assert.Null(NexusEditorDataMount.Attach(fileSystem, ApplicationDirectory, InstallDirectory,
+-            Path.Combine(root, "editor-data")));
+-        Assert.Equal(providerCount, fileSystem.FileProviders.Count);
+-    }
+-
+-    void IDisposable.Dispose()
+-    {
+-        if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+-    }
+-}
+diff --git a/src/LibreLancer/Data/NexusEditorDataMount.cs b/src/LibreLancer/Data/NexusEditorDataMount.cs
+deleted file mode 100644
+--- a/src/LibreLancer/Data/NexusEditorDataMount.cs
++++ /dev/null
+@@ -1,73 +0,0 @@
+-using System;
+-using System.IO;
+-using System.Numerics;
+-using System.Security.Cryptography;
+-using System.Text;
+-using LibreLancer.Data.IO;
+-
+-using Nexus.Assets;
+-
+-namespace LibreLancer.Data;
+-
+-/// <summary>Mounts an activated NAP snapshot and persistent writable workspace for an editor VFS.</summary>
+-public sealed class NexusEditorDataMount
+-{
+-    private const string WorkspaceAlphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_;-+=,#$@%^!~`()[]{}";
+-
+-    private NexusEditorDataMount(string workspaceDirectory, NexusPackageFileProvider packages)
+-    {
+-        WorkspaceDirectory = workspaceDirectory;
+-        Packages = packages;
+-    }
+-
+-    public string WorkspaceDirectory { get; }
+-    public NexusPackageFileProvider Packages { get; }
+-
+-    /// <summary>
+-    /// Adds active packages and their writable workspace above the VFS's existing loose-data providers.
+-    /// Returns null when no active package snapshot is installed.
+-    /// </summary>
+-    public static NexusEditorDataMount? Attach(FileSystem fileSystem, string applicationDirectory,
+-        string gameDataDirectory, string? workspaceBaseDirectory = null)
+-    {
+-        ArgumentNullException.ThrowIfNull(fileSystem);
+-        ArgumentException.ThrowIfNullOrWhiteSpace(applicationDirectory);
+-        ArgumentException.ThrowIfNullOrWhiteSpace(gameDataDirectory);
+-
+-        var packages = NexusPackageFileProvider.LoadActive(applicationDirectory);
+-        if (packages is null) return null;
+-
+-        var workspaceDirectory = GetWorkspaceDirectory(gameDataDirectory, workspaceBaseDirectory);
+-        var workspace = new NexusPackageWorkspaceFileProvider(workspaceDirectory, packages);
+-        fileSystem.FileProviders.Add(packages);
+-        fileSystem.FileProviders.Add(workspace);
+-        return new NexusEditorDataMount(workspaceDirectory, packages);
+-    }
+-
+-    /// <summary>Uses the legacy LancerEdit path and installation ID to preserve existing edits.</summary>
+-    public static string GetWorkspaceDirectory(string gameDataDirectory, string? workspaceBaseDirectory = null)
+-    {
+-        ArgumentException.ThrowIfNullOrWhiteSpace(gameDataDirectory);
+-        if (string.IsNullOrWhiteSpace(workspaceBaseDirectory))
+-        {
+-            var localData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+-            workspaceBaseDirectory = string.IsNullOrWhiteSpace(localData)
+-                ? Path.Combine(AppContext.BaseDirectory, "user-data", "LancerEdit")
+-                : Path.Combine(localData, "LancerEdit");
+-        }
+-        return Path.Combine(workspaceBaseDirectory, "NAPWorkspace", InstallationId(gameDataDirectory));
+-    }
+-
+-    private static string InstallationId(string path)
+-    {
+-        var digest = SHA256.HashData(Encoding.UTF8.GetBytes(path.ToUpperInvariant()));
+-        var value = new BigInteger(digest.AsSpan(0, 24), isUnsigned: true);
+-        var builder = new StringBuilder();
+-        while (value > 0)
+-        {
+-            value = BigInteger.DivRem(value, WorkspaceAlphabet.Length, out var remainder);
+-            builder.Append(WorkspaceAlphabet[(int)remainder]);
+-        }
+-        return builder.ToString();
+-    }
+-}

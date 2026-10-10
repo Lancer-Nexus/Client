@@ -1,89 +1,8 @@
-diff --git a/src/LibreLancer/World/Components/AnimationComponent.cs b/src/LibreLancer/World/Components/AnimationComponent.cs
---- a/src/LibreLancer/World/Components/AnimationComponent.cs
-+++ b/src/LibreLancer/World/Components/AnimationComponent.cs
-@@ -34,14 +34,49 @@
-             public float BlendInDuration;
-             public int[] ObjectCursors;
-             public int[] JointCursors;
-+            public float[] JointLoopDurations;
- 
-             public ActiveAnimation(Script script, string name)
-             {
-                 Name = name;
-                 ObjectCursors = new int[script.ObjectMaps.Count];
-                 JointCursors = new int[script.JointMaps.Count];
-+                JointLoopDurations = new float[script.JointMaps.Count];
-+                for (var i = 0; i < script.JointMaps.Count; i++)
-+                {
-+                    var channel = script.JointMaps[i].Channel;
-+                    JointLoopDurations[i] = channel.Duration;
-+                    for (var j = 0; j < script.JointMaps.Count; j++)
-+                    {
-+                        if (i == j || !SameLastKeyframe(channel, script.JointMaps[j].Channel))
-+                            continue;
-+                        JointLoopDurations[i] = Math.Max(JointLoopDurations[i], script.JointMaps[j].Channel.Duration);
-+                    }
-+                }
-                 Script = script;
-                 ScriptDuration = GetScriptDuration(script);
-+            }
-+
-+            private static bool SameLastKeyframe(Channel first, Channel second)
-+            {
-+                if (first.FrameCount == 0 || second.FrameCount == 0 ||
-+                    first.HasAngle != second.HasAngle ||
-+                    first.HasPosition != second.HasPosition ||
-+                    first.HasOrientation != second.HasOrientation ||
-+                    (!first.HasAngle && !first.HasPosition && !first.HasOrientation))
-+                    return false;
-+
-+                var firstIndex = first.FrameCount - 1;
-+                var secondIndex = second.FrameCount - 1;
-+                if (first.HasAngle && first.GetAngle(firstIndex) != second.GetAngle(secondIndex))
-+                    return false;
-+                if (first.HasPosition && first.GetPosition(firstIndex) != second.GetPosition(secondIndex))
-+                    return false;
-+                if (first.HasOrientation &&
-+                    MathF.Abs(Quaternion.Dot(first.GetQuaternion(firstIndex), second.GetQuaternion(secondIndex))) <
-+                    0.99999f)
-+                    return false;
-+                return true;
-             }
- 
-             private float GetScriptDuration(Script sc)
-@@ -420,6 +455,7 @@
-             {
-                 ref var jointMap = ref a.Script.JointMaps[i];
-                 if (!ProcessJointMap(ref jointMap, ref a.JointCursors[i], a.StartT, a.WorldStartTime, ts, a.Loop,
-+                        a.JointLoopDurations[i],
-                         a.Reverse, a.SuppressedJoints.Contains(jointMap.ChildName), a))
-                 {
-                     finished = false;
-@@ -435,7 +471,8 @@
-         }
- 
-         private bool ProcessJointMap(ref JointMap jm, ref int cur, float initialTime, double startTime,
--            float timeScale, bool loop, bool reverse, bool suppressed, ActiveAnimation animation)
-+            float timeScale, bool loop, float loopDuration, bool reverse, bool suppressed,
-+            ActiveAnimation animation)
-         {
-             var mdl = Parent == null ? rm : Parent.Model!.RigidModel;
-             var joint = mdl.Parts[jm.ChildName].Construct;
-@@ -449,7 +486,9 @@
-             }
-             else
-             {
--                t = t % jm.Channel.Duration;
-+                t = t % (loopDuration > 0 ? loopDuration : jm.Channel.Duration);
-+                if (loopDuration > jm.Channel.Duration)
-+                    t = Math.Min(t, jm.Channel.Duration);
-             }
- 
-             if (reverse)
 diff --git a/src/LibreLancer.Tests/MultipartLoopAnimationTests.cs b/src/LibreLancer.Tests/MultipartLoopAnimationTests.cs
+index 9018553..18a28e3 100644
 --- a/src/LibreLancer.Tests/MultipartLoopAnimationTests.cs
 +++ b/src/LibreLancer.Tests/MultipartLoopAnimationTests.cs
-@@ -12,15 +12,53 @@
+@@ -12,15 +12,53 @@ namespace LibreLancer.Tests;
  public sealed class MultipartLoopAnimationTests
  {
      [Fact]
@@ -95,13 +14,11 @@ diff --git a/src/LibreLancer.Tests/MultipartLoopAnimationTests.cs b/src/LibreLan
 -        AddTrack(script, "Valve_A", 3f, 1f);
 -        AddTrack(script, "Valve_B", 4f, 2f);
 -        AddTrack(script, "Valve_C", 5f, 3f);
--        animation.Scripts.Add(script.Name, script);
--
 +        AddTimedTrack(script, "Valve_A", [0f, 0.1f, 3f], [0f, 1f, 0f]);
 +        AddTimedTrack(script, "Valve_B", [0f, 1f, 1.1f, 4f], [0f, 0f, 1f, 0f]);
 +        AddTimedTrack(script, "Valve_C", [0f, 2f, 2.1f, 5f], [0f, 0f, 1f, 0f]);
-+        animation.Scripts.Add(script.Name, script);
-+
+         animation.Scripts.Add(script.Name, script);
+ 
 +        var (component, model) = CreateComponent(script, animation);
 +        component.StartAnimation(script, loop: true);
 +        component.Update(3.1, null!);
@@ -143,11 +60,13 @@ diff --git a/src/LibreLancer.Tests/MultipartLoopAnimationTests.cs b/src/LibreLan
          var root = new RigidModelPart { Name = "Root", Children = [] };
          var model = new RigidModel
          {
-@@ -48,18 +86,23 @@
+@@ -48,18 +86,23 @@ public sealed class MultipartLoopAnimationTests
              parts.Add(part);
          }
          model.AllParts = parts.ToArray();
--
++        return (new AnimationComponent(model, animation), model);
++    }
+ 
 -        var component = new AnimationComponent(model, animation);
 -        component.StartAnimation(script, loop: true);
 -        component.Update(3.1, null!);
@@ -159,9 +78,6 @@ diff --git a/src/LibreLancer.Tests/MultipartLoopAnimationTests.cs b/src/LibreLan
 -        Assert.InRange(a, 0.032f, 0.034f);
 -        Assert.InRange(b, 1.549f, 1.551f);
 -        Assert.InRange(c, 1.859f, 1.861f);
-+        return (new AnimationComponent(model, animation), model);
-+    }
-+
 +    private static void AddTimedTrack(Script script, string name, float[] times, float[] values)
 +    {
 +        var buffer = new AnmBuffer { Buffer = new byte[times.Length * 8] };
@@ -179,3 +95,161 @@ diff --git a/src/LibreLancer.Tests/MultipartLoopAnimationTests.cs b/src/LibreLan
      }
  
      [Fact]
+@@ -69,20 +112,35 @@ public sealed class MultipartLoopAnimationTests
+         var script = new Script("Sc_offset");
+         AddTrack(script, "Valve", 4f, 4f);
+         animation.Scripts.Add(script.Name, script);
++
+         var root = new RigidModelPart { Name = "Root", Children = [] };
+-        var model = new RigidModel { Root = root, Parts = new ModelPartCollection(), Source = RigidModelSource.Compound };
++        var model = new RigidModel
++        {
++            Root = root,
++            Parts = new ModelPartCollection(),
++            Source = RigidModelSource.Compound
++        };
+         var part = new RigidModelPart
+         {
+             Name = "Valve",
+-            Construct = new PrisConstruct { ParentName = "Root", ChildName = "Valve", AxisTranslation = Vector3.UnitX, Min = -10, Max = 10 }
++            Construct = new PrisConstruct
++            {
++                ParentName = "Root",
++                ChildName = "Valve",
++                AxisTranslation = Vector3.UnitX,
++                Min = -10,
++                Max = 10
++            }
+         };
+         root.Children.Add(part);
+         model.Parts.Add(root);
+         model.Parts.Add(part);
+         model.AllParts = [root, part];
++
+         var component = new AnimationComponent(model, animation);
+         component.StartAnimation(script, loop: false, start_time: 1.5f);
+         component.Update(0, null!);
++
+         Assert.InRange(model.Parts["Valve"].Construct!.LocalTransform.Position.X, 1.499f, 1.501f);
+     }
+ 
+@@ -219,6 +277,7 @@ public sealed class MultipartLoopAnimationTests
+         Assert.InRange(part.Construct.LocalTransform.Position.X, 1.436f, 1.439f);
+     }
+ 
++
+     [Fact]
+     public void ResetAllowsTheSameClipToStartAgain()
+     {
+diff --git a/src/LibreLancer/World/Components/AnimationComponent.cs b/src/LibreLancer/World/Components/AnimationComponent.cs
+index 0bc0a8f..2c2b600 100644
+--- a/src/LibreLancer/World/Components/AnimationComponent.cs
++++ b/src/LibreLancer/World/Components/AnimationComponent.cs
+@@ -34,16 +34,51 @@ namespace LibreLancer.World.Components
+             public float BlendInDuration;
+             public int[] ObjectCursors;
+             public int[] JointCursors;
++            public float[] JointLoopDurations;
+ 
+             public ActiveAnimation(Script script, string name)
+             {
+                 Name = name;
+                 ObjectCursors = new int[script.ObjectMaps.Count];
+                 JointCursors = new int[script.JointMaps.Count];
++                JointLoopDurations = new float[script.JointMaps.Count];
++                for (var i = 0; i < script.JointMaps.Count; i++)
++                {
++                    var channel = script.JointMaps[i].Channel;
++                    JointLoopDurations[i] = channel.Duration;
++                    for (var j = 0; j < script.JointMaps.Count; j++)
++                    {
++                        if (i == j || !SameLastKeyframe(channel, script.JointMaps[j].Channel))
++                            continue;
++                        JointLoopDurations[i] = Math.Max(JointLoopDurations[i], script.JointMaps[j].Channel.Duration);
++                    }
++                }
+                 Script = script;
+                 ScriptDuration = GetScriptDuration(script);
+             }
+ 
++            private static bool SameLastKeyframe(Channel first, Channel second)
++            {
++                if (first.FrameCount == 0 || second.FrameCount == 0 ||
++                    first.HasAngle != second.HasAngle ||
++                    first.HasPosition != second.HasPosition ||
++                    first.HasOrientation != second.HasOrientation ||
++                    (!first.HasAngle && !first.HasPosition && !first.HasOrientation))
++                    return false;
++
++                var firstIndex = first.FrameCount - 1;
++                var secondIndex = second.FrameCount - 1;
++                if (first.HasAngle && first.GetAngle(firstIndex) != second.GetAngle(secondIndex))
++                    return false;
++                if (first.HasPosition && first.GetPosition(firstIndex) != second.GetPosition(secondIndex))
++                    return false;
++                if (first.HasOrientation &&
++                    MathF.Abs(Quaternion.Dot(first.GetQuaternion(firstIndex), second.GetQuaternion(secondIndex))) <
++                    0.99999f)
++                    return false;
++                return true;
++            }
++
+             private float GetScriptDuration(Script sc)
+             {
+                 float duration = 0;
+@@ -420,6 +455,7 @@ namespace LibreLancer.World.Components
+             {
+                 ref var jointMap = ref a.Script.JointMaps[i];
+                 if (!ProcessJointMap(ref jointMap, ref a.JointCursors[i], a.StartT, a.WorldStartTime, ts, a.Loop,
++                        a.JointLoopDurations[i],
+                         a.Reverse, a.SuppressedJoints.Contains(jointMap.ChildName), a))
+                 {
+                     finished = false;
+@@ -435,20 +471,24 @@ namespace LibreLancer.World.Components
+         }
+ 
+         private bool ProcessJointMap(ref JointMap jm, ref int cur, float initialTime, double startTime,
+-            float timeScale, bool loop, bool reverse, bool suppressed, ActiveAnimation animation)
++            float timeScale, bool loop, float loopDuration, bool reverse, bool suppressed,
++            ActiveAnimation animation)
+         {
+             var mdl = Parent == null ? rm : Parent.Model!.RigidModel;
+             var joint = mdl.Parts[jm.ChildName].Construct;
+             double t = initialTime + (getTotalTime() - startTime) * timeScale;
+             bool done = false;
+ 
++            // looping?
+             if (!loop && t >= jm.Channel.Duration)
+             {
+                 done = true;
+             }
+             else
+             {
+-                t = t % jm.Channel.Duration;
++                t = t % (loopDuration > 0 ? loopDuration : jm.Channel.Duration);
++                if (loopDuration > jm.Channel.Duration)
++                    t = Math.Min(t, jm.Channel.Duration);
+             }
+ 
+             if (reverse)
+@@ -457,12 +497,18 @@ namespace LibreLancer.World.Components
+             }
+ 
+             ChannelFloat angle = 0;
++
+             if (jm.Channel.HasAngle)
+-                angle = jm.Channel.FloatAtTime((float)t, ref cur);
++            {
++                angle = jm.Channel.FloatAtTime((float) t, ref cur);
++            }
+ 
+             var quat = Quaternion.Identity;
++
+             if (jm.Channel.HasOrientation)
+-                quat = jm.Channel.QuaternionAtTime((float)t, ref cur);
++            {
++                quat = jm.Channel.QuaternionAtTime((float) t, ref cur);
++            }
+ 
+             if (joint == null || suppressed)
+                 return done;

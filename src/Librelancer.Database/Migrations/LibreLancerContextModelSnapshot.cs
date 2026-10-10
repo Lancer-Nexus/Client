@@ -45,6 +45,47 @@ namespace LibreLancer.Database.Migrations
                     b.ToTable("Accounts");
                 });
 
+            modelBuilder.Entity("LibreLancer.Entities.Character.TransferSnapshotImport", b =>
+                {
+                    b.Property<Guid>("TransferId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("AccountId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("CharacterId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("Imported")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("LeaseVersion")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("SnapshotHash")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SourceInstanceId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("TargetInstanceId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("TargetSystemId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("TicketHash")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("TransferId");
+
+                    b.ToTable("TransferSnapshotImports");
+                });
+
             modelBuilder.Entity("LibreLancer.Entities.Character.CargoItem", b =>
                 {
                     b.Property<long>("Id")

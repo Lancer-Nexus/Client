@@ -1,0 +1,294 @@
+# Nexus Asset Packages (NAP) – Technische Spezifikation
+
+**Projekt:** Lancer-Nexus/Client  
+**Status:** V1-Umsetzung und Linux-Spielstart verifiziert; Windows-Ausführung und einzelne Recovery-/Editorpfade sind offen. Maßgeblich für den konkreten Stand ist [`asset-packages/implementation-status.md`](asset-packages/implementation-status.md).  
+**Version:** 0.1 (2026-10-09)  
+**Formate:** `.nap` (Assetcontainer), `.napd` (Delta-/Patchtransport)
+
+## 1. Ziel und Randbedingungen
+
+Ein beliebig erweiterbares, versions- und patchfähiges Container-Dateisystem für Freelancer-`DATA`-Ressourcen (INI, Modelle, Texturen, Animationen, Audio, Universum, Missionen und optionale Contentpakete) auf Windows und Linux. Client, dedizierter Server und Editor sollen dieselbe VFS-Grundlage verwenden. Keine vollständige Entpackung vor dem Spielstart. Der Launcher/Updater installiert Pakete atomar und repariert defekte Installationen.
+
+**Nichtziele für V1:** Verschlüsselung/DRM; Streaming unbekannter Assets mitten in einer laufenden Szene; generelle Migration aller Schreibzugriffe in Container; bytegenaue Quake-PAK-Kompatibilität.
+
+**Rechtlicher Hinweis:** Originale Freelancer-Spieldaten dürfen nicht automatisch mit Builds verteilt werden. Verpackung und Distribution ausschließlich mit entsprechenden Nutzungsrechten; für reine Entwicklungsinstallationen lokale Konvertierung bereitstellen.
+
+## 2. Repository-Ausgangslage (Stand Prüfung 09.10.2026)
+
+- `src/LibreLancer.Data/IO/FileSystem.cs`: `IFileProvider` bietet `Open`, `FileExists`, `GetBackingFileName`, `GetFiles`, `GetDirectories` und `Refresh`; Provider werden bei der Auflösung rückwärts durchsucht. `IOverlayFileProvider` ergänzt Maskierung und Tombstone-aware Enumeration.
+- Patch 2070 stellt weiterhin das lose DATA-Verzeichnis-Overlay bereit. Die späteren NAP-Patches ergänzen den Containerprovider, Tombstones, effektive Enumeration, Client-/LLServer-Mounts und den LancerEdit-Workspace.
+- Der Updater prüft signierte Client- und NAP-Artefakte, erstellt im Staging einen gemeinsamen Release-Snapshot und aktiviert ihn über einen Release-Pointer. Client plus NAP werden im DownloadServer/Updater-Integrationstest gemeinsam verifiziert und aktiviert; der Linux-Spielstart mit vollständigem NAP und ohne loses `DATA` erreichte das erste UI. Windows-Spiel-/Editorlaufzeit, reale ENOSPC-Prüfung, produktive Veröffentlichung mit provisioniertem Trust Root und einzelne Editor-/Recoverypfade bleiben offen. Details und aktuelle Prüfergebnisse stehen in [`asset-packages/implementation-status.md`](asset-packages/implementation-status.md).
+- Client-/Engine-Änderungen bleiben gemäß `AGENTS.md` patch-only; README- und Statusdokumentation wird direkt im jeweiligen Repository gepflegt. Standalone-Betrieb ohne aktiven Snapshot bleibt erhalten.
+
+Quellen: `AGENTS.md`, `README.md`, `patches/series`, `src/LibreLancer.Data/IO/FileSystem.cs`, `src/Nexus.Assets/NexusPackageFileProvider.cs`, `src/LibreLancer/GameConfig.cs`, `src/LLServer.Core/ServerApp.cs`, sowie der verlinkte Statusbericht.
+
+## 3. Architektur
+
+```text
+Gateway/Version API -> signiertes Release-Manifest
+                              |
+                      Launcher / Updater
+                      |      |      |
+                   Download Verify Staging
+                              |
+                 atomarer active.json Wechsel
+                              |
+                     Package Mount Manager
+                +-------------+------------+
+                |             |            |
+             hotfix.nap    models.nap   sound.nap ...
+                +-------------+------------+
+                              |
+                  NexusPackageFileProvider
+                              |
+                    LibreLancer FileSystem
+                         Client/Server/Editor
+```
+
+Der Mount Manager konsumiert das **lokale, verifizierte und aktivierte Manifest** und erzeugt eine sortierte Provider-Liste. Dateiöffnung erfolgt über virtuelle `DATA/`-relative Namen. Ressourcen können wahlfrei in mehreren Paketen liegen; Kategorien und Verzeichnisse sind lediglich Metadaten, keine feste Layoutvorgabe.
+
+### Beispiel-Pakete
+
+```text
+packages/core/game-config.nap
+packages/core/universe.nap
+packages/graphics/models.nap
+packages/graphics/textures.nap
+packages/graphics/animations.nap
+packages/audio/sounds.nap
+packages/audio/music.nap
+packages/audio/voices-de.nap
+packages/systems/liberty.nap
+packages/systems/rheinland.nap
+packages/updates/hotfix-2026-10.nap
+```
+
+### Lookup- und Konfliktregel
+
+1. Normalisiere den *virtuellen* Pfad (Backslash zu Slash, bekannte `EXE/../DATA/`-Schreibweise canonicalisieren). Akzeptiere niemals absolute Pfade, `..`-Traversal, NUL oder Gerätepfade.
+2. Der Manifest-Mount-Plan ordnet alle Provider nach `(priority ASC, mountOrder ASC, packageId ASC)`; **letzter Provider gewinnt**, entsprechend der existierenden VFS-Suche. Gleiche Priorität ohne eindeutige Mount-Reihenfolge wird beim Manifest-Build abgewiesen.
+3. Innerhalb eines Pakets sind doppelte normalisierte Pfade verboten; Vergleich für Freelancer kompatibel case-insensitive ordinal. Gleichnamige Einträge mehrerer Pakete benötigen explizite Override-Deklaration oder werden im CI abgelehnt.
+4. Tombstone-Einträge maskieren ältere Dateien. Das ist in V1 über `IOverlayFileProvider` und die Tombstone-Prüfungen in `FileSystem` umgesetzt; `Open() => null` allein wird nicht als Löschsignal interpretiert. Regressionstests prüfen Maskierung und Verzeichnisenumeration.
+5. `GetFiles`/`GetDirectories` liefern den **vereinheitlichten effektiven** Verzeichnisstand ohne maskierte Ressourcen.
+6. Ältere, entpackte `DATA`-Installationen bleiben als unterste Fallback-Schicht optional erhalten.
+
+## 4. NAP-Dateiformat v1
+
+**Endian:** Little Endian. **Integer:** explizite fixed-width unsigned Typen; Grenzen vor jeder Allocation prüfen. **Strings:** UTF-8, normalisierte virtuelle Pfade. Kein ausführbarer Archivcode.
+
+### Header (feste Länge 128 Byte, vorgeschlagen)
+
+| Offset | Feld | Typ / Bedeutung |
+|---|---|---|
+| 0 | Magic | 8 Bytes `LNAP\0\r\n\x1A` |
+| 8 | HeaderVersion | u16 = 1 |
+| 10 | HeaderLength | u16 = 128 |
+| 12 | Flags | u32 (definierte Bits, unbekannte Pflichtbits ablehnen) |
+| 16 | PackageUuid | 16 Bytes |
+| 32 | ContentVersion | u64 |
+| 40 | ChunkSizeHint | u32, z. B. 256 KiB |
+| 44 | Reserved | 4 Bytes = 0 |
+| 48 | IndexOffset | u64 |
+| 56 | IndexLength | u64 |
+| 64 | ChunkTableOffset | u64 |
+| 72 | ChunkTableLength | u64 |
+| 80 | PayloadOffset | u64 |
+| 88 | PayloadLength | u64 |
+| 96 | IndexSha256 | 32 Bytes |
+
+Die genauen binären Tabellen werden vor dem ersten Writer-Release als schema-konforme Golden Fixtures eingefroren; Änderungen erfordern eine neue Major-Formatversion.
+
+### Index und Chunktabelle
+
+- **Index:** sortierte Einträge mit Pfad, Größe, SHA-256 des *unkomprimierten* Dateiinhalts, MIME/Asset-Hinweis optional, Flags (Datei/Tombstone), geordnete Chunkreferenzen und Offset/Length im letzten Chunk.
+- **Chunks:** je Chunk SHA-256 des unkomprimierten Inhalts, komprimierte Größe, unkomprimierte Größe, Byteoffset, Codec (`none`/`zstd`), optionale Dictionary-ID.
+- **Kompression:** unabhängig pro Chunk mit Zstandard; bereits stark komprimierte Medien als `none` oder nur bei nachweislichem Gewinn komprimieren. Beliebiger Random-Access auf Teilbereiche ohne Dekomprimierung des ganzen Pakets.
+- **Deduplikation:** im Builder zunächst innerhalb eines Pakets per SHA-256, später optional globaler Content Store. Hashgleichheit nicht als Vertrauensbeweis verwenden: signiertes Manifest und verifizierte Paketinhalte sind erforderlich.
+- **Schutzgrenzen:** maximale Indexgröße, Dateianzahl, Pfadlänge, Chunkgröße, Expansion Ratio, Überlaufprüfungen, keine überlappenden Payload-Regionen, keine unsicheren Dateinamen.
+- **Lesestrategie:** Index beim Mount laden; Chunkdaten auf Abruf lesen; LRU-Cache mit konfigurierbarem RAM-Budget; parallel lesbare, unabhängige Streams und threadsichere Indextabellen.
+
+`GetBackingFileName`-Kompatibilität: Zur Klärung aufrufender APIs alle Call-Sites prüfen. Falls ein echter OS-Pfad verlangt wird, kontrollierter schreibgeschützter Cache-Export mit Hashprüfungen und Race-Schutz; niemals Containerpfade als normale physische Dateien ausgeben.
+
+## 5. Manifeste und Aktivierung
+
+Zwei getrennte Dokumenttypen:
+
+**Release-Manifest (vom Herausgeber signiert):** Version, Plattform, Minimale Client-/Server-/VFS-Version, Paketliste, Versionen, URL/Mirrors, Größen, SHA-256, Mount-Priorität, Abhängigkeiten, erforderliche/optionale Pakete, Überschreibungsregeln, Signatur und Schlüssel-ID.
+
+**`active.json` (lokaler Installationszustand):** Manifest-Digest, Snapshot-ID, ausgewählte optionale Pakete, kanonische lokale Pfade, letzter gesunder Snapshot. Keine Authentifizierungs-Tokens oder Secrets. Schutz vor Manipulation durch Validierung aller referenzierten Paket-Hashes vor Aktivierung.
+
+Beispiel (schematisch, keine produktive Signatur):
+
+```json
+{
+  "schemaVersion": 1,
+  "release": "1.2.0",
+  "minimumClientVersion": "1.2.0",
+  "contentProtocol": 1,
+  "packages": [
+    {"id":"core", "version":3, "path":"core/game-config.nap", "size":1234567, "sha256":"<64-hex>", "required":true, "priority":100, "mountOrder":1, "dependencies":[]},
+    {"id":"animations", "version":4, "path":"graphics/animations.nap", "size":2345678, "sha256":"<64-hex>", "required":true, "priority":100, "mountOrder":2, "dependencies":["core"]},
+    {"id":"sounds-hotfix", "version":1, "path":"updates/sounds-007.nap", "size":345678, "sha256":"<64-hex>", "required":true, "priority":200, "mountOrder":1, "dependencies":["core"], "overrides":["audio/sounds.nap"]}
+  ],
+  "signature": {"algorithm":"Ed25519", "keyId":"release-2026", "value":"<base64-signature>"}
+}
+```
+
+Signiert wird eine festgelegte **kanonische Serialisierung ohne Signaturfeld** (z. B. RFC 8785 JSON Canonicalization Scheme); Testvektoren gehören zur Spezifikation. Öffentlicher Root-Schlüssel wird mit Launcher ausgeliefert; Rotation und Revocation planen. HTTPS plus Hash plus Signatur – nicht nur TLS/Hash.
+
+## 6. Patchverfahren
+
+### A. Overlay-Update (Standard)
+
+Ein neues `.nap` enthält neue/geänderte Dateien und ggf. Tombstones. Download nur der Patchdatei, Manifest entsprechend höherer Priorität mounten. Vorteile: kurzer Updateprozess, keine vollständige Rekonstruktion. Nachteil: wachsende Patchkette und zusätzliche Indexe. Grenzwerte für Kettenlänge/Overhead festlegen; regelmäßige Rebase/Compaction durch Herausgeber.
+
+### B. `.napd` Delta-Transport (optional V2)
+
+`napd` ist **kein direkt gemounteter Container**, sondern ein transportiertes, signiert referenziertes Rezept zur Erzeugung eines neuen `.nap` aus einem exakt definierten alten `.nap`:
+
+- Formatversion, `sourceSha256`, `targetSha256`, targetSize, Chunkoperationen `COPY(old-offset,length)`/`INSERT(payload)` und Kompressions-/Algorithmus-Metadaten.
+- Nur nutzen, falls vollständige Quell-Hashprüfung erfolgreich und Delta kleiner als Vollpaket ist; sonst neues NAP herunterladen.
+- Staging in separater Datei, strikte Längen-/Offset-/Expansion-Bounds, Full Target SHA-256 verifizieren, atomar umbenennen. Delta darf keine beliebigen Pfade schreiben.
+- Optional spätere blockbasierte/bsdiff-artige Encoder. Zuerst Overlay-Verfahren fertigstellen und messen.
+
+## 7. Updatezustandsmaschine und Ausfallsicherheit
+
+```text
+Idle -> FetchManifest -> VerifySignature -> ResolveDependencies
+ -> Plan -> DownloadToStaging (Resume/Range) -> VerifyHashes
+ -> BuildDeltas(optional) -> VerifyCompleteSnapshot
+ -> WritePendingSnapshot -> AtomicSwitch(active.json)
+ -> Launch -> HealthAcknowledged -> CleanupOldSnapshots
+                        | failure
+                        v
+                   RestorePreviousSnapshot
+```
+
+- Manifest und Downloads unvertrauenswürdig behandeln; HTTPS erforderlich; Mirror URLs per Allowlist/Policy.
+- Updater- und Launcherprozess getrennt vom Spiel, um gesperrte Dateihandles unter Windows zu vermeiden.
+- Download-Locks, Journaling, resumierbare Downloads, verfügbare Diskkapazität und Interrupt-Verhalten beachten.
+- Umschaltung nur auf **vollständig** verifizierten Snapshot. Auf Windows/Linux atomaren Rename im selben Dateisystem plus File/Directory-Sync soweit unterstützt.
+- Erfolgreicher Prozessstart allein ist nicht gesund; Client muss Health-Signal nach tatsächlichem Data-Mount und Startbildschirm senden. Timeout/Crash => einmaliges Rollback mit Anti-Loop-Marker.
+- Während ein Prozess läuft, gemountete Pakete nicht verändern/löschen; alte Snapshot-Generation bis Freigabe behalten.
+- Fehler unterscheiden: Netzwerk, Signatur, Pakethash, inkompatible Version, fehlendes Paket, fehlender Speicherplatz, Mountfehler.
+- Statuscodes des bestehenden Clients 42 (Update erforderlich) und 43 (Repair) beibehalten bzw. sauber integrieren.
+
+## 8. Gateway-Kompatibilität
+
+Gateway gibt vor dem Eintritt die minimale Content-Protokollversion und einen signierten Manifest-Digest bzw. die erforderliche Release-ID zurück; Client/Updater vergleicht, installiert und bestätigt. `JoinTicket` bleibt von Update-Metadaten getrennt. Serverseitige Autorität entscheidet, welche Content-Version ein System benötigt. Keine clientseitige Annahme, dass reine Engine-Version genügt. Optionalpakete dürfen keine serverkritischen Gameplay-Definitionen verändern, die die Simulation inkonsistent machen.
+
+## 9. Sicherheit und Robustheit
+
+- Prüfe Signaturen **vor** Verwendung von Updateplänen; prüfe Hashes vor Mount/Aktivierung; Anti-Downgrade-Policy.
+- Pfadnormalisierung invariant und plattformübergreifend. `../`, absolute Pfade, NTFS ADS, Gerätenamen, ungültige UTF-8-Zeichen und case-insensitive Konflikte abweisen.
+- Keine Symlinks und keine Executable-Payload-Extraktion aus Paketen. NAP-Reader darf keine Containerinhalte ausführen.
+- Schutz vor decompression bombs, Hash-Kollision-Annahmen, Offset-/Integerüberläufen, doppelten Einträgen und fehlerhaften Chunkreferenzen.
+- Keine unnötige Datenprotokollierung sensibler Pfade/Token; sichere Fehlermeldungen und Auditdaten über Updatevorgang.
+
+## 10. C#-Komponenten und Projektaufteilung
+
+```text
+src/Nexus.Assets/               # Portable .NET Library
+  NapReader, NapIndex, NapStream, NapWriter
+  NapManifest, PackageMountPlan, ChunkCache
+src/Nexus.Assets.Tests/         # Reader/Writer/Fuzz/Golden Tests
+src/Nexus.Packaging.Cli/        # pack, inspect, verify, diff, compact
+src/LibreLancer.Data/IO/       # NexusPackageFileProvider Adapter
+Updater/Launcher integration    # staging, activation, recovery
+```
+
+CLI-Ziele:
+
+```bash
+nexus-pack pack --source ./DATA --output ./packages/core.nap --compression zstd
+nexus-pack inspect ./packages/core.nap
+nexus-pack verify ./packages/core.nap
+nexus-pack diff --old old.nap --new new.nap --output update.napd
+nexus-pack compact --manifest release.json --output rebuilt.nap
+```
+
+Die konkreten Projektnamen und CLI-Flags werden an die tatsächliche Solution/Buildstruktur angepasst. Keine separate redundante VFS-Implementierung im Launcher schaffen.
+
+### LancerEdit
+
+Im Menü **Data** kann ein NAP-Container über **Unpack NAP Container...** in einen neu angelegten Unterordner extrahiert oder ein ausgewählter Ordner über **Pack Folder as NAP...** gepackt werden. Vor dem Entpacken werden alle Einträge verifiziert; vorhandene Ziele werden nicht überschrieben. Nach dem Laden eines aktiven NAP-Snapshots steht **Export Edited NAP Snapshot...** bereit. Diese Aktion fasst Paketstand und persistente Workspace-Änderungen zu einem vollständigen NAP zusammen. Signierung und Aktivierung bleiben Publisher-/Updater-Schritte.
+
+## 11. Test- und Abnahmekriterien
+
+1. Roundtrip für INI, BMP/DDS, CMP/3DB, ALE/Animation, WAV/OGG und zufällige Binärdateien, einschließlich leerer Dateien.
+2. Case-insensitive Pfade, `EXE/../DATA`, virtuelle Ordnerauflistung, ältere Fallback-Daten, deterministische Override-Priorität und Tombstones funktionieren identisch unter Windows/Linux.
+3. Mehrere parallele zufällige Seek/Read-Streams lesen bytegenau; Cache-Memory unter Limit; große Dateien streamen ohne Vollpufferung.
+4. Manipulierte Header/Index/Chunks, Überläufe, Path-Traversal, ungültige Signatur und beschädigte Downloads werden sicher abgelehnt.
+5. Abbruch während Download, Patch-Rekonstruktion, Aktivierung und Start führt zu vollständigem alten oder neuen Zustand – nie gemischter Content-Version.
+6. Optionalpakete und Abhängigkeiten werden sauber aktiviert/deaktiviert; serverkritische Content-Version wird vor dem Join geprüft.
+7. Client, LLServer und Editor laden reale Assets ohne Regression; bestehende Verzeichnisinstallation funktioniert weiterhin.
+8. Messungen dokumentieren Containergröße, Patchgröße, Mountzeit, Lese-Latenz, RAM und Startzeit; Grenzwerte vor Performance-Freigabe definieren.
+9. CI baut Reader, Writer und Tests für Windows und Linux; Golden-Fixtures und Fuzzing/Property-Tests ergänzen.
+
+## 12. Implementierungsreihenfolge
+
+**Phase 0 – Audit:** Repo/Overlay/VFS/Updater-Aufrufstellen inventarisieren, Content-Rechte klären, Schnittstellen und Tests erfassen.
+
+**Phase 1 – Leseformat:** feste Formatversion, golden fixtures, NAP Reader/Writer, CLI, robuste Unit-Tests.
+
+**Phase 2 – VFS-Mount:** Provider, Manifest-Priorität, Tombstones, `GetBackingFileName`-Kompatibilität, Integrationstests für Client/Server/Editor.
+
+**Phase 3 – Updater:** signiertes Release-Manifest, atomare Snapshots, Resume, Repair, Rollback und Gateway-Versioncheck.
+
+**Phase 4 – Overlay-Patches:** diff-basierter Paketbuilder, Delete/Override, Update-Matrix, Compaction.
+
+**Phase 5 – optionale Verbesserungen:** NAPD-Delta-Rekonstruktion, CDN/Mirrors, Content-On-Demand, globaler Chunkstore nach Messung.
+
+## 13. Offene Architekturentscheidungen
+
+- Physische Chunkgröße (64/256/1024 KiB) anhand realer Asset-Mixes benchmarken.
+- Verzeichnis-/Dateilängenlimits und Cache-Budget festsetzen.
+- Signatur-Schlüssellebenszyklus und Launcher-Truststore definieren.
+- Prüfen, welche Assets ausschließlich Dateipfade verlangen und temporär extrahiert werden müssen.
+- Server-/Client-Content-Digest: vollständige Release-Identität oder gezieltes Gameplay-Subset?
+- Legale Bezugsquelle und lokale Importfunktion für proprietäre Freelancer-Daten.
+
+
+## 14. Optionale Audio-Pipeline und moderne Audioformate
+
+**Ziel:** Audioressourcen in getrennten Paketen (`sounds.nap`, `music.nap`, `voices-<sprache>.nap`) unabhängig aktualisieren. Für bisherige WAV-Dateien können zur Build-Zeit modernere Formate verwendet werden, solange bestehende Spielreferenzen unverändert funktionieren und die Decoderfähigkeit des aktuellen LibreLancer-Forks nachgewiesen ist.
+
+### Vorgehen und Formate
+
+- **WAV/PCM:** Originaltreue, niedrigste Codec-Latenz; Standard-Fallback für kurze/loopkritische SFX. Container darf PCM-Blöcke optional per Zstd komprimieren.
+- **Ogg Vorbis:** Bevorzugt zu evaluieren für Musik, Ambient und längere Sounds, abhängig von tatsächlicher Decoderunterstützung und Loop-Verhalten.
+- **Opus:** Bevorzugt zu evaluieren für Sprachausgabe, gegebenenfalls längere Sounds; Decoder, Pre-Skip und Seek-Verhalten vorab prüfen.
+- **MP3:** Optionaler Decoder-/Importpfad; nur einsetzen, wenn sinnvoll und unterstützt.
+- **FLAC:** Optionale verlustfreie Alternative, falls decoderseitig verfügbar.
+
+Bereits komprimierte Audiodaten werden normalerweise in NAP mit `compression=none` gespeichert; eine zweite Zstd-Schicht bietet oft kaum Ersparnis und erhöht CPU-Aufwand. Lange Audiodaten sollen gestreamt statt vollständig vorab dekodiert werden.
+
+### Kompatibilitätsmodell und Aliase
+
+Ein vom Containerindex getrenntes, signiertes Audio-Mapping kann beispielhaft folgenden Eintrag enthalten:
+
+```json
+{
+  "audioAliases": [{
+    "virtualPath": "DATA/AUDIO/MUSIC/music_space.wav",
+    "assetPath": "AUDIO/MUSIC/music_space.ogg",
+    "codec": "vorbis",
+    "streaming": true,
+    "requiresDecoder": "vorbis"
+  }]
+}
+```
+
+**Invariante:** Die öffentliche VFS-API darf nicht stillschweigend unter einem `.wav`-Pfad Ogg-/Opus-Bytes ausgeben, wenn bestehende Aufrufer rohes WAV erwarten. Audio-Aliasauflösung erfolgt über einen dafür vorgesehenen Audio-Resolver/Loader, der Codec und Stream korrekt erkennt und an den passenden Decoder übergibt. Normale `IFileProvider`-Clients müssen weiterhin die erwarteten Rohdateien erhalten oder ausdrücklich migriert werden.
+
+### Encoding, Streaming und Validierung
+
+1. Bestehenden Audio-Ladepfad, Decoder, Ressourcentypen, Loop-Metadaten und Plattformen im Repository untersuchen; tatsächliche Vorbis/Opus/MP3-Unterstützung durch Code und Tests belegen.
+2. Opt-in Build-Konvertierung über `Nexus.AudioPipeline` mit `analyze`, `convert`, `verify`; pro Asset-Klasse bitrate/quality, Samplerate, Kanalanzahl und Zielcodec festlegbar.
+3. Encoder-Version und Parameter aufzeichnen; keine verlustbehaftete Mehrfachkodierung. Ursprungs-Assets beim lokalen Packaging erhalten können, ohne sie zu distribuieren.
+4. Loop-Punkte, Encoder-Delay, Pre-Skip, gapless playback, 3D-Sound, Sample-Präzision sowie Start-Latenz testen. Wo gleichwertige Wiedergabe nicht möglich ist, WAV belassen.
+5. Seek-fähige Container-Streams und blockweisen Zugriff für Audio erlauben; Dekodierung langer Dateien nicht vollständig im RAM erzwingen. Begrenzte Caches für kurze Effekte.
+6. Manifest enthält Abhängigkeit von notwendiger Client-Decoder-Version; atomare Paket-Aktivierung und Rollback auch für reine Audio-Updates.
+7. Ungültige Audiodaten/Metadaten robust ablehnen; nur synthetische, selbst erstellte oder lizenzierte Test-Assets verwenden.
+
+**Abnahmekriterien:** Audio-Aliase funktionieren, ursprüngliche WAV-Pfade brechen keine bestehenden Loader; Audio-Pakete lassen sich getrennt updaten und reparieren; Musik-Loops/kurze SFX zeigen keine unzulässigen Timing-Regressions; Linux und Windows getestete Decoderpfade; Audio-Fallback bei nicht kompatiblen Ressourcen.

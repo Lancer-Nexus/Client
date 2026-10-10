@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Linq;
+using LancerNexus.Protocol;
 
 namespace LibreLancer.Missions;
 
@@ -24,6 +25,29 @@ public class MissionLabel
     public bool AnyAlive() => states.Values.Any(x => x == NpcState.Alive);
 
     public int DestroyedCount() => states.Values.Count(x => x == NpcState.Dead);
+
+    public NpcMissionLabelState CaptureTransferState() => new()
+    {
+        Nickname = Name,
+        Alive = states.Where(x => x.Value == NpcState.Alive).Select(x => x.Key).OrderBy(x => x, System.StringComparer.OrdinalIgnoreCase).ToArray(),
+        Destroyed = states.Where(x => x.Value == NpcState.Dead).Select(x => x.Key).OrderBy(x => x, System.StringComparer.OrdinalIgnoreCase).ToArray()
+    };
+
+    public void RestoreTransferState(NpcMissionLabelState state)
+    {
+        foreach (var name in state.Alive)
+        {
+            if (!states.ContainsKey(name) || states[name] != NpcState.NotSpawned)
+                throw new System.IO.InvalidDataException($"Mission label '{Name}' contains an invalid alive object '{name}'.");
+            states[name] = NpcState.Alive;
+        }
+        foreach (var name in state.Destroyed)
+        {
+            if (!states.ContainsKey(name) || states[name] != NpcState.NotSpawned)
+                throw new System.IO.InvalidDataException($"Mission label '{Name}' contains an invalid destroyed object '{name}'.");
+            states[name] = NpcState.Dead;
+        }
+    }
 
     public MissionLabel(string name, IEnumerable<string> ships)
     {

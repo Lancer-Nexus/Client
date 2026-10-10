@@ -4,7 +4,7 @@ namespace LibreLancer.Server.ConsoleCommands
     public class NPCCommand : IConsoleCommand
     {
         public string Name => "npc";
-        public bool Admin => true;
+        public string? Permission => "command.npc";
         public void Run(Player player, string arguments)
         {
             player.Space!.World.NPCs.RunScript(arguments).ContinueWith((t) =>

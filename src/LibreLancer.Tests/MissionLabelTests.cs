@@ -42,4 +42,22 @@ public class MissionLabelTests
 
         Assert.False(label.IsAllKilled());
     }
+
+    [Fact]
+    public void TransferStateRestoresAliveDestroyedAndNotSpawnedMembers()
+    {
+        var source = new MissionLabel("enemies", ["alive", "destroyed", "not_spawned"]);
+        source.Spawned("alive");
+        source.Spawned("destroyed");
+        source.Destroyed("destroyed");
+
+        var target = new MissionLabel("enemies", ["alive", "destroyed", "not_spawned"]);
+        target.RestoreTransferState(source.CaptureTransferState());
+
+        Assert.True(target.AnyAlive());
+        Assert.Equal(1, target.DestroyedCount());
+        Assert.False(target.IsAllKilled());
+        target.Destroyed("alive");
+        Assert.True(target.IsAllKilled());
+    }
 }

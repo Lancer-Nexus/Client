@@ -57,6 +57,7 @@ namespace LibreLancer.Utf.Ale
         }
 		public float GetValue(float sparam, float time)
 		{
+			if (Items.Count == 0) return 0;
 			// 1 item, 1 value
 			if (Items.Count == 1) {
 				return Items [0].GetValue (time);
@@ -72,7 +73,9 @@ namespace LibreLancer.Utf.Ale
 			}
 			// We're at the end
 			if (f1 == null) {
-				return Items [Items.Count - 1].GetValue(time);
+                return sparam < Items[0].SParam
+                    ? Items[0].GetValue(time)
+                    : Items[Items.Count - 1].GetValue(time);
 			}
 			// Interpolate between SParams
 			var v1 = f1.GetValue (time);

@@ -1,6 +1,33 @@
+diff --git a/src/LibreLancer/GameStates/RoomGameplay.cs b/src/LibreLancer/GameStates/RoomGameplay.cs
+index 41aa8e9..2ba53c9 100644
+--- a/src/LibreLancer/GameStates/RoomGameplay.cs
++++ b/src/LibreLancer/GameStates/RoomGameplay.cs
+@@ -1369,7 +1369,10 @@ namespace LibreLancer
+                 ? playerShip.GetHardpoint("HpMount")!.Transform.Inverse()
+                 : Transform3D.Identity);
+ 
+-            shipMarker.Object?.Children.Add(playerShip);
++            if (shipMarker.Object != null)
++            {
++                playerShip.Reparent(shipMarker.Object);
++            }
+         }
+ 
+         private void RoomDoSceneScript(ThnScript? sc, ScriptState state)
+@@ -1386,7 +1389,7 @@ namespace LibreLancer
+             waitingForFinish = sc;
+             if (hasLandingAnimation && state == ScriptState.Enter && sc != null)
+                 locationAnnouncementDelay = Math.Max(0, sc.Duration - 8);
+-            scene!.BeginScene(Scripts(sceneScripts, [sc]));
++            scene!.BeginScene(Scripts(sceneScripts, [sc]), sceneScripts.Length);
+             PopulateRoomNpcs();
+             string[] ships = [];
+ 
+diff --git a/src/LibreLancer/Thn/Cutscene.cs b/src/LibreLancer/Thn/Cutscene.cs
+index 9f07fe9..5526f4c 100644
 --- a/src/LibreLancer/Thn/Cutscene.cs
 +++ b/src/LibreLancer/Thn/Cutscene.cs
-@@ -55,6 +55,8 @@
+@@ -55,6 +55,8 @@ public class Cutscene : IDisposable
  
      private ThnScriptContext scriptContext;
      private List<ThnScriptInstance> instances = [];
@@ -9,7 +36,7 @@
      private readonly List<ThnScriptLayer> scriptLayers = [];
      private ThnSceneObject[] starSphereObjects = [];
      public event Action<ThnScript>? ScriptFinished;
-@@ -158,12 +160,21 @@
+@@ -158,12 +160,21 @@ public class Cutscene : IDisposable
          sceneObjects.Remove(obj.Name);
      }
  
@@ -33,7 +60,7 @@
      }
  
      public bool FinishScript(ThnScript script)
-@@ -252,7 +263,8 @@
+@@ -252,7 +263,8 @@ public class Cutscene : IDisposable
      private ThnScriptInstance[] SceneSetup(
          ThnScript[] scripts,
          bool resetObjects = true,
@@ -43,7 +70,7 @@
      {
          if (resetObjects)
          {
-@@ -305,6 +317,10 @@
+@@ -305,6 +317,10 @@ public class Cutscene : IDisposable
          {
              var script = scripts[i];
              var ts = new ThnScriptInstance(this, script);
@@ -54,7 +81,7 @@
              ts.ConstructEntities(sceneObjects, spawnObjects && (resetObjects || spawnLayerObjects));
              instances.Add(ts);
              newInstances[i] = ts;
-@@ -416,16 +432,32 @@
+@@ -416,10 +432,13 @@ public class Cutscene : IDisposable
              }
          }
  
@@ -69,11 +96,10 @@
  
          camera.Update();
          if (Renderer != null)
-         {
-             World.Update(delta);
+@@ -428,6 +447,19 @@ public class Cutscene : IDisposable
          }
-+    }
-+
+     }
+ 
 +    private void StartLoopInstance(ThnScript script)
 +    {
 +        var instance = new ThnScriptInstance(this, script)
@@ -85,12 +111,16 @@
 +        instance.ConstructEntities(sceneObjects, spawnObjects, $"__loop{loopInstanceIndex++}");
 +        instances.Add(instance);
 +        instance.Update(0);
-     }
- 
++    }
++
      public void Draw(double delta, int renderWidth, int renderHeight, ICamera? overrideCam = null)
+     {
+         UpdateStarsphere();
+diff --git a/src/LibreLancer/Thn/ThnScriptInstance.cs b/src/LibreLancer/Thn/ThnScriptInstance.cs
+index 99b84ff..1e4917b 100644
 --- a/src/LibreLancer/Thn/ThnScriptInstance.cs
 +++ b/src/LibreLancer/Thn/ThnScriptInstance.cs
-@@ -26,11 +26,15 @@
+@@ -26,11 +26,15 @@ namespace LibreLancer.Thn
  
      public class ThnScriptInstance
      {
@@ -106,7 +136,7 @@
  
          public bool Running => CurrentTime < Duration;
  
-@@ -41,7 +45,10 @@
+@@ -41,7 +45,10 @@ namespace LibreLancer.Thn
  
          private readonly ThnScript thn;
          private readonly List<(ThnSceneObject Object, string Animation)> skipMotionTargets = [];
@@ -117,18 +147,17 @@
  
          public ThnScriptInstance(Cutscene cs, ThnScript script)
          {
-@@ -74,18 +81,25 @@
+@@ -74,18 +81,25 @@ namespace LibreLancer.Thn
              return sub != null && type == e.Type && e.Template.Equals(templateName, StringComparison.OrdinalIgnoreCase);
          }
  
 -        public void ConstructEntities(Dictionary<string, ThnSceneObject> objects, bool spawnObjects)
--        {
--            this.Objects = objects;
 +        public void ConstructEntities(
 +            Dictionary<string, ThnSceneObject> objects,
 +            bool spawnObjects,
 +            string? sceneNameSuffix = null)
-+        {
+         {
+-            this.Objects = objects;
 +            this.Objects = sceneNameSuffix == null
 +                ? objects
 +                : new Dictionary<string, ThnSceneObject>(objects, StringComparer.OrdinalIgnoreCase);
@@ -148,7 +177,7 @@
                      Translate = kv.Value.Position ?? Vector3.Zero,
                      Rotate = kv.Value.Rotation
                  };
-@@ -105,7 +119,7 @@
+@@ -105,7 +119,7 @@ namespace LibreLancer.Thn
                      obj.Object.SetLocalTransform(new Transform3D(transform, obj.Rotate));
                      obj.HpMount = Cutscene.PlayerShip!.GetHardpoint("HpMount");
                      Cutscene.AddWorldObject(obj.Object);
@@ -157,7 +186,7 @@
                      continue;
                  }
  
-@@ -113,7 +127,7 @@
+@@ -113,7 +127,7 @@ namespace LibreLancer.Thn
                  {
                      obj.Entity = kv.Value;
                      obj.Engine = Cutscene.PlayerEngine;
@@ -166,7 +195,7 @@
                      continue;
                  }
  
-@@ -317,13 +331,25 @@
+@@ -317,7 +331,7 @@ namespace LibreLancer.Thn
                  }
  
                  obj.Entity = kv.Value;
@@ -175,11 +204,10 @@
              }
  
              // Verify? This seems to work
-             monitors.Sort((x, y) => string.Compare(x.Entity.Priority, y.Entity.Priority, StringComparison.Ordinal));
-             for (int i = 0; i < monitors.Count; i++)
+@@ -326,6 +340,18 @@ namespace LibreLancer.Thn
                  monitors[i].MonitorIndex = i;
-+        }
-+
+         }
+ 
 +        private void AddObject(
 +            Dictionary<string, ThnSceneObject> sceneObjects,
 +            string scriptKey,
@@ -190,10 +218,12 @@
 +            if (!ReferenceEquals(Objects, sceneObjects))
 +                sceneObjects[sceneKey] = obj;
 +            ownedSceneObjects.Add(sceneKey);
-         }
- 
++        }
++
          private Queue<ThnEvent> delaySoundEvents = new();
-@@ -360,6 +386,13 @@
+ 
+         public void Update(double delta)
+@@ -360,6 +386,13 @@ namespace LibreLancer.Thn
                  }
              }
  
@@ -207,7 +237,7 @@
              if (CurrentTime > Duration)
                  Shutdown();
          }
-@@ -387,8 +420,10 @@
+@@ -387,8 +420,10 @@ namespace LibreLancer.Thn
  
          public void Shutdown(bool raiseFinished = true)
          {
@@ -219,20 +249,11 @@
              Cleanup();
          }
  
---- a/src/LibreLancer/GameStates/RoomGameplay.cs
-+++ b/src/LibreLancer/GameStates/RoomGameplay.cs
-@@ -1389,7 +1389,7 @@
-             waitingForFinish = sc;
-             if (hasLandingAnimation && state == ScriptState.Enter && sc != null)
-                 locationAnnouncementDelay = Math.Max(0, sc.Duration - 8);
--            scene!.BeginScene(Scripts(sceneScripts, [sc]));
-+            scene!.BeginScene(Scripts(sceneScripts, [sc]), sceneScripts.Length);
-             PopulateRoomNpcs();
-             string[] ships = [];
- 
+diff --git a/src/LibreLancer.Tests/ThnScriptDurationTests.cs b/src/LibreLancer.Tests/ThnScriptDurationTests.cs
+index a83f6d91..09dbf540 100644
 --- a/src/LibreLancer.Tests/ThnScriptDurationTests.cs
 +++ b/src/LibreLancer.Tests/ThnScriptDurationTests.cs
-@@ -43,6 +43,32 @@
+@@ -43,6 +43,32 @@ public class ThnScriptDurationTests
          Assert.True(processor.Finished);
      }
  

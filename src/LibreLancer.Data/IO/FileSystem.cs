@@ -66,6 +66,13 @@ public class FileSystem
     {
         for (int i = FileProviders.Count - 1; i >= 0; i--)
         {
+            if (FileProviders[i] is IOverlayFileProvider overlay &&
+                overlay.TryResolveOverlayFile(filename, out var overlayExists))
+            {
+                if (!overlayExists)
+                    throw new FileNotFoundException(filename);
+                return FileProviders[i].Open(filename) ?? throw new FileNotFoundException(filename);
+            }
             Stream? stream = FileProviders[i].Open(filename);
             if (stream != null)
             {
@@ -109,10 +116,26 @@ public class FileSystem
             }
         }
 
-        return files.ToArray();
+        return files.Where(file => FileExists(JoinVfsPath(path, file))).ToArray();
     }
 
     public string[] GetDirectories(string path)
+    {
+        var dirs = GetDirectoriesRaw(path);
+        var visible = new List<string>();
+        foreach (var directory in dirs)
+        {
+            var candidate = JoinVfsPath(path, directory);
+            var affectedByTombstone = FileProviders.OfType<IOverlayFileProvider>()
+                .Any(x => x.HasTombstonesUnder(candidate));
+            if (!affectedByTombstone ||
+                HasVisibleFiles(candidate, new HashSet<string>(StringComparer.OrdinalIgnoreCase)))
+                visible.Add(directory);
+        }
+        return visible.ToArray();
+    }
+
+    private HashSet<string> GetDirectoriesRaw(string path)
     {
         HashSet<string> dirs = new(StringComparer.OrdinalIgnoreCase);
         for (int i = FileProviders.Count - 1; i >= 0; i--)
@@ -123,13 +146,30 @@ public class FileSystem
             }
         }
 
-        return dirs.ToArray();
+        return dirs;
     }
+
+    private bool HasVisibleFiles(string path, HashSet<string> visited)
+    {
+        if (!visited.Add(path)) return false;
+        if (GetFiles(path).Length != 0) return true;
+        foreach (var directory in GetDirectoriesRaw(path))
+            if (HasVisibleFiles(JoinVfsPath(path, directory), visited)) return true;
+        return false;
+    }
+
+    private static string JoinVfsPath(string directory, string name) =>
+        string.IsNullOrEmpty(directory) || directory is "/" or "\\"
+            ? name
+            : directory.TrimEnd('/', '\\') + "/" + name;
 
     public string? GetBackingFileName(string path)
     {
         for (int i = FileProviders.Count - 1; i >= 0; i--)
         {
+            if (FileProviders[i] is IOverlayFileProvider overlay &&
+                overlay.TryResolveOverlayFile(path, out _))
+                return null;
             if (FileProviders[i].GetBackingFileName(path, out var fname))
             {
                 return fname;
@@ -148,6 +188,9 @@ public class FileSystem
 
         for (int i = FileProviders.Count - 1; i >= 0; i--)
         {
+            if (FileProviders[i] is IOverlayFileProvider overlay &&
+                overlay.TryResolveOverlayFile(filename, out var overlayExists))
+                return overlayExists;
             if (FileProviders[i].FileExists(filename))
             {
                 return true;
@@ -165,6 +208,13 @@ public interface IFileProvider
     IEnumerable<string> GetFiles(string path);
     IEnumerable<string> GetDirectories(string path);
     void Refresh();
+}
+
+/// <summary>Reports files and tombstones that shadow lower-priority VFS providers.</summary>
+public interface IOverlayFileProvider : IFileProvider
+{
+    bool HasTombstonesUnder(string directory);
+    bool TryResolveOverlayFile(string filename, out bool exists);
 }
 
 /// <summary>
@@ -311,6 +361,64 @@ public sealed class SysFolderQuickInit : IFileProvider
     }
 }
 
+/// <summary>Maps Freelancer DATA-relative VFS paths to packaged override files.</summary>
+public sealed class FreelancerDataOverlayFileProvider : IFileProvider
+{
+    private static readonly string[] prefixes = ["EXE/../data/", "../data/", "data/", "DATA/"];
+    private readonly SysFolderQuickInit files;
+
+    public FreelancerDataOverlayFileProvider(string dataDirectory)
+    {
+        files = new SysFolderQuickInit(dataDirectory);
+    }
+
+    private static string? Map(string path)
+    {
+        var normalized = path.Replace('\\', '/');
+        foreach (var prefix in prefixes)
+        {
+            if (normalized.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                return normalized[prefix.Length..];
+        }
+        return null;
+    }
+
+    public Stream? Open(string filename)
+    {
+        var mapped = Map(filename);
+        return mapped is null ? null : files.Open(mapped);
+    }
+
+    public bool FileExists(string filename)
+    {
+        var mapped = Map(filename);
+        return mapped is not null && files.FileExists(mapped);
+    }
+
+    public bool GetBackingFileName(string path, out string? fileName)
+    {
+        var mapped = Map(path);
+        if (mapped is not null)
+            return files.GetBackingFileName(mapped, out fileName);
+        fileName = null;
+        return false;
+    }
+
+    public IEnumerable<string> GetFiles(string path)
+    {
+        var mapped = Map(path.TrimEnd('\\', '/') + "/");
+        return mapped is null ? Array.Empty<string>() : files.GetFiles(mapped);
+    }
+
+    public IEnumerable<string> GetDirectories(string path)
+    {
+        var mapped = Map(path.TrimEnd('\\', '/') + "/");
+        return mapped is null ? Array.Empty<string>() : files.GetDirectories(mapped);
+    }
+
+    public void Refresh() => files.Refresh();
+}
+
 /// <summary>
 /// Case-insensitive implementation of IFileProvider
 /// </summary>
@@ -318,11 +426,13 @@ public sealed class SysFolder : BaseFileSystemProvider
 {
     private bool caseSensitive;
     private string baseFolder;
+    private readonly SysFolderQuickInit fallback;
 
     public SysFolder(string path)
     {
         caseSensitive = Platform.IsDirCaseSensitive(path);
         baseFolder = path;
+        fallback = new SysFolderQuickInit(path);
         Refresh();
     }
 
@@ -349,12 +459,22 @@ public sealed class SysFolder : BaseFileSystemProvider
     public override IEnumerable<string> GetFiles(string path)
     {
         var fullPath = Path.Combine(baseFolder, path.Replace('\\', Path.DirectorySeparatorChar));
+        if (caseSensitive && Directory.Exists(fullPath))
+        {
+            return Directory.GetFiles(fullPath).Select(Path.GetFileName)
+                .Union(base.GetFiles(path), StringComparer.OrdinalIgnoreCase)!;
+        }
         return (Directory.Exists(fullPath) ? Directory.GetFiles(fullPath).Select(Path.GetFileName) : base.GetFiles(path))!;
     }
 
     public override IEnumerable<string> GetDirectories(string path)
     {
         var fullPath = Path.Combine(baseFolder, path.Replace('\\', Path.DirectorySeparatorChar));
+        if (caseSensitive && Directory.Exists(fullPath))
+        {
+            return Directory.GetDirectories(fullPath).Select(Path.GetFileName)
+                .Union(base.GetDirectories(path), StringComparer.OrdinalIgnoreCase)!;
+        }
         return (Directory.Exists(fullPath)
             ? Directory.GetDirectories(fullPath).Select(Path.GetFileName)
             : base.GetDirectories(path))!;
@@ -387,6 +507,12 @@ public sealed class SysFolder : BaseFileSystemProvider
     private VfsDirectory WalkDir(string dir, VfsDirectory? parent, bool recurse = true)
     {
         var d = new VfsDirectory() { Name = Path.GetFileName(dir), Parent = parent };
+        WalkDirContents(dir, d, recurse);
+        return d;
+    }
+
+    private void WalkDirContents(string dir, VfsDirectory d, bool recurse)
+    {
         foreach (var f in Directory.EnumerateFiles(dir).Select(Path.GetFileName).ToArray())
             d.Items[f!] = new SysFile(Path.Combine(dir, f!), f!);
         var dinfo = new DirectoryInfo(dir);
@@ -395,17 +521,17 @@ public sealed class SysFolder : BaseFileSystemProvider
         {
             foreach (var directory in dinfo.GetDirectories())
             {
-                if (!directory.Attributes.HasFlag(FileAttributes.ReparsePoint))
+                var childRecurse = !directory.Attributes.HasFlag(FileAttributes.ReparsePoint);
+                if (d.Items.TryGetValue(directory.Name, out var existing) && existing is VfsDirectory existingDirectory)
                 {
-                    d.Items[directory.Name] = WalkDir(directory.FullName, d);
+                    WalkDirContents(directory.FullName, existingDirectory, childRecurse);
                 }
                 else
                 {
-                    d.Items[directory.Name] = WalkDir(directory.FullName, d, false);
+                    d.Items[directory.Name] = WalkDir(directory.FullName, d, childRecurse);
                 }
             }
         }
-        return d;
     }
 
     public override bool FileExists(string filename)
@@ -416,12 +542,7 @@ public sealed class SysFolder : BaseFileSystemProvider
             return true;
         }
 
-        if (caseSensitive)
-        {
-            return base.FileExists(filename);
-        }
-
-        return false;
+        return (caseSensitive && base.FileExists(filename)) || fallback.FileExists(filename);
     }
 
 
@@ -433,6 +554,6 @@ public sealed class SysFolder : BaseFileSystemProvider
             return File.OpenRead(path);
         }
 
-        return caseSensitive ? base.Open(filename) : null;
+        return (caseSensitive ? base.Open(filename) : null) ?? fallback.Open(filename);
     }
 }

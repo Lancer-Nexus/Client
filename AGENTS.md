@@ -37,6 +37,7 @@ Maintain the Lancer Nexus client fork while preserving compatibility with upstre
 - The primary automated test project is `src/LibreLancer.Tests/LibreLancer.Tests.csproj`. Run the relevant test subset after client changes; use the full solution build when the change crosses shared engine or project boundaries.
 - Native components are configured through the existing `CMakeLists.txt` and dependencies checked by `scripts/depcheck_unix`; do not replace this with a service-style `dotnet restore`-only workflow.
 - The current project files target `net10.0`. Keep cluster functionality optional and isolated behind existing configuration/capability boundaries while upstream synchronization remains possible.
+- LLServer's managed FLHook compatibility adapter is optional. Build it only with `-p:EnableFlHookCompat=true`; its runtime stays disabled unless `FlHookCompatEnabled` is explicitly set in a clustered server profile. Keep all related LibreLancer changes in numbered patches under `patches/series`.
 - `src/LibreLancer/LibreLancer.csproj` references the shared `Protocol` submodule for the optional Gateway version handshake; initialize that submodule before building the client.
 
 ## Working-model escalation
@@ -52,7 +53,7 @@ Permission changes use typed Gateway requests and are authorized centrally by Ad
 
 Every player-facing server command that is currently guarded by `Character.Admin` must receive its own `command.<name>` permission and be checked fail-closed through Gateway with the account, session, character lease, instance and system context before execution. Keep the command-to-permission catalog in [Administration's permission guide](../Administration/docs/permission-system.md#permissions-fuer-bestehende-librelancer-adminbefehle). Do not silently retain the legacy flag as a clustered fallback; standalone OP fallback must remain explicitly isolated.
 
-See [the Administration permission system guide](../Administration/docs/permission-system.md) for the command syntax, local operator boundaries, and the fact that LLServer revision-sync startup is still pending.
+Cluster builds opt into LLServer permission revision synchronization with `-p:EnableClusterIntegration=true`. A clustered instance requires `LANCER_NEXUS_GAME_INSTANCE_KEY` and `LANCER_NEXUS_PERMISSION_REDIS_ENDPOINT=host:port`; runtime status stays not-ready until the Redis subscription is live and the Gateway SQL snapshot is activated and acknowledged. Standalone builds keep cluster integration disabled. See [the Administration permission system guide](../Administration/docs/permission-system.md) for the command syntax and local operator boundaries.
 
 1. Identify whether the change belongs in the client or in Gateway/Protocol/Cluster.
 2. Keep the smallest possible patch against the upstream fork.

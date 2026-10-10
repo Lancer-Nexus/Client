@@ -6,7 +6,7 @@ namespace LibreLancer.Server.ConsoleCommands
     public class WarpCommand : IConsoleCommand
     {
         public string Name => "warp";
-        public bool Admin => true;
+        public string? Permission => "command.warp";
         public void Run(Player player, string arguments)
         {
             if (!ConsoleCommands.ParseString(arguments, out float x, out float y, out float z))

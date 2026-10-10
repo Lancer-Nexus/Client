@@ -45,7 +45,7 @@ public class AsteroidFieldList
             if (!DataEquality.ObjectEquals(f, OriginalFields[f]))
             {
                 var sections = IniSerializer.SerializeAsteroidField(f);
-                var filename = gameData.VFS.GetBackingFileName(gameData.Items.DataPath(f.SourceFile));
+                var filename = WritableDataPath.Resolve(gameData.VFS, gameData.Items.DataPath(f.SourceFile));
                 IniWriter.WriteIniFile(filename, sections);
                 FLLog.Info("Ini", $"Saved to {filename}");
             }

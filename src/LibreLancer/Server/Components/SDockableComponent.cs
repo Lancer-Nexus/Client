@@ -583,6 +583,7 @@ namespace LibreLancer.Server.Components
                 orientation,
                 enteredAtPenultimate);
             ship.AddComponent(movement);
+            movement.StartShipTravelEffect(world);
 
             if (ship.TryGetComponent<ShipPhysicsComponent>(out var component))
             {
@@ -870,11 +871,14 @@ namespace LibreLancer.Server.Components
                 {
                     if (dock.Ship.TryGetComponent<SPlayerComponent>(out var player))
                     {
-                        player.Player.JumpTo(Action.Target!, Action.Exit!, world.Server!.GatherJumpers());
+                        player.Player.JumpTo(Action.Target!, Action.Exit!,
+                            world.Server!.GatherJumpers(player.Player.MissionRuntime));
                     }
                     else if (dock.Ship.TryGetComponent<SNPCComponent>(out var npc))
                     {
-                        npc.Docked();
+                        if (world.Server?.Server.BeginPopulationNpcTransfer(dock.Ship, Action.Target!, Action.Exit!,
+                                Parent.Nickname!, world.Server) != true)
+                            npc.Docked();
                     }
                 }
                 else if (Action.Kind == DockKinds.Tradelane)

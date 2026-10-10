@@ -43,6 +43,15 @@ namespace LibreLancer
 
 		public GameConfig Config => _cfg;
 
+#if DEBUG
+        public string? DebugLoginEmail { get; set; }
+        public string? DebugLoginPassword { get; set; }
+        public string? DebugCharacterName { get; set; }
+#endif
+
+        public bool StartNewGameOnLaunch { get; set; }
+        public string? LoadSaveOnLaunch { get; set; }
+
         private GameConfig _cfg;
 		public FreelancerGame(GameConfig config) : base(config.BufferWidth, config.BufferHeight, false)
 		{
@@ -84,11 +93,11 @@ namespace LibreLancer
 			// Move to stop _TSGetMainThread error on OSX
 			MinimumWindowSize = new Point(640, 480);
 			SetFullScreen(Config.Settings.FullScreen);
-			SetVSync(Config.Settings.VSync);
+            SetVSync(Config.Settings.VSync);
             Config.Settings.RenderContext = RenderContext;
+            var vfs = _cfg.CreateFreelancerFileSystem();
             Config.Settings.Validate();
             // Cache
-            var vfs = FileSystem.FromPath(_cfg.FreelancerPath);
 			ResourceManager = new GameResourceManager(this, vfs);
 			// Init Audio
 			FLLog.Info("Audio", "Initialising Audio");

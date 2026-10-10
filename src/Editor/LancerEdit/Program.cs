@@ -27,7 +27,18 @@ namespace LancerEdit
         [SuppressMessage("ReSharper", "MethodSupportsCancellation")]
         static void Main(string[] args)
         {
-            if (!OpenOnOther(args))
+            if (!TryParseArguments(args, out var startupDataPath, out var openFiles, out var showHelp))
+            {
+                Environment.ExitCode = 2;
+                return;
+            }
+            if (showHelp)
+            {
+                Console.WriteLine("Usage: LancerEdit [--data <Freelancer directory>] [file ...]");
+                Console.WriteLine("  --data <path>  Load this Freelancer installation on startup.");
+                return;
+            }
+            if (startupDataPath != null || !OpenOnOther(openFiles))
             {
                 MainWindow mw = null;
                 Task pipeServer = null;
@@ -35,7 +46,10 @@ namespace LancerEdit
                 AppHandler.Run(() =>
                 {
                     var editorConfig = EditorConfiguration.Load(true);
-                    mw = new MainWindow(editorConfig) { InitOpenFile = args };
+                    mw = new MainWindow(editorConfig, startupDataPath: startupDataPath)
+                    {
+                        InitOpenFile = openFiles
+                    };
                     pipeServer = Task.Run(async () => await PipeServer(cts.Token, x =>
                     {
                         mw.QueueUIThread(() =>
@@ -56,6 +70,54 @@ namespace LancerEdit
                     mw.Crashed();
                 });
             }
+        }
+
+        static bool TryParseArguments(string[] args, out string startupDataPath, out string[] openFiles,
+            out bool showHelp)
+        {
+            startupDataPath = null;
+            showHelp = false;
+            var files = new System.Collections.Generic.List<string>();
+            for (int i = 0; i < args.Length; i++)
+            {
+                var arg = args[i];
+                if (arg == "--help" || arg == "-h")
+                {
+                    showHelp = true;
+                    continue;
+                }
+                if (arg == "--data")
+                {
+                    if (i + 1 >= args.Length || args[i + 1].StartsWith("--", StringComparison.Ordinal))
+                    {
+                        Console.Error.WriteLine("Missing path after --data.");
+                        openFiles = System.Array.Empty<string>();
+                        return false;
+                    }
+                    if (startupDataPath != null)
+                    {
+                        Console.Error.WriteLine("Specify --data only once.");
+                        openFiles = System.Array.Empty<string>();
+                        return false;
+                    }
+                    startupDataPath = args[++i];
+                    continue;
+                }
+                if (arg.StartsWith("--data=", StringComparison.Ordinal))
+                {
+                    if (startupDataPath != null || arg.Length == "--data=".Length)
+                    {
+                        Console.Error.WriteLine("Specify --data once with a non-empty path.");
+                        openFiles = System.Array.Empty<string>();
+                        return false;
+                    }
+                    startupDataPath = arg["--data=".Length..];
+                    continue;
+                }
+                files.Add(arg);
+            }
+            openFiles = files.ToArray();
+            return true;
         }
 
         static async Task PipeServer(CancellationToken token, Action<string> openFile)

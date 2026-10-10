@@ -1,23 +1,37 @@
-diff --git a/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs b/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs
---- a/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs
-+++ b/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs
-@@ -62,6 +62,15 @@
-         }
- 
-         private uint fxID = 1;
+diff --git a/src/LibreLancer.Tests/TradelaneNetworkEffectTests.cs b/src/LibreLancer.Tests/TradelaneNetworkEffectTests.cs
+new file mode 100644
+index 00000000..3394dc05
+--- /dev/null
++++ b/src/LibreLancer.Tests/TradelaneNetworkEffectTests.cs
+@@ -0,0 +1,26 @@
++using LibreLancer.Server.Components;
++using LibreLancer.World;
++using Xunit;
 +
-+        public uint AddNetworkEffect(string effect, uint[] hardpoints)
++namespace LibreLancer.Tests;
++
++public class TradelaneNetworkEffectTests
++{
++    [Fact]
++    public void NetworkEffectCanBeRemovedAtLaneExit()
++    {
++        var runner = new SFuseRunnerComponent(new GameObject());
++
++        var id = runner.AddNetworkEffect("basic_tl_ship_travel", []);
++        Assert.Collection(runner.Effects, effect =>
 +        {
-+            var id = fxID++;
-+            Effects.Add(new SpawnedEffect { ID = id, Effect = effect, Hardpoints = hardpoints });
-+            return id;
-+        }
++            Assert.Equal(id, effect.ID);
++            Assert.Equal("basic_tl_ship_travel", effect.Effect);
++            Assert.Empty(effect.Hardpoints);
++        });
 +
-+        public bool RemoveNetworkEffect(uint id) => Effects.RemoveAll(x => x.ID == id) > 0;
- 
-         private void Update(double time, GameWorld world, FuseInstance instance)
-         {
++        Assert.True(runner.RemoveNetworkEffect(id));
++        Assert.Empty(runner.Effects);
++        Assert.False(runner.RemoveNetworkEffect(id));
++    }
++}
 diff --git a/src/LibreLancer/Client/Components/CNetEffectsComponent.cs b/src/LibreLancer/Client/Components/CNetEffectsComponent.cs
+index 68120f3a..7dc243e4 100644
 --- a/src/LibreLancer/Client/Components/CNetEffectsComponent.cs
 +++ b/src/LibreLancer/Client/Components/CNetEffectsComponent.cs
 @@ -2,6 +2,7 @@
@@ -28,7 +42,7 @@ diff --git a/src/LibreLancer/Client/Components/CNetEffectsComponent.cs b/src/Lib
  using System.Collections.Generic;
  using LibreLancer.Net.Protocol;
  using LibreLancer.Render;
-@@ -20,7 +21,7 @@
+@@ -20,7 +21,7 @@ namespace LibreLancer.Client.Components
  
          private int renIndex = 0;
  
@@ -37,7 +51,7 @@ diff --git a/src/LibreLancer/Client/Components/CNetEffectsComponent.cs b/src/Lib
  
          private void Spawn(SpawnedEffect effect, GameWorld world)
          {
-@@ -33,6 +34,15 @@
+@@ -33,6 +34,15 @@ namespace LibreLancer.Client.Components
                  return;
              }
  
@@ -53,7 +67,7 @@ diff --git a/src/LibreLancer/Client/Components/CNetEffectsComponent.cs b/src/Lib
              foreach (var fxhp in effect.Hardpoints)
              {
                  var hp = Parent?.GetHardpoint(fxhp);
-@@ -44,24 +54,29 @@
+@@ -44,24 +54,29 @@ namespace LibreLancer.Client.Components
  
                  var fxobj = new ParticleEffectRenderer(pfx) {Index = renIndex++, Attachment = hp};
                  Parent?.ExtraRenderers.Add(fxobj);
@@ -93,7 +107,75 @@ diff --git a/src/LibreLancer/Client/Components/CNetEffectsComponent.cs b/src/Lib
              effects = fx;
          }
      }
+diff --git a/src/LibreLancer/GameStates/SpaceGameplay.cs b/src/LibreLancer/GameStates/SpaceGameplay.cs
+index 2d7a434b..482d866b 100644
+--- a/src/LibreLancer/GameStates/SpaceGameplay.cs
++++ b/src/LibreLancer/GameStates/SpaceGameplay.cs
+@@ -71,7 +71,6 @@ namespace LibreLancer
+         private readonly List<ParticleEffectRenderer> transientShipEffects = [];
+         private TradelaneEquipment? activeTradelaneEquipment;
+         private ParticleEffectRenderer? tradelaneTravelRenderer;
+-        private ParticleEffectRenderer? tradelaneShipTravelRenderer;
+         private SoundInstance? tradelaneTravelSound;
+         public Cutscene? Thn;
+ 
+@@ -758,11 +757,6 @@ namespace LibreLancer
+                 player?.ExtraRenderers.Remove(tradelaneTravelRenderer);
+                 tradelaneTravelRenderer = null;
+             }
+-            if (tradelaneShipTravelRenderer != null)
+-            {
+-                player?.ExtraRenderers.Remove(tradelaneShipTravelRenderer);
+-                tradelaneShipTravelRenderer = null;
+-            }
+             tradelaneTravelSound?.Stop();
+             tradelaneTravelSound = null;
+             activeTradelaneEquipment = null;
+@@ -1612,10 +1606,6 @@ namespace LibreLancer
+             if (activeTradelaneEquipment != null)
+             {
+                 AttachTransientShipEffect(activeTradelaneEquipment.ShipEnter);
+-                var shipTravel = AttachShipEffect(
+-                    activeTradelaneEquipment.ShipTravel,
+-                    playSound: false);
+-                tradelaneShipTravelRenderer = shipTravel.Renderer;
+                 var travel = AttachShipEffect(
+                     activeTradelaneEquipment.PlayerTravel,
+                     loopSound: true);
+diff --git a/src/LibreLancer/Server/Components/SDockableComponent.cs b/src/LibreLancer/Server/Components/SDockableComponent.cs
+index 82dc3da9..ac92b57e 100644
+--- a/src/LibreLancer/Server/Components/SDockableComponent.cs
++++ b/src/LibreLancer/Server/Components/SDockableComponent.cs
+@@ -583,6 +583,7 @@ namespace LibreLancer.Server.Components
+                 orientation,
+                 enteredAtPenultimate);
+             ship.AddComponent(movement);
++            movement.StartShipTravelEffect(world);
+ 
+             if (ship.TryGetComponent<ShipPhysicsComponent>(out var component))
+             {
+diff --git a/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs b/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs
+index 8f763107..d7214edf 100644
+--- a/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs
++++ b/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs
+@@ -63,6 +63,15 @@ namespace LibreLancer.Server.Components
+ 
+         private uint fxID = 1;
+ 
++        public uint AddNetworkEffect(string effect, uint[] hardpoints)
++        {
++            var id = fxID++;
++            Effects.Add(new SpawnedEffect { ID = id, Effect = effect, Hardpoints = hardpoints });
++            return id;
++        }
++
++        public bool RemoveNetworkEffect(uint id) => Effects.RemoveAll(x => x.ID == id) > 0;
++
+         private void Update(double time, GameWorld world, FuseInstance instance)
+         {
+             instance.T += time / instance.Fuse.Fuse.Lifetime;
 diff --git a/src/LibreLancer/Server/Components/STradelaneMoveComponent.cs b/src/LibreLancer/Server/Components/STradelaneMoveComponent.cs
+index 39092e3e..b64fe9cc 100644
 --- a/src/LibreLancer/Server/Components/STradelaneMoveComponent.cs
 +++ b/src/LibreLancer/Server/Components/STradelaneMoveComponent.cs
 @@ -5,6 +5,8 @@
@@ -105,7 +187,7 @@ diff --git a/src/LibreLancer/Server/Components/STradelaneMoveComponent.cs b/src/
  using LibreLancer.Missions;
  using LibreLancer.Net.Protocol;
  using LibreLancer.World;
-@@ -30,6 +32,7 @@
+@@ -30,6 +32,7 @@ namespace LibreLancer.Server.Components
          private float slowdownProgress;
  
          private float manualExitTime;
@@ -113,7 +195,7 @@ diff --git a/src/LibreLancer/Server/Components/STradelaneMoveComponent.cs b/src/
          private float manualStartSpeed;
          private Quaternion manualStartOrientation;
          private Quaternion manualTargetOrientation;
-@@ -130,12 +133,42 @@
+@@ -130,12 +133,42 @@ namespace LibreLancer.Server.Components
              return true;
          }
  
@@ -158,7 +240,7 @@ diff --git a/src/LibreLancer/Server/Components/STradelaneMoveComponent.cs b/src/
              }
          }
  
-@@ -145,7 +178,7 @@
+@@ -145,7 +178,7 @@ namespace LibreLancer.Server.Components
  
              if (moveState == TradelaneMoveState.ManualExit)
              {
@@ -167,7 +249,7 @@ diff --git a/src/LibreLancer/Server/Components/STradelaneMoveComponent.cs b/src/
                  return;
              }
  
-@@ -154,7 +187,7 @@
+@@ -154,7 +187,7 @@ namespace LibreLancer.Server.Components
  
              if (tradelaneComponent is null)
              {
@@ -176,7 +258,7 @@ diff --git a/src/LibreLancer/Server/Components/STradelaneMoveComponent.cs b/src/
                  return;
              }
  
-@@ -167,19 +200,19 @@
+@@ -167,19 +200,19 @@ namespace LibreLancer.Server.Components
                  {
                      if (Parent.Formation.LeadShip != Parent)
                      {
@@ -199,7 +281,7 @@ diff --git a/src/LibreLancer/Server/Components/STradelaneMoveComponent.cs b/src/
                  return;
              }
  
-@@ -196,7 +229,7 @@
+@@ -196,7 +229,7 @@ namespace LibreLancer.Server.Components
                  var laneContinues = LaneEntered();
                  if (!laneContinues)
                  {
@@ -208,7 +290,10 @@ diff --git a/src/LibreLancer/Server/Components/STradelaneMoveComponent.cs b/src/
                  }
  
                  return;
-@@ -281,7 +314,7 @@
+@@ -278,10 +311,10 @@ namespace LibreLancer.Server.Components
+             if (Parent.TryGetComponent<SEngineComponent>(out var engine))
+             {
+                 engine.Speed = MathHelper.Clamp(speed / TradelaneMotion.Speed, 0, 1) * 0.9f;
              }
          }
  
@@ -217,7 +302,7 @@ diff --git a/src/LibreLancer/Server/Components/STradelaneMoveComponent.cs b/src/
          {
              manualExitTime += (float)time;
              var turnProgress = MathHelper.Clamp(manualExitTime / TradelaneMotion.ManualTurnDuration, 0, 1);
-@@ -302,7 +335,7 @@
+@@ -296,7 +329,7 @@ namespace LibreLancer.Server.Components
  
              if (manualExitTime >= TradelaneMotion.ManualExitDuration)
              {
@@ -226,15 +311,15 @@ diff --git a/src/LibreLancer/Server/Components/STradelaneMoveComponent.cs b/src/
              }
          }
  
-@@ -363,17 +396,18 @@
+@@ -356,18 +389,19 @@ namespace LibreLancer.Server.Components
+             distance < 3000 &&
              tradelaneComponent.TryGetFirstChildComponent<SShieldComponent>(out var comp) &&
              comp.Health < float.Epsilon;
  
 -        private void TradeLaneDisruption()
--        {
--            ExitTradelane();
 +        private void TradeLaneDisruption(GameWorld world)
-+        {
+         {
+-            ExitTradelane();
 +            ExitTradelane(world);
              if (Parent!.TryGetComponent<SPlayerComponent>(out var pc))
              {
@@ -243,87 +328,9 @@ diff --git a/src/LibreLancer/Server/Components/STradelaneMoveComponent.cs b/src/
          }
  
 -        private void ExitTradelane()
--        {
 +        private void ExitTradelane(GameWorld world)
-+        {
+         {
 +            StopShipTravelEffect(world);
              if (Parent!.TryGetComponent<ShipPhysicsComponent>(out var ctrl))
              {
                  ctrl.Active = true;
-diff --git a/src/LibreLancer/Server/Components/SDockableComponent.cs b/src/LibreLancer/Server/Components/SDockableComponent.cs
---- a/src/LibreLancer/Server/Components/SDockableComponent.cs
-+++ b/src/LibreLancer/Server/Components/SDockableComponent.cs
-@@ -583,6 +583,7 @@
-                 orientation,
-                 enteredAtPenultimate);
-             ship.AddComponent(movement);
-+            movement.StartShipTravelEffect(world);
- 
-             if (ship.TryGetComponent<ShipPhysicsComponent>(out var component))
-             {
-diff --git a/src/LibreLancer/GameStates/SpaceGameplay.cs b/src/LibreLancer/GameStates/SpaceGameplay.cs
---- a/src/LibreLancer/GameStates/SpaceGameplay.cs
-+++ b/src/LibreLancer/GameStates/SpaceGameplay.cs
-@@ -71,7 +71,6 @@
-         private readonly List<ParticleEffectRenderer> transientShipEffects = [];
-         private TradelaneEquipment? activeTradelaneEquipment;
-         private ParticleEffectRenderer? tradelaneTravelRenderer;
--        private ParticleEffectRenderer? tradelaneShipTravelRenderer;
-         private SoundInstance? tradelaneTravelSound;
-         public Cutscene? Thn;
- 
-@@ -757,11 +756,6 @@
-                 player?.ExtraRenderers.Remove(tradelaneTravelRenderer);
-                 tradelaneTravelRenderer = null;
-             }
--            if (tradelaneShipTravelRenderer != null)
--            {
--                player?.ExtraRenderers.Remove(tradelaneShipTravelRenderer);
--                tradelaneShipTravelRenderer = null;
--            }
-             tradelaneTravelSound?.Stop();
-             tradelaneTravelSound = null;
-             activeTradelaneEquipment = null;
-@@ -1602,10 +1596,6 @@
-             if (activeTradelaneEquipment != null)
-             {
-                 AttachTransientShipEffect(activeTradelaneEquipment.ShipEnter);
--                var shipTravel = AttachShipEffect(
--                    activeTradelaneEquipment.ShipTravel,
--                    playSound: false);
--                tradelaneShipTravelRenderer = shipTravel.Renderer;
-                 var travel = AttachShipEffect(
-                     activeTradelaneEquipment.PlayerTravel,
-                     loopSound: true);
-diff --git a/src/LibreLancer.Tests/TradelaneNetworkEffectTests.cs b/src/LibreLancer.Tests/TradelaneNetworkEffectTests.cs
-new file mode 100644
-index 00000000..3394dc0
---- /dev/null
-+++ b/src/LibreLancer.Tests/TradelaneNetworkEffectTests.cs
-@@ -0,0 +1,26 @@
-+using LibreLancer.Server.Components;
-+using LibreLancer.World;
-+using Xunit;
-+
-+namespace LibreLancer.Tests;
-+
-+public class TradelaneNetworkEffectTests
-+{
-+    [Fact]
-+    public void NetworkEffectCanBeRemovedAtLaneExit()
-+    {
-+        var runner = new SFuseRunnerComponent(new GameObject());
-+
-+        var id = runner.AddNetworkEffect("basic_tl_ship_travel", []);
-+        Assert.Collection(runner.Effects, effect =>
-+        {
-+            Assert.Equal(id, effect.ID);
-+            Assert.Equal("basic_tl_ship_travel", effect.Effect);
-+            Assert.Empty(effect.Hardpoints);
-+        });
-+
-+        Assert.True(runner.RemoveNetworkEffect(id));
-+        Assert.Empty(runner.Effects);
-+        Assert.False(runner.RemoveNetworkEffect(id));
-+    }
-+}

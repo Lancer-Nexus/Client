@@ -10,7 +10,7 @@ public class NewsSaveStrategy(NewsEditorTab tab) : ISaveStrategy
     {
         tab.Data.GameData.Items.News = tab.News.Clone();
         var newsPath = tab.Data.GameData.Items.DataPath("MISSIONS/news.ini");
-        var filePath = tab.Data.GameData.VFS.GetBackingFileName(newsPath);
+        var filePath = WritableDataPath.Resolve(tab.Data.GameData.VFS, newsPath);
         IniWriter.WriteIniFile(filePath, IniSerializer.SerializeNews(tab.News));
         tab.Dirty = false;
         tab.OnSaved();

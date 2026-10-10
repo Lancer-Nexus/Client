@@ -35,6 +35,7 @@ using LibreLancer.Render;
 using LibreLancer.Resources;
 using LibreLancer.Shaders;
 using LibreLancer.Utf.Ale;
+using Nexus.Assets;
 
 namespace LancerEdit
 {
@@ -75,11 +76,14 @@ namespace LancerEdit
 
         public bool EnableAudioConversion;
 
+        private bool initialDataLoadPending;
+
         private const int LOG_SIZE = 128 * 1024; //128k UTF-16, 256k UTF-8
 
         Dictionary<string, ResourceUsage> ResourceIndex = new(StringComparer.OrdinalIgnoreCase);
 
-        public MainWindow(EditorConfiguration editorConfig, GameConfiguration configuration = null) : base(editorConfig.WindowWidth, editorConfig.WindowHeight, true, configuration)
+        public MainWindow(EditorConfiguration editorConfig, GameConfiguration configuration = null,
+            string startupDataPath = null) : base(editorConfig.WindowWidth, editorConfig.WindowHeight, true, configuration)
 
         {
             Version = "LancerEdit " + Platform.GetInformationalVersion<MainWindow>();
@@ -103,9 +107,11 @@ namespace LancerEdit
             recentFiles = new RecentFilesHandler(OpenFile);
             Updater = new UpdateChecks(this, GetBasePath());
             EnableAudioConversion = Mp3Encoder.EncoderAvailable();
-            if (!string.IsNullOrWhiteSpace(Config.AutoLoadPath))
+            var dataPath = string.IsNullOrWhiteSpace(startupDataPath) ? Config.AutoLoadPath : startupDataPath;
+            if (!string.IsNullOrWhiteSpace(dataPath))
             {
-                QueueUIThread(() => LoadGameData(Config.AutoLoadPath));
+                initialDataLoadPending = true;
+                QueueUIThread(() => LoadGameData(dataPath));
             }
         }
         double errorTimer = 0;
@@ -190,10 +196,10 @@ namespace LancerEdit
                 var icon = (Texture2D)LibreLancer.ImageLib.Generic.TextureFromStream(RenderContext, stream);
                 logoTexture = ImGuiHelper.RegisterTexture(icon);
             }
-            //Open passed in files!
-            if (InitOpenFile != null)
-                foreach (var f in InitOpenFile)
-                    OpenFile(f);
+            // Open files after the initial data set finishes loading so preview tabs
+            // (such as THN scenes) have their game data context available.
+            if (!initialDataLoadPending)
+                OpenInitialFiles();
             RichText = RenderContext.Renderer2D.RichText;
             Fonts = new FontManager();
             Fonts.ConstructDefaultFonts();
@@ -331,6 +337,22 @@ namespace LancerEdit
             }
         }
 
+        private void OpenInitialFiles()
+        {
+            var files = InitOpenFile;
+            InitOpenFile = null;
+            if (files == null) return;
+            foreach (var f in files)
+                OpenFile(f);
+        }
+
+        private void CompleteInitialDataLoad()
+        {
+            if (!initialDataLoadPending) return;
+            initialDataLoadPending = false;
+            OpenInitialFiles();
+        }
+
         public PopupManager Popups = new PopupManager();
 
         private int bottomTab = 0;
@@ -457,11 +479,106 @@ namespace LancerEdit
             });
         }
 
+        void UnpackNap()
+        {
+            FileDialog.Open(packagePath =>
+            {
+                if (string.IsNullOrWhiteSpace(packagePath)) return;
+                QueueUIThread(() => FileDialog.ChooseFolder(outputParent =>
+                {
+                    if (string.IsNullOrWhiteSpace(outputParent)) return;
+                    Task.Run(() =>
+                    {
+                        try
+                        {
+                            var archive = NapArchive.Open(packagePath);
+                            var output = archive.ExtractToDirectory(outputParent);
+                            QueueUIThread(() => Popups.MessageBox("NAP", $"Unpacked to {output}"));
+                        }
+                        catch (Exception exception)
+                        {
+                            QueueUIThread(() => ErrorDialog($"Could not unpack NAP: {exception.Message}"));
+                        }
+                    });
+                }));
+            }, new FileDialogFilters(new FileFilter("Nexus Asset Package", "nap")));
+        }
+
+        void PackNap()
+        {
+            FileDialog.ChooseFolder(sourceDirectory =>
+            {
+                if (string.IsNullOrWhiteSpace(sourceDirectory)) return;
+                QueueUIThread(() => FileDialog.Save(outputPath =>
+                {
+                    if (string.IsNullOrWhiteSpace(outputPath)) return;
+                    if (!outputPath.EndsWith(".nap", StringComparison.OrdinalIgnoreCase))
+                        outputPath += ".nap";
+                    Task.Run(() =>
+                    {
+                        try
+                        {
+                            NapWriter.PackDirectory(sourceDirectory, outputPath);
+                            QueueUIThread(() => Popups.MessageBox("NAP", $"Packed to {outputPath}"));
+                        }
+                        catch (Exception exception)
+                        {
+                            QueueUIThread(() => ErrorDialog($"Could not pack NAP: {exception.Message}"));
+                        }
+                    });
+                }, new FileDialogFilters(new FileFilter("Nexus Asset Package", "nap"))));
+            });
+        }
+
+        void ExportEditedNap()
+        {
+            var workspace = OpenDataContext?.WorkspaceDirectory;
+            if (string.IsNullOrWhiteSpace(workspace))
+            {
+                ErrorDialog("Load an active NAP package snapshot before exporting editor changes.");
+                return;
+            }
+            FileDialog.Save(outputPath =>
+            {
+                if (string.IsNullOrWhiteSpace(outputPath)) return;
+                if (!outputPath.EndsWith(".nap", StringComparison.OrdinalIgnoreCase))
+                    outputPath += ".nap";
+                Task.Run(() =>
+                {
+                    try
+                    {
+                        var fullOutput = Path.GetFullPath(outputPath);
+                        EnsureOutside(fullOutput, AppContext.BaseDirectory, "active application directory");
+                        EnsureOutside(fullOutput, workspace, "editor workspace");
+                        var provider = NexusPackageFileProvider.LoadActive(AppContext.BaseDirectory)
+                            ?? throw new InvalidDataException("No active NAP package snapshot was found.");
+                        var fileSystem = new LibreLancer.Data.IO.FileSystem(provider);
+                        fileSystem.FileProviders.Add(new NexusPackageWorkspaceFileProvider(workspace, provider));
+                        var packageId = NapOverlayBuilder.Compact(fileSystem, fullOutput);
+                        QueueUIThread(() => Popups.MessageBox("NAP", $"Exported edited package snapshot to {fullOutput}\nPackage: {packageId:D}"));
+                    }
+                    catch (Exception exception)
+                    {
+                        QueueUIThread(() => ErrorDialog($"Could not export edited NAP snapshot: {exception.Message}"));
+                    }
+                });
+            }, new FileDialogFilters(new FileFilter("Nexus Asset Package", "nap")));
+        }
+
+        static void EnsureOutside(string filePath, string protectedDirectory, string description)
+        {
+            var relative = Path.GetRelativePath(Path.GetFullPath(protectedDirectory), filePath);
+            if (!Path.IsPathRooted(relative) && relative != ".." &&
+                !relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+                throw new InvalidOperationException($"NAP output must be outside the {description}.");
+        }
+
         void LoadGameData(string folder)
         {
             if (!GameConfig.CheckFLDirectory(folder))
             {
                 ErrorDialog($"'{folder}' is not a valid Freelancer folder");
+                CompleteInitialDataLoad();
                 return;
             }
             QueueUIThread(() =>
@@ -484,10 +601,12 @@ namespace LancerEdit
                 {
                     OpenDataContext = c;
                     FinishLoadingSpinner();
+                    CompleteInitialDataLoad();
                 }, e =>
                 {
                     FinishLoadingSpinner();
                     ErrorDialog(GetExceptionText(e));
+                    CompleteInitialDataLoad();
                 });
             });
         }
@@ -628,6 +747,14 @@ namespace LancerEdit
                         LoadGameData(OpenDataContext!.Folder);
                 }
                 ImGui.Separator();
+                if (Theme.IconMenuItem(Icons.BoxOpen, "Unpack NAP Container...", true))
+                    UnpackNap();
+                if (Theme.IconMenuItem(Icons.Save, "Pack Folder as NAP...", true))
+                    PackNap();
+                if (Theme.IconMenuItem(Icons.Save, "Export Edited NAP Snapshot...",
+                        OpenDataContext?.WorkspaceDirectory != null))
+                    ExportEditedNap();
+                ImGui.Separator();
                 if (Theme.IconMenuItem(Icons.BookOpen, "Infocard Browser", OpenDataContext != null))
                     AddTab(new InfocardBrowserTab(OpenDataContext, this));
                 if (Theme.IconMenuItem(Icons.Globe, "Universe Editor", OpenDataContext != null))
@@ -662,6 +789,14 @@ namespace LancerEdit
                     {
                         AddTab(new MissionScriptEditorTab(OpenDataContext, this, x));
                     }, AppFilters.IniFilters, GetDataPath());
+                }
+                if (Theme.IconMenuItem(Icons.Calculator, "Trading Planner", OpenDataContext != null))
+                {
+                    var fd = TabControl.Tabs.FirstOrDefault(x => x is TradingPlannerTab);
+                    if (fd != null)
+                        TabControl.SetSelected(fd);
+                    else
+                        AddTab(new TradingPlannerTab(OpenDataContext, this));
                 }
                 ImGui.Separator();
                 if (Theme.IconMenuItem(Icons.Fire, "Projectile Viewer", OpenDataContext != null))

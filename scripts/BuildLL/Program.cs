@@ -25,6 +25,7 @@ namespace BuildLL
         private static bool withWin32 = false;
         private static bool withWin64 = false;
         private static bool withUpdates = true;
+        private static bool withNexusClusterServer = false;
         private static string updateChannel = "daily";
         private static VSVersion vsVersion = VSVersion.Any;
 
@@ -39,6 +40,7 @@ namespace BuildLL
             FlagArg("--with-win32", () => withWin32 = true, "Also build for 32-bit windows");
             FlagArg("--with-win64", () => withWin64 = true, "(Linux only) Also build for 64-bit windows");
             FlagArg("--no-updates", () => withUpdates = false, "Disables built in updater (SDK only)");
+            FlagArg("--nexus-cluster-server", () => withNexusClusterServer = true, "Build LLServer with optional Lancer Nexus Cluster and FLHookCompat integrations");
 
             StringArg("--prefix", x => prefix = x, "Set cmake install prefix");
             StringArg("--assemblyversion", x => versionSetting = x, "Set generated version");
@@ -88,20 +90,29 @@ namespace BuildLL
             var objDir = "./obj/artifacts-headless";
             var binDir = "./bin/librelancer-server-";
             var outdir = binDir + rid;
-            Dotnet.Restore("LibreLancer.sln", rid, objDir);
+            Dotnet.Restore("LibreLancer.sln", rid, objDir, ClusterBuildProperties);
             var settings = new DotnetPublishSettings()
             {
                 Configuration = "Release",
                 OutputDirectory = objDir,
                 Runtime = rid,
                 SelfContained = true,
-                Extra = "-p:DisableShaders=True"
+                Extra = "-p:DisableShaders=True " + ClusterBuildPropertiesForServer
             };
             Dotnet.Publish("src/LLServer/LLServer.csproj", settings);
             await CustomPublish.MergeAndPatch(objDir, binDir + rid, rid, ["LLServer"]);
+            CopyDataOverlay(outdir);
             CopyFile("Credits.txt", outdir);
             CopyFile("LICENSE", outdir);
         }
+
+        private static string ClusterBuildPropertiesForServer => withNexusClusterServer
+            ? "-p:EnableClusterIntegration=true -p:EnableFlHookCompat=true"
+            : string.Empty;
+
+        private static string ClusterBuildProperties => withNexusClusterServer
+            ? ClusterBuildPropertiesForServer
+            : string.Empty;
 
         private static HashSet<string> published = [];
 
@@ -111,7 +122,7 @@ namespace BuildLL
             var objDir = "./obj/artifacts";
             var binDir = sdk ? "./bin/librelancer-sdk-" : "./bin/librelancer-";
             var outdir = binDir + rid;
-            Dotnet.Restore("LibreLancer.sln", rid, objDir);
+            Dotnet.Restore("LibreLancer.sln", rid, objDir, ClusterBuildProperties);
             foreach (var proj in projs)
             {
                 if (!published.Add($"{proj}:{rid}"))
@@ -121,12 +132,14 @@ namespace BuildLL
                     Configuration = "Release",
                     OutputDirectory = objDir,
                     Runtime = rid,
-                    SelfContained = true
+                    SelfContained = true,
+                    Extra = Path.GetFileNameWithoutExtension(proj) == "LLServer" ? ClusterBuildPropertiesForServer : null
                 };
                 Dotnet.Publish(proj, settings);
             }
             await CustomPublish.MergeAndPatch(objDir, binDir + rid, rid,
                 projs.Select(x => Path.GetFileNameWithoutExtension(x)).ToArray());
+            CopyDataOverlay(outdir);
             if (sdk)
             {
                 var docsdir = Path.Combine(outdir, "lib/Docs");
@@ -159,6 +172,14 @@ namespace BuildLL
                 ZipFile.CreateFromDirectory("src/Editor/librelancer_blender_addon", blAddon, CompressionLevel.Optimal,
                     true);
             }
+        }
+
+        static void CopyDataOverlay(string outputDirectory)
+        {
+            var source = new DirectoryInfo("./data");
+            if (source.Exists)
+                CustomPublish.CopyFilesRecursively(source,
+                    new DirectoryInfo(Path.Combine(outputDirectory, "lib", "data")));
         }
 
         static string GetLinuxRid()

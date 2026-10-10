@@ -3,12 +3,13 @@ using System.Numerics;
 using LibreLancer.Data.GameData.Items;
 using LibreLancer.Data.Schema.Equipment;
 using LibreLancer.World;
+using LibreLancer.World.Components;
 
 namespace LibreLancer.Server.Components;
 
 public sealed class SDeployableComponent : GameComponent
 {
-    public const double LaunchCollisionSafeTime = 1.0;
+    public const double LaunchCollisionSafeTime = ProjectileLaunchSafety.CollisionGracePeriod;
 
     public MunitionEquip Munition { get; }
     public GameObject Owner { get; }
@@ -30,7 +31,7 @@ public sealed class SDeployableComponent : GameComponent
         _ => 0
     };
 
-    public bool IsCollisionSafe => totalTime < LaunchCollisionSafeTime || Mine?.PhantomPhysics == true;
+    public bool IsCollisionSafe => ProjectileLaunchSafety.IsCollisionSafe(totalTime) || Mine?.PhantomPhysics == true;
 
     public bool IsOwner(GameObject obj) => ReferenceEquals(obj, Owner);
 

@@ -26,7 +26,43 @@ namespace LibreLancer.World.Components
 
         public bool PlayerInput;
 
+        public Vector3? TumbleSteering;
+        public float? TumbleThrottle;
+
         private PIDController rollPID = new() { P = 2 };
+
+        internal PIDControllerTransferState CaptureRollControllerTransferState() => rollPID.CaptureTransferState();
+
+        internal void RestoreRollControllerTransferState(PIDControllerTransferState state) =>
+            rollPID.RestoreTransferState(state);
+
+        internal LibreLancer.Server.NpcShipSteeringTransferStateV1 CaptureNpcTransferState() => new()
+        {
+            Pitch = InPitch,
+            Yaw = InYaw,
+            Roll = InRoll,
+            Throttle = InThrottle,
+            Cruise = Cruise,
+            CruiseSpeedOffset = CruiseSpeedOffset,
+            Thrust = Thrust,
+            Strafe = CurrentStrafe,
+            EngineKill = EngineKill
+        };
+
+        internal void RestoreNpcTransferState(LibreLancer.Server.NpcShipSteeringTransferStateV1 state)
+        {
+            state.Validate();
+            InPitch = state.Pitch;
+            InYaw = state.Yaw;
+            InRoll = state.Roll;
+            InThrottle = state.Throttle;
+            Cruise = state.Cruise;
+            CruiseSpeedOffset = state.CruiseSpeedOffset;
+            Thrust = state.Thrust;
+            CurrentStrafe = state.Strafe;
+            EngineKill = state.EngineKill;
+            PlayerInput = false;
+        }
 
         public ShipSteeringComponent(GameObject parent) : base(parent) { }
 
@@ -66,7 +102,11 @@ namespace LibreLancer.World.Components
 
             // Set output parameters
             Vector3 steerControl;
-            if (!PlayerInput && Parent.TryGetComponent<AutopilotComponent>(out var autoPilot) &&
+            if (TumbleSteering.HasValue)
+            {
+                steerControl = TumbleSteering.Value;
+            }
+            else if (!PlayerInput && Parent.TryGetComponent<AutopilotComponent>(out var autoPilot) &&
                 autoPilot.CurrentBehavior != AutopilotBehaviors.None)
             {
                 steerControl = new Vector3(autoPilot.OutPitch, autoPilot.OutYaw, 0);
@@ -79,7 +119,7 @@ namespace LibreLancer.World.Components
             double pitch, yaw;
             DecomposeOrientation(Matrix4x4.CreateFromQuaternion(Parent.PhysicsComponent!.Body.Orientation), out pitch, out yaw, out var roll);
 
-            if (Math.Abs(InPitch) < float.Epsilon && Math.Abs(InYaw) < float.Epsilon)
+            if (!TumbleSteering.HasValue && Math.Abs(InPitch) < float.Epsilon && Math.Abs(InYaw) < float.Epsilon)
                 steerControl.Z = MathHelper.Clamp((float) rollPID.Update(0, roll, (float) time), -0.5f, 0.5f);
             else
                 rollPID.Reset();
@@ -88,18 +128,18 @@ namespace LibreLancer.World.Components
 
             var strafe = CurrentStrafe;
             if (strafe == StrafeControls.None &&
-                Parent.TryGetComponent<AutopilotComponent>(out autoPilot) &&
-                autoPilot.CurrentBehavior != AutopilotBehaviors.None)
+                Parent.TryGetComponent<AutopilotComponent>(out var strafeAutopilot) &&
+                strafeAutopilot.CurrentBehavior != AutopilotBehaviors.None)
             {
-                strafe = autoPilot.AutopilotStrafe;
+                strafe = strafeAutopilot.AutopilotStrafe;
             }
 
             physics!.Steering = OutputSteering;
             physics.CurrentStrafe = strafe;
             var escortSpeedFactor = GetEscortSpeedFactor();
-            physics.EnginePower = InThrottle * escortSpeedFactor;
+            physics.EnginePower = (TumbleThrottle ?? InThrottle) * escortSpeedFactor;
             physics.ThrustRequested = Thrust;
-            physics.CruiseEnabled = Cruise;
+            physics.CruiseEnabled = !TumbleSteering.HasValue && Cruise;
             physics.CruiseSpeedOffset = Cruise ? CruiseSpeedOffset : 0;
             if (Cruise && escortSpeedFactor < 1)
             {
@@ -107,7 +147,7 @@ namespace LibreLancer.World.Components
                 physics.CruiseSpeedOffset = MathF.Min(physics.CruiseSpeedOffset,
                     -cruiseSpeed * (1 - escortSpeedFactor));
             }
-            physics.EngineKillEnabled = EngineKill;
+            physics.EngineKillEnabled = !TumbleSteering.HasValue && EngineKill;
         }
 
         // Specific decomposition for roll

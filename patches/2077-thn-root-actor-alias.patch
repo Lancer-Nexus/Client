@@ -1,32 +1,14 @@
---- a/src/LibreLancer/Thn/ThnSceneObject.cs
-+++ b/src/LibreLancer/Thn/ThnSceneObject.cs
-@@ -209,9 +209,9 @@
-     bool characterRoot = false)
-     : ThnAttachParent
- {
--    public static bool IsCharacterRootTarget(ThnSceneObject obj, string? targetPart) =>
--        obj.Object?.RenderComponent is CharacterRenderer &&
--        string.Equals(targetPart, "Root", StringComparison.OrdinalIgnoreCase);
-+    public static bool IsRootTarget(ThnSceneObject obj, string? targetPart) =>
-+        string.Equals(targetPart, "Root", StringComparison.OrdinalIgnoreCase) &&
-+        (obj.Object?.RenderComponent is CharacterRenderer || obj.Object?.Model?.RigidModel.Parts == null);
- 
-     public override Transform3D GetTransform(bool pathLookAt)
-     {
---- a/src/LibreLancer/Thn/Events/AttachEntityEvent.cs
-+++ b/src/LibreLancer/Thn/Events/AttachEntityEvent.cs
-@@ -103,7 +103,7 @@
- 
-                 case TargetTypes.Part when !string.IsNullOrEmpty(TargetPart):
-                 {
--                    if (ThnObjectParent.IsCharacterRootTarget(objB, TargetPart))
-+                    if (ThnObjectParent.IsRootTarget(objB, TargetPart))
-                     {
-                         characterRoot = true;
-                     }
+diff --git a/src/LibreLancer.Tests/ThnCharacterRootAttachmentTests.cs b/src/LibreLancer.Tests/ThnCharacterRootAttachmentTests.cs
+index ea6fb1c..127a291 100644
 --- a/src/LibreLancer.Tests/ThnCharacterRootAttachmentTests.cs
 +++ b/src/LibreLancer.Tests/ThnCharacterRootAttachmentTests.cs
-@@ -28,11 +28,26 @@
+@@ -1,4 +1,5 @@
+ using System;
++using System.Collections.Generic;
+ using System.Numerics;
+ using System.Runtime.CompilerServices;
+ using LibreLancer.Render;
+@@ -28,13 +29,28 @@ public sealed class ThnCharacterRootAttachmentTests
              Rotate = Quaternion.Identity,
              Object = character
          };
@@ -37,8 +19,8 @@
          var parent = new ThnObjectParent(sceneObject, null, null, characterRoot: true);
  
          AssertTransformClose(rootMotionTransform, parent.GetTransform(pathLookAt: false));
-+    }
-+
+     }
+ 
 +    [Fact]
 +    public void RootAttachmentSupportsActorAliasWithoutRenderableObject()
 +    {
@@ -52,6 +34,133 @@
 +        var parent = new ThnObjectParent(sceneObject, null, null, characterRoot: true);
 +        AssertTransformClose(new Transform3D(sceneObject.Translate, sceneObject.Rotate),
 +            parent.GetTransform(pathLookAt: false));
++    }
++
+     [Fact]
+     public void CharacterHardpointAttachmentUsesWorldTransformAfterRootMotion()
+     {
+@@ -59,6 +75,40 @@ public sealed class ThnCharacterRootAttachmentTests
+         AssertTransformClose(hardpointTransform * rootMotionTransform, parent.GetTransform(pathLookAt: false));
      }
  
-     [Fact]
++    [Fact]
++    public void CharacterBoneAttachmentUsesAnimatedBoneTransformAndWorldTransform()
++    {
++        var boneTransform = new Transform3D(
++            new Vector3(0.2f, 1.1f, -0.35f),
++            Quaternion.CreateFromAxisAngle(Vector3.UnitX, 0.2f));
++        var bone = new BoneInstance("Body_Head", boneTransform, Vector3.Zero, Vector3.One);
++        var skinning = (DfmSkinning)RuntimeHelpers.GetUninitializedObject(typeof(DfmSkinning));
++        skinning.Bones = new Dictionary<string, BoneInstance>(StringComparer.OrdinalIgnoreCase)
++        {
++            [bone.Name] = bone
++        };
++        var skeleton = (DfmSkeletonManager)RuntimeHelpers.GetUninitializedObject(typeof(DfmSkeletonManager));
++        skeleton.BodySkinning = skinning;
++        var characterRenderer = (CharacterRenderer)RuntimeHelpers.GetUninitializedObject(typeof(CharacterRenderer));
++        characterRenderer.Skeleton = skeleton;
++        var worldTransform = new Transform3D(
++            new Vector3(4, 2, -6),
++            Quaternion.CreateFromAxisAngle(Vector3.UnitY, -0.6f));
++        var character = new GameObject { RenderComponent = characterRenderer };
++        character.SetLocalTransform(worldTransform);
++        var sceneObject = new ThnSceneObject { Object = character };
++        var parent = new ThnObjectParent(sceneObject, null, null, characterBoneName: "body_head");
++
++        AssertTransformClose(boneTransform * worldTransform, parent.GetTransform(pathLookAt: false));
++
++        var animatedBoneTransform = new Transform3D(
++            new Vector3(-0.1f, 1.3f, 0.4f),
++            Quaternion.CreateFromAxisAngle(Vector3.UnitZ, -0.15f));
++        bone.LocalTransform = animatedBoneTransform;
++
++        AssertTransformClose(animatedBoneTransform * worldTransform, parent.GetTransform(pathLookAt: false));
++    }
++
+     private sealed class TestHardpoint(Transform3D transform) : IRenderHardpoint
+     {
+         public Transform3D Transform => transform;
+diff --git a/src/LibreLancer/Thn/Events/AttachEntityEvent.cs b/src/LibreLancer/Thn/Events/AttachEntityEvent.cs
+index fc21db3..7aff3ba 100644
+--- a/src/LibreLancer/Thn/Events/AttachEntityEvent.cs
++++ b/src/LibreLancer/Thn/Events/AttachEntityEvent.cs
+@@ -33,6 +33,7 @@ namespace LibreLancer.Thn.Events
+                 t += delta;
+                 if (t > Duration)
+                 {
++                    Child.Update();
+                     Child.Attachments.Remove(Attachment);
+                     return false;
+                 }
+@@ -85,6 +86,7 @@ namespace LibreLancer.Thn.Events
+             IRenderHardpoint? hardpoint = null;
+             RigidModelPart? part = null;
+             var characterRoot = false;
++            string? characterBoneName = null;
+             switch (TargetType)
+             {
+                 case TargetTypes.Hardpoint when !string.IsNullOrEmpty(TargetPart):
+@@ -103,10 +105,15 @@ namespace LibreLancer.Thn.Events
+ 
+                 case TargetTypes.Part when !string.IsNullOrEmpty(TargetPart):
+                 {
+-                    if (ThnObjectParent.IsCharacterRootTarget(objB, TargetPart))
++                    if (ThnObjectParent.IsRootTarget(objB, TargetPart))
+                     {
+                         characterRoot = true;
+                     }
++                    else if (objB.Object?.RenderComponent is CharacterRenderer character &&
++                             character.Skeleton.TryGetBoneTransform(TargetPart, objB.Object.WorldTransform, out _))
++                    {
++                        characterBoneName = TargetPart;
++                    }
+                     else if (objB.Object?.Model?.RigidModel.Parts == null)
+                     {
+                         FLLog.Error("Thn", "Could not get parts on " + objB.Name);
+@@ -123,7 +130,7 @@ namespace LibreLancer.Thn.Events
+                 }
+             }
+ 
+-            var tgt = new ThnObjectParent(objB, hardpoint, part, characterRoot);
++            var tgt = new ThnObjectParent(objB, hardpoint, part, characterRoot, characterBoneName);
+             Quaternion lastRotate = Quaternion.Identity;
+             if ((Flags & AttachFlags.Orientation) == AttachFlags.Orientation &&
+                 (Flags & AttachFlags.OrientationRelative) == AttachFlags.OrientationRelative)
+diff --git a/src/LibreLancer/Thn/ThnSceneObject.cs b/src/LibreLancer/Thn/ThnSceneObject.cs
+index 94d30b1..5140b3a 100644
+--- a/src/LibreLancer/Thn/ThnSceneObject.cs
++++ b/src/LibreLancer/Thn/ThnSceneObject.cs
+@@ -58,7 +58,7 @@ public class ThnSceneObject
+                     var qCurrent = parent.Orientation;
+                     var diff = qCurrent * Quaternion.Inverse(t.LastRotate);
+                     var qChild = self.Orientation;
+-                    self.Orientation = qChild * diff;
++                    self.Orientation = diff * qChild;
+                     t.LastRotate = qCurrent;
+                 }
+                 else
+@@ -206,16 +206,19 @@ public class ThnPathParent(ThnSceneObject Path)
+ }
+ 
+ public class ThnObjectParent(ThnSceneObject obj, IRenderHardpoint? hardpoint, RigidModelPart? part,
+-    bool characterRoot = false)
++    bool characterRoot = false, string? characterBoneName = null)
+     : ThnAttachParent
+ {
+-
+-    public static bool IsCharacterRootTarget(ThnSceneObject obj, string? targetPart) =>
+-        obj.Object?.RenderComponent is CharacterRenderer &&
+-        string.Equals(targetPart, "Root", StringComparison.OrdinalIgnoreCase);
++    public static bool IsRootTarget(ThnSceneObject obj, string? targetPart) =>
++        string.Equals(targetPart, "Root", StringComparison.OrdinalIgnoreCase) &&
++        (obj.Object?.RenderComponent is CharacterRenderer || obj.Object?.Model?.RigidModel.Parts == null);
+ 
+     public override Transform3D GetTransform(bool pathLookAt)
+     {
++        if (characterBoneName != null && obj.Object?.RenderComponent is CharacterRenderer character &&
++            character.Skeleton.TryGetBoneTransform(characterBoneName, obj.Object.WorldTransform, out var boneTransform))
++            return boneTransform;
++
+         var useCharacterWorldTransform =
+             obj.Object?.RenderComponent is CharacterRenderer && (characterRoot || hardpoint != null);
+         var tr = useCharacterWorldTransform

@@ -27,4 +27,13 @@ public partial class LightSource : NamedObject
     public Vector3? Attenuation;
     [Entry("direction")]
     public Vector3? Direction;
+    public string? ColorCurve;
+    public float? ColorCurvePeriod;
+
+    [EntryHandler("color_curve", MinComponents = 2)]
+    private void ParseColorCurve(Entry entry)
+    {
+        ColorCurve = entry[0].ToString();
+        ColorCurvePeriod = entry[1].ToSingle();
+    }
 }

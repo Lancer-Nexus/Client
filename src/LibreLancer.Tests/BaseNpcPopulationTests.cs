@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using LibreLancer.Client;
 using LibreLancer.Data;
@@ -273,6 +274,18 @@ public class BaseNpcPopulationTests
         Assert.Single(save.MPlayer.VNPCs);
         Assert.Equal(new HashValue(123), save.MPlayer.Rumors[0].Item);
         Assert.Equal(new HashValue(456), save.MPlayer.VNPCs[0].ItemA);
+    }
+
+    [Fact]
+    public void SaveWithEmptyOptionalCargoHealthLoads()
+    {
+        var save = SaveGame.FromString("transfer", "[Player]\ncargo = 123, 1, , , 0\n");
+
+        var cargo = Assert.Single(save.Player!.Cargo);
+        Assert.Equal(new HashValue(123), cargo.Item);
+        Assert.Equal(1, cargo.Count);
+        Assert.Equal(1, cargo.PercentageHealth);
+        Assert.False(cargo.IsMissionCargo);
     }
 
     private static BaseRoom Room(int density, params BaseNpc[] npcs) => new()

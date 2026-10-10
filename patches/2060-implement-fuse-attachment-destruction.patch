@@ -1,7 +1,8 @@
 diff --git a/src/LibreLancer.Data/Schema/Fuses/FuseAction.cs b/src/LibreLancer.Data/Schema/Fuses/FuseAction.cs
+index 514cfb88..c79f6f78 100644
 --- a/src/LibreLancer.Data/Schema/Fuses/FuseAction.cs
 +++ b/src/LibreLancer.Data/Schema/Fuses/FuseAction.cs
-@@ -41,15 +41,16 @@
+@@ -41,15 +41,16 @@ public partial class FuseStartEffect : FuseAction //[start_effect]
  public partial class FuseDestroyHpAttachment : FuseAction //[destroy_hp_attachment]
  {
      [Entry("hardpoint")]
@@ -21,123 +22,11 @@ diff --git a/src/LibreLancer.Data/Schema/Fuses/FuseAction.cs b/src/LibreLancer.D
  }
  [ParsedSection]
  public partial class FuseDestroyGroup : FuseAction //[destroy_group]
-diff --git a/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs b/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs
---- a/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs
-+++ b/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs
-@@ -11,6 +11,7 @@
- using LibreLancer.Data.GameData;
- using LibreLancer.Net.Protocol;
- using LibreLancer.World;
-+using LibreLancer.World.Components;
- 
- namespace LibreLancer.Server.Components
- {
-@@ -108,9 +109,9 @@
-                         Parent.SpawnDebris(dst.GroupName!, world, GetResourceManager(world)!);
-                     }
-                 }
--                else if (act is FuseDestroyHpAttachment)
--                {
--
-+                else if (act is FuseDestroyHpAttachment attachment)
-+                {
-+                    DestroyHpAttachment(world, attachment);
-                 }
-                 else if (act is FuseImpulse impulse)
-                 {
-@@ -207,6 +208,71 @@
-             }
-         }
- 
-+        private void DestroyHpAttachment(GameWorld world, FuseDestroyHpAttachment action)
-+        {
-+            var hardpoints = Parent.Children
-+                .Where(x => x.Attachment != null && x.TryGetComponent<EquipmentComponent>(out _))
-+                .Select(x => x.Attachment!.Name)
-+                .Distinct(StringComparer.OrdinalIgnoreCase)
-+                .ToArray();
-+            if (hardpoints.Length == 0 || string.IsNullOrWhiteSpace(action.Hardpoint))
-+            {
-+                return;
-+            }
-+
-+            var hardpointName = action.Hardpoint.Equals("random", StringComparison.OrdinalIgnoreCase)
-+                ? SelectRandomHardpoint(hardpoints, Random.Shared.NextSingle())
-+                : hardpoints.FirstOrDefault(x => x.Equals(action.Hardpoint, StringComparison.OrdinalIgnoreCase));
-+            if (hardpointName == null || Parent.GetHardpoint(hardpointName) is not { } hardpoint)
-+            {
-+                return;
-+            }
-+
-+            var child = Parent.Children.FirstOrDefault(x =>
-+                x.Attachment?.Name.Equals(hardpointName, StringComparison.OrdinalIgnoreCase) == true &&
-+                x.TryGetComponent<EquipmentComponent>(out _));
-+            if (child == null)
-+            {
-+                return;
-+            }
-+
-+            if (action.Fate == FusePartFate.debris &&
-+                child.TryGetComponent<CargoPodComponent>(out _) &&
-+                child.TryGetComponent<SHealthComponent>(out var health))
-+            {
-+                health.DamageRootFromFuse(health.CurrentHealth);
-+                return;
-+            }
-+
-+            if (action.Fate == FusePartFate.loot &&
-+                child.TryGetComponent<EquipmentComponent>(out var equipment) &&
-+                equipment.Equipment.LootAppearance is { } lootAppearance)
-+            {
-+                var transform = hardpoint.Transform * Parent.WorldTransform;
-+                var direction = Random.Shared.NextUnitVector();
-+                var impulse = direction * (40 + (Random.Shared.NextSingle() * 60));
-+                world.Server?.SpawnLoot(lootAppearance, equipment.Equipment, 1, transform,
-+                    initialImpulse: impulse);
-+            }
-+
-+            if (Parent.RemoveEquipment(hardpointName, world))
-+            {
-+                world.Server?.EquipmentDestroyed(Parent, hardpoint, action.Fate == FusePartFate.debris);
-+            }
-+        }
-+
-+        internal static string? SelectRandomHardpoint(IReadOnlyList<string> hardpoints, float randomValue)
-+        {
-+            if (hardpoints.Count == 0)
-+            {
-+                return null;
-+            }
-+
-+            var normalized = MathHelper.Clamp(randomValue, 0, 1);
-+            var index = Math.Min(hardpoints.Count - 1, (int)(normalized * hardpoints.Count));
-+            return hardpoints[index];
-+        }
-+
-         private void ApplyImpulse(GameWorld world, FuseImpulse action)
-         {
-             var physics = world.Physics;
-diff --git a/src/LibreLancer/Server/ServerWorld.cs b/src/LibreLancer/Server/ServerWorld.cs
---- a/src/LibreLancer/Server/ServerWorld.cs
-+++ b/src/LibreLancer/Server/ServerWorld.cs
-@@ -1461,11 +1461,11 @@
-                 p.RpcClient.DestroyPart(obj, part);
-         }
- 
--        public void EquipmentDestroyed(GameObject obj, Hardpoint hardpoint)
-+        public void EquipmentDestroyed(GameObject obj, Hardpoint hardpoint, bool explode = true)
-         {
-             foreach (Player p in Players.Keys)
-             {
--                p.RpcClient.DestroyEquipment(obj, true, hardpoint.Name);
-+                p.RpcClient.DestroyEquipment(obj, explode, hardpoint.Name);
-             }
-             // Save destroyed cargo pods
-             if (obj.SystemObject != null)
 diff --git a/src/LibreLancer.Tests/FuseAndExplosionIniTests.cs b/src/LibreLancer.Tests/FuseAndExplosionIniTests.cs
+index 2058fd4d..938f5a52 100644
 --- a/src/LibreLancer.Tests/FuseAndExplosionIniTests.cs
 +++ b/src/LibreLancer.Tests/FuseAndExplosionIniTests.cs
-@@ -33,7 +33,7 @@
+@@ -33,7 +33,7 @@ public sealed class FuseAndExplosionIniTests
  
              var effect = Assert.IsType<FuseStartEffect>(Assert.Single(Assert.Single(parsed.Fuses).Actions));
              Assert.Equal(value, effect.Effect);
@@ -146,7 +35,7 @@ diff --git a/src/LibreLancer.Tests/FuseAndExplosionIniTests.cs b/src/LibreLancer
          }
          finally
          {
-@@ -131,4 +131,49 @@
+@@ -131,4 +131,49 @@ public sealed class FuseAndExplosionIniTests
              Directory.Delete(root, true);
          }
      }
@@ -197,6 +86,7 @@ diff --git a/src/LibreLancer.Tests/FuseAndExplosionIniTests.cs b/src/LibreLancer
 +    }
  }
 diff --git a/src/LibreLancer.Tests/FuseImpulseTests.cs b/src/LibreLancer.Tests/FuseImpulseTests.cs
+index 6c537010..1c934e0a 100644
 --- a/src/LibreLancer.Tests/FuseImpulseTests.cs
 +++ b/src/LibreLancer.Tests/FuseImpulseTests.cs
 @@ -1,3 +1,4 @@
@@ -204,7 +94,7 @@ diff --git a/src/LibreLancer.Tests/FuseImpulseTests.cs b/src/LibreLancer.Tests/F
  using System.Numerics;
  using LibreLancer.Server.Components;
  using Xunit;
-@@ -33,7 +34,18 @@
+@@ -33,7 +34,18 @@ public sealed class FuseImpulseTests
      public void FuseActionTimeUsesFixedOrRandomizedRange()
      {
          Assert.Equal(0.25f, SFuseRunnerComponent.ResolveActionTime(new Vector2(-1, 0.25f), 0.8f));
@@ -224,3 +114,62 @@ diff --git a/src/LibreLancer.Tests/FuseImpulseTests.cs b/src/LibreLancer.Tests/F
 +        Assert.Equal("HpTurret03", SFuseRunnerComponent.SelectRandomHardpoint(hardpoints, 1));
 +    }
  }
+diff --git a/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs b/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs
+index e965bc30..5f0f93d2 100644
+--- a/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs
++++ b/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs
+@@ -11,6 +11,7 @@ using LibreLancer.Data.Schema.Fuses;
+ using LibreLancer.Data.GameData;
+ using LibreLancer.Net.Protocol;
+ using LibreLancer.World;
++using LibreLancer.World.Components;
+ 
+ namespace LibreLancer.Server.Components
+ {
+@@ -108,9 +109,9 @@ namespace LibreLancer.Server.Components
+                         Parent.SpawnDebris(dst.GroupName!, world, GetResourceManager(world)!);
+                     }
+                 }
+-                else if (act is FuseDestroyHpAttachment)
++                else if (act is FuseDestroyHpAttachment attachment)
+                 {
+-
++                    DestroyHpAttachment(world, attachment);
+                 }
+                 else if (act is FuseImpulse impulse)
+                 {
+@@ -159,6 +160,34 @@ namespace LibreLancer.Server.Components
+             }
+         }
+ 
++        private void DestroyHpAttachment(GameWorld world, FuseDestroyHpAttachment action)
++        {
++            var equipment = Parent.AllEquipment.Where(x => x.Attachment != null).ToArray();
++            if (equipment.Length == 0 || string.IsNullOrWhiteSpace(action.Hardpoint)) return;
++            var hardpointName = action.Hardpoint.Equals("random", StringComparison.OrdinalIgnoreCase)
++                ? SelectRandomHardpoint(equipment.Select(x => x.Attachment!.Name).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(), Random.Shared.NextSingle())
++                : equipment.FirstOrDefault(x => x.Attachment!.Name.Equals(action.Hardpoint, StringComparison.OrdinalIgnoreCase))?.Attachment?.Name;
++            var item = equipment.FirstOrDefault(x => x.Attachment!.Name.Equals(hardpointName, StringComparison.OrdinalIgnoreCase));
++            if (item?.Attachment is not { } hardpoint) return;
++
++            if (action.Fate == FusePartFate.loot && item.Equipment.LootAppearance is { } lootAppearance)
++            {
++                var transform = hardpoint.Transform * Parent.WorldTransform;
++                world.Server?.SpawnLoot(lootAppearance, item.Equipment, 1, transform,
++                    initialImpulse: Random.Shared.NextUnitVector() * (40 + Random.Shared.NextSingle() * 60));
++            }
++
++            if (Parent.RemoveEquipment(hardpoint.Name, world))
++                world.Server?.EquipmentDestroyed(Parent, hardpoint, action.Fate == FusePartFate.debris);
++        }
++
++        internal static string? SelectRandomHardpoint(IReadOnlyList<string> hardpoints, float randomValue)
++        {
++            if (hardpoints.Count == 0) return null;
++            var normalized = MathHelper.Clamp(randomValue, 0, 1);
++            return hardpoints[Math.Min(hardpoints.Count - 1, (int)(normalized * hardpoints.Count))];
++        }
++
+         internal static float ResolveActionTime(Vector2 range, float randomValue)
+         {
+             if (range.X < 0)

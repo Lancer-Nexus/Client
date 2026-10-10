@@ -183,8 +183,8 @@ public class UniverseEditorTab : GameContentTab
 
     void NewSystem(string nickname, Vector2 position)
     {
-        var systemsFolder =
-            Data.GameData.VFS.GetBackingFileName(Data.GameData.Items.Ini.Freelancer.DataPath + "/UNIVERSE/SYSTEMS");
+        var systemsFolder = WritableDataPath.Resolve(Data.GameData.VFS,
+            Data.GameData.Items.Ini.Freelancer.DataPath + "/UNIVERSE/SYSTEMS");
         var newFolder = Path.Combine(systemsFolder, nickname);
         Directory.CreateDirectory(newFolder);
         var system = new StarSystem()
@@ -200,7 +200,8 @@ public class UniverseEditorTab : GameContentTab
             UniversePosition = position,
         };
         Data.GameData.Items.Systems.Add(system);
-        var universePath = Data.GameData.VFS.GetBackingFileName(Data.GameData.Items.Ini.Freelancer.UniversePath);
+        var universePath = WritableDataPath.Resolve(Data.GameData.VFS,
+            Data.GameData.Items.Ini.Freelancer.UniversePath);
         using (var stream = File.Create(Path.Combine(newFolder, $"{nickname}.ini")))
         {
             var sections = IniSerializer.SerializeStarSystem(system);

@@ -33,10 +33,17 @@ namespace LibreLancer.Thn.Events
                 t += delta;
                 if (t > Duration)
                 {
+                    Child.Update();
                     Child.Attachments.Remove(Attachment);
                     return false;
                 }
                 return true;
+            }
+
+            public override void Finish()
+            {
+                Child.Update();
+                Child.Attachments.Remove(Attachment);
             }
         }
 
@@ -78,6 +85,8 @@ namespace LibreLancer.Thn.Events
             // Attach GameObjects to eachother
             IRenderHardpoint? hardpoint = null;
             RigidModelPart? part = null;
+            var characterRoot = false;
+            string? characterBoneName = null;
             switch (TargetType)
             {
                 case TargetTypes.Hardpoint when !string.IsNullOrEmpty(TargetPart):
@@ -96,7 +105,16 @@ namespace LibreLancer.Thn.Events
 
                 case TargetTypes.Part when !string.IsNullOrEmpty(TargetPart):
                 {
-                    if (objB.Object?.Model?.RigidModel.Parts == null)
+                    if (ThnObjectParent.IsRootTarget(objB, TargetPart))
+                    {
+                        characterRoot = true;
+                    }
+                    else if (objB.Object?.RenderComponent is CharacterRenderer character &&
+                             character.Skeleton.TryGetBoneTransform(TargetPart, objB.Object.WorldTransform, out _))
+                    {
+                        characterBoneName = TargetPart;
+                    }
+                    else if (objB.Object?.Model?.RigidModel.Parts == null)
                     {
                         FLLog.Error("Thn", "Could not get parts on " + objB.Name);
                     }
@@ -112,13 +130,19 @@ namespace LibreLancer.Thn.Events
                 }
             }
 
-            var tgt = new ThnObjectParent(objB, hardpoint, part);
+            var tgt = new ThnObjectParent(objB, hardpoint, part, characterRoot, characterBoneName);
             Quaternion lastRotate = Quaternion.Identity;
             if ((Flags & AttachFlags.Orientation) == AttachFlags.Orientation &&
                 (Flags & AttachFlags.OrientationRelative) == AttachFlags.OrientationRelative)
             {
                 var (_, tr) = tgt.GetTransform(false);
                 lastRotate = tr;
+            }
+            Transform3D? parentChildTransform = null;
+            if ((Flags & AttachFlags.ParentChild) == AttachFlags.ParentChild)
+            {
+                parentChildTransform = ThnAttachment.CaptureParentChildTransform(
+                    objA.GetTransform(), tgt.GetTransform(false));
             }
             var attachment = new ThnAttachment(tgt)
             {
@@ -127,6 +151,7 @@ namespace LibreLancer.Thn.Events
                 OrientationRelative = ((Flags & AttachFlags.OrientationRelative) == AttachFlags.OrientationRelative),
                 EntityRelative = ((Flags & AttachFlags.EntityRelative) == AttachFlags.EntityRelative),
                 LookAt = ((Flags & AttachFlags.LookAt) == AttachFlags.LookAt),
+                ParentChildTransform = parentChildTransform,
                 LastRotate = lastRotate,
                 Offset = Offset,
             };

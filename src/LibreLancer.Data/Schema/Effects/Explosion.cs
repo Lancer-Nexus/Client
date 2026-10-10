@@ -8,7 +8,7 @@ namespace LibreLancer.Data.Schema.Effects;
 public partial class Explosion
 {
     [Entry("nickname", Required = true)] public string Nickname = null!;
-    [Entry("lifetime")] public Vector2 Lifetime;
+    [Entry("lifetime", MinMax = true)] public Vector2 Lifetime;
     [Entry("process")] public string? Process;
     [Entry("radius")] public float Radius;
     [Entry("hull_damage")] public float HullDamage;

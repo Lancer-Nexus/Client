@@ -28,6 +28,8 @@ namespace LibreLancer.Utf.Ale
 		}
         public float GetValue(float time)
         {
+            if (Keyframes.Count == 0)
+                return 0;
             if (Keyframes.Count == 1)
                 return Keyframes[0].Value;
 

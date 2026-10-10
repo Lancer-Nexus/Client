@@ -6,11 +6,15 @@ string dumpFolder = "";
 bool help = false;
 bool verbose = false;
 bool listDeps = false;
+bool repairEmptyOutputs = false;
 var aparse = new Args("Usage: LLShaderCompiler input output");
 aparse.String("dxc", "Path to the dxc compiler executable", x => dxcStr = x);
 aparse.String("dump", "Folder to dump generated SPIR-V/GLSL.", x => dumpFolder = x);
 aparse.Flag("list-deps", "Lists all input file dependencies to stdout.", c => { listDeps = true;
     c.MinArgs = 1;
+});
+aparse.Flag("repair-empty-outputs", "Deletes empty outputs from input/output pairs.", c => { repairEmptyOutputs = true;
+    c.MinArgs = 2;
 });
 aparse.Flag("verbose", "Enable verbose output.", () => verbose = true);
 aparse.Flag("help", "Prints this message.", () => help = true);
@@ -97,6 +101,27 @@ if (listDeps)
         Console.Error.WriteLine(e.ToDiagnosticString());
         Environment.Exit(1);
     }
+}
+
+if (repairEmptyOutputs)
+{
+    if (positional.Length % 2 != 0)
+    {
+        Console.Error.WriteLine("Need equal number of inputs and outputs");
+        Environment.Exit(1);
+    }
+
+    foreach (var (_, output) in positional.Chunk(2).Select(x => (x[0], x[1])))
+    {
+        if (File.Exists(output) && new FileInfo(output).Length == 0)
+        {
+            File.Delete(output);
+            if (verbose)
+                Console.WriteLine($"Removed empty shader bundle {output}");
+        }
+    }
+
+    return;
 }
 
 

@@ -23,7 +23,7 @@ namespace LibreLancer.Net
     {
         private record LoginResult(string token);
 
-        private record VerifyResult(Guid guid);
+        public record VerifiedGameIdentity(Guid guid, Guid sessionId = default);
 
         private static string Combine(string baseUrl, string relUrl)
         {
@@ -188,7 +188,10 @@ namespace LibreLancer.Net
             }
         }
 
-        public static async Task<Guid> VerifyToken(this HttpClient client, string url, string token)
+        public static async Task<Guid> VerifyToken(this HttpClient client, string url, string token) =>
+            (await client.VerifyGameIdentity(url, token)).guid;
+
+        public static async Task<VerifiedGameIdentity> VerifyGameIdentity(this HttpClient client, string url, string token)
         {
             try
             {
@@ -209,18 +212,21 @@ namespace LibreLancer.Net
 
                 if (result.IsSuccessStatusCode)
                 {
-                    var verifyResult = await result.Content.ReadFromJsonAsync<VerifyResult>();
-                    return verifyResult!.guid;
+                    using (result)
+                    {
+                        return await result.Content.ReadFromJsonAsync<VerifiedGameIdentity>()
+                            ?? new VerifiedGameIdentity(Guid.Empty);
+                    }
                 }
 
-                var response = await result.Content.ReadAsStringAsync();
-                FLLog.Info("Http", $"verifytoken failed. {result.StatusCode}: {response}");
-                return Guid.Empty;
+                FLLog.Info("Http", $"Ticket verification failed: HTTP {(int)result.StatusCode}");
+                result.Dispose();
+                return new VerifiedGameIdentity(Guid.Empty);
             }
             catch (Exception e)
             {
-                FLLog.Error("Http", e.ToString());
-                return Guid.Empty;
+                FLLog.Error("Http", $"Ticket verification unavailable ({e.GetType().Name})");
+                return new VerifiedGameIdentity(Guid.Empty);
             }
         }
     }

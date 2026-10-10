@@ -738,6 +738,14 @@ public sealed partial class MissionScriptEditorTab : GameContentTab
 
     internal EditResult<bool> SaveMission(string savePath = null)
     {
+        var emptyTriggerFields = FindEmptyTriggerFields(nodes.OfType<NodeMissionTrigger>());
+        if (emptyTriggerFields.Count > 0)
+        {
+            return EditResult<bool>.Error(
+                "Cannot save mission: trigger entries contain empty fields. " +
+                string.Join("; ", emptyTriggerFields));
+        }
+
         if (savePath != null)
         {
             FileSaveLocation = savePath;
@@ -761,6 +769,38 @@ public sealed partial class MissionScriptEditorTab : GameContentTab
         missionIni.Save(FileSaveLocation, gameData, nodes.OfType<NodeMissionTrigger>(), savedNodes);
 
         return new EditResult<bool>(true);
+    }
+
+    public static List<string> FindEmptyTriggerFields(IEnumerable<NodeMissionTrigger> triggers)
+    {
+        var emptyFields = new List<string>();
+        foreach (var trigger in triggers)
+        {
+            CheckEntries(trigger, "condition", trigger.Conditions, emptyFields);
+            CheckEntries(trigger, "action", trigger.Actions, emptyFields);
+        }
+        return emptyFields;
+    }
+
+    private static void CheckEntries(NodeMissionTrigger trigger, string kind,
+        IEnumerable<NodeTriggerEntry> entries, List<string> emptyFields)
+    {
+        foreach (var entry in entries)
+        {
+            var builder = new IniBuilder();
+            var section = builder.Section("Trigger");
+            entry.WriteEntry(section);
+            foreach (var field in section.Section)
+            {
+                for (var i = 0; i < field.Count; i++)
+                {
+                    if (field[i] is StringValue text && string.IsNullOrWhiteSpace(text.ToString()))
+                    {
+                        emptyFields.Add($"'{trigger.Data.Nickname}' {kind} '{field.Name}' argument {i + 1}");
+                    }
+                }
+            }
+        }
     }
 
     private void DuplicateSelectedNodes()

@@ -50,22 +50,34 @@ namespace LibreLancer.Fx
             var texCoords = TextureHandler.GetCoordinates(index);
 
 			var z = RenderHelpers.GetZ(instance.Pool!.Camera.Position, Vector3.Transform(Vector3.Zero, transform));
-            Vector3 forward = Vector3.Zero;
             for (int i = 0; i < count; i++)
             {
                 var pos = Vector3.Transform(instance.Buffer[nodeIdx, i].Position, node_tr);
+                Vector3 next = Vector3.Zero;
                 if (i + 1 < count)
                 {
-                    var pos2 = Vector3.Transform(instance.Buffer[nodeIdx, i + 1].Position, node_tr);
-                    forward = (pos2 - pos).Normalized();
+                    next = Vector3.Transform(instance.Buffer[nodeIdx, i + 1].Position, node_tr);
                 }
+                Vector3 previous = Vector3.Zero;
+                if (i > 0)
+                    previous = Vector3.Transform(instance.Buffer[nodeIdx, i - 1].Position, node_tr);
+                var forward = GetBeamForward(pos, previous, next, i > 0, i + 1 < count);
                 var time = instance.Buffer[nodeIdx, i].TimeAlive / instance.Buffer[nodeIdx, i].LifeSpan;
                 var w = Width!.GetValue(sparam, time);
                 instance.Pool.AddBeamPoint(pos, forward, w * 0.5f, texCoords,
                     new Color4(Color.GetValue(sparam, time), Alpha.GetValue(sparam, time)));
             }
-            instance.Pool.DrawBeamBuffer(TextureHandler.Texture ?? res.WhiteTexture, BlendInfo, z);
+			instance.Pool.DrawBeamBuffer(TextureHandler.Texture ?? res.WhiteTexture, BlendInfo, z);
 		}
+
+        internal static Vector3 GetBeamForward(Vector3 position, Vector3 previous, Vector3 next,
+            bool hasPrevious, bool hasNext)
+        {
+            var direction = hasNext ? next - position : Vector3.Zero;
+            if (direction.LengthSquared() <= 1e-12f && hasPrevious)
+                direction = position - previous;
+            var lengthSquared = direction.LengthSquared();
+            return lengthSquared > 1e-12f ? direction / MathF.Sqrt(lengthSquared) : Vector3.Zero;
+        }
 	}
 }
-

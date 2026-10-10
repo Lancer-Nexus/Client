@@ -89,7 +89,7 @@ float4 main(Input input) : SV_Target0
 #ifdef TEX2_ENABLED
     if (Tex2Type < 1)
     {
-        ec += EtTexture.Sample(EtSampler, GetTexCoord(1, input));
+        ec *= EtTexture.Sample(EtSampler, GetTexCoord(1, input));
     }
 #endif
     float4 ac = float4(1.0, 1.0, 1.0, 1.0);

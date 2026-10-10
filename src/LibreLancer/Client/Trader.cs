@@ -106,6 +106,23 @@ namespace LibreLancer.Client
                     [FormatStat(thruster.Force), FormatStat(thruster.Drain)]);
             }
 
+            var ammunition = equipment switch
+            {
+                MunitionEquip ammo => ammo.Def,
+                MissileEquip missile => missile.Def,
+                _ => null
+            };
+            if (ammunition != null)
+            {
+                return BuildStatsCards(
+                    ["Stats", "Hull Damage Per Shot:", "Shield Damage Per Shot:", "Lifetime:",
+                        "Detonation Distance:", "Seeker Range:", "Seeker Field of View:", "Time to Lock:"],
+                    [FormatStat(ammunition.HullDamage), FormatStat(ammunition.EnergyDamage),
+                        $"{FormatStat(ammunition.Lifetime)} s", $"{FormatStat(ammunition.DetonationDist)} m",
+                        $"{FormatStat(ammunition.SeekerRange)} m", $"{FormatStat(ammunition.SeekerFovDeg)}°",
+                        $"{FormatStat(ammunition.TimeToLock)} s"]);
+            }
+
             var hullDamage = 0f;
             var shieldDamage = 0f;
             var lifetime = 0f;
@@ -562,8 +579,13 @@ namespace LibreLancer.Client
                 return 0;
             }
             var maxAmount = (int) Math.Floor(session.Credits / item.Price);
-            var holdLimit = CargoUtilities.GetItemLimit(session.Items, session.PlayerShip!, item.Equipment!);
-            return Math.Min(maxAmount, holdLimit);
+            var canAutoMountSingle = !string.IsNullOrWhiteSpace(item.Equipment.HpType) &&
+                CargoUtilities.CompatibleHardpoints(session.PlayerShip!, session.Game.GameData.Items.Ini.HpTypes,
+                        item.Equipment.HpType)
+                    .Any(hp => !session.Items.Any(x => hp.Equals(x.Hardpoint, StringComparison.OrdinalIgnoreCase)));
+
+            return CargoUtilities.GetPurchaseLimit(
+                session.Items, session.PlayerShip!, item.Equipment, maxAmount, canAutoMountSingle);
         }
 
         public float GetHoldSize() => session.PlayerShip?.HoldSize ?? 0;

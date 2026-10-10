@@ -38,15 +38,9 @@ public class MissionScriptDocument
         var srcNpcIni = iniFile?.Info?.NpcShipFile ?? "";
         if (!string.IsNullOrWhiteSpace(srcNpcIni))
         {
-            var npcPath = gameData.GameData.VFS.GetBackingFileName(gameData.GameData.Items.DataPath(srcNpcIni));
-            if (npcPath is not null)
-            {
-                iniFile.ShipIni = new NPCShipIni(npcPath, null);
-            }
-            else
-            {
-                srcNpcIni = "";
-            }
+            var npcPath = WritableDataPath.Resolve(gameData.GameData.VFS,
+                gameData.GameData.Items.DataPath(srcNpcIni));
+            iniFile.ShipIni = new NPCShipIni(npcPath, null);
         }
         var gameScript = new MissionScript(iniFile, gameData.GameData.Items);
         var missionIni = new MissionScriptDocument(gameScript);
@@ -81,14 +75,12 @@ public class MissionScriptDocument
     {
         if (!string.IsNullOrWhiteSpace(Info.NpcShipFile))
         {
-            var npcPath = gameData.GameData.VFS.GetBackingFileName(gameData.GameData.Items.DataPath(Info.NpcShipFile));
-            if (npcPath is not null)
-            {
-                var npcBuilder = new IniBuilder();
-                foreach(var npc in NpcShips)
-                    IniSerializer.SerializeShipArch(npc.Value, npcBuilder);
-                IniWriter.WriteIniFile(npcPath, npcBuilder.Sections);
-            }
+            var npcPath = WritableDataPath.Resolve(gameData.GameData.VFS,
+                gameData.GameData.Items.DataPath(Info.NpcShipFile));
+            var npcBuilder = new IniBuilder();
+            foreach(var npc in NpcShips)
+                IniSerializer.SerializeShipArch(npc.Value, npcBuilder);
+            IniWriter.WriteIniFile(npcPath, npcBuilder.Sections);
         }
 
         IniBuilder ini = new();

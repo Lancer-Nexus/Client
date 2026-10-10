@@ -14,6 +14,7 @@ using LibreLancer.Interface;
 using LibreLancer.Missions;
 using LibreLancer.Missions.Actions;
 using LibreLancer.Missions.Conditions;
+using LancerNexus.Protocol;
 
 namespace LibreLancer.Server.RandomMissions;
 
@@ -49,6 +50,63 @@ public sealed class GeneratedRandomMission
     public required string TargetName;
     public required object TargetLocation; // To remove
     public required ShipArch TargetShipArch;
+    private int? transferTargetLocationIds;
+
+    public NpcGeneratedMissionState CaptureTransferState() => new()
+    {
+        OfferBaseNickname = Parameters.OfferBase.Nickname,
+        OfferFactionNickname = Parameters.OfferFaction.Nickname,
+        HostileFactionNickname = Parameters.HostileFaction.Nickname,
+        DestinationSystemNickname = Parameters.DestinationSystem.Nickname,
+        TargetZoneNickname = Parameters.TargetZone.Nickname,
+        TargetShipArchNickname = TargetShipArch.Nickname,
+        MissionType = MissionType,
+        TargetLocationIds = TargetLocationIds(),
+        Reward = Parameters.Reward,
+        Difficulty = Parameters.Difficulty,
+        Seed = Parameters.Seed,
+        TargetPosition = new NpcVector3
+        {
+            X = Parameters.TargetPosition.X,
+            Y = Parameters.TargetPosition.Y,
+            Z = Parameters.TargetPosition.Z
+        },
+        Id = Id,
+        OfferText = OfferText,
+        TargetName = TargetName
+    };
+
+    public static MissionScript CreateTransferScript(GameItemDb items, NpcGeneratedMissionState state)
+    {
+        var system = items.Systems.Get(state.DestinationSystemNickname)
+            ?? throw new InvalidOperationException($"Random mission system '{state.DestinationSystemNickname}' is unavailable.");
+        if (!system.ZoneDict.TryGetValue(state.TargetZoneNickname, out var zone))
+            throw new InvalidOperationException($"Random mission zone '{state.TargetZoneNickname}' is unavailable.");
+        var offerBase = items.Bases.Get(state.OfferBaseNickname)
+            ?? throw new InvalidOperationException($"Random mission offer base '{state.OfferBaseNickname}' is unavailable.");
+        var offerFaction = items.Factions.Get(state.OfferFactionNickname)
+            ?? throw new InvalidOperationException($"Random mission offer faction '{state.OfferFactionNickname}' is unavailable.");
+        var hostileFaction = items.Factions.Get(state.HostileFactionNickname)
+            ?? throw new InvalidOperationException($"Random mission hostile faction '{state.HostileFactionNickname}' is unavailable.");
+        var shipArch = items.NpcShips.Get(state.TargetShipArchNickname)
+            ?? throw new InvalidOperationException($"Random mission ship archetype '{state.TargetShipArchNickname}' is unavailable.");
+        var mission = new GeneratedRandomMission
+        {
+            Parameters = new RandomMissionParameters(offerFaction, offerBase, state.Reward, state.Difficulty,
+                hostileFaction, system, new System.Numerics.Vector3(state.TargetPosition.X, state.TargetPosition.Y,
+                    state.TargetPosition.Z), zone, state.Seed),
+            Path = null!,
+            Strings = null!,
+            Items = new Dictionary<string, object>(),
+            MissionType = state.MissionType,
+            OfferText = "",
+            TargetName = "",
+            TargetLocation = zone,
+            TargetShipArch = shipArch,
+            transferTargetLocationIds = state.TargetLocationIds
+        };
+        return mission.CreateScript();
+    }
 
     public MissionScript CreateScript()
     {
@@ -211,7 +269,7 @@ public sealed class GeneratedRandomMission
         return Parameters.TargetPosition + offsets[index % offsets.Length];
     }
 
-    int TargetLocationIds() => TargetLocation switch
+    int TargetLocationIds() => transferTargetLocationIds ?? (TargetLocation switch
     {
         Zone z => z.IdsName,
         Base b => b.IdsName,
@@ -219,7 +277,7 @@ public sealed class GeneratedRandomMission
         NamedItem n => n.IdsName,
         IdsArgument i => i.Ids,
         _ => Parameters.TargetZone.IdsName
-    };
+    });
 }
 
 public static class RandomMissionGenerator

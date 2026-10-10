@@ -1,112 +1,6 @@
---- a/src/LibreLancer/Client/Components/CMissileComponent.cs
-+++ b/src/LibreLancer/Client/Components/CMissileComponent.cs
-@@ -1,5 +1,6 @@
- using LibreLancer.Data.GameData.Items;
- using LibreLancer.World;
-+using LibreLancer.World.Components;
- 
- namespace LibreLancer.Client.Components;
- 
-@@ -16,7 +17,7 @@
- 
-     public override void Register(GameWorld world)
-     {
--        if (Munition == null)
-+        if (Equipment is not (MunitionEquip or MissileEquip))
-         {
-             return;
-         }
-@@ -33,13 +34,14 @@
- 
-     public override void Update(double time, GameWorld world)
-     {
--        if (Munition == null || Parent.PhysicsComponent is not { } physics || physics.Body == null)
-+        if (Equipment is not (MunitionEquip or MissileEquip) ||
-+            Parent.PhysicsComponent is not { } physics || physics.Body == null)
-         {
-             return;
-         }
- 
-         elapsed += time;
--        var collidable = elapsed >= 1.0;
-+        var collidable = !ProjectileLaunchSafety.IsCollisionSafe(elapsed);
-         physics.Collidable = collidable;
-         physics.Body.Collidable = collidable;
-     }
---- a/src/LibreLancer/Server/Components/SMissileComponent.cs
-+++ b/src/LibreLancer/Server/Components/SMissileComponent.cs
-@@ -2,6 +2,7 @@
- using System.Numerics;
- using LibreLancer.Data.GameData.Items;
- using LibreLancer.World;
-+using LibreLancer.World.Components;
- 
- namespace LibreLancer.Server.Components;
- 
-@@ -28,6 +29,16 @@
- 
-     private double totalTime;
- 
-+    public override void Register(GameWorld world)
-+    {
-+        if (Parent.PhysicsComponent is { } physics)
-+        {
-+            physics.Collidable = false;
-+            if (physics.Body != null)
-+                physics.Body.Collidable = false;
-+        }
-+    }
-+
-     public override void Update(double time, GameWorld world)
-     {
-         totalTime += time;
-@@ -37,6 +48,9 @@
-         }
- 
-         var phys = Parent.PhysicsComponent!;
-+        var collidable = !ProjectileLaunchSafety.IsCollisionSafe(totalTime);
-+        phys.Collidable = collidable;
-+        phys.Body.Collidable = collidable;
-         phys.Body.LinearVelocity = Vector3.Transform(-Vector3.UnitZ, Parent.LocalTransform.Orientation) * Speed;
- 
-         if (Target != null &&
---- a/src/LibreLancer/Server/Components/SDeployableComponent.cs
-+++ b/src/LibreLancer/Server/Components/SDeployableComponent.cs
-@@ -3,12 +3,13 @@
- using LibreLancer.Data.GameData.Items;
- using LibreLancer.Data.Schema.Equipment;
- using LibreLancer.World;
-+using LibreLancer.World.Components;
- 
- namespace LibreLancer.Server.Components;
- 
- public sealed class SDeployableComponent : GameComponent
- {
--    public const double LaunchCollisionSafeTime = 1.0;
-+    public const double LaunchCollisionSafeTime = ProjectileLaunchSafety.CollisionGracePeriod;
- 
-     public MunitionEquip Munition { get; }
-     public GameObject Owner { get; }
-@@ -30,7 +31,7 @@
-         _ => 0
-     };
- 
--    public bool IsCollisionSafe => totalTime < LaunchCollisionSafeTime || Mine?.PhantomPhysics == true;
-+    public bool IsCollisionSafe => ProjectileLaunchSafety.IsCollisionSafe(totalTime) || Mine?.PhantomPhysics == true;
- 
-     public bool IsOwner(GameObject obj) => ReferenceEquals(obj, Owner);
- 
---- /dev/null
-+++ b/src/LibreLancer/World/Components/ProjectileLaunchSafety.cs
-@@ -0,0 +1,8 @@
-+namespace LibreLancer.World.Components;
-+
-+public static class ProjectileLaunchSafety
-+{
-+    public const double CollisionGracePeriod = 1.0;
-+
-+    public static bool IsCollisionSafe(double elapsed) => elapsed < CollisionGracePeriod;
-+}
+diff --git a/src/LibreLancer.Tests/ProjectileLaunchSafetyTests.cs b/src/LibreLancer.Tests/ProjectileLaunchSafetyTests.cs
+new file mode 100644
+index 00000000..c8102707
 --- /dev/null
 +++ b/src/LibreLancer.Tests/ProjectileLaunchSafetyTests.cs
 @@ -0,0 +1,17 @@
@@ -126,4 +20,122 @@
 +    {
 +        Assert.Equal(expected, ProjectileLaunchSafety.IsCollisionSafe(elapsed));
 +    }
++}
+diff --git a/src/LibreLancer/Client/Components/CMissileComponent.cs b/src/LibreLancer/Client/Components/CMissileComponent.cs
+index ab2ef507..b8083d61 100644
+--- a/src/LibreLancer/Client/Components/CMissileComponent.cs
++++ b/src/LibreLancer/Client/Components/CMissileComponent.cs
+@@ -1,5 +1,6 @@
+ using LibreLancer.Data.GameData.Items;
+ using LibreLancer.World;
++using LibreLancer.World.Components;
+ 
+ namespace LibreLancer.Client.Components;
+ 
+@@ -16,7 +17,7 @@ public class CDeployedMunitionComponent : GameComponent
+ 
+     public override void Register(GameWorld world)
+     {
+-        if (Munition == null)
++        if (Equipment is not (MunitionEquip or MissileEquip))
+         {
+             return;
+         }
+@@ -33,13 +34,14 @@ public class CDeployedMunitionComponent : GameComponent
+ 
+     public override void Update(double time, GameWorld world)
+     {
+-        if (Munition == null || Parent.PhysicsComponent is not { } physics || physics.Body == null)
++        if (Equipment is not (MunitionEquip or MissileEquip) ||
++            Parent.PhysicsComponent is not { } physics || physics.Body == null)
+         {
+             return;
+         }
+ 
+         elapsed += time;
+-        var collidable = elapsed >= 1.0;
++        var collidable = !ProjectileLaunchSafety.IsCollisionSafe(elapsed);
+         physics.Collidable = collidable;
+         physics.Body.Collidable = collidable;
+     }
+diff --git a/src/LibreLancer/Server/Components/SDeployableComponent.cs b/src/LibreLancer/Server/Components/SDeployableComponent.cs
+index 54deb3c2..38648b7e 100644
+--- a/src/LibreLancer/Server/Components/SDeployableComponent.cs
++++ b/src/LibreLancer/Server/Components/SDeployableComponent.cs
+@@ -3,12 +3,13 @@ using System.Numerics;
+ using LibreLancer.Data.GameData.Items;
+ using LibreLancer.Data.Schema.Equipment;
+ using LibreLancer.World;
++using LibreLancer.World.Components;
+ 
+ namespace LibreLancer.Server.Components;
+ 
+ public sealed class SDeployableComponent : GameComponent
+ {
+-    public const double LaunchCollisionSafeTime = 1.0;
++    public const double LaunchCollisionSafeTime = ProjectileLaunchSafety.CollisionGracePeriod;
+ 
+     public MunitionEquip Munition { get; }
+     public GameObject Owner { get; }
+@@ -30,7 +31,7 @@ public sealed class SDeployableComponent : GameComponent
+         _ => 0
+     };
+ 
+-    public bool IsCollisionSafe => totalTime < LaunchCollisionSafeTime || Mine?.PhantomPhysics == true;
++    public bool IsCollisionSafe => ProjectileLaunchSafety.IsCollisionSafe(totalTime) || Mine?.PhantomPhysics == true;
+ 
+     public bool IsOwner(GameObject obj) => ReferenceEquals(obj, Owner);
+ 
+diff --git a/src/LibreLancer/Server/Components/SMissileComponent.cs b/src/LibreLancer/Server/Components/SMissileComponent.cs
+index 5a2513ee..cb5f707c 100644
+--- a/src/LibreLancer/Server/Components/SMissileComponent.cs
++++ b/src/LibreLancer/Server/Components/SMissileComponent.cs
+@@ -2,6 +2,7 @@ using System.Collections.Generic;
+ using System.Numerics;
+ using LibreLancer.Data.GameData.Items;
+ using LibreLancer.World;
++using LibreLancer.World.Components;
+ 
+ namespace LibreLancer.Server.Components;
+ 
+@@ -28,6 +29,16 @@ public class SMissileComponent : GameComponent
+ 
+     private double totalTime;
+ 
++    public override void Register(GameWorld world)
++    {
++        if (Parent.PhysicsComponent is { } physics)
++        {
++            physics.Collidable = false;
++            if (physics.Body != null)
++                physics.Body.Collidable = false;
++        }
++    }
++
+     public override void Update(double time, GameWorld world)
+     {
+         totalTime += time;
+@@ -37,6 +48,9 @@ public class SMissileComponent : GameComponent
+         }
+ 
+         var phys = Parent.PhysicsComponent!;
++        var collidable = !ProjectileLaunchSafety.IsCollisionSafe(totalTime);
++        phys.Collidable = collidable;
++        phys.Body.Collidable = collidable;
+        phys.Body.LinearVelocity = Vector3.Transform(-Vector3.UnitZ, Parent.LocalTransform.Orientation) * Speed;
+ 
+         if (Target != null &&
+diff --git a/src/LibreLancer/World/Components/ProjectileLaunchSafety.cs b/src/LibreLancer/World/Components/ProjectileLaunchSafety.cs
+new file mode 100644
+index 00000000..3271f91a
+--- /dev/null
++++ b/src/LibreLancer/World/Components/ProjectileLaunchSafety.cs
+@@ -0,0 +1,8 @@
++namespace LibreLancer.World.Components;
++
++public static class ProjectileLaunchSafety
++{
++    public const double CollisionGracePeriod = 1.0;
++
++    public static bool IsCollisionSafe(double elapsed) => elapsed < CollisionGracePeriod;
 +}

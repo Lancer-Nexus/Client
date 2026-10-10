@@ -10,7 +10,7 @@ namespace LibreLancer.Render
 		public const int NEBULA_INSIDE = 0;
 		public const int SUN = 1;
 		public const int OBJECT = 1;
+		public const int CORONA = 2;
         public const int OPAQUE = int.MaxValue;
 	}
 }
-

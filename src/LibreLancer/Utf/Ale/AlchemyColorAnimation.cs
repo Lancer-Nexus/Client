@@ -73,7 +73,9 @@ namespace LibreLancer.Utf.Ale
             // We're at the end
             if (c1 == null)
             {
-                return Items[Items.Count - 1].GetValue(time);
+                return sparam < Items[0].SParam
+                    ? Items[0].GetValue(time)
+                    : Items[Items.Count - 1].GetValue(time);
             }
 
             // Interpolate between SParams

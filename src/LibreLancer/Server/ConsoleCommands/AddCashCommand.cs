@@ -4,7 +4,7 @@ namespace LibreLancer.Server.ConsoleCommands
     public class AddCashCommand : IConsoleCommand
     {
         public string Name => "addcash";
-        public bool Admin => true;
+        public string? Permission => "command.addcash";
 
         public void Run(Player player, string args)
         {

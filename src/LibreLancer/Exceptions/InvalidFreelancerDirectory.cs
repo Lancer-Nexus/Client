@@ -8,7 +8,8 @@ namespace LibreLancer.Exceptions
 {
     public class InvalidFreelancerDirectory : Exception
     {
-        public InvalidFreelancerDirectory(string path) : base(path)
+        public InvalidFreelancerDirectory(string path) : base(
+            $"The Freelancer data directory '{path}' is invalid. Set freelancer_path to a Freelancer installation directory or data archive.")
         { }
     }
 }

@@ -58,6 +58,8 @@ namespace LibreLancer.Fx
     public class AppearanceReference(FxAppearance app) : NodeReference
     {
         public readonly FxAppearance Appearance = app;
+        public EmitterReference? SourceEmitter;
+        public bool AirFieldOwnsDirection;
         public override FxNode Node => Appearance;
 
         public List<FieldReference> Linked = [];
@@ -132,6 +134,9 @@ namespace LibreLancer.Fx
                     if (max2 < maxParticles)
                         maxParticles = max2;
                 }
+
+                if (emitter.InitialParticles > maxParticles)
+                    maxParticles = emitter.InitialParticles;
 
                 ParticleCounts[emitNode.AppBufIdx] += maxParticles;
 

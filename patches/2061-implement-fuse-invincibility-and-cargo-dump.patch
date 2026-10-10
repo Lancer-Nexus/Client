@@ -1,7 +1,8 @@
 diff --git a/src/LibreLancer.Data/Schema/Fuses/Fuse.cs b/src/LibreLancer.Data/Schema/Fuses/Fuse.cs
+index 48cfab71..dcaab064 100644
 --- a/src/LibreLancer.Data/Schema/Fuses/Fuse.cs
 +++ b/src/LibreLancer.Data/Schema/Fuses/Fuse.cs
-@@ -26,6 +26,8 @@
+@@ -26,6 +26,8 @@ public partial class Fuse
      [Section("impulse", Child = true)]
      [Section("damage_root", Child = true)]
      [Section("damage_group", Child = true)]
@@ -10,26 +11,14 @@ diff --git a/src/LibreLancer.Data/Schema/Fuses/Fuse.cs b/src/LibreLancer.Data/Sc
      [Section("destroy_root", Child = true)]
      public List<FuseAction> Actions = [];
  }
-diff --git a/src/LibreLancer.Data/Schema/Fuses/FuseIni.cs b/src/LibreLancer.Data/Schema/Fuses/FuseIni.cs
---- a/src/LibreLancer.Data/Schema/Fuses/FuseIni.cs
-+++ b/src/LibreLancer.Data/Schema/Fuses/FuseIni.cs
-@@ -20,6 +20,8 @@
-     [Section("impulse", Type = typeof(FuseImpulse), Child = true)]
-     [Section("damage_root", Type = typeof(FuseDamageRoot), Child = true)]
-     [Section("damage_group", Type = typeof(FuseDamageGroup), Child = true)]
-+    [Section("make_invincible", Type = typeof(FuseMakeInvincible), Child = true)]
-+    [Section("dump_cargo", Type = typeof(FuseDumpCargo), Child = true)]
-     [Section("destroy_root", Type = typeof(FuseDestroyRoot), Child = true)]
-     public List<Fuse> Fuses = [];
-     public void AddFuseIni(string path, FileSystem vfs, IniStringPool? stringPool = null)
 diff --git a/src/LibreLancer.Data/Schema/Fuses/FuseAction.cs b/src/LibreLancer.Data/Schema/Fuses/FuseAction.cs
+index c79f6f78..e5dffc0c 100644
 --- a/src/LibreLancer.Data/Schema/Fuses/FuseAction.cs
 +++ b/src/LibreLancer.Data/Schema/Fuses/FuseAction.cs
-@@ -112,3 +112,17 @@
-     [Entry("hitpoints")]
+@@ -102,6 +102,20 @@ public partial class FuseDamageRoot : FuseAction
      public float Hitpoints;
  }
-+
+ 
 +[ParsedSection]
 +public partial class FuseMakeInvincible : FuseAction
 +{
@@ -43,185 +32,28 @@ diff --git a/src/LibreLancer.Data/Schema/Fuses/FuseAction.cs b/src/LibreLancer.D
 +    [Entry("origin_hardpoint")]
 +    public string? OriginHardpoint;
 +}
-diff --git a/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs b/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs
---- a/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs
-+++ b/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs
-@@ -128,6 +128,17 @@
-                 {
-                     ApplyGroupDamage(world, damageGroup);
-                 }
-+                else if (act is FuseMakeInvincible makeInvincible)
-+                {
-+                    if (Parent.TryGetComponent<SHealthComponent>(out var health))
-+                    {
-+                        health.Invulnerable = makeInvincible.TurnOn;
-+                    }
-+                }
-+                else if (act is FuseDumpCargo dumpCargo)
-+                {
-+                    DumpCargo(world, dumpCargo);
-+                }
-                 else if (act is FuseIgniteFuse ig)
-                 {
-                     var start = true;
-@@ -261,6 +272,55 @@
-             }
-         }
- 
-+        private void DumpCargo(GameWorld world, FuseDumpCargo action)
-+        {
-+            if (world.Server == null)
-+            {
-+                return;
-+            }
 +
-+            var origin = Parent.WorldTransform;
-+            if (!string.IsNullOrWhiteSpace(action.OriginHardpoint) &&
-+                Parent.GetHardpoint(action.OriginHardpoint) is { } hardpoint)
-+            {
-+                origin = hardpoint.Transform * origin;
-+            }
-+
-+            var cargo = new List<BasicCargo>();
-+            if (Parent.TryGetComponent<SPlayerComponent>(out var playerCargo))
-+            {
-+                cargo.AddRange(playerCargo.TakeLootableCargoForFuse());
-+            }
-+            if (Parent.TryGetComponent<SNPCCargoComponent>(out var npcCargo))
-+            {
-+                cargo.AddRange(npcCargo.TakeLootableCargoForFuse());
-+            }
-+
-+            foreach (var child in Parent.Children)
-+            {
-+                if (child.TryGetComponent<CargoPodComponent>(out var cargoPod))
-+                {
-+                    cargo.AddRange(cargoPod.TakeLootableCargoForFuse());
-+                }
-+            }
-+
-+            foreach (var item in cargo)
-+            {
-+                var remaining = item.Count;
-+                while (remaining > 0)
-+                {
-+                    var count = Math.Min(30, remaining);
-+                    remaining -= count;
-+                    var direction = Random.Shared.NextUnitVector();
-+                    var offset = direction * (2 + Random.Shared.NextSingle() * 4);
-+                    var impulse = direction * (40 + Random.Shared.NextSingle() * 60);
-+                    world.Server.SpawnLoot(item.Item.LootAppearance!, item.Item, count,
-+                        new Transform3D(origin.Position + offset, origin.Orientation),
-+                        initialImpulse: impulse);
-+                }
-+            }
-+        }
-+
-         internal static string? SelectRandomHardpoint(IReadOnlyList<string> hardpoints, float randomValue)
-         {
-             if (hardpoints.Count == 0)
-diff --git a/src/LibreLancer/Server/Components/SPlayerComponent.cs b/src/LibreLancer/Server/Components/SPlayerComponent.cs
---- a/src/LibreLancer/Server/Components/SPlayerComponent.cs
-+++ b/src/LibreLancer/Server/Components/SPlayerComponent.cs
-@@ -5,6 +5,7 @@
- using System.Linq;
- using System.Numerics;
- using LibreLancer.Data;
-+using LibreLancer.Data.GameData;
- using LibreLancer.Data.GameData.Items;
- using LibreLancer.Data.GameData.World;
- using LibreLancer.Missions;
-@@ -512,5 +513,36 @@
-                 yield return new NetShipCargo(i.ID, i.Equipment!.CRC, null, 255, i.Count, i.IsMissionItem);
-             }
-         }
-+
-+        internal List<BasicCargo> TakeLootableCargoForFuse()
-+        {
-+            var character = Player.Character;
-+            if (character == null)
-+            {
-+                return [];
-+            }
-+
-+            var slots = character.Items
-+                .Where(x => string.IsNullOrEmpty(x.Hardpoint) && x.Equipment?.LootAppearance != null)
-+                .ToArray();
-+            if (slots.Length == 0)
-+            {
-+                return [];
-+            }
-+
-+            var result = new List<BasicCargo>(slots.Length);
-+            using (var transaction = character.BeginTransaction())
-+            {
-+                foreach (var slot in slots)
-+                {
-+                    result.Add(new BasicCargo(slot.Equipment!, slot.Count));
-+                    Player.RpcClient.DeleteSlot(slot.ID);
-+                    transaction.RemoveCargo(slot, slot.Count);
-+                }
-+            }
-+
-+            Player.UpdateCurrentInventory();
-+            return result;
-+        }
-     }
- }
-diff --git a/src/LibreLancer/Server/Components/SNPCCargoComponent.cs b/src/LibreLancer/Server/Components/SNPCCargoComponent.cs
---- a/src/LibreLancer/Server/Components/SNPCCargoComponent.cs
-+++ b/src/LibreLancer/Server/Components/SNPCCargoComponent.cs
-@@ -53,4 +53,21 @@
-         var slot = Cargo.FirstOrDefault(x => x.Item is T);
-         return (T) slot.Item;
-     }
-+
-+    internal List<BasicCargo> TakeLootableCargoForFuse()
-+    {
-+        var result = new List<BasicCargo>();
-+        for (var i = Cargo.Count - 1; i >= 0; i--)
-+        {
-+            if (Cargo[i].Item.LootAppearance == null)
-+            {
-+                continue;
-+            }
-+
-+            result.Add(Cargo[i]);
-+            Cargo.RemoveAt(i);
-+        }
-+
-+        return result;
-+    }
- }
-diff --git a/src/LibreLancer/World/Components/CargoPodComponent.cs b/src/LibreLancer/World/Components/CargoPodComponent.cs
---- a/src/LibreLancer/World/Components/CargoPodComponent.cs
-+++ b/src/LibreLancer/World/Components/CargoPodComponent.cs
-@@ -79,4 +79,21 @@
-             solar?.Children.Remove(Parent);
-         }
-     }
-+
-+    internal List<BasicCargo> TakeLootableCargoForFuse()
-+    {
-+        var result = new List<BasicCargo>();
-+        for (var i = Cargo.Count - 1; i >= 0; i--)
-+        {
-+            if (Cargo[i].Item.LootAppearance == null)
-+            {
-+                continue;
-+            }
-+
-+            result.Add(Cargo[i]);
-+            Cargo.RemoveAt(i);
-+        }
-+
-+        return result;
-+    }
- }
+ [ParsedSection]
+ public partial class FuseDamageGroup : FuseAction
+ {
+diff --git a/src/LibreLancer.Data/Schema/Fuses/FuseIni.cs b/src/LibreLancer.Data/Schema/Fuses/FuseIni.cs
+index 3f7725b3..34256dbf 100644
+--- a/src/LibreLancer.Data/Schema/Fuses/FuseIni.cs
++++ b/src/LibreLancer.Data/Schema/Fuses/FuseIni.cs
+@@ -20,6 +20,8 @@ public partial class FuseIni
+     [Section("impulse", Type = typeof(FuseImpulse), Child = true)]
+     [Section("damage_root", Type = typeof(FuseDamageRoot), Child = true)]
+     [Section("damage_group", Type = typeof(FuseDamageGroup), Child = true)]
++    [Section("make_invincible", Type = typeof(FuseMakeInvincible), Child = true)]
++    [Section("dump_cargo", Type = typeof(FuseDumpCargo), Child = true)]
+     [Section("destroy_root", Type = typeof(FuseDestroyRoot), Child = true)]
+     public List<Fuse> Fuses = [];
+     public void AddFuseIni(string path, FileSystem vfs, IniStringPool? stringPool = null)
 diff --git a/src/LibreLancer.Tests/FuseAndExplosionIniTests.cs b/src/LibreLancer.Tests/FuseAndExplosionIniTests.cs
+index 938f5a52..df07a3d9 100644
 --- a/src/LibreLancer.Tests/FuseAndExplosionIniTests.cs
 +++ b/src/LibreLancer.Tests/FuseAndExplosionIniTests.cs
-@@ -176,4 +176,41 @@
+@@ -176,4 +176,41 @@ public sealed class FuseAndExplosionIniTests
              Directory.Delete(root, true);
          }
      }
@@ -261,5 +93,167 @@ diff --git a/src/LibreLancer.Tests/FuseAndExplosionIniTests.cs b/src/LibreLancer
 +        {
 +            Directory.Delete(root, true);
 +        }
++    }
+ }
+diff --git a/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs b/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs
+index 5f0f93d2..46e0d75a 100644
+--- a/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs
++++ b/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs
+@@ -12,6 +12,7 @@ using LibreLancer.Data.GameData;
+ using LibreLancer.Net.Protocol;
+ using LibreLancer.World;
+ using LibreLancer.World.Components;
++using LibreLancer.World.Equipments;
+ 
+ namespace LibreLancer.Server.Components
+ {
+@@ -128,6 +129,15 @@ namespace LibreLancer.Server.Components
+                 {
+                     ApplyGroupDamage(world, damageGroup);
+                 }
++                else if (act is FuseMakeInvincible makeInvincible)
++                {
++                    if (Parent.TryGetComponent<SHealthComponent>(out var health))
++                        health.Invulnerable = makeInvincible.TurnOn;
++                }
++                else if (act is FuseDumpCargo dumpCargo)
++                {
++                    DumpCargo(world, dumpCargo);
++                }
+                 else if (act is FuseIgniteFuse ig)
+                 {
+                     var start = true;
+@@ -188,6 +198,32 @@ namespace LibreLancer.Server.Components
+             return hardpoints[Math.Min(hardpoints.Count - 1, (int)(normalized * hardpoints.Count))];
+         }
+ 
++        private void DumpCargo(GameWorld world, FuseDumpCargo action)
++        {
++            if (world.Server == null) return;
++            var origin = Parent.WorldTransform;
++            if (!string.IsNullOrWhiteSpace(action.OriginHardpoint) && Parent.GetHardpoint(action.OriginHardpoint) is { } hp)
++                origin = hp.Transform * origin;
++            var cargo = new List<BasicCargo>();
++            if (Parent.TryGetComponent<SPlayerComponent>(out var player)) cargo.AddRange(player.TakeLootableCargoForFuse());
++            if (Parent.TryGetComponent<SNPCCargoComponent>(out var npc)) cargo.AddRange(npc.TakeLootableCargoForFuse());
++            foreach (var pod in Parent.EquipmentOfType<CargoPod>()) cargo.AddRange(pod.TakeLootableCargoForFuse());
++            foreach (var item in cargo)
++            {
++                var remaining = item.Count;
++                while (remaining > 0)
++                {
++                    var count = Math.Min(30, remaining);
++                    remaining -= count;
++                    var direction = Random.Shared.NextUnitVector();
++                    var offset = direction * (2 + Random.Shared.NextSingle() * 4);
++                    var impulse = direction * (40 + Random.Shared.NextSingle() * 60);
++                    world.Server.SpawnLoot(item.Item.LootAppearance!, item.Item, count,
++                        new Transform3D(origin.Position + offset, origin.Orientation), initialImpulse: impulse);
++                }
++            }
++        }
++
+         internal static float ResolveActionTime(Vector2 range, float randomValue)
+         {
+             if (range.X < 0)
+diff --git a/src/LibreLancer/Server/Components/SNPCCargoComponent.cs b/src/LibreLancer/Server/Components/SNPCCargoComponent.cs
+index c680c0a..b37f990 100644
+--- a/src/LibreLancer/Server/Components/SNPCCargoComponent.cs
++++ b/src/LibreLancer/Server/Components/SNPCCargoComponent.cs
+@@ -53,4 +53,21 @@ public class SNPCCargoComponent : AbstractCargoComponent
+         var slot = Cargo.FirstOrDefault(x => x.Item is T);
+         return (T) slot.Item;
+     }
++
++    internal List<BasicCargo> TakeLootableCargoForFuse()
++    {
++        var result = new List<BasicCargo>();
++        for (var i = Cargo.Count - 1; i >= 0; i--)
++        {
++            if (Cargo[i].Item.LootAppearance == null)
++            {
++                continue;
++            }
++
++            result.Add(Cargo[i]);
++            Cargo.RemoveAt(i);
++        }
++
++        return result;
++    }
+ }
+diff --git a/src/LibreLancer/Server/Components/SPlayerComponent.cs b/src/LibreLancer/Server/Components/SPlayerComponent.cs
+index a773cb5..735a1b9 100644
+--- a/src/LibreLancer/Server/Components/SPlayerComponent.cs
++++ b/src/LibreLancer/Server/Components/SPlayerComponent.cs
+@@ -5,6 +5,7 @@ using System.Diagnostics.CodeAnalysis;
+ using System.Linq;
+ using System.Numerics;
+ using LibreLancer.Data;
++using LibreLancer.Data.GameData;
+ using LibreLancer.Data.GameData.Items;
+ using LibreLancer.Data.GameData.World;
+ using LibreLancer.Missions;
+@@ -512,5 +513,36 @@ namespace LibreLancer.Server.Components
+                 yield return new NetShipCargo(i.ID, i.Equipment!.CRC, null, 255, i.Count, i.IsMissionItem);
+             }
+         }
++
++        internal List<BasicCargo> TakeLootableCargoForFuse()
++        {
++            var character = Player.Character;
++            if (character == null)
++            {
++                return [];
++            }
++
++            var slots = character.Items
++                .Where(x => string.IsNullOrEmpty(x.Hardpoint) && x.Equipment?.LootAppearance != null)
++                .ToArray();
++            if (slots.Length == 0)
++            {
++                return [];
++            }
++
++            var result = new List<BasicCargo>(slots.Length);
++            using (var transaction = character.BeginTransaction())
++            {
++                foreach (var slot in slots)
++                {
++                    result.Add(new BasicCargo(slot.Equipment!, slot.Count));
++                    Player.RpcClient.DeleteSlot(slot.ID);
++                    transaction.RemoveCargo(slot, slot.Count);
++                }
++            }
++
++            Player.UpdateCurrentInventory();
++            return result;
++        }
+     }
+ }
+diff --git a/src/LibreLancer/World/Components/CargoPodComponent.cs b/src/LibreLancer/World/Components/CargoPodComponent.cs
+index 198a1a3..7bd3d98 100644
+--- a/src/LibreLancer/World/Components/CargoPodComponent.cs
++++ b/src/LibreLancer/World/Components/CargoPodComponent.cs
+@@ -79,4 +79,21 @@ public class CargoPodComponent : GameComponent
+             solar?.Children.Remove(Parent);
+         }
+     }
++
++    internal List<BasicCargo> TakeLootableCargoForFuse()
++    {
++        var result = new List<BasicCargo>();
++        for (var i = Cargo.Count - 1; i >= 0; i--)
++        {
++            if (Cargo[i].Item.LootAppearance == null)
++            {
++                continue;
++            }
++
++            result.Add(Cargo[i]);
++            Cargo.RemoveAt(i);
++        }
++
++        return result;
 +    }
  }

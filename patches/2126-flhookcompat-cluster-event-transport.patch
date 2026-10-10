@@ -1,0 +1,846 @@
+--- a/src/LLServer.Core/ServerApp.cs
++++ b/src/LLServer.Core/ServerApp.cs
+@@ -190,8 +190,12 @@
+                 throw;
+             }
+         }
++        else if (Config.FlHookCompatClusterEventsEnabled)
++        {
++            throw new InvalidOperationException("FLHook cluster event publishing requires FlHookCompatEnabled=true.");
++        }
+ #else
+-        if (Config.FlHookCompatEnabled)
++        if (Config.FlHookCompatEnabled || Config.FlHookCompatClusterEventsEnabled)
+             throw new InvalidOperationException("FLHookCompat is enabled in configuration, but this LLServer build has no FLHookCompat support. Build with EnableFlHookCompat=true.");
+ #endif
+ #if LANCER_NEXUS_CLUSTER
+@@ -342,8 +346,9 @@
+                 InstanceId = Config.InstanceId!,
+                 SystemId = Config.SystemId!,
+                 SystemIds = Config.SystemIds,
+-                IsReady = network?.IsRunning == true && ClusterPermissionsReady,
++                IsReady = network?.IsRunning == true && ClusterPermissionsReady && ClusterFlHookEventCaptureReady,
+                 PermissionsReady = ClusterPermissionsReady,
++                FlHookEventCaptureReady = ClusterFlHookEventCaptureReady,
+                 PermissionRevision = CurrentPermissionRevision,
+                 IsDraining = !string.IsNullOrWhiteSpace(Config.DrainFlagFile) &&
+                              File.Exists(Path.GetFullPath(Config.DrainFlagFile, Platform.GetBasePath())),
+@@ -381,6 +386,9 @@
+         }
+     }
+ 
++    private bool ClusterFlHookEventCaptureReady => !Config.FlHookCompatClusterEventsEnabled ||
++        flHookCompatRuntime?.ClusterEventCaptureReady == true;
++
+     private long CurrentPermissionRevision
+     {
+         get
+@@ -406,6 +414,7 @@
+     public int CurrentPlayers { get; init; }
+     public int MaxPlayers { get; init; }
+     public bool PermissionsReady { get; init; }
++    public bool FlHookEventCaptureReady { get; init; }
+     public long PermissionRevision { get; init; }
+     public string Endpoint { get; init; } = "";
+     public string[] Capabilities { get; init; } = [];
+--- a/src/LLServer.Core/ServerConfig.cs
++++ b/src/LLServer.Core/ServerConfig.cs
+@@ -27,10 +27,18 @@
+     public string[] SystemIds = [];
+     public string? InstanceEndpoint;
+     public bool FlHookCompatEnabled;
++    public bool FlHookCompatClusterEventsEnabled;
+     public string FlHookCompatDirectory = "flhook-plugins";
+     public string? FlHookCompatTrustRootFile;
+     public string[] FlHookCompatPluginIds = [];
+     public string[] FlHookCompatApprovedCapabilities = [];
++    public string? CoordinatorQuicEndpoint;
++    public string? CoordinatorQuicServerName;
++    public string? ClusterAgentNodeId;
++    public string? CoordinatorQuicClientCertificate;
++    public string? CoordinatorQuicCaCertificate;
++    public string? FlHookCompatEventCursorFile;
++    public string? FlHookCompatEventOutboxFile;
+     public int? TestNewCharacterRank;
+     public string? TestMissionNickname;
+ 
+@@ -58,10 +66,18 @@
+         SystemIds = (string[])other.SystemIds.Clone();
+         InstanceEndpoint = other.InstanceEndpoint;
+         FlHookCompatEnabled = other.FlHookCompatEnabled;
++        FlHookCompatClusterEventsEnabled = other.FlHookCompatClusterEventsEnabled;
+         FlHookCompatDirectory = other.FlHookCompatDirectory;
+         FlHookCompatTrustRootFile = other.FlHookCompatTrustRootFile;
+         FlHookCompatPluginIds = (string[])other.FlHookCompatPluginIds.Clone();
+         FlHookCompatApprovedCapabilities = (string[])other.FlHookCompatApprovedCapabilities.Clone();
++        CoordinatorQuicEndpoint = other.CoordinatorQuicEndpoint;
++        CoordinatorQuicServerName = other.CoordinatorQuicServerName;
++        ClusterAgentNodeId = other.ClusterAgentNodeId;
++        CoordinatorQuicClientCertificate = other.CoordinatorQuicClientCertificate;
++        CoordinatorQuicCaCertificate = other.CoordinatorQuicCaCertificate;
++        FlHookCompatEventCursorFile = other.FlHookCompatEventCursorFile;
++        FlHookCompatEventOutboxFile = other.FlHookCompatEventOutboxFile;
+         TestNewCharacterRank = other.TestNewCharacterRank;
+         TestMissionNickname = other.TestMissionNickname;
+     }
+--- a/src/LLServer.Core/FlHookCompatRuntime.cs
++++ b/src/LLServer.Core/FlHookCompatRuntime.cs
+@@ -3,6 +3,7 @@
+ using System.Collections.Generic;
+ using System.IO;
+ using System.Linq;
++using System.Net;
+ using System.Runtime.InteropServices;
+ using System.Text.Json;
+ using System.Threading;
+@@ -23,6 +24,7 @@
+     private readonly ServerConfig config;
+     private readonly string basePath;
+     private readonly FlHookCompatServerEventHub eventHub;
++    private CoordinatorFlHookEventPublisher? clusterEventPublisher;
+     private readonly Channel<PendingEvent> pending = Channel.CreateBounded<PendingEvent>(new BoundedChannelOptions(4096)
+     {
+         FullMode = BoundedChannelFullMode.Wait,
+@@ -33,11 +35,21 @@
+     private Task? dispatcher;
+     private int queueOverflowLogged;
+ 
++    public bool ClusterEventCaptureReady => !config.FlHookCompatClusterEventsEnabled ||
++        dispatcher is { IsCompleted: false } && Volatile.Read(ref queueOverflowLogged) == 0;
++
+     public FlHookCompatRuntime(ServerConfig config, string basePath, string instanceId)
+     {
+         this.config = config;
+         this.basePath = basePath;
+-        eventHub = new FlHookCompatServerEventHub(instanceId);
++        string? durableOutboxPath = null;
++        if (config.FlHookCompatClusterEventsEnabled)
++        {
++            durableOutboxPath = Path.GetFullPath(config.FlHookCompatEventOutboxFile ??
++                Path.Combine(Path.GetDirectoryName(Path.GetFullPath(config.DatabasePath, basePath))!,
++                    "flhook-events.outbox.jsonl"), basePath);
++        }
++        eventHub = new FlHookCompatServerEventHub(instanceId, durableJournalPath: durableOutboxPath);
+     }
+ 
+     public async Task StartAsync()
+@@ -47,6 +59,32 @@
+             config.FlHookCompatApprovedCapabilities.Distinct(StringComparer.Ordinal).Count() != config.FlHookCompatApprovedCapabilities.Length)
+             throw new InvalidOperationException("FLHookCompat plugin assignments and capabilities must be unique lists.");
+ 
++        if (config.FlHookCompatClusterEventsEnabled)
++        {
++            if (!OperatingSystem.IsLinux())
++                throw new PlatformNotSupportedException("Coordinator FLHook event publishing currently requires Linux QUIC support.");
++            if (config.CoordinatorQuicEndpoint is null ||
++                !IPEndPoint.TryParse(config.CoordinatorQuicEndpoint, out var coordinatorEndPoint) ||
++                string.IsNullOrWhiteSpace(config.CoordinatorQuicServerName) ||
++                string.IsNullOrWhiteSpace(config.ClusterAgentNodeId) ||
++                string.IsNullOrWhiteSpace(config.CoordinatorQuicClientCertificate) ||
++                string.IsNullOrWhiteSpace(config.CoordinatorQuicCaCertificate))
++                throw new InvalidOperationException("FLHook cluster events require CoordinatorQuicEndpoint, CoordinatorQuicServerName, ClusterAgentNodeId, CoordinatorQuicClientCertificate and CoordinatorQuicCaCertificate.");
++
++            var certificatePath = Path.GetFullPath(config.CoordinatorQuicClientCertificate, basePath);
++            var caPath = Path.GetFullPath(config.CoordinatorQuicCaCertificate, basePath);
++            if (!File.Exists(certificatePath) || !File.Exists(caPath))
++                throw new FileNotFoundException("FLHook cluster event certificate or Coordinator CA file was not found.");
++            var cursorPath = Path.GetFullPath(config.FlHookCompatEventCursorFile ??
++                Path.Combine(Path.GetDirectoryName(Path.GetFullPath(config.DatabasePath, basePath))!, "flhook-events.cursor.json"), basePath);
++            clusterEventPublisher = new CoordinatorFlHookEventPublisher(eventHub,
++                new CoordinatorFlHookEventPublisher.Settings(coordinatorEndPoint!, config.CoordinatorQuicServerName,
++                    config.ClusterAgentNodeId, eventHub.InstanceId, certificatePath,
++                    Environment.GetEnvironmentVariable("LANCER_NEXUS_COORDINATOR_QUIC_CLIENT_CERT_PASSWORD"),
++                    caPath, cursorPath));
++            clusterEventPublisher.Start();
++        }
++
+         var pluginRoot = Path.GetFullPath(config.FlHookCompatDirectory, basePath);
+         var trustRootPath = Path.GetFullPath(config.FlHookCompatTrustRootFile ?? Path.Combine(config.FlHookCompatDirectory, "trust-root.json"), basePath);
+         var trustRoot = JsonSerializer.Deserialize<FlHookCompatTrustRoot>(await File.ReadAllTextAsync(trustRootPath), JsonOptions)
+@@ -158,12 +196,23 @@
+             catch (Exception exception) { FLLog.Error("FLHookCompat", $"Event dispatcher stopped: {exception.Message}"); }
+             dispatcher = null;
+         }
++        if (clusterEventPublisher is not null)
++        {
++            try
++            {
++                if (OperatingSystem.IsLinux())
++                    await clusterEventPublisher.DisposeAsync();
++            }
++            catch (Exception exception) { FLLog.Error("FLHookCompat", $"Coordinator event publisher stopped: {exception.Message}"); }
++            clusterEventPublisher = null;
++        }
+         for (var i = plugins.Count - 1; i >= 0; i--)
+         {
+             try { await plugins[i].DisposeAsync(); }
+             catch (Exception exception) { FLLog.Error("FLHookCompat", $"Plugin shutdown failed: {exception.Message}"); }
+         }
+         plugins.Clear();
++        eventHub.Dispose();
+     }
+ 
+     private static FlHookCompatManifest ReadDeclaredManifest(FlHookCompatSignedManifest envelope)
+--- a/src/LibreLancer.Tests/LibreLancer.Tests.csproj
++++ b/src/LibreLancer.Tests/LibreLancer.Tests.csproj
+@@ -7,6 +7,10 @@
+         <IsPackable>false</IsPackable>
+     </PropertyGroup>
+ 
++    <PropertyGroup Condition="'$(EnableFlHookCompat)' == 'true'">
++        <DefineConstants>$(DefineConstants);LANCER_NEXUS_FLHOOKCOMPAT_TESTS</DefineConstants>
++    </PropertyGroup>
++
+     <ItemGroup>
+         <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.0.1" />
+         <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
+--- a/README.md
++++ b/README.md
+@@ -18,6 +18,8 @@
+ 
+ The client targets the current .NET version used by the upstream project. Cluster features must remain optional behind configuration or capability negotiation so that standalone development and upstream synchronization continue to work.
+ 
++Client changes are maintained as patches in `patches/series`. After changing the patch stack, validate a fresh overlay with `python3 scripts/verify-lancer-nexus-overlay.py`; the LancerEdit Release build and NAP tests were verified against `origin/main` with patch 2122.
++
+ Proposed graphics and rendering work is tracked in the [renderer roadmap](docs/renderer-roadmap.md). It records current normal-map, PBR, SMAA and particle-blur support alongside planned post-processing and lighting work.
+ 
+ ## Related repositories
+@@ -36,7 +38,7 @@
+ git submodule update --init --remote --merge Protocol
+ ```
+ 
+-CI performs the same update before the existing LibreLancer build. Standalone client builds remain possible when the cluster integration is disabled.
++CI checks out the committed `Protocol` submodule revision recursively so the build uses the version recorded by this repository. Standalone client builds remain possible when the cluster integration is disabled.
+ 
+ Lancer Nexus client changes are carried by the patch series in `patches/series`. The root build orchestrator applies it before building; direct `./build.sh` runs the same idempotent patch applier when the overlay is present. The applier rejects partial or conflicting patch states instead of forcing them.
+ 
+@@ -48,10 +50,14 @@
+ 
+ `NexusGatewayLogin` reads `client-version.json` from the running client release directory, POSTs `ClientVersionHello` before credentials, then requests placement with the authenticated session. The client connects to the assigned endpoint with the Gateway JoinTicket. A required update displays a prompt and exits with code 42 after acknowledgement. Missing or damaged local version metadata requests repair with exit code 43. The Updater validates signed NAP data packages, including their structure and content hashes, stages them with the client into one release and atomically activates the combined snapshot. The Client acknowledges startup after game data and its first UI state load; the Updater can restore the previous healthy release if that signal times out. On 2026-10-09, the Linux game reached its first UI state with the full game-data container mounted and loose `DATA` absent. Windows game runtime and live rollback behavior remain unverified.
+ 
+-NAP V1 provides the `Nexus.Assets` reader/writer and `nexus-pack` CLI for `pack`, `inspect`, `verify`, overlay `diff` and `compact`. The Client and LLServer mount packages listed in the local `packages/active.json` snapshot after validating each package's path, size and SHA-256. The Updater stages required and selected signed `.nap` packages plus their dependency/override closure beside the client release and activates the combined snapshot. Download CI exercises a signed client `tar.zst` and NAP package from the DownloadServer through Updater hash and structure verification into one activated release. LancerEdit has Data-menu actions to pack a selected folder as NAP, unpack a verified NAP, and export an edited active snapshot. A synthetic Editor-path test verifies that packing a selected `DATA` folder and unpacking it preserves the complete relative file tree and bytes; 28/28 NAP asset tests pass. On 2026-10-09, a Linux LancerEdit GUI roundtrip packed a synthetic folder through the native dialogs, unpacked the resulting NAP through the Data menu, and reproduced all three paths and file contents byte-for-byte; CLI verification passed for all three entries. Windows LancerEdit behavior remains unverified. InterfaceEdit now mounts the verified active NAP snapshot and shares LancerEdit’s persistent writable workspace; focused VFS/workspace tests and Linux Release build pass. A 2026-10-09 Linux GUI smoke opened a synthetic project with an active one-file NAP, displayed mount/workspace status and opened the workspace in Nautilus; GUI save/restart behavior and Windows editor runtime remain unverified; the editor Data menu shows snapshot/workspace status and can open the workspace, and project-load/save failures appear in the editor; see `docs/asset-packages/interfaceedit-plan.md`. The dedicated Ubuntu/Windows NAP test workflow is committed, but its manual dispatch was rejected because GitHub reports Actions disabled for this repository; Windows NAP execution therefore remains unverified. See `docs/asset-packages/implementation-status.md`; package only assets you have rights to distribute.
++NAP V1 provides the `Nexus.Assets` reader/writer and `nexus-pack` CLI for `pack`, `inspect`, `verify`, overlay `diff` and `compact`. The Client and LLServer mount packages listed in the local `packages/active.json` snapshot after validating each package's path, size and SHA-256. The Updater stages required and selected signed `.nap` packages plus their dependency/override closure beside the client release and activates the combined snapshot. Download CI exercises a signed client `tar.zst` and NAP package from the DownloadServer through Updater hash and structure verification into one activated release. LancerEdit has Data-menu actions to pack a selected folder as NAP, unpack a verified NAP, and export an edited active snapshot. A synthetic Editor-path test verifies that packing a selected `DATA` folder and unpacking it preserves the complete relative file tree and bytes; 28/28 NAP asset tests pass. On 2026-10-09, a Linux LancerEdit GUI roundtrip packed a synthetic folder through the native dialogs, unpacked the resulting NAP through the Data menu, and reproduced all three paths and file contents byte-for-byte; CLI verification passed for all three entries. Windows LancerEdit behavior remains unverified. InterfaceEdit NAP mounting was removed during the upstream alignment in patch 2121; it currently uses loose game data. Its earlier mount/workspace GUI smoke applies to the pre-alignment overlay and must be repeated if that integration is restored. LancerEdit retains the NAP workspace, pack, unpack and export tools; see `docs/asset-packages/implementation-status.md`. The dedicated Ubuntu/Windows NAP test workflow is committed, but its manual dispatch was rejected because GitHub reports Actions disabled for this repository; Windows NAP execution therefore remains unverified. See `docs/asset-packages/implementation-status.md`; package only assets you have rights to distribute.
+ 
+ ## Dedicated server runtime status
+ 
++LLServer can optionally load trusted source-recompiled FLHookCompat managed plugins. This feature is disabled by default and requires an LLServer build with `-p:EnableFlHookCompat=true`, plus `FlHookCompatEnabled: true`, Gateway `LoginUrl`, and `InstanceId` in the clustered server profile. Provision the public-key-only `trust-root.json` and place each assigned plugin under `flhook-plugins/<plugin-id>/` with `manifest-envelope.json`, `plugin.dll`, and optional `configuration.json`. Set `FlHookCompatPluginIds` and `FlHookCompatApprovedCapabilities` explicitly. The current plugin capability is `server.events.subscribe`; events are authenticated local account/character lifecycle and local system changes. Plugins run in-process and must be trusted first-party code.
++
++Optional Coordinator publishing is enabled with `FlHookCompatClusterEventsEnabled: true`; the server must be built with both `EnableClusterIntegration=true` and `EnableFlHookCompat=true`. Configure `CoordinatorQuicEndpoint`, `CoordinatorQuicServerName`, `ClusterAgentNodeId`, `CoordinatorQuicClientCertificate`, and `CoordinatorQuicCaCertificate`. The client certificate must be the Agent's mTLS identity (Client Authentication EKU and one DNS SAN matching `ClusterAgentNodeId`); its password is read from `LANCER_NEXUS_COORDINATOR_QUIC_CLIENT_CERT_PASSWORD`. Pending events are appended and fsynced to a durable JSONL outbox, then retried over mTLS/QUIC until Coordinator returns a matching `Stored` or `Duplicate`. The acknowledged epoch/sequence cursor is written atomically to `FlHookCompatEventCursorFile`; the outbox defaults beside the server database and can be moved with `FlHookCompatEventOutboxFile`. The outbox preserves sequenced events across process restarts, fails closed on corrupt or missing pending history, and permits one LLServer process per outbox path. Runtime status sets `FlHookEventCaptureReady=false` and `IsReady=false` if the event dispatcher fails or its bounded ingress queue drops an event. The ingress queue runs before durable publication, so an immediate crash can still lose events waiting in that queue. A maximum of 100,000 pending events and 256 MiB of journal data is enforced; operators must restore Coordinator connectivity before reaching either limit. Coordinator replay for downstream consumers and cluster command APIs remain open.
++
+ `LLServer` can optionally publish an atomic JSON runtime snapshot for the host Agent. Set `RuntimeStatusFile`, `InstanceId`, `SystemId`, `InstanceEndpoint`, and `MaxPlayers` in its server configuration. `MaxPlayers` controls the listener limit and must match the Agent's `Agent__Instance__MaxPlayers`. The snapshot reports the actual listener running state and connected peers; it contains no credentials. Optionally set `DrainFlagFile` to a host-local path; while that file exists, the snapshot reports `IsDraining=true`, and the Coordinator stops assigning new sessions while existing sessions remain connected. The host lifecycle controller can enter or leave drain by creating or removing the flag file. Leave these fields unset for standalone deployments. The Agent treats missing or stale snapshots as not ready; LLServer removes the snapshot on a clean stop.
+ 
+ Cluster LLServer instances use `NpcCoordinatorUrl` plus the environment variable `LANCER_NEXUS_COORDINATOR_API_KEY` for Coordinator-issued NPC identities. Keep the key out of `llserver.json`. A single background worker per hosted system keeps a block of 128 IDs buffered and asks for another block below 32. The game simulation only takes an ID from a local queue; when the pool is empty, the NPC remains pending and is inserted into the world after the Coordinator replies. Network delays therefore do not block the game loop. The Coordinator's MySQL NPC ownership migration must be applied before startup.
+@@ -89,6 +95,10 @@
+ 
+ LLServer accepts `SystemIds` to host a Nexus system group with one database, player limit and endpoint. `SystemId` remains the primary fallback. Jumps within the set stay local; jumps outside use Gateway transfer. `BindAddress` can restrict the UDP listener to a private IPv4 interface, and cluster mode disables the legacy discovery listener. The eight-group baseline is generated by Scripts after collection.
+ 
++For a deployable Cluster LLServer package, use `./build.sh --nexus-cluster-server LinuxDaily` from the Client checkout in the Lancer-Nexus workspace; this opts into `EnableClusterIntegration` and `EnableFlHookCompat` for LLServer publishing. The flag does not enable plugin execution.
++
++Cluster permission revision synchronization is opt-in at build time with `-p:EnableClusterIntegration=true`. Cluster instances require the per-instance `LANCER_NEXUS_GAME_INSTANCE_KEY` and the internal Redis `LANCER_NEXUS_PERMISSION_REDIS_ENDPOINT=host:port`. LLServer reports `IsReady=false` until it has subscribed to Redis, loaded and activated the current Gateway SQL permission snapshot, and received its revision ACK. Redis carries invalidations only; a disconnected listener makes the instance unready. Standalone builds remain independent of Cluster.
++
+ ## NPC retirement recovery infrastructure
+ 
+ Patch 1126 adds a durable background retirement outbox under the configured NPC
+--- /dev/null
++++ b/src/LLServer.Core/CoordinatorFlHookEventPublisher.cs
+@@ -0,0 +1,334 @@
++#if LANCER_NEXUS_FLHOOKCOMPAT
++using System;
++using System.Buffers;
++using System.IO;
++using System.Linq;
++using System.Net;
++using System.Net.Quic;
++using System.Net.Security;
++using System.Runtime.Versioning;
++using System.Security.Authentication;
++using System.Security.Cryptography;
++using System.Security.Cryptography.X509Certificates;
++using System.Text.Json;
++using System.Threading;
++using System.Threading.Tasks;
++using LancerNexus.FlhookCompat;
++using LancerNexus.FlhookCompat.Hosting;
++using LancerNexus.Protocol;
++using LibreLancer;
++using MessagePack;
++using ClusterProtocolViolationException = LancerNexus.Protocol.ProtocolViolationException;
++
++namespace LLServer;
++
++/// <summary>Retries the local bounded event history over the authenticated Coordinator QUIC control channel.</summary>
++[SupportedOSPlatform("linux")]
++internal sealed class CoordinatorFlHookEventPublisher : IAsyncDisposable
++{
++    private const int MaximumSerializedEnvelopeLength = checked((int)ClusterEnvelopeValidator.MaxPayloadLength + 16 * 1024);
++    private static readonly SslApplicationProtocol Alpn = new("lancer-nexus-control/1");
++    private static readonly MessagePackSerializerOptions UntrustedMessagePack =
++        MessagePackSerializerOptions.Standard.WithSecurity(MessagePackSecurity.UntrustedData);
++    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
++
++    private readonly FlHookCompatServerEventHub events;
++    private readonly Settings settings;
++    private readonly X509Certificate2 clientCertificate;
++    private readonly X509Certificate2 coordinatorCaCertificate;
++    private readonly CancellationTokenSource cancellation = new();
++    private Task? runner;
++
++    public CoordinatorFlHookEventPublisher(FlHookCompatServerEventHub events, Settings settings)
++    {
++        this.events = events;
++        this.settings = settings;
++        clientCertificate = X509CertificateLoader.LoadPkcs12FromFile(settings.ClientCertificatePath,
++            settings.ClientCertificatePassword, X509KeyStorageFlags.EphemeralKeySet);
++        coordinatorCaCertificate = X509CertificateLoader.LoadCertificateFromFile(settings.CoordinatorCaCertificatePath);
++        ValidateClientCertificate(clientCertificate, settings.NodeId);
++    }
++
++    public void Start()
++    {
++        if (runner is not null)
++            throw new InvalidOperationException("Coordinator FLHook event publisher is already running.");
++        runner = Task.Run(() => RunAsync(cancellation.Token));
++    }
++
++    public async ValueTask DisposeAsync()
++    {
++        cancellation.Cancel();
++        if (runner is not null)
++        {
++            try { await runner.ConfigureAwait(false); }
++            catch (OperationCanceledException) { }
++            runner = null;
++        }
++        clientCertificate.Dispose();
++        coordinatorCaCertificate.Dispose();
++        cancellation.Dispose();
++    }
++
++    private async Task RunAsync(CancellationToken cancellationToken)
++    {
++        var retryDelay = TimeSpan.FromSeconds(1);
++        while (!cancellationToken.IsCancellationRequested)
++        {
++            var sessionStartedAt = DateTimeOffset.UtcNow;
++            try
++            {
++                await RunSessionAsync(cancellationToken).ConfigureAwait(false);
++                retryDelay = TimeSpan.FromSeconds(1);
++            }
++            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
++            {
++                break;
++            }
++            catch (Exception exception)
++            {
++                FLLog.Warning("FLHookCompat", $"Coordinator event stream unavailable: {exception.GetType().Name}: {exception.Message}");
++                try { settings.ConnectionErrorObserver?.Invoke(exception); }
++                catch (Exception observerException)
++                {
++                    FLLog.Warning("FLHookCompat", $"Coordinator event error observer failed: {observerException.GetType().Name}");
++                }
++                if (DateTimeOffset.UtcNow - sessionStartedAt >= TimeSpan.FromMinutes(1))
++                    retryDelay = TimeSpan.FromSeconds(1);
++                await Task.Delay(retryDelay, cancellationToken).ConfigureAwait(false);
++                retryDelay = TimeSpan.FromSeconds(Math.Min(retryDelay.TotalSeconds * 2, 30));
++            }
++        }
++    }
++
++    private async Task RunSessionAsync(CancellationToken cancellationToken)
++    {
++        var options = new QuicClientConnectionOptions
++        {
++            RemoteEndPoint = settings.CoordinatorEndPoint,
++            DefaultStreamErrorCode = 0x100,
++            DefaultCloseErrorCode = 0x101,
++            ClientAuthenticationOptions = new SslClientAuthenticationOptions
++            {
++                TargetHost = settings.CoordinatorServerName,
++                ApplicationProtocols = [Alpn],
++                EnabledSslProtocols = SslProtocols.Tls13,
++                ClientCertificates = [clientCertificate],
++                RemoteCertificateValidationCallback = ValidateCoordinatorCertificate
++            }
++        };
++
++        await using var connection = await QuicConnection.ConnectAsync(options, cancellationToken).ConfigureAwait(false);
++        await ExchangeHelloAsync(connection, cancellationToken).ConfigureAwait(false);
++        FLLog.Info("FLHookCompat", $"Connected authenticated Coordinator event stream for {settings.InstanceId}.");
++
++        var cursor = await LoadCursorAsync(cancellationToken).ConfigureAwait(false);
++        var currentEpoch = events.ProducerEpoch;
++        var acknowledgedSequence = events.AcknowledgedSequence;
++        if (cursor is null || cursor.ProducerEpoch != currentEpoch || cursor.Sequence < acknowledgedSequence)
++        {
++            cursor = new Cursor(settings.InstanceId, currentEpoch, acknowledgedSequence);
++            await SaveCursorAsync(cursor, cancellationToken).ConfigureAwait(false);
++        }
++        while (!cancellationToken.IsCancellationRequested)
++        {
++            var replay = events.ReadAfter(cursor?.Sequence ?? 0, 500, cursor?.ProducerEpoch);
++
++            if (replay.HasGap)
++                FLLog.Warning("FLHookCompat", $"Local event replay has a gap for {settings.InstanceId}: cursor {cursor?.Sequence ?? 0}, oldest {replay.OldestAvailableSequence}.");
++
++            if (replay.Events.Count == 0)
++            {
++                cursor ??= new Cursor(settings.InstanceId, replay.ProducerEpoch, 0);
++                await Task.Delay(TimeSpan.FromMilliseconds(200), cancellationToken).ConfigureAwait(false);
++                continue;
++            }
++
++            foreach (var value in replay.Events)
++            {
++                var wireEvent = ToProtocolEvent(value);
++                var acknowledgement = await SendEventAsync(connection, wireEvent, cancellationToken).ConfigureAwait(false);
++                if (acknowledgement.Status is not (FlHookEventIngestStatusV1.Stored or FlHookEventIngestStatusV1.Duplicate))
++                    throw new IOException($"Coordinator did not durably accept event {wireEvent.InstanceId}/{wireEvent.ProducerEpoch}/{wireEvent.Sequence}: {acknowledgement.Status}.");
++
++                events.Acknowledge(wireEvent.ProducerEpoch, wireEvent.Sequence);
++                cursor = new Cursor(settings.InstanceId, wireEvent.ProducerEpoch, wireEvent.Sequence);
++                await SaveCursorAsync(cursor, cancellationToken).ConfigureAwait(false);
++            }
++        }
++    }
++
++    private async Task ExchangeHelloAsync(QuicConnection connection, CancellationToken cancellationToken)
++    {
++        var hello = new ClusterHello
++        {
++            NodeId = settings.NodeId,
++            InstanceId = settings.InstanceId,
++            BuildVersion = typeof(CoordinatorFlHookEventPublisher).Assembly.GetName().Version?.ToString() ?? "unknown",
++            Capabilities = ["cluster_handshake_v1", ClusterCapabilities.FlHookEventsV1]
++        };
++        var request = CreateEnvelope(ClusterMessageType.Hello, ClusterFrameFlags.Request, 1,
++            Guid.NewGuid(), MessagePackSerializer.Serialize(hello));
++        var response = await ExchangeAsync(connection, request, cancellationToken).ConfigureAwait(false);
++        if (response.MessageType != (ushort)ClusterMessageType.Hello ||
++            response.CorrelationId != request.CorrelationId || response.Sequence != request.Sequence ||
++            response.Flags is not (ClusterFrameFlags.Response or (ClusterFrameFlags.Response | ClusterFrameFlags.Error)))
++            throw new ClusterProtocolViolationException("Coordinator returned an invalid cluster Hello response.");
++
++        var result = MessagePackSerializer.Deserialize<ClusterHandshakeResponse>(response.Payload, UntrustedMessagePack);
++        if (!result.Accepted || !result.NegotiatedCapabilities.Contains(ClusterCapabilities.FlHookEventsV1, StringComparer.Ordinal))
++            throw new InvalidOperationException($"Coordinator did not negotiate FLHook event publishing: {result.ReasonCode}.");
++    }
++
++    private async Task<FlHookEventIngestResultV1> SendEventAsync(QuicConnection connection, FlHookEventV1 value,
++        CancellationToken cancellationToken)
++    {
++        var correlationId = Guid.NewGuid();
++        var request = CreateEnvelope(ClusterMessageType.FlHookEvent, ClusterFrameFlags.Request,
++            checked((ulong)value.Sequence), correlationId, MessagePackSerializer.Serialize(value));
++        var response = await ExchangeAsync(connection, request, cancellationToken).ConfigureAwait(false);
++        if (response.MessageType != (ushort)ClusterMessageType.FlHookEventIngestResult ||
++            response.CorrelationId != correlationId || response.Sequence != request.Sequence ||
++            response.Flags is not (ClusterFrameFlags.Response or (ClusterFrameFlags.Response | ClusterFrameFlags.Error)))
++            throw new ClusterProtocolViolationException("Coordinator returned an invalid FLHook event acknowledgement frame.");
++
++        var result = MessagePackSerializer.Deserialize<FlHookEventIngestResultV1>(response.Payload, UntrustedMessagePack);
++        if (!result.IsValid() || result.CorrelationId != correlationId || result.InstanceId != value.InstanceId ||
++            result.ProducerEpoch != value.ProducerEpoch || result.Sequence != value.Sequence)
++            throw new ClusterProtocolViolationException("Coordinator acknowledgement identity does not match the submitted event.");
++        return result;
++    }
++
++    private static async Task<ClusterEnvelope> ExchangeAsync(QuicConnection connection, ClusterEnvelope request,
++        CancellationToken cancellationToken)
++    {
++        await using var stream = await connection.OpenOutboundStreamAsync(QuicStreamType.Bidirectional, cancellationToken).ConfigureAwait(false);
++        await stream.WriteAsync(MessagePackSerializer.Serialize(request), cancellationToken).ConfigureAwait(false);
++        stream.CompleteWrites();
++        var responseBytes = await ReadToEndAsync(stream, cancellationToken).ConfigureAwait(false);
++        var response = MessagePackSerializer.Deserialize<ClusterEnvelope>(responseBytes, UntrustedMessagePack);
++        ClusterEnvelopeValidator.Validate(response);
++        return response;
++    }
++
++    private static async Task<byte[]> ReadToEndAsync(QuicStream stream, CancellationToken cancellationToken)
++    {
++        using var buffer = new MemoryStream();
++        var chunk = ArrayPool<byte>.Shared.Rent(8192);
++        try
++        {
++            int read;
++            while ((read = await stream.ReadAsync(chunk.AsMemory(), cancellationToken).ConfigureAwait(false)) != 0)
++            {
++                if (buffer.Length + read > MaximumSerializedEnvelopeLength)
++                    throw new ClusterProtocolViolationException("Coordinator response exceeds the cluster frame limit.");
++                buffer.Write(chunk, 0, read);
++            }
++            if (buffer.Length == 0)
++                throw new ClusterProtocolViolationException("Coordinator returned an empty cluster response.");
++            return buffer.ToArray();
++        }
++        finally
++        {
++            ArrayPool<byte>.Shared.Return(chunk);
++        }
++    }
++
++    private static ClusterEnvelope CreateEnvelope(ClusterMessageType messageType, ClusterFrameFlags flags,
++        ulong sequence, Guid correlationId, byte[] payload) => new()
++    {
++        MessageType = (ushort)messageType,
++        Flags = flags,
++        CorrelationId = correlationId,
++        Sequence = sequence,
++        PayloadLength = checked((uint)payload.Length),
++        Payload = payload
++    };
++
++    private static FlHookEventV1 ToProtocolEvent(FlHookCompatServerEvent value) => new()
++    {
++        InstanceId = value.InstanceId,
++        Sequence = value.Sequence,
++        OccurredUtc = value.OccurredUtc.ToUniversalTime(),
++        Kind = value.Kind switch
++        {
++            FlHookCompatServerEventKind.PlayerConnected => FlHookEventKind.PlayerConnected,
++            FlHookCompatServerEventKind.PlayerDisconnected => FlHookEventKind.PlayerDisconnected,
++            FlHookCompatServerEventKind.CharacterConnected => FlHookEventKind.CharacterConnected,
++            FlHookCompatServerEventKind.CharacterDisconnected => FlHookEventKind.CharacterDisconnected,
++            FlHookCompatServerEventKind.PlayerSystemChanged => FlHookEventKind.PlayerSystemChanged,
++            _ => throw new ClusterProtocolViolationException("Local event kind is unsupported by the cluster contract.")
++        },
++        PlayerId = value.PlayerId,
++        SystemId = value.SystemId,
++        CharacterId = value.CharacterId,
++        ProducerEpoch = value.ProducerEpoch
++    };
++
++    private async Task<Cursor?> LoadCursorAsync(CancellationToken cancellationToken)
++    {
++        if (!File.Exists(settings.CursorPath)) return null;
++        await using var stream = new FileStream(settings.CursorPath, FileMode.Open, FileAccess.Read, FileShare.Read,
++            4096, FileOptions.Asynchronous | FileOptions.SequentialScan);
++        var cursor = await JsonSerializer.DeserializeAsync<Cursor>(stream, JsonOptions, cancellationToken).ConfigureAwait(false)
++            ?? throw new InvalidDataException("FLHook event cursor file is empty.");
++        if (cursor.InstanceId != settings.InstanceId || cursor.ProducerEpoch == Guid.Empty || cursor.Sequence < 0)
++            throw new InvalidDataException("FLHook event cursor file does not match the configured instance.");
++        return cursor;
++    }
++
++    private async Task SaveCursorAsync(Cursor cursor, CancellationToken cancellationToken)
++    {
++        Directory.CreateDirectory(Path.GetDirectoryName(settings.CursorPath)!);
++        var temporaryPath = settings.CursorPath + ".tmp";
++        await using (var stream = new FileStream(temporaryPath, FileMode.Create, FileAccess.Write, FileShare.None,
++                         4096, FileOptions.Asynchronous | FileOptions.WriteThrough))
++        {
++            await JsonSerializer.SerializeAsync(stream, cursor, JsonOptions, cancellationToken).ConfigureAwait(false);
++            await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
++            stream.Flush(true);
++        }
++        File.Move(temporaryPath, settings.CursorPath, overwrite: true);
++    }
++
++    private bool ValidateCoordinatorCertificate(object sender, X509Certificate? certificate,
++        X509Chain? chain, SslPolicyErrors errors)
++    {
++        if (certificate is not X509Certificate2 peer ||
++            (errors & (SslPolicyErrors.RemoteCertificateNameMismatch | SslPolicyErrors.RemoteCertificateNotAvailable)) != 0 ||
++            !HasEnhancedKeyUsage(peer, "1.3.6.1.5.5.7.3.1"))
++            return false;
++
++        using var validationChain = new X509Chain();
++        validationChain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
++        validationChain.ChainPolicy.CustomTrustStore.Add(coordinatorCaCertificate);
++        validationChain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
++        return validationChain.Build(peer);
++    }
++
++    private static void ValidateClientCertificate(X509Certificate2 certificate, string nodeId)
++    {
++        var now = DateTime.UtcNow;
++        var sanExtension = certificate.Extensions.FirstOrDefault(extension => extension.Oid?.Value == "2.5.29.17");
++        var san = sanExtension is null ? null : new X509SubjectAlternativeNameExtension(sanExtension.RawData, sanExtension.Critical);
++        var dnsNames = san?.EnumerateDnsNames().ToArray() ?? [];
++        if (!certificate.HasPrivateKey || certificate.NotBefore.ToUniversalTime() > now ||
++            certificate.NotAfter.ToUniversalTime() <= now || !HasEnhancedKeyUsage(certificate, "1.3.6.1.5.5.7.3.2") ||
++            dnsNames.Length != 1 || dnsNames[0].Contains('*', StringComparison.Ordinal) ||
++            !string.Equals(dnsNames[0], nodeId, StringComparison.OrdinalIgnoreCase))
++            throw new CryptographicException("Coordinator event client certificate must have Client Authentication EKU and exactly one DNS SAN matching the configured Agent node ID.");
++    }
++
++    private static bool HasEnhancedKeyUsage(X509Certificate2 certificate, string expectedOid) => certificate.Extensions
++        .Where(extension => extension.Oid?.Value == "2.5.29.37")
++        .Select(extension => new X509EnhancedKeyUsageExtension(extension, extension.Critical))
++        .Any(extension => extension.EnhancedKeyUsages.Cast<System.Security.Cryptography.Oid>()
++            .Any(oid => oid.Value == expectedOid));
++
++    internal sealed record Settings(IPEndPoint CoordinatorEndPoint, string CoordinatorServerName, string NodeId,
++        string InstanceId, string ClientCertificatePath, string? ClientCertificatePassword,
++        string CoordinatorCaCertificatePath, string CursorPath, Action<Exception>? ConnectionErrorObserver = null);
++
++    private sealed record Cursor(string InstanceId, Guid ProducerEpoch, long Sequence);
++}
++#endif
+--- /dev/null
++++ b/src/LLServer.Core/Properties/AssemblyInfo.cs
+@@ -0,0 +1,3 @@
++using System.Runtime.CompilerServices;
++
++[assembly: InternalsVisibleTo("LibreLancer.Tests")]
+--- /dev/null
++++ b/src/LibreLancer.Tests/ClusterFlHookEventPublisherTests.cs
+@@ -0,0 +1,257 @@
++#if LANCER_NEXUS_FLHOOKCOMPAT_TESTS
++using System;
++using System.Collections.Concurrent;
++using System.IO;
++using System.Linq;
++using System.Net;
++using System.Net.Quic;
++using System.Net.Security;
++using System.Security.Authentication;
++using System.Security.Cryptography;
++using System.Security.Cryptography.X509Certificates;
++using System.Text.Json;
++using System.Threading;
++using System.Threading.Tasks;
++using LancerNexus.FlhookCompat;
++using LancerNexus.FlhookCompat.Hosting;
++using LancerNexus.Protocol;
++using LLServer;
++using MessagePack;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class ClusterFlHookEventPublisherTests
++{
++    [Fact]
++    public async Task LostAcknowledgementRetriesSameDurableEventAndDuplicateAckAdvancesCursor()
++    {
++        Assert.True(QuicListener.IsSupported && QuicConnection.IsSupported,
++            "This integration test requires System.Net.Quic and libmsquic.");
++        var directory = Path.Combine(Path.GetTempPath(), "ln-flhook-publisher-" + Guid.NewGuid().ToString("N"));
++        Directory.CreateDirectory(directory);
++        var journalPath = Path.Combine(directory, "events.jsonl");
++        var clientCertificatePath = Path.Combine(directory, "agent.pfx");
++        var caPath = Path.Combine(directory, "ca.cer");
++        var cursorPath = Path.Combine(directory, "cursor.json");
++        using var authority = CreateAuthority();
++        using var coordinatorCertificate = CreateLeaf(authority, "localhost", "1.3.6.1.5.5.7.3.1");
++        using var agentCertificate = CreateLeaf(authority, "agent-01", "1.3.6.1.5.5.7.3.2");
++        await File.WriteAllBytesAsync(clientCertificatePath, agentCertificate.Export(X509ContentType.Pkcs12));
++        await File.WriteAllBytesAsync(caPath, authority.Export(X509ContentType.Cert));
++
++        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(20));
++        var errors = new ConcurrentQueue<Exception>();
++        var retryAccepted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
++        FlHookEventV1? firstAttempt = null;
++        await using var listener = await QuicListener.ListenAsync(new QuicListenerOptions
++        {
++            ListenEndPoint = new IPEndPoint(IPAddress.Loopback, 0),
++            ListenBacklog = 8,
++            ApplicationProtocols = [new SslApplicationProtocol("lancer-nexus-control/1")],
++            ConnectionOptionsCallback = (_, _, _) => ValueTask.FromResult(new QuicServerConnectionOptions
++            {
++                DefaultStreamErrorCode = 0x100,
++                DefaultCloseErrorCode = 0x101,
++                MaxInboundBidirectionalStreams = 4,
++                ServerAuthenticationOptions = new SslServerAuthenticationOptions
++                {
++                    ApplicationProtocols = [new SslApplicationProtocol("lancer-nexus-control/1")],
++                    EnabledSslProtocols = SslProtocols.Tls13,
++                    ClientCertificateRequired = true,
++                    ServerCertificate = coordinatorCertificate,
++                    RemoteCertificateValidationCallback = (_, certificate, _, _) =>
++                        certificate is X509Certificate2 peer && ChainsTo(peer, authority) && HasDnsSan(peer, "agent-01")
++                }
++            })
++        }, cancellation.Token);
++
++        var eventHub = new FlHookCompatServerEventHub("li-01", durableJournalPath: journalPath);
++        eventHub.Publish(FlHookCompatServerEventKind.PlayerConnected, "account-01");
++        var coordinator = Task.Run(async () =>
++        {
++            for (var attempt = 0; attempt < 2; attempt++)
++            {
++                await using var connection = await listener.AcceptConnectionAsync(cancellation.Token);
++                var (helloRequest, helloStream) = await ReceiveAsync(connection, cancellation.Token);
++                Assert.Equal((ushort)ClusterMessageType.Hello, helloRequest.MessageType);
++                var hello = MessagePackSerializer.Deserialize<ClusterHello>(helloRequest.Payload);
++                Assert.Equal("agent-01", hello.NodeId);
++                Assert.Equal("li-01", hello.InstanceId);
++                await using (helloStream)
++                    await RespondAsync(helloStream, helloRequest, ClusterMessageType.Hello,
++                        new ClusterHandshakeResponse
++                        {
++                            Accepted = true,
++                            ReasonCode = "accepted",
++                            NegotiatedCapabilities = [ClusterCapabilities.FlHookEventsV1]
++                        }, cancellation.Token);
++
++                var (eventRequest, eventStream) = await ReceiveAsync(connection, cancellation.Token);
++                await using (eventStream)
++                {
++                    Assert.Equal((ushort)ClusterMessageType.FlHookEvent, eventRequest.MessageType);
++                    var value = MessagePackSerializer.Deserialize<FlHookEventV1>(eventRequest.Payload);
++                    Assert.True(value.IsValid());
++                    Assert.Equal("li-01", value.InstanceId);
++                    Assert.Equal(1, value.Sequence);
++
++                    if (attempt == 0)
++                    {
++                        // Coordinator storage succeeded, but the first response is lost.
++                        firstAttempt = value;
++                        await connection.CloseAsync(0, cancellation.Token);
++                        continue;
++                    }
++
++                    Assert.NotNull(firstAttempt);
++                    Assert.Equal(firstAttempt!.ProducerEpoch, value.ProducerEpoch);
++                    Assert.Equal(firstAttempt.Sequence, value.Sequence);
++                    Assert.Equal(firstAttempt.InstanceId, value.InstanceId);
++                    Assert.Equal(firstAttempt.OccurredUtc, value.OccurredUtc);
++                    Assert.Equal(firstAttempt.Kind, value.Kind);
++                    Assert.Equal(firstAttempt.PlayerId, value.PlayerId);
++                    await RespondAsync(eventStream, eventRequest, ClusterMessageType.FlHookEventIngestResult,
++                        new FlHookEventIngestResultV1
++                        {
++                            CorrelationId = eventRequest.CorrelationId,
++                            InstanceId = value.InstanceId,
++                            ProducerEpoch = value.ProducerEpoch,
++                            Sequence = value.Sequence,
++                            Status = FlHookEventIngestStatusV1.Duplicate
++                        }, cancellation.Token);
++                    retryAccepted.TrySetResult();
++                    return;
++                }
++            }
++        }, cancellation.Token);
++
++        try
++        {
++            await using (var publisher = new CoordinatorFlHookEventPublisher(eventHub,
++                             new CoordinatorFlHookEventPublisher.Settings(
++                                 (IPEndPoint)listener.LocalEndPoint, "localhost", "agent-01", "li-01",
++                                 clientCertificatePath, null, caPath, cursorPath, errors.Enqueue)))
++            {
++                publisher.Start();
++                var timeout = Task.Delay(TimeSpan.FromSeconds(15), cancellation.Token);
++                var completed = await Task.WhenAny(retryAccepted.Task, coordinator, timeout);
++                if (completed == timeout)
++                    throw new InvalidOperationException("Timed out waiting for Coordinator event ingest. Transport errors: " +
++                        string.Join(" | ", errors.Select(error => error.ToString())));
++                if (completed == coordinator)
++                    await coordinator;
++                if (!retryAccepted.Task.IsCompleted)
++                    throw new InvalidOperationException("Coordinator did not receive the retry. Transport errors: " +
++                        string.Join(" | ", errors.Select(error => error.ToString())));
++                await retryAccepted.Task;
++
++                var ackDeadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(3);
++                long cursorSequence = 0;
++                while (DateTimeOffset.UtcNow < ackDeadline &&
++                       (eventHub.AcknowledgedSequence < 1 || cursorSequence < 1))
++                {
++                    if (File.Exists(cursorPath))
++                    {
++                        using var cursor = JsonDocument.Parse(await File.ReadAllTextAsync(cursorPath, cancellation.Token));
++                        cursorSequence = cursor.RootElement.GetProperty("sequence").GetInt64();
++                    }
++                    if (eventHub.AcknowledgedSequence < 1 || cursorSequence < 1)
++                        await Task.Delay(TimeSpan.FromMilliseconds(10), cancellation.Token);
++                }
++                Assert.Equal(1, eventHub.AcknowledgedSequence);
++                Assert.Equal(1, cursorSequence);
++            }
++
++            await coordinator.WaitAsync(TimeSpan.FromSeconds(3), cancellation.Token);
++            Assert.True(eventHub.AcknowledgedSequence == 1,
++                "Publisher did not apply the ACK. Transport errors: " + string.Join(" | ", errors.Select(error => error.ToString())));
++            using var cursorDocument = JsonDocument.Parse(await File.ReadAllTextAsync(cursorPath, cancellation.Token));
++            Assert.Equal(1, cursorDocument.RootElement.GetProperty("sequence").GetInt64());
++            Assert.Equal(0, eventHub.ReadAfter(1).Events.Count);
++        }
++        finally
++        {
++            cancellation.Cancel();
++            eventHub.Dispose();
++            if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
++        }
++    }
++
++    private static async Task<(ClusterEnvelope Envelope, QuicStream Stream)> ReceiveAsync(QuicConnection connection,
++        CancellationToken token)
++    {
++        var stream = await connection.AcceptInboundStreamAsync(token);
++        using var buffer = new MemoryStream();
++        var chunk = new byte[4096];
++        int read;
++        while ((read = await stream.ReadAsync(chunk, token)) != 0) buffer.Write(chunk, 0, read);
++        var envelope = MessagePackSerializer.Deserialize<ClusterEnvelope>(buffer.ToArray());
++        ClusterEnvelopeValidator.Validate(envelope);
++        return (envelope, stream);
++    }
++
++    private static async Task RespondAsync<T>(QuicStream stream, ClusterEnvelope request,
++        ClusterMessageType type, T payload, CancellationToken token)
++    {
++        var bytes = MessagePackSerializer.Serialize(payload);
++        var envelope = new ClusterEnvelope
++        {
++            MessageType = (ushort)type,
++            Flags = ClusterFrameFlags.Response,
++            CorrelationId = request.CorrelationId,
++            Sequence = request.Sequence,
++            PayloadLength = checked((uint)bytes.Length),
++            Payload = bytes
++        };
++        await stream.WriteAsync(MessagePackSerializer.Serialize(envelope), token);
++        stream.CompleteWrites();
++    }
++
++    private static X509Certificate2 CreateAuthority()
++    {
++        using var key = RSA.Create(2048);
++        var request = new CertificateRequest("CN=LLServer test CA", key, HashAlgorithmName.SHA256,
++            RSASignaturePadding.Pkcs1);
++        request.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
++        request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign |
++            X509KeyUsageFlags.CrlSign, true));
++        return request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddHours(1));
++    }
++
++    private static X509Certificate2 CreateLeaf(X509Certificate2 authority, string dnsName, string usage)
++    {
++        using var key = RSA.Create(2048);
++        var request = new CertificateRequest($"CN={dnsName}", key, HashAlgorithmName.SHA256,
++            RSASignaturePadding.Pkcs1);
++        request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
++        request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature |
++            X509KeyUsageFlags.KeyEncipherment, false));
++        var usages = new OidCollection();
++        usages.Add(new Oid(usage));
++        request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(usages, false));
++        var names = new SubjectAlternativeNameBuilder();
++        names.AddDnsName(dnsName);
++        request.CertificateExtensions.Add(names.Build());
++        return request.Create(authority, DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddMinutes(50),
++            RandomNumberGenerator.GetBytes(16)).CopyWithPrivateKey(key);
++    }
++
++    private static bool ChainsTo(X509Certificate2 certificate, X509Certificate2 authority)
++    {
++        using var chain = new X509Chain();
++        chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
++        chain.ChainPolicy.CustomTrustStore.Add(authority);
++        chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
++        return chain.Build(certificate);
++    }
++
++    private static bool HasDnsSan(X509Certificate2 certificate, string expected)
++    {
++        var san = certificate.Extensions.FirstOrDefault(value => value.Oid?.Value == "2.5.29.17");
++        var names = san is null ? [] : new X509SubjectAlternativeNameExtension(san.RawData, san.Critical)
++            .EnumerateDnsNames().ToArray();
++        return names.Length == 1 && names[0] == expected;
++    }
++}
++#endif

@@ -9,12 +9,16 @@ using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
 using System.Numerics;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using LibreLancer.Data;
 using LibreLancer.Data.GameData;
 using LibreLancer.Data.GameData.Items;
 using LibreLancer.Data.GameData.World;
 using LibreLancer.Data.Schema.Equipment;
+using LibreLancer.Missions;
 using LibreLancer.Net;
 using LibreLancer.Net.Protocol;
 using LibreLancer.Physics;
@@ -35,6 +39,15 @@ namespace LibreLancer.Server
         public NPCManager NPCs;
         public SpacePopulationManager Population;
         private Random debrisRandom = new();
+        private sealed class PendingNpcTerminal(GameObject terminal,
+            LancerNexus.Protocol.NpcRetirementReasonV1 reason, Action accepted)
+        {
+            public GameObject Terminal { get; } = terminal;
+            public LancerNexus.Protocol.NpcRetirementReasonV1 Reason { get; } = reason;
+            public Action Accepted { get; } = accepted;
+            public bool InFlight { get; set; }
+        }
+        private readonly List<PendingNpcTerminal> pendingNpcTerminals = [];
 
         public NetIDGenerator IdGenerator = new();
         private UpdatePacker packer = new();
@@ -167,7 +180,7 @@ namespace LibreLancer.Server
                     if (obj.TryGetComponent<SPlayerComponent>(out var playerComponent))
                     {
                         actions.Enqueue(() =>
-                            Server.LocalPlayer?.MissionRuntime?.LootAcquired(pickup.Nickname!, "Player"));
+                            playerComponent.Player.MissionRuntime?.LootAcquired(pickup.Nickname!, "Player"));
                     }
                 }
                 else
@@ -287,43 +300,135 @@ namespace LibreLancer.Server
 
         public void LaunchComplete(GameObject obj)
         {
-            if (!string.IsNullOrWhiteSpace(obj.Nickname))
-            {
-                Server.LocalPlayer?.MissionRuntime?.LaunchComplete(obj.Nickname);
-            }
+            if (string.IsNullOrWhiteSpace(obj.Nickname)) return;
+            var missionRuntime = obj.TryGetComponent<SPlayerComponent>(out var player)
+                ? player.Player.MissionRuntime
+                : obj.TryGetComponent<SNPCComponent>(out var npc) ? npc.MissionRuntime : null;
+            missionRuntime?.LaunchComplete(obj.Nickname);
         }
 
-        public JumperNpc[] GatherJumpers()
+        public JumperNpc[] GatherJumpers(MissionRuntime? missionRuntime)
         {
-            var msn = Server.LocalPlayer?.MissionRuntime;
-
-            if (msn == null)
+            if (missionRuntime == null)
             {
                 return [];
             }
 
             var jumpers = new List<JumperNpc>();
 
-            foreach (var npc in msn.Script.Ships.Values)
+            foreach (var npc in missionRuntime.Script.Ships.Values)
             {
                 if (!npc.Jumper)
                 {
                     continue;
                 }
 
-                var go = GameWorld.GetObject(npc.Nickname);
+                var go = FindActiveMissionNpc(missionRuntime, npc.Nickname);
 
                 if (go == null)
                 {
                     continue;
                 }
 
-                jumpers.Add(JumperNpc.FromGameObject(go));
-                msn.SystemExit(System.Nickname, npc.Nickname);
-                RemoveSpawnedObject(go, false);
+                jumpers.Add(JumperNpc.FromGameObject(go, this));
             }
 
             return jumpers.ToArray();
+        }
+
+        internal GameObject? FindActiveMissionNpc(MissionRuntime runtime, string nickname) =>
+            GameWorld.Objects.SingleOrDefault(obj =>
+                (obj.Flags & GameObjectFlags.Exists) != 0 &&
+                string.Equals(obj.Nickname, nickname, StringComparison.OrdinalIgnoreCase) &&
+                obj.TryGetComponent<SNPCComponent>(out var npc) && ReferenceEquals(npc.MissionRuntime, runtime));
+
+        // Internal names may collide with imported ships; ownership IDs are authoritative.
+        internal GameObject? FindActiveNpcById(Guid id) => id == Guid.Empty ? null :
+            GameWorld.Objects.SingleOrDefault(obj =>
+                (obj.Flags & GameObjectFlags.Exists) != 0 &&
+                obj.TryGetComponent<SNPCComponent>(out var npc) && npc.NpcId == id);
+
+        /// <summary>Captures the latest runtime state and removes a group on the simulation thread.</summary>
+        public Task<JumperNpc[]> FreezeJumpersAsync(JumperNpc[] jumpers, MissionRuntime? missionRuntime,
+            bool triggerMissionExit = true, Action? beforeFreeze = null,
+            Action<JumperNpc[]>? beforeRemove = null)
+        {
+            var completion = new TaskCompletionSource<JumperNpc[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+            EnqueueAction(() =>
+            {
+                try
+                {
+                    beforeFreeze?.Invoke();
+                    var objects = new List<(JumperNpc Jumper, GameObject Object)>();
+                    foreach (var jumper in jumpers)
+                    {
+                        var obj = FindActiveNpcById(jumper.NpcId);
+                        if (obj is null || !obj.TryGetComponent<SNPCComponent>(out var npc) || npc.NpcId != jumper.NpcId ||
+                            !ReferenceEquals(npc.MissionRuntime, missionRuntime))
+                            throw new InvalidOperationException($"Jumping NPC '{jumper.Nickname}' is no longer active in the source world.");
+                        objects.Add((jumper, obj));
+                    }
+                    var captured = objects.Select(entry => JumperNpc.FromGameObject(entry.Object, this)).ToArray();
+                    beforeRemove?.Invoke(captured);
+                    foreach (var jumper in captured)
+                    {
+                        if (triggerMissionExit)
+                            missionRuntime?.SystemExit(System.Nickname, jumper.Nickname);
+                        var obj = objects.First(entry => entry.Jumper.NpcId == jumper.NpcId).Object;
+                        RemoveSpawnedObjectImmediate(obj, false);
+                    }
+                    completion.TrySetResult(captured);
+                }
+                catch (Exception exception) { completion.TrySetException(exception); }
+            });
+            return completion.Task;
+        }
+
+        /// <summary>Freezes the transferring player and its mission jumpers in one simulation action.</summary>
+        public Task<((Vector3 Position, Quaternion Orientation) PlayerTransform, JumperNpc[] Jumpers)>
+            FreezePlayerAndJumpersAsync(Player player, JumperNpc[] jumpers, Action? beforeFreeze = null,
+                Action<JumperNpc[]>? beforeRemove = null)
+        {
+            var completion = new TaskCompletionSource<
+                ((Vector3 Position, Quaternion Orientation) PlayerTransform, JumperNpc[] Jumpers)>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            EnqueueAction(() =>
+            {
+                try
+                {
+                    beforeFreeze?.Invoke();
+                    if (!Players.TryGetValue(player, out var playerObject))
+                        throw new InvalidOperationException("Player is not active in this world.");
+
+                    var objects = new List<(JumperNpc Jumper, GameObject Object)>();
+                    foreach (var jumper in jumpers)
+                    {
+                        var obj = FindActiveNpcById(jumper.NpcId);
+                        if (obj is null || !obj.TryGetComponent<SNPCComponent>(out var npc) || npc.NpcId != jumper.NpcId ||
+                            !ReferenceEquals(npc.MissionRuntime, player.MissionRuntime))
+                            throw new InvalidOperationException($"Jumping NPC '{jumper.Nickname}' is no longer active in the source world.");
+                        objects.Add((jumper, obj));
+                    }
+
+                    var captured = objects.Select(entry => JumperNpc.FromGameObject(entry.Object, this)).ToArray();
+                    beforeRemove?.Invoke(captured);
+                    var playerTransform = playerObject.WorldTransform;
+                    RemoveObjectInternal(playerObject);
+                    Players.Remove(player);
+                    foreach (var other in Players)
+                        other.Key.Despawn(player.ID, false);
+                    Interlocked.Decrement(ref PlayerCount);
+                    foreach (var entry in objects)
+                        RemoveSpawnedObjectImmediate(entry.Object, false);
+
+                    completion.TrySetResult(((playerTransform.Position, playerTransform.Orientation), captured));
+                }
+                catch (Exception exception)
+                {
+                    completion.TrySetException(exception);
+                }
+            });
+            return completion.Task;
         }
 
         public bool TryScanCargo(GameObject obj, [MaybeNullWhen(false)] out NetLoadout ld)
@@ -564,11 +669,11 @@ namespace LibreLancer.Server
             return obj;
         }
 
-        public void SpawnJumpers(string target, JumperNpc[] jumpers)
+        public void SpawnJumpers(string target, JumperNpc[] jumpers, MissionRuntime missionRuntime)
         {
             foreach (var j in jumpers)
             {
-                NPCs.SpawnJumper(j, Server.LocalPlayer?.MissionRuntime!, target);
+                NPCs.SpawnJumper(j, missionRuntime, target);
             }
         }
 
@@ -892,22 +997,206 @@ namespace LibreLancer.Server
             });
         }
 
-        public void RemoveSpawnedObject(GameObject obj, bool exploded)
+        public Task<(Vector3 Position, Quaternion Orientation)> FreezePlayerAsync(Player player)
         {
+            var completion = new TaskCompletionSource<(Vector3, Quaternion)>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
             actions.Enqueue(() =>
             {
-                if ((obj.Flags & GameObjectFlags.Exists) == 0)
+                if (!Players.TryGetValue(player, out var obj))
                 {
-                    spawnedObjects.Remove(obj);
+                    completion.TrySetException(new InvalidOperationException("Player is not active in this world."));
                     return;
                 }
 
+                var transform = obj.WorldTransform;
                 RemoveObjectInternal(obj);
-                spawnedObjects.Remove(obj);
-                if (obj.NetID != 0)
-                    IdGenerator.Free(obj.NetID);
-                foreach (var p in Players) p.Key.Despawn(obj.NetID, exploded);
+                Players.Remove(player);
+                foreach (var other in Players)
+                    other.Key.Despawn(player.ID, false);
+                Interlocked.Decrement(ref PlayerCount);
+                completion.TrySetResult((transform.Position, transform.Orientation));
             });
+            return completion.Task;
+        }
+
+        private void QueueNpcPopulationCheckpoints()
+        {
+            if (Server is null || !Server.IsNpcCheckpointOutboxReady || spawnedObjects.Count == 0) return;
+            var active = spawnedObjects.Where(obj => (obj.Flags & GameObjectFlags.Exists) != 0 &&
+                    obj.TryGetComponent<SNPCComponent>(out var npc) && npc.NpcId != Guid.Empty &&
+                    npc.OwnershipVersion > 0 && npc.MissionRuntime is null && !npc.TerminalCheckpointPending &&
+                    obj.TryGetComponent<ShipComponent>(out _))
+                .Distinct().ToHashSet();
+            var visited = new HashSet<GameObject>();
+            foreach (var candidate in active)
+            {
+                if (!visited.Add(candidate)) continue;
+                var npc = candidate.GetComponent<SNPCComponent>()!;
+                var objects = candidate.Formation is { } formation
+                    ? new[] { formation.LeadShip }.Concat(formation.Followers).Where(active.Contains).Distinct().ToArray()
+                    : [candidate];
+                if (objects.Any(obj => !obj.TryGetComponent<SNPCComponent>(out var member) ||
+                                       member.MissionRuntime is not null || member.NpcId == Guid.Empty))
+                    continue;
+                foreach (var obj in objects) visited.Add(obj);
+                QueueNpcCheckpointGroup(objects, null, null);
+            }
+        }
+
+        internal bool TryQueueNpcTerminalCheckpoint(GameObject terminal,
+            LancerNexus.Protocol.NpcRetirementReasonV1 reason, Action accepted)
+        {
+            if (Server is null || !terminal.TryGetComponent<SNPCComponent>(out var npc) ||
+                npc.NpcId == Guid.Empty || npc.OwnershipVersion <= 0 || npc.MissionRuntime is not null ||
+                !terminal.TryGetComponent<ShipComponent>(out _))
+                return false;
+            pendingNpcTerminals.Add(new PendingNpcTerminal(terminal, reason, accepted));
+            return true;
+        }
+
+        private void ProcessPendingNpcTerminals()
+        {
+            if (Server is null || !Server.IsNpcCheckpointOutboxReady) return;
+            for (var i = pendingNpcTerminals.Count - 1; i >= 0; i--)
+            {
+                var pending = pendingNpcTerminals[i];
+                if (pending.InFlight) continue;
+                if ((pending.Terminal.Flags & GameObjectFlags.Exists) == 0)
+                {
+                    pendingNpcTerminals.RemoveAt(i);
+                    continue;
+                }
+                var objects = pending.Terminal.Formation is { } formation
+                    ? new[] { formation.LeadShip }.Concat(formation.Followers)
+                        .Where(obj => (obj.Flags & GameObjectFlags.Exists) != 0 &&
+                            obj.TryGetComponent<SNPCComponent>(out var member) && member.MissionRuntime is null &&
+                            member.NpcId != Guid.Empty && member.OwnershipVersion > 0 &&
+                            (obj == pending.Terminal || !member.TerminalCheckpointPending) &&
+                            obj.TryGetComponent<ShipComponent>(out _))
+                        .Distinct().ToArray()
+                    : [pending.Terminal];
+                if (objects.Any(obj => !obj.TryGetComponent<SNPCComponent>(out var member) ||
+                                       Server.IsNpcCheckpointPending(member.NpcId)))
+                    continue;
+                var completion = QueueNpcCheckpointGroup(objects, pending.Terminal, pending.Reason);
+                if (completion is null) continue;
+                pending.InFlight = true;
+                _ = completion.ContinueWith(task =>
+                {
+                    var accepted = task.IsCompletedSuccessfully && task.Result.Accepted;
+                    actions.Enqueue(() =>
+                    {
+                        pending.InFlight = false;
+                        if (!accepted) return;
+                        pendingNpcTerminals.Remove(pending);
+                        if (pending.Terminal.TryGetComponent<SNPCComponent>(out var terminalNpc))
+                            terminalNpc.TerminalCheckpointPending = false;
+                        pending.Accepted();
+                    });
+                }, TaskScheduler.Default);
+            }
+        }
+
+        private Task<LancerNexus.Protocol.NpcCheckpointWriteResponseV1>? QueueNpcCheckpointGroup(GameObject[] objects, GameObject? terminal,
+            LancerNexus.Protocol.NpcRetirementReasonV1? terminalReason)
+        {
+            if (Server is null || objects.Length == 0 || objects.Length > LancerNexus.Protocol.NpcTransferContractValidator.MaximumNpcsPerTransfer)
+                return null;
+            try
+            {
+                var jumpers = objects.Select(obj => JumperNpc.FromGameObject(obj, this)).ToArray();
+                if (terminal is not null)
+                    jumpers = PrepareSurvivorFormationSnapshots(jumpers, terminal.GetComponent<SNPCComponent>()!.NpcId);
+                var terminalNpc = terminal?.GetComponent<SNPCComponent>();
+                var survivors = terminalNpc is null ? jumpers : jumpers.Where(jumper => jumper.NpcId != terminalNpc.NpcId).ToArray();
+                var members = jumpers.Select(jumper => jumper.RuntimeSnapshot).ToArray();
+                var revisions = members.Select(member => new LancerNexus.Protocol.NpcCheckpointRevisionV1
+                {
+                    NpcId = member.NpcId, OwnershipVersion = member.OwnershipVersion,
+                    Revision = Server.GetNpcCheckpointRevision(member.NpcId, member.OwnershipVersion)
+                }).ToArray();
+                if (members.Any(member => Server.IsNpcCheckpointPending(member.NpcId))) return null;
+                LancerNexus.Protocol.NpcRetirementEntryV1[] retirements = terminalNpc is null ? [] : [new()
+                {
+                    NpcId = terminalNpc.NpcId, OwnershipVersion = terminalNpc.OwnershipVersion,
+                    Reason = terminalReason!.Value
+                }];
+                var groupId = StableCheckpointGroupId(members.Select(member => member.NpcId));
+                var formations = survivors.Any(jumper => jumper.FormationSnapshot is not null &&
+                        jumper.FormationSnapshot.Members.Any(member => member.CharacterId.HasValue))
+                    ? [] : GameServer.CaptureNpcFormations(groupId, null, survivors);
+                var request = new LancerNexus.Protocol.NpcCheckpointWriteRequestV1
+                {
+                    RequestId = Guid.NewGuid(), InstanceId = Server.InstanceId!, SystemId = System.Nickname,
+                    SimulationTick = CurrentTick, Npcs = survivors.Select(jumper => jumper.RuntimeSnapshot).ToArray(),
+                    Retirements = retirements, ExpectedRevisions = revisions, Formations = formations
+                };
+                var queued = Server.QueueNpcCheckpoint(request);
+                _ = queued.Durable.ContinueWith(task =>
+                {
+                    if (task.IsFaulted)
+                        FLLog.Warning("NPC Checkpoint", $"Checkpoint {request.RequestId:D} was not durably staged: {task.Exception?.GetBaseException().Message}");
+                }, TaskScheduler.Default);
+                return queued.Completed;
+            }
+            catch (Exception exception)
+            {
+                FLLog.Warning("NPC Checkpoint", $"Could not capture NPC group checkpoint: {exception.Message}");
+                return null;
+            }
+        }
+
+        private static JumperNpc[] PrepareSurvivorFormationSnapshots(JumperNpc[] jumpers, Guid terminalNpcId)
+        {
+            var survivors = jumpers.Where(jumper => jumper.NpcId != terminalNpcId).ToArray();
+            foreach (var jumper in survivors)
+            {
+                if (jumper.FormationSnapshot is not { } source) continue;
+                var members = source.Members.Where(member => member.NpcId != terminalNpcId).ToArray();
+                if (members.Length < 2 || members.Any(member => member.CharacterId.HasValue))
+                { jumper.FormationSnapshot = null; continue; }
+                if (members.All(member => !member.IsLeader))
+                    members[0] = new() { IsLeader = true, NpcId = members[0].NpcId, Offset = members[0].Offset };
+                jumper.FormationSnapshot = new LancerNexus.Protocol.NpcFormationStateV1
+                {
+                    Members = members, PlayerPosition = source.PlayerPosition,
+                    PlayerTargetPosition = source.PlayerTargetPosition
+                };
+            }
+            return jumpers;
+        }
+
+        private static Guid StableCheckpointGroupId(IEnumerable<Guid> ids)
+        {
+            var identity = string.Join("|", ids.Order().Select(id => id.ToString("N")));
+            return new Guid(SHA256.HashData(Encoding.UTF8.GetBytes("npc-checkpoint-group:" + identity)).AsSpan(0, 16));
+        }
+
+        public void RemoveSpawnedObject(GameObject obj, bool exploded)
+        {
+            actions.Enqueue(() => RemoveSpawnedObjectInternal(obj, exploded));
+        }
+
+        /// <summary>Removes an NPC during an in-progress world action after an atomic restore fails.</summary>
+        internal void RemoveSpawnedObjectImmediate(GameObject obj, bool exploded) =>
+            RemoveSpawnedObjectInternal(obj, exploded);
+
+        private void RemoveSpawnedObjectInternal(GameObject obj, bool exploded)
+        {
+            if (obj.TryGetComponent<SNPCComponent>(out var npc) && npc.TerminalCheckpointPending)
+                return;
+            if ((obj.Flags & GameObjectFlags.Exists) == 0)
+            {
+                spawnedObjects.Remove(obj);
+                return;
+            }
+
+            RemoveObjectInternal(obj);
+            spawnedObjects.Remove(obj);
+            if (obj.NetID != 0)
+                IdGenerator.Free(obj.NetID);
+            foreach (var p in Players) p.Key.Despawn(obj.NetID, exploded);
         }
 
         public void InputsUpdate(Player player, InputUpdatePacket input)
@@ -926,7 +1215,7 @@ namespace LibreLancer.Server
         private List<GameObject> spawnedObjects = [];
 
         public GameObject SpawnSolar(string nickname, Archetype arch, string loadout, Faction rep, Vector3 position,
-            Quaternion orientation, int idsName = 0, string? dockWith = null)
+            Quaternion orientation, int idsName = 0, string? dockWith = null, Pilot? pilot = null)
         {
             var gameobj = new GameObject(arch, null, Server.Resources, false)
             {
@@ -951,6 +1240,7 @@ namespace LibreLancer.Server
             solarLoadout ??= arch.Loadout;
             if (solarLoadout != null)
                 gameobj.SetLoadout(solarLoadout, Server.Resources, null);
+            SAutoTurretComponent.TryAdd(gameobj, () => pilot?.Gun);
 
             if (!string.IsNullOrWhiteSpace(dockWith))
             {
@@ -1172,11 +1462,11 @@ namespace LibreLancer.Server
                 p.RpcClient.DestroyPart(obj, part);
         }
 
-        public void EquipmentDestroyed(GameObject obj, Hardpoint hardpoint)
+        public void EquipmentDestroyed(GameObject obj, Hardpoint hardpoint, bool explode = true)
         {
             foreach (Player p in Players.Keys)
             {
-                p.RpcClient.DestroyEquipment(obj, true, hardpoint.Name);
+                p.RpcClient.DestroyEquipment(obj, explode, hardpoint.Name);
             }
             // Save destroyed cargo pods
             if (obj.SystemObject != null)
@@ -1215,8 +1505,44 @@ namespace LibreLancer.Server
 
         public uint CurrentTick { get; private set; }
 
+        private int pendingPopulationTransfers;
+
+        internal void RetainPopulationTransfer() => Interlocked.Increment(ref pendingPopulationTransfers);
+        internal void ReleasePopulationTransfer() => Interlocked.Decrement(ref pendingPopulationTransfers);
+
         private double noPlayersTime;
         private double maxNoPlayers = 2.0;
+
+        private bool ShouldKeepAliveForMissionSolarBase()
+        {
+            var player = Server.LocalPlayer;
+            return PlayerCount == 0 &&
+                   player?.MissionRuntime != null &&
+                   player.Space == null &&
+                   player.MissionRuntime.IsMissionSolarBase(player.Base) &&
+                   System.Nickname.Equals(player.System, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private void FreezeShipsForMissionSolarBase()
+        {
+            foreach (var obj in spawnedObjects)
+            {
+                if (!obj.TryGetComponent<ShipPhysicsComponent>(out var physics) || obj.PhysicsComponent?.Body is not { } body)
+                    continue;
+
+                body.LinearVelocity = Vector3.Zero;
+                body.AngularVelocity = Vector3.Zero;
+                physics.EnginePower = 0;
+
+                if (obj.TryGetComponent<ShipSteeringComponent>(out var steering))
+                {
+                    steering.InThrottle = 0;
+                    steering.Cruise = false;
+                }
+            }
+        }
+
+        private double npcCheckpointElapsed;
 
         public bool Update(double delta, double totalTime, uint currentTick, int step)
         {
@@ -1227,6 +1553,8 @@ namespace LibreLancer.Server
             {
                 act();
             }
+
+            ProcessPendingNpcTerminals();
 
             while (delayedActions.Count > 0 && delayedActions.TryPeek(out var delayedAct)
                                             && delayedAct.Item2 <= Server.TotalTime)
@@ -1243,9 +1571,22 @@ namespace LibreLancer.Server
                 return true;
             }
 
+            if (ShouldKeepAliveForMissionSolarBase())
+            {
+                FreezeShipsForMissionSolarBase();
+                noPlayersTime = 0;
+                return true;
+            }
+
             // Update
             NPCs.FrameStart();
             Population.Update(delta);
+            npcCheckpointElapsed += delta;
+            if (npcCheckpointElapsed >= 10)
+            {
+                npcCheckpointElapsed %= 10;
+                QueueNpcPopulationCheckpoints();
+            }
             GameWorld.Update(delta);
             ApplyDamageZones(delta);
 
@@ -1272,7 +1613,8 @@ namespace LibreLancer.Server
             }
 
             // Despawn after 2 seconds of nothing
-            if (PlayerCount == 0)
+            if (PlayerCount == 0 && !Population.HasActiveTransferredShips &&
+                Volatile.Read(ref pendingPopulationTransfers) == 0)
             {
                 noPlayersTime += delta;
                 return (noPlayersTime < maxNoPlayers);
@@ -1326,7 +1668,7 @@ namespace LibreLancer.Server
                 }
                 if (obj.TryGetComponent<SSolarComponent>(out var solar))
                 {
-                    if (solar.SendSolarUpdate || solar.SendPartsUpdate)
+                    if (solar.SendSolarUpdate || solar.SendPartsUpdate || solar.SendAutoTurretUpdate)
                     {
                         yield return obj;
                     }

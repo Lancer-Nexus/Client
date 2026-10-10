@@ -1,93 +1,65 @@
-diff --git a/src/LibreLancer/GameStates/SpaceGameplay.cs b/src/LibreLancer/GameStates/SpaceGameplay.cs
---- a/src/LibreLancer/GameStates/SpaceGameplay.cs
-+++ b/src/LibreLancer/GameStates/SpaceGameplay.cs
-@@ -111,11 +111,8 @@
-         private double accum = 0;
- 
-         public bool Dead = false;
--        private bool isLeftDown = false;
--        private double leftDownTimer = 0;
-+        private readonly MouseTargetingGesture mouseTargeting = new();
-         private bool mouseFlight = false;
--        // Closest to vanilla mouse-flight activation timing.
--        private const double MouseFlightActivationDelay = 0.155;
- 
-         public SpaceGameplay(FreelancerGame g, CGameSession session) : base(g)
-         {
-@@ -1209,16 +1206,11 @@
- 
-             if (!(Game.Debug.CaptureMouse) && !ui.MouseWanted(Game.Mouse.X, Game.Mouse.Y))
-             {
--                if (!isLeftDown)
--                {
--                    isLeftDown = true;
--                    leftDownTimer = MouseFlightActivationDelay;
--                }
-+                mouseTargeting.LeftMouseDown(pointerAvailable: true);
-             }
-             else
-             {
--                isLeftDown = false;
--                leftDownTimer = 0;
-+                mouseTargeting.LeftMouseDown(pointerAvailable: false);
-             }
-         }
- 
-@@ -1226,8 +1218,8 @@
-         {
-             if ((e.Buttons & MouseButtons.Left) > 0)
-             {
--                if (isLeftDown && leftDownTimer >= 0 && !mouseFlight &&
--                    !Game.Debug.CaptureMouse && !ui.MouseWanted(Game.Mouse.X, Game.Mouse.Y))
-+                if (mouseTargeting.LeftMouseUp(mouseFlight,
-+                        !Game.Debug.CaptureMouse && !ui.MouseWanted(Game.Mouse.X, Game.Mouse.Y)))
-                 {
-                     var newSelection = GetMouseSelection();
-                     if (newSelection != null)
-@@ -1236,8 +1228,6 @@
-                     }
-                 }
- 
--                leftDownTimer = 0;
--                isLeftDown = false;
-             }
-         }
- 
-@@ -1373,10 +1363,7 @@
-                 return;
-             }
- 
--            if (isLeftDown)
--            {
--                leftDownTimer -= delta;
--            }
-+            mouseTargeting.Update(delta);
- 
-             Input.Update();
- 
-@@ -1436,7 +1423,7 @@
-             shipInput.Viewport = new Vector2(Game.Width, Game.Height);
-             shipInput.Camera = _chaseCamera;
- 
--            if (((isLeftDown && leftDownTimer < 0) || mouseFlight) && control.Active)
-+            if ((mouseTargeting.MouseFlightFromHold || mouseFlight) && control.Active)
-             {
-                 var mX = Game.Mouse.X;
-                 var mY = Game.Mouse.Y;
-diff --git a/src/LibreLancer/GameStates/SpaceGameplay.Hud.cs b/src/LibreLancer/GameStates/SpaceGameplay.Hud.cs
---- a/src/LibreLancer/GameStates/SpaceGameplay.Hud.cs
-+++ b/src/LibreLancer/GameStates/SpaceGameplay.Hud.cs
-@@ -216,7 +216,7 @@
- 
-     private void DrawSteeringArrows(UiContext context, DrawList2D drawList)
-     {
--        var steeringActive = ((isLeftDown && leftDownTimer < 0) || mouseFlight) &&
-+        var steeringActive = (mouseTargeting.MouseFlightFromHold || mouseFlight) &&
-                              control.Active &&
-                              !ui.MouseWanted(Game.Mouse.X, Game.Mouse.Y);
-         if (!steeringActive || isTurretView)
+diff --git a/src/LibreLancer.Tests/MouseTargetingGestureTests.cs b/src/LibreLancer.Tests/MouseTargetingGestureTests.cs
+new file mode 100644
+index 0000000..fba243e
+--- /dev/null
++++ b/src/LibreLancer.Tests/MouseTargetingGestureTests.cs
+@@ -0,0 +1,53 @@
++using LibreLancer.Client;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class MouseTargetingGestureTests
++{
++    [Fact]
++    public void QuickClickSelectsWhenReleasedBeforeMouseFlightStarts()
++    {
++        var gesture = new MouseTargetingGesture();
++        gesture.LeftMouseDown(pointerAvailable: true);
++        gesture.Update(MouseTargetingGesture.ActivationDelay - 0.01);
++
++        Assert.True(gesture.LeftMouseUp(mouseFlightToggled: false, pointerAvailable: true));
++        Assert.False(gesture.IsLeftDown);
++        Assert.False(gesture.MouseFlightFromHold);
++    }
++
++
++    [Fact]
++    public void HoldingPastActivationStartsMouseFlightWithoutSelecting()
++    {
++        var gesture = new MouseTargetingGesture();
++        gesture.LeftMouseDown(pointerAvailable: true);
++        gesture.Update(MouseTargetingGesture.ActivationDelay + 0.01);
++
++        Assert.True(gesture.MouseFlightFromHold);
++        Assert.False(gesture.LeftMouseUp(mouseFlightToggled: false, pointerAvailable: true));
++    }
++
++    [Fact]
++    public void ManualMouseFlightDoesNotTurnAQuickPressIntoTargetSelection()
++    {
++        var gesture = new MouseTargetingGesture();
++        gesture.LeftMouseDown(pointerAvailable: true);
++
++        Assert.False(gesture.LeftMouseUp(mouseFlightToggled: true, pointerAvailable: true));
++    }
++
++    [Fact]
++    public void PointerCaptureBlocksSelectionAndCancelsUnavailablePresses()
++    {
++        var gesture = new MouseTargetingGesture();
++        gesture.LeftMouseDown(pointerAvailable: false);
++
++        Assert.False(gesture.IsLeftDown);
++        Assert.False(gesture.LeftMouseUp(mouseFlightToggled: false, pointerAvailable: true));
++
++        gesture.LeftMouseDown(pointerAvailable: true);
++        Assert.False(gesture.LeftMouseUp(mouseFlightToggled: false, pointerAvailable: false));
++    }
++}
 diff --git a/src/LibreLancer/Client/MouseTargetingGesture.cs b/src/LibreLancer/Client/MouseTargetingGesture.cs
 new file mode 100644
+index 0000000..3b7199f
 --- /dev/null
 +++ b/src/LibreLancer/Client/MouseTargetingGesture.cs
 @@ -0,0 +1,46 @@
@@ -137,60 +109,16 @@ new file mode 100644
 +        TimeUntilMouseFlight = 0;
 +    }
 +}
-diff --git a/src/LibreLancer.Tests/MouseTargetingGestureTests.cs b/src/LibreLancer.Tests/MouseTargetingGestureTests.cs
-new file mode 100644
---- /dev/null
-+++ b/src/LibreLancer.Tests/MouseTargetingGestureTests.cs
-@@ -0,0 +1,52 @@
-+using LibreLancer.Client;
-+using Xunit;
-+
-+namespace LibreLancer.Tests;
-+
-+public class MouseTargetingGestureTests
-+{
-+    [Fact]
-+    public void QuickClickSelectsWhenReleasedBeforeMouseFlightStarts()
-+    {
-+        var gesture = new MouseTargetingGesture();
-+        gesture.LeftMouseDown(pointerAvailable: true);
-+        gesture.Update(MouseTargetingGesture.ActivationDelay - 0.01);
-+
-+        Assert.True(gesture.LeftMouseUp(mouseFlightToggled: false, pointerAvailable: true));
-+        Assert.False(gesture.IsLeftDown);
-+        Assert.False(gesture.MouseFlightFromHold);
-+    }
-+
-+    [Fact]
-+    public void HoldingPastActivationStartsMouseFlightWithoutSelecting()
-+    {
-+        var gesture = new MouseTargetingGesture();
-+        gesture.LeftMouseDown(pointerAvailable: true);
-+        gesture.Update(MouseTargetingGesture.ActivationDelay + 0.01);
-+
-+        Assert.True(gesture.MouseFlightFromHold);
-+        Assert.False(gesture.LeftMouseUp(mouseFlightToggled: false, pointerAvailable: true));
-+    }
-+
-+    [Fact]
-+    public void ManualMouseFlightDoesNotTurnAQuickPressIntoTargetSelection()
-+    {
-+        var gesture = new MouseTargetingGesture();
-+        gesture.LeftMouseDown(pointerAvailable: true);
-+
-+        Assert.False(gesture.LeftMouseUp(mouseFlightToggled: true, pointerAvailable: true));
-+    }
-+
-+    [Fact]
-+    public void PointerCaptureBlocksSelectionAndCancelsUnavailablePresses()
-+    {
-+        var gesture = new MouseTargetingGesture();
-+        gesture.LeftMouseDown(pointerAvailable: false);
-+
-+        Assert.False(gesture.IsLeftDown);
-+        Assert.False(gesture.LeftMouseUp(mouseFlightToggled: false, pointerAvailable: true));
-+
-+        gesture.LeftMouseDown(pointerAvailable: true);
-+        Assert.False(gesture.LeftMouseUp(mouseFlightToggled: false, pointerAvailable: false));
-+    }
-+}
+diff --git a/src/LibreLancer/GameStates/SpaceGameplay.Hud.cs b/src/LibreLancer/GameStates/SpaceGameplay.Hud.cs
+index 4d83e09..e9e26ba 100644
+--- a/src/LibreLancer/GameStates/SpaceGameplay.Hud.cs
++++ b/src/LibreLancer/GameStates/SpaceGameplay.Hud.cs
+@@ -216,7 +216,7 @@ partial class SpaceGameplay
+ 
+     private void DrawSteeringArrows(UiContext context, DrawList2D drawList)
+     {
+-        var steeringActive = ((isLeftDown && leftDownTimer < 0) || mouseFlight) &&
++        var steeringActive = (mouseTargeting.MouseFlightFromHold || mouseFlight) &&
+                              control.Active &&
+                              !ui.MouseWanted(Game.Mouse.X, Game.Mouse.Y);
+         if (!steeringActive || isTurretView)

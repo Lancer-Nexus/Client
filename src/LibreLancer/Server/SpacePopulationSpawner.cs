@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
 using LibreLancer.Data.GameData;
+using LibreLancer.Data.GameData.Items;
 using LibreLancer.Data.Schema.Missions;
 using LibreLancer.Missions;
 using LibreLancer.Server.Components;
@@ -49,6 +50,9 @@ public partial class SpacePopulationManager
             faction,
             world.Server.GameData.Items,
             random);
+        TradeCargoPlan? tradeCargo = TryLoadTradeCargo(info, faction, out var selectedCargo)
+            ? selectedCargo
+            : null;
         if (info.Ships.Count == 0)
             return;
         if (state.InBattle &&
@@ -66,7 +70,7 @@ public partial class SpacePopulationManager
         if (!TryFindSpawnLocation(state, info, context.Players, creationDistance, false, out var spawn))
             return;
 
-        SpawnGroup(state, info, faction, spawn, populationClasses);
+        SpawnGroup(state, info, faction, spawn, populationClasses, tradeCargo);
     }
 
     public void PopulateInitialAroundPlayer(GameObject player)
@@ -115,6 +119,9 @@ public partial class SpacePopulationManager
             faction,
             world.Server.GameData.Items,
             random);
+        TradeCargoPlan? tradeCargo = TryLoadTradeCargo(info, faction, out var selectedCargo)
+            ? selectedCargo
+            : null;
         if (info.Ships.Count == 0)
             return;
         if (state.InBattle &&
@@ -132,7 +139,7 @@ public partial class SpacePopulationManager
         if (!TryFindSpawnLocation(state, info, context.Players, creationDistance, true, out var spawn))
             return;
 
-        SpawnGroup(state, info, faction, spawn, populationClasses);
+        SpawnGroup(state, info, faction, spawn, populationClasses, tradeCargo);
     }
 
     private int CountShips(ZoneState state) =>
@@ -238,7 +245,8 @@ public partial class SpacePopulationManager
         EncounterInfo info,
         Faction faction,
         SpawnLocation spawn,
-        HashSet<string> populationClasses)
+        HashSet<string> populationClasses,
+        TradeCargoPlan? tradeCargo = null)
     {
         var items = world.Server.GameData.Items;
         var position = spawn.Position;
@@ -264,6 +272,12 @@ public partial class SpacePopulationManager
             arrivalDockable = dockable;
         }
         var neutralTo = ActiveRandomMissionPlayerObjects();
+        var cargoCarrierIndex = info.Ships.FindIndex(x =>
+            x.MakeClass?.Contains("freight", StringComparison.OrdinalIgnoreCase) == true ||
+            x.MakeClass?.Contains("transport", StringComparison.OrdinalIgnoreCase) == true);
+        if (cargoCarrierIndex < 0)
+            cargoCarrierIndex = 0;
+        var cargoAssigned = false;
 
         for (int i = 0; i < info.Ships.Count; i++)
         {
@@ -293,7 +307,7 @@ public partial class SpacePopulationManager
                 ? "FIGHTER"
                 : entry.Ship.StateGraph;
             var pilot = string.IsNullOrWhiteSpace(entry.Ship.Pilot) ? null : items.GetPilot(entry.Ship.Pilot);
-            var nickname = $"spacepop_{++spawnCounter}_{i}";
+            var nickname = NextPopulationNickname(i);
             var offset = spawn.ArrivalObject == null
                 ? GetSpawnOffset(info, i, orientation)
                 : Vector3.Zero;
@@ -315,11 +329,22 @@ public partial class SpacePopulationManager
                 reservedArrival,
                 neutralTo);
             group.Ships.Add(obj);
+            if (!cargoAssigned && tradeCargo is { } cargo && i >= cargoCarrierIndex)
+            {
+                if (obj.GetComponent<SNPCCargoComponent>() is { } cargoComponent)
+                {
+                    cargoComponent.Cargo.Add(new BasicCargo(cargo.Commodity, cargo.Quantity));
+                    if (obj.GetComponent<SNPCComponent>() is { } npc)
+                        npc.TradeCargoUnitPrice = cargo.SourceUnitPrice;
+                }
+                cargoAssigned = true;
+            }
         }
 
         if (group.Ships.Count == 0)
             return;
 
+        BindTraderCombatReactions(group);
         state.Groups.Add(group);
         RecordFormationCreation(state, info);
         if (info.Formation != null && group.Ships.Count > 1)
@@ -422,7 +447,7 @@ public partial class SpacePopulationManager
             return true;
 
         if (!formation.AllowSimultaneousCreation && state.Groups.Any(x =>
-                ReferenceEquals(x.Encounter.FormationDefinition, formation) &&
+                ReferenceEquals(x.Encounter?.FormationDefinition, formation) &&
                 x.Ships.Any(Alive)))
         {
             return false;

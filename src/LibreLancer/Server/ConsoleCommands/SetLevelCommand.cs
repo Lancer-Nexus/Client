@@ -4,7 +4,7 @@ namespace LibreLancer.Server.ConsoleCommands
     public class SetLevelCommand : IConsoleCommand
     {
         public string Name => "setlevel";
-        public bool Admin => true;
+        public string? Permission => "command.setlevel";
 
         private static void ApplyLevel(Player targetPlayer, int level)
         {

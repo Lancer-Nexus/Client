@@ -17,10 +17,10 @@ namespace BuildLL
         {
             return CPUCount > 0 ? $"-maxcpucount:{CPUCount}" : "";
         }
-        public static void Restore(string project, string rid, string artifactsPath)
+        public static void Restore(string project, string rid, string artifactsPath, string? extra = null)
         {
             RunCommand("dotnet",
-                $"restore {M()} {Verbosity} -r {rid} -p:UseArtifactsOutput=true -p:ArtifactsPath={P(artifactsPath)} /nr:false {P(project)}");
+                $"restore {M()} {Verbosity} -r {rid} -p:UseArtifactsOutput=true -p:ArtifactsPath={P(artifactsPath)} {extra} /nr:false {P(project)}");
         }
 
         public static void BuildDebug(string project)

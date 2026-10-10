@@ -159,7 +159,13 @@ namespace LibreLancer.Render
 
             foreach (var lt in system.LightSources)
             {
-                SystemLighting.Lights.Add(new DynamicLight() { Light = lt.Light });
+                SystemLighting.Lights.Add(new DynamicLight()
+                {
+                    Light = lt.Light,
+                    BaseColor = lt.Light.Color,
+                    ColorCurve = lt.ColorCurve,
+                    ColorCurvePeriod = lt.ColorCurvePeriod
+                });
             }
         }
 
@@ -172,6 +178,9 @@ namespace LibreLancer.Render
 
         public void Update(double elapsed)
         {
+            foreach (var dynamicLight in SystemLighting.Lights)
+                dynamicLight.UpdateColorCurve(game.TotalTime);
+
             foreach (var model in StarSphereModels)
             {
                 model.Update(game.TotalTime);

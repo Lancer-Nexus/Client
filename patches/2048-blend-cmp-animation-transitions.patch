@@ -1,3 +1,107 @@
+diff --git a/src/LibreLancer.Tests/MultipartLoopAnimationTests.cs b/src/LibreLancer.Tests/MultipartLoopAnimationTests.cs
+index 00000000..00000000 100644
+--- a/src/LibreLancer.Tests/MultipartLoopAnimationTests.cs
++++ b/src/LibreLancer.Tests/MultipartLoopAnimationTests.cs
+@@ -86,6 +86,97 @@
+         Assert.InRange(model.Parts["Valve"].Construct!.LocalTransform.Position.X, 1.499f, 1.501f);
+     }
+ 
++    [Fact]
++    public void NewClipBlendsFromTheCurrentlyDisplayedPose()
++    {
++        var animation = new AnmFile();
++        var previous = new Script("Sc_previous");
++        var next = new Script("Sc_next");
++        AddTrack(previous, "Valve", 4f, 4f);
++        AddTrack(next, "Valve", 4f, 0f);
++        animation.Scripts.Add(previous.Name, previous);
++        animation.Scripts.Add(next.Name, next);
++
++        var root = new RigidModelPart { Name = "Root", Children = [] };
++        var part = new RigidModelPart
++        {
++            Name = "Valve",
++            Construct = new PrisConstruct
++            {
++                ParentName = "Root",
++                ChildName = "Valve",
++                AxisTranslation = Vector3.UnitX,
++                Min = -10,
++                Max = 10
++            }
++        };
++        root.Children.Add(part);
++        var model = new RigidModel
++        {
++            Root = root,
++            Parts = new ModelPartCollection(),
++            AllParts = [root, part],
++            Source = RigidModelSource.Compound
++        };
++        model.Parts.Add(root);
++        model.Parts.Add(part);
++
++        var component = new AnimationComponent(model, animation);
++        component.StartAnimation(previous);
++        component.Update(2, null!);
++        Assert.InRange(part.Construct!.LocalTransform.Position.X, 1.999f, 2.001f);
++
++        component.StartAnimation(next);
++        component.Update(0.125, null!);
++        Assert.InRange(part.Construct.LocalTransform.Position.X, 0.999f, 1.001f);
++
++        component.Update(0.125, null!);
++        Assert.InRange(part.Construct.LocalTransform.Position.X, -0.001f, 0.001f);
++    }
++
++    [Fact]
++    public void ReversingAnActiveClipBlendsWithoutSuppressingItself()
++    {
++        var animation = new AnmFile();
++        var script = new Script("Sc_reverse");
++        AddTrack(script, "Valve", 4f, 4f);
++        animation.Scripts.Add(script.Name, script);
++
++        var root = new RigidModelPart { Name = "Root", Children = [] };
++        var part = new RigidModelPart
++        {
++            Name = "Valve",
++            Construct = new PrisConstruct
++            {
++                ParentName = "Root",
++                ChildName = "Valve",
++                AxisTranslation = Vector3.UnitX,
++                Min = -10,
++                Max = 10
++            }
++        };
++        root.Children.Add(part);
++        var model = new RigidModel
++        {
++            Root = root,
++            Parts = new ModelPartCollection(),
++            AllParts = [root, part],
++            Source = RigidModelSource.Compound
++        };
++        model.Parts.Add(root);
++        model.Parts.Add(part);
++
++        var component = new AnimationComponent(model, animation);
++        component.StartAnimation(script);
++        component.Update(1.5, null!);
++        component.StartAnimation(script, reverse: true);
++        component.Update(0, null!);
++        Assert.InRange(part.Construct!.LocalTransform.Position.X, 1.499f, 1.501f);
++
++        component.Update(0.125, null!);
++        Assert.InRange(part.Construct.LocalTransform.Position.X, 1.436f, 1.439f);
++    }
++
+     private static void AddTrack(Script script, string name, float duration, float lastValue)
+     {
+         var buffer = new AnmBuffer { Buffer = new byte[8] };
+diff --git a/src/LibreLancer/World/Components/AnimationComponent.cs b/src/LibreLancer/World/Components/AnimationComponent.cs
+index 00000000..00000000 100644
 --- a/src/LibreLancer/World/Components/AnimationComponent.cs
 +++ b/src/LibreLancer/World/Components/AnimationComponent.cs
 @@ -8,6 +8,7 @@
@@ -122,17 +226,14 @@
  
              if ((GameObject?)Parent != null)
              {
-@@ -268,19 +327,23 @@
+@@ -268,18 +327,22 @@
              accumTime += time;
              int c = animations.Count;
  
 -            for (int i = animations.Count - 1; i >= 0; i--)
-+            for (int i = 0; i < animations.Count;)
-             {
+-            {
 -                if (ProcessAnimation(animations[i]))
-+                var animation = animations[i];
-+                if (ProcessAnimation(animation))
-                 {
+-                {
 -                    if (AnimationCompleted != null)
 -                    {
 -                        AnimationCompleted(animations[i].Name);
@@ -140,6 +241,11 @@
 -
 -                    active.Remove(animations[i].Script);
 -                    completeAnimations.Add(animations[i]);
++            for (int i = 0; i < animations.Count;)
++            {
++                var animation = animations[i];
++                if (ProcessAnimation(animation))
++                {
 +                    foreach (var joint in animation.BlendFrom.Keys)
 +                        joint.OverrideTransform = null;
 +                    animation.BlendFrom.Clear();
@@ -147,14 +253,13 @@
 +                    active.Remove(animation.Script);
 +                    completeAnimations.Add(animation);
                      animations.RemoveAt(i);
-                 }
++                }
 +                else
 +                {
 +                    i++;
-+                }
+                 }
              }
  
-             if (c > 0 && Parent != null)
 @@ -310,8 +373,9 @@
  
              for (int i = 0; i < a.Script.JointMaps.Count; i++)
@@ -167,7 +272,7 @@
                  {
                      finished = false;
                  }
-@@ -325,8 +389,8 @@
+@@ -325,15 +389,14 @@
              return false;
          }
  
@@ -178,11 +283,34 @@
          {
              var mdl = Parent == null ? rm : Parent.Model!.RigidModel;
              var joint = mdl.Parts[jm.ChildName].Construct;
-@@ -362,7 +426,30 @@
-                 quat = jm.Channel.QuaternionAtTime((float) t, ref cur);
+             double t = initialTime + (getTotalTime() - startTime) * timeScale;
+             bool done = false;
+ 
+-            // looping?
+             if (!loop && t >= jm.Channel.Duration)
+             {
+                 done = true;
+@@ -349,20 +412,37 @@
              }
  
+             ChannelFloat angle = 0;
+-
+             if (jm.Channel.HasAngle)
+-            {
+-                angle = jm.Channel.FloatAtTime((float) t, ref cur);
+-            }
++                angle = jm.Channel.FloatAtTime((float)t, ref cur);
+ 
+             var quat = Quaternion.Identity;
+-
+             if (jm.Channel.HasOrientation)
+-            {
+-                quat = jm.Channel.QuaternionAtTime((float) t, ref cur);
+-            }
+-
 -            joint?.Update(angle, quat);
++                quat = jm.Channel.QuaternionAtTime((float)t, ref cur);
++
 +            if (joint == null || suppressed)
 +                return done;
 +
@@ -210,103 +338,3 @@
              return done;
          }
  
---- a/src/LibreLancer.Tests/MultipartLoopAnimationTests.cs
-+++ b/src/LibreLancer.Tests/MultipartLoopAnimationTests.cs
-@@ -101,6 +101,97 @@
-         Assert.InRange(model.Parts["Valve"].Construct!.LocalTransform.Position.X, 1.499f, 1.501f);
-     }
- 
-+    [Fact]
-+    public void NewClipBlendsFromTheCurrentlyDisplayedPose()
-+    {
-+        var animation = new AnmFile();
-+        var previous = new Script("Sc_previous");
-+        var next = new Script("Sc_next");
-+        AddTrack(previous, "Valve", 4f, 4f);
-+        AddTrack(next, "Valve", 4f, 0f);
-+        animation.Scripts.Add(previous.Name, previous);
-+        animation.Scripts.Add(next.Name, next);
-+
-+        var root = new RigidModelPart { Name = "Root", Children = [] };
-+        var part = new RigidModelPart
-+        {
-+            Name = "Valve",
-+            Construct = new PrisConstruct
-+            {
-+                ParentName = "Root",
-+                ChildName = "Valve",
-+                AxisTranslation = Vector3.UnitX,
-+                Min = -10,
-+                Max = 10
-+            }
-+        };
-+        root.Children.Add(part);
-+        var model = new RigidModel
-+        {
-+            Root = root,
-+            Parts = new ModelPartCollection(),
-+            AllParts = [root, part],
-+            Source = RigidModelSource.Compound
-+        };
-+        model.Parts.Add(root);
-+        model.Parts.Add(part);
-+
-+        var component = new AnimationComponent(model, animation);
-+        component.StartAnimation(previous);
-+        component.Update(2, null!);
-+        Assert.InRange(part.Construct!.LocalTransform.Position.X, 1.999f, 2.001f);
-+
-+        component.StartAnimation(next);
-+        component.Update(0.125, null!);
-+        Assert.InRange(part.Construct.LocalTransform.Position.X, 0.999f, 1.001f);
-+
-+        component.Update(0.125, null!);
-+        Assert.InRange(part.Construct.LocalTransform.Position.X, -0.001f, 0.001f);
-+    }
-+
-+    [Fact]
-+    public void ReversingAnActiveClipBlendsWithoutSuppressingItself()
-+    {
-+        var animation = new AnmFile();
-+        var script = new Script("Sc_reverse");
-+        AddTrack(script, "Valve", 4f, 4f);
-+        animation.Scripts.Add(script.Name, script);
-+
-+        var root = new RigidModelPart { Name = "Root", Children = [] };
-+        var part = new RigidModelPart
-+        {
-+            Name = "Valve",
-+            Construct = new PrisConstruct
-+            {
-+                ParentName = "Root",
-+                ChildName = "Valve",
-+                AxisTranslation = Vector3.UnitX,
-+                Min = -10,
-+                Max = 10
-+            }
-+        };
-+        root.Children.Add(part);
-+        var model = new RigidModel
-+        {
-+            Root = root,
-+            Parts = new ModelPartCollection(),
-+            AllParts = [root, part],
-+            Source = RigidModelSource.Compound
-+        };
-+        model.Parts.Add(root);
-+        model.Parts.Add(part);
-+
-+        var component = new AnimationComponent(model, animation);
-+        component.StartAnimation(script);
-+        component.Update(1.5, null!);
-+        component.StartAnimation(script, reverse: true);
-+        component.Update(0, null!);
-+        Assert.InRange(part.Construct!.LocalTransform.Position.X, 1.499f, 1.501f);
-+
-+        component.Update(0.125, null!);
-+        Assert.InRange(part.Construct.LocalTransform.Position.X, 1.436f, 1.439f);
-+    }
-+
-     private static void AddTrack(Script script, string name, float duration, float lastValue)
-     {
-         var buffer = new AnmBuffer { Buffer = new byte[8] };
