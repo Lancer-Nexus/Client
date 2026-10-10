@@ -1,0 +1,207 @@
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -1752,6 +1752,15 @@
+             return client.RenewAsync(characterId, leaseToken, leaseVersion, cancellationToken);
+         }
+ 
++        public Task ReleaseCharacterLeaseAsync(long characterId, Guid sessionId, string leaseToken,
++            long leaseVersion, CancellationToken cancellationToken = default)
++        {
++            if (!ClusterTransfersEnabled || characterId <= 0 || sessionId == Guid.Empty || leaseVersion <= 0)
++                throw new InvalidOperationException("Gateway character lease release is not configured.");
++            return GetGatewayCharacterLeaseClient().ReleaseAsync(characterId, sessionId, leaseToken, leaseVersion,
++                cancellationToken);
++        }
++
+         public Task<LancerNexus.Protocol.CharacterSaveSnapshotV1?> ReadCharacterSnapshotAsync(long characterId,
+             string leaseToken, long leaseVersion, CancellationToken cancellationToken = default) =>
+             GetGatewayCharacterLeaseClient().ReadSnapshotAsync(characterId, leaseToken, leaseVersion, cancellationToken);
+--- a/src/LibreLancer/Server/Player.cs
++++ b/src/LibreLancer/Server/Player.cs
+@@ -2602,23 +2602,51 @@
+                 Volatile.Write(ref sourceDisconnected, 1);
+                 return;
+             }
+-            if (packetQueueTask != null)
+-            {
+-                inputPackets.Complete();
+-                packetQueueTask.Wait(1000);
+-
+-                if (Character != null)
+-                {
+-                    Game.PublishServerEvent(new ServerEvent
+-                    {
+-                        Type = ServerEventType.PlayerDisconnected,
+-                        TimeUtc = DateTime.UtcNow,
+-                        Payload = new PlayerDisconnectedEventPayload(this, DisconnectReason.Unknown)
+-                    });
+-                }
+-            }
+-
+-            LoggedOut();
++            if (Interlocked.Exchange(ref disconnectStarted, 1) != 0) return;
++            _ = CompleteDisconnectAsync();
++        }
++
++        private int disconnectStarted;
++
++        private async Task CompleteDisconnectAsync()
++        {
++            try
++            {
++                if (packetQueueTask != null)
++                {
++                    inputPackets.Complete();
++                    await Task.WhenAny(packetQueueTask, Task.Delay(TimeSpan.FromSeconds(1))).ConfigureAwait(false);
++                }
++
++                if (Character != null && GatewayCharacterId > 0 && GatewayLeaseToken is { } leaseToken &&
++                    GatewayLeaseVersion > 0 && GatewaySessionId != Guid.Empty)
++                {
++                    try
++                    {
++                        if (await QueueGatewayShutdownSnapshot().ConfigureAwait(false))
++                        {
++                            await Game.ReleaseCharacterLeaseAsync(GatewayCharacterId, GatewaySessionId, leaseToken,
++                                GatewayLeaseVersion).ConfigureAwait(false);
++                            GatewayLeaseToken = null;
++                        }
++                        else
++                        {
++                            FLLog.Warning("Gateway", "Character lease retained because final snapshot was not confirmed.");
++                        }
++                    }
++                    catch (Exception error)
++                    {
++                        FLLog.Warning("Gateway", $"Character lease retained after disconnect ({error.GetType().Name}).");
++                    }
++                }
++
++                LoggedOut();
++            }
++            catch (Exception error)
++            {
++                FLLog.Error("Server", $"Player disconnect cleanup failed ({error.GetType().Name}).");
++                LoggedOut();
++            }
+         }
+ 
+         public void JumpTo(string system, string target, JumperNpc[] jumpers)
+--- a/src/LibreLancer/Server/GatewayCharacterLeaseClient.cs
++++ b/src/LibreLancer/Server/GatewayCharacterLeaseClient.cs
+@@ -231,6 +231,30 @@
+         return new GatewayCharacterLease(characterId, leaseToken, leaseVersion, renewed.ValidUntilUtc!.Value);
+     }
+ 
++    public async Task ReleaseAsync(long characterId, Guid sessionId, string leaseToken, long leaseVersion,
++        CancellationToken cancellationToken = default)
++    {
++        var requestBody = new CharacterLeaseReleaseRequestV1
++        {
++            CorrelationId = Guid.NewGuid(), CharacterId = characterId, SessionId = sessionId,
++            LeaseToken = leaseToken, LeaseVersion = leaseVersion
++        };
++        if (!requestBody.IsValid())
++            throw new ArgumentException("Character lease release request is invalid.");
++        using var message = new HttpRequestMessage(HttpMethod.Post,
++            new Uri(gateway, "api/v1/game/release-character-lease"));
++        message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", instanceKey);
++        message.Content = JsonContent.Create(requestBody);
++        using var response = await http.SendAsync(message, cancellationToken).ConfigureAwait(false);
++        var released = await response.Content.ReadFromJsonAsync<CharacterLeaseReleaseResultV1>(
++            cancellationToken: cancellationToken).ConfigureAwait(false);
++        if (released is null || !released.IsValid() || released.CorrelationId != requestBody.CorrelationId ||
++            released.LeaseVersion != leaseVersion)
++            throw new InvalidDataException("Gateway character lease release response is invalid.");
++        if (!response.IsSuccessStatusCode || !released.Released)
++            throw new InvalidOperationException($"Gateway character lease release rejected: {released.ReasonCode}.");
++    }
++
+     public async Task<CharacterSaveSnapshotV1?> ReadSnapshotAsync(long characterId, string leaseToken,
+         long leaseVersion, CancellationToken cancellationToken = default)
+     {
+--- a/src/LibreLancer.Tests/GatewayCharacterLeaseClientTests.cs
++++ b/src/LibreLancer.Tests/GatewayCharacterLeaseClientTests.cs
+@@ -54,6 +54,24 @@
+         Assert.Equal("/api/v1/game/renew-character-lease", handler.Paths[^1]);
+         Assert.Equal(acquired.LeaseToken, handler.RenewRequest!.LeaseToken);
+         Assert.Equal(acquired.LeaseVersion, handler.RenewRequest.LeaseVersion);
++    }
++
++    [Fact]
++    public async Task ReleasesTheExactSessionTokenAndLeaseFence()
++    {
++        var handler = new Handler();
++        using var http = new HttpClient(handler);
++        var session = Guid.NewGuid();
++        var client = new GatewayCharacterLeaseClient(new Uri("https://gateway.test"), new string('k', 32), http);
++
++        await client.ReleaseAsync(918, session, new string('t', 43), 6);
++
++        Assert.Equal("/api/v1/game/release-character-lease", handler.Paths[^1]);
++        Assert.Equal(918, handler.ReleaseRequest!.CharacterId);
++        Assert.Equal(session, handler.ReleaseRequest.SessionId);
++        Assert.Equal(new string('t', 43), handler.ReleaseRequest.LeaseToken);
++        Assert.Equal(6, handler.ReleaseRequest.LeaseVersion);
++        Assert.All(handler.Authorizations, value => Assert.Equal("Bearer " + new string('k', 32), value));
+     }
+ 
+     [Fact]
+@@ -189,6 +207,7 @@
+         public List<string?> Authorizations { get; } = [];
+         public CharacterLeaseAcquireRequestV1? AcquireRequest { get; private set; }
+         public CharacterLeaseRenewRequestV1? RenewRequest { get; private set; }
++        public CharacterLeaseReleaseRequestV1? ReleaseRequest { get; private set; }
+         public CharacterSaveSnapshotReadRequestV1? SnapshotReadRequest { get; private set; }
+         public CharacterSaveSnapshotWriteRequestV1? SnapshotWriteRequest { get; private set; }
+         public CharacterRosterRequestV1? RosterRequest { get; private set; }
+@@ -288,6 +307,20 @@
+                 };
+             }
+ 
++            if (request.RequestUri.AbsolutePath.EndsWith("release-character-lease", StringComparison.Ordinal))
++            {
++                ReleaseRequest = await request.Content!.ReadFromJsonAsync<CharacterLeaseReleaseRequestV1>(
++                    cancellationToken: cancellationToken);
++                return new HttpResponseMessage(HttpStatusCode.OK)
++                {
++                    Content = JsonContent.Create(new CharacterLeaseReleaseResultV1
++                    {
++                        CorrelationId = ReleaseRequest!.CorrelationId, Released = true, ReasonCode = "released",
++                        LeaseVersion = ReleaseRequest.LeaseVersion
++                    })
++                };
++            }
++
+             if (request.RequestUri.AbsolutePath.EndsWith("snapshot/read", StringComparison.Ordinal))
+             {
+                 SnapshotReadRequest = await request.Content!.ReadFromJsonAsync<CharacterSaveSnapshotReadRequestV1>(
+--- a/patches/series
++++ b/patches/series
+@@ -134,3 +134,4 @@
+ client 2131-idempotent-llserver-shutdown.patch
+ client 2132-log-gateway-connection-task-failures.patch
+ client 2133-avoid-duplicate-empty-session-disconnect-event.patch
++client 2134-release-gateway-character-lease-on-disconnect.patch
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -11,7 +11,7 @@
+ - The active game instance remains authoritative until the MySQL-backed lease changes atomically at `Committed`; the client must handle rejection, expiry and recovery states.
+ - Shared, versioned MessagePack contracts and capabilities belong in `Protocol`; Redis is never exposed to the client.
+ 
+-For clustered LLServer character persistence, register the new display name and initial SaveGame with Gateway under the active account/session before publishing it to the character menu; roll the local compatibility row back on rejection. Read the account roster from Gateway and map Gateway IDs to separate local SQLite cache IDs. Rebuild missing cache rows only from a validated Gateway snapshot; if both a snapshot and local row are absent, omit that legacy character rather than inventing state. Resolve the Gateway-owned character ID and acquire its lease after selection. Load a lease-fenced Gateway SaveGame snapshot when present; only bootstrap revision 1 from the matching local SQLite row when no Gateway snapshot exists. Persist explicit saves, one-minute live checkpoints and committed transfer snapshots using sequential Gateway snapshot revisions. Delete through Gateway's history-preserving tombstone before removing the local cache row. On graceful shutdown, stop new logins, drain in-flight login tasks, pause world simulation, capture each active leased character on the simulation loop, and await its Gateway snapshot write before stopping the server. Characters in a committed transfer use the transfer snapshot path; abrupt termination cannot run this checkpoint. Treat lease rejection, invalid snapshots and unavailable snapshot storage as fail-closed conditions.
++For clustered LLServer character persistence, register the new display name and initial SaveGame with Gateway under the active account/session before publishing it to the character menu; roll the local compatibility row back on rejection. Read the account roster from Gateway and map Gateway IDs to separate local SQLite cache IDs. Rebuild missing cache rows only from a validated Gateway snapshot; if both a snapshot and local row are absent, omit that legacy character rather than inventing state. Resolve the Gateway-owned character ID and acquire its lease after selection. Load a lease-fenced Gateway SaveGame snapshot when present; only bootstrap revision 1 from the matching local SQLite row when no Gateway snapshot exists. Persist explicit saves, one-minute live checkpoints and committed transfer snapshots using sequential Gateway snapshot revisions. Delete through Gateway's history-preserving tombstone before removing the local cache row. On normal disconnect, capture and confirm the final Gateway snapshot before releasing the exact session, token and fencing version; retain the lease when persistence or release fails. On graceful shutdown, stop new logins, drain in-flight login tasks, pause world simulation, capture each active leased character on the simulation loop, and await its Gateway snapshot write before stopping the server. Characters in a committed transfer use the transfer snapshot path; abrupt termination cannot run these checkpoints. Treat lease rejection, invalid snapshots and unavailable snapshot storage as fail-closed conditions.
+ 
+ ## Rules
+ 
+--- a/README.md
++++ b/README.md
+@@ -99,7 +99,7 @@
+ 
+ Cluster permission revision synchronization is opt-in at build time with `-p:EnableClusterIntegration=true`. Cluster instances require the per-instance `LANCER_NEXUS_GAME_INSTANCE_KEY` and the internal Redis `LANCER_NEXUS_PERMISSION_REDIS_ENDPOINT=host:port`. LLServer reports `IsReady=false` until it has subscribed to Redis, loaded and activated the current Gateway SQL permission snapshot, and received its revision ACK. Redis carries invalidations only; a disconnected listener makes the instance unready. Standalone builds remain independent of Cluster.
+ 
+-Clustered character creation registers the exact display name and initial SaveGame with Gateway under the active account/session; a Gateway rejection rolls back the local compatibility row. LLServer loads the authoritative Gateway roster, reconstructs missing local cache rows only from validated Gateway snapshots, and deletes through Gateway's history-preserving tombstone before removing a local row. A legacy character without a Gateway snapshot is available only on instances that still have its local SQLite row; missing legacy state is omitted instead of replaced with a default pilot. After selection, LLServer acquires the fenced lease and loads the latest Gateway SaveGame snapshot. If no snapshot exists yet, it imports the matching local SQLite row once as revision 1. LLServer checkpoints the live SaveGame to Gateway every minute, persists explicit Freelancer saves, and writes a transferred SaveGame under the target lease fence after transfer commit. Gateway validates each read and write against the active instance, session, lease token and version. On graceful `StopServer`, LLServer rejects new logins, drains active login work, pauses world simulation, captures each active leased character on the simulation loop, and waits for the final Gateway snapshot write before stopping the loop. Characters already in transfer use the transfer snapshot protocol. A forced process kill cannot run the shutdown checkpoint; local SQLite remains a compatibility/bootstrap cache, not the cluster persistence authority.
++Clustered character creation registers the exact display name and initial SaveGame with Gateway under the active account/session; a Gateway rejection rolls back the local compatibility row. LLServer loads the authoritative Gateway roster, reconstructs missing local cache rows only from validated Gateway snapshots, and deletes through Gateway's history-preserving tombstone before removing a local row. A legacy character without a Gateway snapshot is available only on instances that still have its local SQLite row; missing legacy state is omitted instead of replaced with a default pilot. After selection, LLServer acquires the fenced lease and loads the latest Gateway SaveGame snapshot. If no snapshot exists yet, it imports the matching local SQLite row once as revision 1. LLServer checkpoints the live SaveGame to Gateway every minute, persists explicit Freelancer saves, and writes a transferred SaveGame under the target lease fence after transfer commit. Gateway validates each read and write against the active instance, session, lease token and version. On normal disconnect, LLServer confirms the final Gateway snapshot before releasing the exact session, token and lease version; if persistence or release fails, the lease remains active until expiry. On graceful `StopServer`, LLServer rejects new logins, drains active login work, pauses world simulation, captures each active leased character on the simulation loop, and waits for the final Gateway snapshot write before stopping the loop. Characters already in transfer use the transfer snapshot protocol. A forced process kill cannot run the shutdown checkpoint; local SQLite remains a compatibility/bootstrap cache, not the cluster persistence authority.
+ 
+ ## NPC retirement recovery infrastructure
+ 
