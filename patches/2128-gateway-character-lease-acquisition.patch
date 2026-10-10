@@ -1,0 +1,694 @@
+diff --git a/src/LLServer.Core/FlHookCompatRuntime.cs b/src/LLServer.Core/FlHookCompatRuntime.cs
+index 697595e40..edc68026c 100644
+--- a/src/LLServer.Core/FlHookCompatRuntime.cs
++++ b/src/LLServer.Core/FlHookCompatRuntime.cs
+@@ -170,12 +170,12 @@ internal sealed class FlHookCompatRuntime : IAsyncDisposable
+             case ServerEventType.CharacterConnected:
+                 player = serverEvent.GetPayload<CharacterConnectedEventPayload>().ConnectedCharacter;
+                 kind = FlHookCompatServerEventKind.CharacterConnected;
+-                characterId = player.Character?.ID;
++                characterId = player.StableCharacterId;
+                 break;
+             case ServerEventType.CharacterDisconnected:
+                 player = serverEvent.GetPayload<CharacterDisconnectedEventPayload>().DisconnectedCharacter;
+                 kind = FlHookCompatServerEventKind.CharacterDisconnected;
+-                characterId = player.Character?.ID;
++                characterId = player.StableCharacterId;
+                 break;
+             case ServerEventType.PlayerSystemChanged:
+                 var changed = serverEvent.GetPayload<PlayerSystemChangedEventPayload>();
+diff --git a/src/LibreLancer.Tests/GatewayCharacterLeaseClientTests.cs b/src/LibreLancer.Tests/GatewayCharacterLeaseClientTests.cs
+new file mode 100644
+index 000000000..11508ffd7
+--- /dev/null
++++ b/src/LibreLancer.Tests/GatewayCharacterLeaseClientTests.cs
+@@ -0,0 +1,123 @@
++using System;
++using System.Collections.Generic;
++using System.IO;
++using System.Net;
++using System.Net.Http;
++using System.Net.Http.Json;
++using System.Threading;
++using System.Threading.Tasks;
++using LancerNexus.Protocol;
++using LibreLancer.Server;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class GatewayCharacterLeaseClientTests
++{
++    [Fact]
++    public async Task ResolvesStableIdThenAcquiresItsSignedLease()
++    {
++        var handler = new Handler();
++        using var http = new HttpClient(handler);
++        var account = Guid.NewGuid();
++        var session = Guid.NewGuid();
++        var client = new GatewayCharacterLeaseClient(new Uri("https://gateway.test"), new string('k', 32), http);
++
++        var lease = await client.ResolveAndAcquireAsync(account, session, "Pilot One");
++
++        Assert.Equal(918, lease.CharacterId);
++        Assert.Equal(1, lease.LeaseVersion);
++        Assert.Equal("lj1.signed", handler.AcquireRequest!.JoinTicket);
++        Assert.Equal(918, handler.AcquireRequest.CharacterId);
++        Assert.Equal(43, handler.AcquireRequest.LeaseToken.Length);
++        Assert.Equal(new[]
++        {
++            "/api/v1/game/characters/resolve-identity",
++            "/api/v1/game/acquire-character-lease"
++        }, handler.Paths);
++        Assert.All(handler.Authorizations, value => Assert.Equal("Bearer " + new string('k', 32), value));
++    }
++
++    [Fact]
++    public async Task RenewsTheSameLeaseFenceAndToken()
++    {
++        var handler = new Handler();
++        using var http = new HttpClient(handler);
++        var client = new GatewayCharacterLeaseClient(new Uri("https://gateway.test"), new string('k', 32), http);
++        var acquired = await client.ResolveAndAcquireAsync(Guid.NewGuid(), Guid.NewGuid(), "Pilot One");
++
++        var renewed = await client.RenewAsync(acquired.CharacterId, acquired.LeaseToken, acquired.LeaseVersion);
++
++        Assert.Equal(acquired.CharacterId, renewed.CharacterId);
++        Assert.Equal(acquired.LeaseToken, renewed.LeaseToken);
++        Assert.Equal(acquired.LeaseVersion, renewed.LeaseVersion);
++        Assert.Equal("/api/v1/game/renew-character-lease", handler.Paths[^1]);
++        Assert.Equal(acquired.LeaseToken, handler.RenewRequest!.LeaseToken);
++        Assert.Equal(acquired.LeaseVersion, handler.RenewRequest.LeaseVersion);
++    }
++
++    [Fact]
++    public async Task RejectsMismatchedIdentityCorrelationBeforeAcquiringLease()
++    {
++        var handler = new Handler(mismatchCorrelation: true);
++        using var http = new HttpClient(handler);
++        var client = new GatewayCharacterLeaseClient(new Uri("https://gateway.test"), "instance-key-value-0123456789abcdef", http);
++
++        await Assert.ThrowsAsync<InvalidDataException>(() =>
++            client.ResolveAndAcquireAsync(Guid.NewGuid(), Guid.NewGuid(), "Pilot One"));
++        Assert.Single(handler.Paths);
++    }
++
++    private sealed class Handler(bool mismatchCorrelation = false) : HttpMessageHandler
++    {
++        public List<string> Paths { get; } = [];
++        public List<string?> Authorizations { get; } = [];
++        public CharacterLeaseAcquireRequestV1? AcquireRequest { get; private set; }
++        public CharacterLeaseRenewRequestV1? RenewRequest { get; private set; }
++
++        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,
++            CancellationToken cancellationToken)
++        {
++            Paths.Add(request.RequestUri!.AbsolutePath);
++            Authorizations.Add(request.Headers.Authorization?.ToString());
++            if (request.RequestUri.AbsolutePath.EndsWith("resolve-identity", StringComparison.Ordinal))
++            {
++                var body = await request.Content!.ReadFromJsonAsync<CharacterIdentityResolveRequestV1>(
++                    cancellationToken: cancellationToken);
++                return new HttpResponseMessage(HttpStatusCode.OK)
++                {
++                    Content = JsonContent.Create(new CharacterIdentityResolveResultV1
++                    {
++                        CorrelationId = mismatchCorrelation ? Guid.NewGuid() : body!.CorrelationId,
++                        Accepted = true, ReasonCode = "resolved", CharacterId = 918, LeaseTicket = "lj1.signed"
++                    })
++                };
++            }
++
++            if (request.RequestUri.AbsolutePath.EndsWith("renew-character-lease", StringComparison.Ordinal))
++            {
++                RenewRequest = await request.Content!.ReadFromJsonAsync<CharacterLeaseRenewRequestV1>(
++                    cancellationToken: cancellationToken);
++                return new HttpResponseMessage(HttpStatusCode.OK)
++                {
++                    Content = JsonContent.Create(new CharacterLeaseRenewResultV1
++                    {
++                        CorrelationId = RenewRequest!.CorrelationId, Accepted = true, ReasonCode = "renewed",
++                        LeaseVersion = RenewRequest.LeaseVersion, ValidUntilUtc = DateTimeOffset.UtcNow.AddMinutes(15)
++                    })
++                };
++            }
++
++            AcquireRequest = await request.Content!.ReadFromJsonAsync<CharacterLeaseAcquireRequestV1>(
++                cancellationToken: cancellationToken);
++            return new HttpResponseMessage(HttpStatusCode.OK)
++            {
++                Content = JsonContent.Create(new CharacterLeaseAcquireResultV1
++                {
++                    CorrelationId = AcquireRequest!.CorrelationId, Accepted = true, ReasonCode = "acquired",
++                    LeaseVersion = 1, ValidUntilUtc = DateTimeOffset.UtcNow.AddMinutes(15)
++                })
++            };
++        }
++    }
++}
+diff --git a/src/LibreLancer.Tests/LibreLancer.Tests.csproj b/src/LibreLancer.Tests/LibreLancer.Tests.csproj
+index db065b216..0a64a2aa1 100644
+--- a/src/LibreLancer.Tests/LibreLancer.Tests.csproj
++++ b/src/LibreLancer.Tests/LibreLancer.Tests.csproj
+@@ -27,6 +27,11 @@
+       <ProjectReference Include="..\LLServer.Core\LLServer.Core.csproj" />
+     </ItemGroup>
+ 
++    <ItemGroup Condition="'$(EnableFlHookCompat)' == 'true'">
++      <ProjectReference Include="..\..\..\FLHookCompat\src\LancerNexus.FlhookCompat.Contracts\LancerNexus.FlhookCompat.Contracts.csproj" />
++      <ProjectReference Include="..\..\..\FLHookCompat\src\LancerNexus.FlhookCompat.Hosting\LancerNexus.FlhookCompat.Hosting.csproj" />
++    </ItemGroup>
++
+     <ItemGroup>
+       <Folder Include="TestAssets\" />
+       <Folder Include="Thorn\Scripts\" />
+diff --git a/src/LibreLancer/Net/GameListener.cs b/src/LibreLancer/Net/GameListener.cs
+index 7f59b93a9..a74206139 100644
+--- a/src/LibreLancer/Net/GameListener.cs
++++ b/src/LibreLancer/Net/GameListener.cs
+@@ -119,11 +119,13 @@ namespace LibreLancer.Net
+                                 }
+                                 try
+                                 {
++                                    var targetLeaseToken = game.CreateTargetTransferLeaseToken(transferId);
+                                     var imported = await game.ImportTransferSnapshotAndAcceptAsync(transferId,
+-                                        parts[2], game.CreateTargetTransferLeaseToken(transferId));
++                                        parts[2], targetLeaseToken);
+                                     var transferPeer = request.Accept();
+                                     var transferPlayer = new Player(new RemotePacketClient(transferPeer), game,
+-                                        imported.AccountId, imported.CharacterId, imported.SaveGame, imported.NpcSnapshot)
++                                        imported.AccountId, imported.CharacterId, imported.SaveGame, imported.NpcSnapshot,
++                                        targetLeaseToken, imported.LeaseVersion)
+                                     {
+                                         GatewayTransferId = imported.TransferId
+                                     };
+diff --git a/src/LibreLancer/Server/GameServer.cs b/src/LibreLancer/Server/GameServer.cs
+index dc5a40056..32a7da2b3 100644
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -575,7 +575,7 @@ namespace LibreLancer.Server
+                 string.IsNullOrWhiteSpace(prepared.TargetEndpoint))
+                 throw new InvalidDataException("Coordinator returned an invalid NPC transfer reservation.");
+ 
+-            if (missionRuntime is not null && (leaseVersion < 0 || missionRuntime.Player.Character?.ID != characterId))
++            if (missionRuntime is not null && (leaseVersion < 0 || missionRuntime.Player.StableCharacterId != characterId))
+                 throw new InvalidDataException("Mission NPC transfer does not match its source character lease.");
+             if (missionRuntime is not null && !transferLeaseVersions.TryAdd(transferId, leaseVersion) &&
+                 (!transferLeaseVersions.TryGetValue(transferId, out var knownVersion) || knownVersion != leaseVersion))
+@@ -1047,7 +1047,7 @@ namespace LibreLancer.Server
+             if (npcIds.Any(id => id == Guid.Empty) || npcIds.Distinct().Count() != npcIds.Length ||
+                 jumpers.Any(jumper => jumper.RuntimeSnapshot is null || jumper.OwnershipVersion <= 0))
+                 throw new InvalidDataException("A jumping NPC has no Coordinator identity or transferable runtime snapshot.");
+-            var characterId = missionRuntime?.Player.Character?.ID;
++            var characterId = missionRuntime?.Player.StableCharacterId;
+             var formations = CaptureNpcFormations(transferId, characterId, jumpers);
+             foreach (var jumper in jumpers)
+             {
+@@ -1113,8 +1113,8 @@ namespace LibreLancer.Server
+         {
+             var context = state.MissionState.Length == 0 ? null :
+                 JsonSerializer.Deserialize<NpcMissionTransferContext>(state.MissionState);
+-            if (missionRuntime.Player.Character?.ID is not > 0 || context is not { CharacterId: > 0 } ||
+-                context.CharacterId != missionRuntime.Player.Character.ID ||
++            if (missionRuntime.Player.StableCharacterId is not > 0 || context is not { CharacterId: > 0 } ||
++                context.CharacterId != missionRuntime.Player.StableCharacterId ||
+                 string.IsNullOrWhiteSpace(context.MissionNickname) ||
+                 !string.Equals(missionRuntime.MissionNickname, context.MissionNickname,
+                     StringComparison.OrdinalIgnoreCase))
+@@ -1349,7 +1349,7 @@ namespace LibreLancer.Server
+             var context = JsonSerializer.Deserialize<NpcMissionTransferContext>(state.MissionState);
+             if (context is not { CharacterId: > 0 } || string.IsNullOrWhiteSpace(context.MissionNickname))
+                 return null;
+-            return GetConnectedPlayers().FirstOrDefault(player => player.Character?.ID == context.CharacterId &&
++            return GetConnectedPlayers().FirstOrDefault(player => player.StableCharacterId == context.CharacterId &&
+                 player.MissionRuntime != null && string.Equals(player.MissionRuntime.MissionNickname,
+                     context.MissionNickname, StringComparison.OrdinalIgnoreCase))?.MissionRuntime;
+         }
+@@ -1694,6 +1694,36 @@ namespace LibreLancer.Server
+             return Convert.ToBase64String(HMACSHA256.HashData(key, payload))
+                 .TrimEnd('=').Replace('+', '-').Replace('/', '_');
+         }
++        public Task<GatewayCharacterLease> ResolveAndAcquireCharacterLeaseAsync(Guid accountId, Guid sessionId,
++            string displayName, CancellationToken cancellationToken = default)
++        {
++            if (!ClusterTransfersEnabled || accountId == Guid.Empty || sessionId == Guid.Empty)
++                throw new InvalidOperationException("Gateway character leasing is not configured for this player.");
++            GatewayCharacterLeaseClient client;
++            lock (gatewayCharacterLeaseClientLock)
++            {
++                gatewayCharacterLeaseClient ??= new GatewayCharacterLeaseClient(
++                    new Uri(LoginUrl!, UriKind.Absolute), TransferInstanceKey!, transferHttp);
++                client = gatewayCharacterLeaseClient;
++            }
++            return client.ResolveAndAcquireAsync(accountId, sessionId, displayName, cancellationToken);
++        }
++
++        public Task<GatewayCharacterLease> RenewCharacterLeaseAsync(long characterId, string leaseToken,
++            long leaseVersion, CancellationToken cancellationToken = default)
++        {
++            if (!ClusterTransfersEnabled || characterId <= 0 || leaseVersion <= 0)
++                throw new InvalidOperationException("Gateway character lease renewal is not configured.");
++            GatewayCharacterLeaseClient client;
++            lock (gatewayCharacterLeaseClientLock)
++            {
++                gatewayCharacterLeaseClient ??= new GatewayCharacterLeaseClient(
++                    new Uri(LoginUrl!, UriKind.Absolute), TransferInstanceKey!, transferHttp);
++                client = gatewayCharacterLeaseClient;
++            }
++            return client.RenewAsync(characterId, leaseToken, leaseVersion, cancellationToken);
++        }
++
+     public int? TestNewCharacterRank { get; set; }
+     public string? TestMissionNickname { get; set; }
+ 
+@@ -1703,6 +1733,8 @@ namespace LibreLancer.Server
+         Timeout = TimeSpan.FromSeconds(30)
+     };
+     private readonly ConcurrentDictionary<Guid, long> transferLeaseVersions = new();
++    private readonly object gatewayCharacterLeaseClientLock = new();
++    private GatewayCharacterLeaseClient? gatewayCharacterLeaseClient;
+ 
+         public async Task<LancerNexus.Protocol.AdminQueryResponse> QueryAdministrationAsync(
+             LancerNexus.Protocol.GameAdminQueryRequest body)
+@@ -1750,7 +1782,7 @@ namespace LibreLancer.Server
+                 GetTransferGatewayUrl("/api/v1/game/admin/permissions/check"));
+             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", TransferInstanceKey!);
+             request.Content = JsonContent.Create(new GamePermissionCheckRequest(player.AccountId,
+-                player.GatewaySessionId, player.Character.ID, player.GatewayTransferId, permission, player.System));
++                player.GatewaySessionId, player.StableCharacterId, player.GatewayTransferId, permission, player.System));
+             using var response = await transferHttp.SendAsync(request, timeout.Token);
+             if (!response.IsSuccessStatusCode) return false;
+             var result = await response.Content.ReadFromJsonAsync<GamePermissionCheckResponse>(timeout.Token);
+@@ -1974,7 +2006,7 @@ namespace LibreLancer.Server
+         {
+             if (transferId == Guid.Empty || characterId <= 0)
+                 throw new ArgumentException("Transfer and character IDs must be valid.");
+-            var player = GetConnectedPlayers().SingleOrDefault(x => x.Character?.ID == characterId);
++            var player = GetConnectedPlayers().SingleOrDefault(x => x.StableCharacterId == characterId);
+             if (player == null)
+                 return Task.FromException<byte[]>(new InvalidOperationException("Character is not connected to this instance."));
+             return player.FreezeForTransferAsync(transferId, characterId, targetSystem, target);
+@@ -2189,7 +2221,7 @@ namespace LibreLancer.Server
+             }
+             var npcSnapshot = await WaitForNpcTransferCommitAsync(transferId, cancellationToken)
+                 .ConfigureAwait(false);
+-            var acceptedPlayer = GetConnectedPlayers().SingleOrDefault(player => player.Character?.ID == import.CharacterId);
++            var acceptedPlayer = GetConnectedPlayers().SingleOrDefault(player => player.StableCharacterId == import.CharacterId);
+             if (acceptedPlayer != null)
+                 acceptedPlayer.GatewayTransferId = transferId;
+             return new TransferSnapshotTargetReadyResult(transferId, import.AccountId, import.CharacterId,
+@@ -2416,7 +2448,7 @@ namespace LibreLancer.Server
+             if (!string.Equals(status.SourceInstanceId, InstanceId, StringComparison.Ordinal))
+                 throw new InvalidDataException("Transfer belongs to another source instance.");
+ 
+-            var sourcePlayer = GetConnectedPlayers().SingleOrDefault(x => x.Character?.ID == characterId);
++            var sourcePlayer = GetConnectedPlayers().SingleOrDefault(x => x.StableCharacterId == characterId);
+             switch (status.State)
+             {
+                 case LancerNexus.Protocol.TransferState.Committed:
+@@ -2505,10 +2537,10 @@ namespace LibreLancer.Server
+         private sealed record TransferSourceReleasedResponse(Guid TransferId, string InstanceId, string State);
+ 
+         public bool AbortCharacterTransfer(Guid transferId, long characterId) =>
+-            GetConnectedPlayers().SingleOrDefault(x => x.Character?.ID == characterId)?.AbortTransferFreeze(transferId) ?? false;
++            GetConnectedPlayers().SingleOrDefault(x => x.StableCharacterId == characterId)?.AbortTransferFreeze(transferId) ?? false;
+ 
+         public bool ReleaseCharacterAfterTransferCommit(Guid transferId, long characterId) =>
+-            GetConnectedPlayers().SingleOrDefault(x => x.Character?.ID == characterId)?.ReleaseAfterTransferCommit(transferId) ?? false;
++            GetConnectedPlayers().SingleOrDefault(x => x.StableCharacterId == characterId)?.ReleaseAfterTransferCommit(transferId) ?? false;
+ 
+ #if DEBUG
+         /// <summary>Read-only local diagnostics captured between simulation updates.</summary>
+diff --git a/src/LibreLancer/Server/GatewayCharacterLeaseClient.cs b/src/LibreLancer/Server/GatewayCharacterLeaseClient.cs
+new file mode 100644
+index 000000000..7abb5d4cd
+--- /dev/null
++++ b/src/LibreLancer/Server/GatewayCharacterLeaseClient.cs
+@@ -0,0 +1,117 @@
++using System;
++using System.IO;
++using System.Net.Http;
++using System.Net.Http.Headers;
++using System.Net.Http.Json;
++using System.Security.Cryptography;
++using System.Text;
++using System.Threading;
++using System.Threading.Tasks;
++using LancerNexus.Protocol;
++
++namespace LibreLancer.Server;
++
++public sealed record GatewayCharacterLease(long CharacterId, string LeaseToken, long LeaseVersion,
++    DateTimeOffset ValidUntilUtc);
++
++public sealed class GatewayCharacterLeaseClient
++{
++    private readonly Uri gateway;
++    private readonly string instanceKey;
++    private readonly HttpClient http;
++
++    public GatewayCharacterLeaseClient(Uri gateway, string instanceKey, HttpClient http)
++    {
++        if (!gateway.IsAbsoluteUri || gateway.Scheme != Uri.UriSchemeHttps ||
++            gateway.AbsolutePath != "/" || !string.IsNullOrEmpty(gateway.UserInfo) || !string.IsNullOrEmpty(gateway.Query) ||
++            !string.IsNullOrEmpty(gateway.Fragment))
++            throw new ArgumentException("Gateway URL must be an HTTPS origin.", nameof(gateway));
++        if (string.IsNullOrWhiteSpace(instanceKey) || instanceKey.Length < 32)
++            throw new ArgumentException("Gateway instance key is invalid.", nameof(instanceKey));
++        this.gateway = new Uri(gateway.AbsoluteUri.TrimEnd('/') + "/", UriKind.Absolute);
++        this.instanceKey = instanceKey;
++        this.http = http ?? throw new ArgumentNullException(nameof(http));
++    }
++
++    public async Task<GatewayCharacterLease> ResolveAndAcquireAsync(Guid accountId, Guid sessionId,
++        string displayName, CancellationToken cancellationToken = default)
++    {
++        var resolveRequest = new CharacterIdentityResolveRequestV1
++        {
++            CorrelationId = Guid.NewGuid(), AccountId = accountId, SessionId = sessionId,
++            DisplayName = displayName
++        };
++        if (!resolveRequest.IsValid())
++            throw new ArgumentException("Character identity request is invalid.", nameof(displayName));
++
++        using var resolveMessage = new HttpRequestMessage(HttpMethod.Post,
++            new Uri(gateway, "api/v1/game/characters/resolve-identity"));
++        resolveMessage.Headers.Authorization = new AuthenticationHeaderValue("Bearer", instanceKey);
++        resolveMessage.Content = JsonContent.Create(resolveRequest);
++        using var resolveResponse = await http.SendAsync(resolveMessage, cancellationToken).ConfigureAwait(false);
++        if (!resolveResponse.IsSuccessStatusCode)
++            throw new HttpRequestException($"Gateway character identity resolution failed with HTTP {(int)resolveResponse.StatusCode}.");
++        var identity = await resolveResponse.Content.ReadFromJsonAsync<CharacterIdentityResolveResultV1>(
++            cancellationToken: cancellationToken).ConfigureAwait(false);
++        if (identity is null || !identity.IsValid() || identity.CorrelationId != resolveRequest.CorrelationId ||
++            !identity.Accepted || identity.CharacterId is not > 0 || string.IsNullOrWhiteSpace(identity.LeaseTicket))
++            throw new InvalidDataException("Gateway character identity response is invalid.");
++
++        var leaseTokenPayload = Encoding.UTF8.GetBytes(
++            $"character-lease-v1:{accountId:D}:{sessionId:D}:{identity.CharacterId.Value}");
++        var instanceKeyBytes = Encoding.UTF8.GetBytes(instanceKey);
++        var leaseTokenBytes = HMACSHA256.HashData(instanceKeyBytes, leaseTokenPayload);
++        var leaseToken = Convert.ToBase64String(leaseTokenBytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
++        CryptographicOperations.ZeroMemory(leaseTokenBytes);
++        CryptographicOperations.ZeroMemory(leaseTokenPayload);
++        CryptographicOperations.ZeroMemory(instanceKeyBytes);
++        var acquireRequest = new CharacterLeaseAcquireRequestV1
++        {
++            CorrelationId = Guid.NewGuid(), JoinTicket = identity.LeaseTicket,
++            LeaseToken = leaseToken, CharacterId = identity.CharacterId.Value
++        };
++        if (!acquireRequest.IsValid())
++            throw new InvalidDataException("Gateway issued an invalid character lease request.");
++
++        using var acquireMessage = new HttpRequestMessage(HttpMethod.Post,
++            new Uri(gateway, "api/v1/game/acquire-character-lease"));
++        acquireMessage.Headers.Authorization = new AuthenticationHeaderValue("Bearer", instanceKey);
++        acquireMessage.Content = JsonContent.Create(acquireRequest);
++        using var acquireResponse = await http.SendAsync(acquireMessage, cancellationToken).ConfigureAwait(false);
++        if (!acquireResponse.IsSuccessStatusCode)
++            throw new HttpRequestException($"Gateway character lease acquisition failed with HTTP {(int)acquireResponse.StatusCode}.");
++        var acquired = await acquireResponse.Content.ReadFromJsonAsync<CharacterLeaseAcquireResultV1>(
++            cancellationToken: cancellationToken).ConfigureAwait(false);
++        if (acquired is null || !acquired.IsValid() || acquired.CorrelationId != acquireRequest.CorrelationId)
++            throw new InvalidDataException("Gateway character lease response is invalid.");
++        if (!acquired.Accepted)
++            throw new InvalidOperationException($"Gateway character lease rejected: {acquired.ReasonCode}.");
++        return new GatewayCharacterLease(identity.CharacterId.Value, leaseToken, acquired.LeaseVersion!.Value,
++            acquired.ValidUntilUtc!.Value);
++    }
++
++    public async Task<GatewayCharacterLease> RenewAsync(long characterId, string leaseToken, long leaseVersion,
++        CancellationToken cancellationToken = default)
++    {
++        var requestBody = new CharacterLeaseRenewRequestV1
++        {
++            CorrelationId = Guid.NewGuid(), CharacterId = characterId,
++            LeaseToken = leaseToken, LeaseVersion = leaseVersion
++        };
++        if (!requestBody.IsValid())
++            throw new ArgumentException("Character lease renewal request is invalid.");
++        using var message = new HttpRequestMessage(HttpMethod.Post,
++            new Uri(gateway, "api/v1/game/renew-character-lease"));
++        message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", instanceKey);
++        message.Content = JsonContent.Create(requestBody);
++        using var response = await http.SendAsync(message, cancellationToken).ConfigureAwait(false);
++        if (!response.IsSuccessStatusCode)
++            throw new HttpRequestException($"Gateway character lease renewal failed with HTTP {(int)response.StatusCode}.");
++        var renewed = await response.Content.ReadFromJsonAsync<CharacterLeaseRenewResultV1>(
++            cancellationToken: cancellationToken).ConfigureAwait(false);
++        if (renewed is null || !renewed.IsValid() || renewed.CorrelationId != requestBody.CorrelationId ||
++            !renewed.Accepted || renewed.LeaseVersion != leaseVersion)
++            throw new InvalidDataException("Gateway character lease renewal response is invalid or rejected.");
++        return new GatewayCharacterLease(characterId, leaseToken, leaseVersion, renewed.ValidUntilUtc!.Value);
++    }
++}
+diff --git a/src/LibreLancer/Server/NPCManager.cs b/src/LibreLancer/Server/NPCManager.cs
+index 5b8613db2..681aa2e57 100644
+--- a/src/LibreLancer/Server/NPCManager.cs
++++ b/src/LibreLancer/Server/NPCManager.cs
+@@ -580,7 +580,7 @@ namespace LibreLancer.Server
+                         ? restored.FirstOrDefault(candidate => candidate.Identity.NpcId == npcId).Object ??
+                           World.GameWorld.Objects.FirstOrDefault(candidate =>
+                               candidate.TryGetComponent<SNPCComponent>(out var npc) && npc.NpcId == npcId)
+-                        : World.Players.FirstOrDefault(candidate => candidate.Key.Character?.ID == member.CharacterId).Value;
++                        : World.Players.FirstOrDefault(candidate => candidate.Key.StableCharacterId == member.CharacterId).Value;
+                     return (Member: member, Object: obj ?? throw new InvalidDataException("NPC formation member could not be resolved after restore."));
+                 }).ToArray();
+                 if (members.Select(entry => entry.Object).Distinct().Count() != members.Length)
+@@ -645,7 +645,7 @@ namespace LibreLancer.Server
+                     World.GameWorld.Objects.FirstOrDefault(candidate =>
+                         candidate.TryGetComponent<SNPCComponent>(out var npc) && npc.NpcId == npcId),
+                 "character" when reference.CharacterId is long characterId =>
+-                    World.Players.FirstOrDefault(candidate => candidate.Key.Character?.ID == characterId).Value,
++                    World.Players.FirstOrDefault(candidate => candidate.Key.StableCharacterId == characterId).Value,
+                 "nickname" when !string.IsNullOrWhiteSpace(reference.Nickname) =>
+                     World.GameWorld.GetObject(reference.Nickname),
+                 _ => null
+diff --git a/src/LibreLancer/Server/Player.cs b/src/LibreLancer/Server/Player.cs
+index 77c7710e6..0f094f7c3 100644
+--- a/src/LibreLancer/Server/Player.cs
++++ b/src/LibreLancer/Server/Player.cs
+@@ -120,6 +120,13 @@ namespace LibreLancer.Server
+         // Populated exclusively from Gateway admission, never from a client chat payload.
+         public Guid GatewaySessionId { get; internal set; }
+         public Guid GatewayTransferId { get; internal set; }
++        public long GatewayCharacterId { get; internal set; }
++        public string? GatewayLeaseToken { get; internal set; }
++        public long GatewayLeaseVersion { get; internal set; }
++        public DateTimeOffset GatewayLeaseValidUntilUtc { get; internal set; }
++        public long StableCharacterId => GatewayCharacterId > 0 ? GatewayCharacterId : Character?.ID ?? 0;
++        private CancellationTokenSource? gatewayLeaseRenewalCancellation;
++        private Task? gatewayLeaseRenewalTask;
+         private int adminQueryRunning;
+         private long lastAdminQuery;
+ 
+@@ -157,7 +164,7 @@ namespace LibreLancer.Server
+                     try
+                     {
+                         var result = await Game.MutateAdministrationPermissionAsync(new GamePermissionMutationRequest(
+-                            AccountId, GatewaySessionId, Character?.ID ?? 0, GatewayTransferId, query));
++                            AccountId, GatewaySessionId, StableCharacterId, GatewayTransferId, query));
+                         rpcClient.OnConsoleMessage(result.Status switch
+                         {
+                             "ok" => "Admin: Rechteänderung synchronisiert.",
+@@ -194,7 +201,7 @@ namespace LibreLancer.Server
+                 return;
+             }
+             lastAdminQuery = now;
+-            var characterId = Character?.ID ?? 0;
++            var characterId = StableCharacterId;
+             _ = Task.Run(async () =>
+             {
+                 try
+@@ -222,7 +229,8 @@ namespace LibreLancer.Server
+ 
+         public Player(IPacketClient client, GameServer game, Guid playerGuid, long? transferLoginCharacterId = null,
+             SaveGame? transferLoginSaveGame = null,
+-            LancerNexus.Protocol.NpcTransferSnapshot? transferLoginNpcSnapshot = null)
++            LancerNexus.Protocol.NpcTransferSnapshot? transferLoginNpcSnapshot = null,
++            string? transferLeaseToken = null, long transferLeaseVersion = 0)
+         {
+             this.Client = client;
+             this.Game = game;
+@@ -230,6 +238,13 @@ namespace LibreLancer.Server
+             this.transferLoginCharacterId = transferLoginCharacterId;
+             this.transferLoginSaveGame = transferLoginSaveGame;
+             this.transferLoginNpcSnapshot = transferLoginNpcSnapshot;
++            if (transferLoginCharacterId is > 0 && transferLeaseToken is not null && transferLeaseVersion > 0)
++            {
++                GatewayCharacterId = transferLoginCharacterId.Value;
++                GatewayLeaseToken = transferLeaseToken;
++                GatewayLeaseVersion = transferLeaseVersion;
++                GatewayLeaseValidUntilUtc = DateTimeOffset.UtcNow.AddSeconds(10);
++            }
+             ID = Interlocked.Increment(ref _gid);
+             ResponseHandler = new NetResponseHandler();
+             rpcClient = new RemoteClientPlayer(client, ResponseHandler);
+@@ -1317,6 +1332,7 @@ namespace LibreLancer.Server
+                         return;
+                     }
+                     BeginGame(await NetCharacter.FromDb(characterId, Game), transferLoginSaveGame);
++                    StartGatewayLeaseRenewal();
+                 }
+                 else
+                 {
+@@ -1364,7 +1380,7 @@ namespace LibreLancer.Server
+             string targetSystem, string target, string targetInstanceId, string targetEndpoint)
+         {
+             if (!Guid.TryParseExact(transferId, "N", out var id) || !Game.ClusterTransfersEnabled ||
+-                Character?.ID != characterId || leaseVersion < 0)
++                StableCharacterId != characterId || leaseVersion < 0)
+             {
+                 rpcClient.TransferSnapshotStaged(transferId, false);
+                 return;
+@@ -1544,6 +1560,25 @@ namespace LibreLancer.Server
+                     return false;
+                 }
+ 
++                GatewayCharacterLease? acquiredLease = null;
++                if (Game.ClusterTransfersEnabled)
++                {
++                    try
++                    {
++                        acquiredLease = await Game.ResolveAndAcquireCharacterLeaseAsync(playerGuid, GatewaySessionId, sc.Name);
++                        GatewayCharacterId = acquiredLease.CharacterId;
++                        GatewayLeaseToken = acquiredLease.LeaseToken;
++                        GatewayLeaseVersion = acquiredLease.LeaseVersion;
++                        GatewayLeaseValidUntilUtc = acquiredLease.ValidUntilUtc;
++                    }
++                    catch (Exception error)
++                    {
++                        Game.CharactersInUse.Remove(sc.Id);
++                        FLLog.Warning("Gateway", $"Character lease acquisition failed ({error.GetType().Name}).");
++                        return false;
++                    }
++                }
++
+                 SaveGame? testMission = null;
+ #if DEBUG
+                 if (!string.IsNullOrWhiteSpace(Game.TestMissionNickname))
+@@ -1560,6 +1595,7 @@ namespace LibreLancer.Server
+                 }
+ #endif
+                 BeginGame(await NetCharacter.FromDb(sc.Id, Game), testMission);
++                if (acquiredLease is not null) StartGatewayLeaseRenewal();
+                 return true;
+             }
+             else
+@@ -1568,6 +1604,62 @@ namespace LibreLancer.Server
+             }
+         }
+ 
++        private void StartGatewayLeaseRenewal()
++        {
++            if (GatewayCharacterId <= 0 || string.IsNullOrWhiteSpace(GatewayLeaseToken) || GatewayLeaseVersion <= 0)
++                return;
++            if (GatewayLeaseValidUntilUtc <= DateTimeOffset.UtcNow)
++            {
++                if (!TransferInProgress) Client.Disconnect(DisconnectReason.LoginError);
++                return;
++            }
++            var cancellation = new CancellationTokenSource();
++            var previous = Interlocked.Exchange(ref gatewayLeaseRenewalCancellation, cancellation);
++            previous?.Cancel();
++            gatewayLeaseRenewalTask = Task.Run(async () =>
++            {
++                while (!cancellation.IsCancellationRequested)
++                {
++                    var remaining = GatewayLeaseValidUntilUtc - DateTimeOffset.UtcNow;
++                    if (remaining <= TimeSpan.Zero)
++                    {
++                        if (!TransferInProgress) Client.Disconnect(DisconnectReason.LoginError);
++                        return;
++                    }
++                    var delay = remaining <= TimeSpan.FromSeconds(10)
++                        ? TimeSpan.Zero
++                        : TimeSpan.FromTicks(Math.Max(TimeSpan.FromSeconds(5).Ticks, remaining.Ticks / 3));
++                    try { await Task.Delay(delay, cancellation.Token).ConfigureAwait(false); }
++                    catch (OperationCanceledException) { return; }
++                    try
++                    {
++                        var renewed = await Game.RenewCharacterLeaseAsync(GatewayCharacterId, GatewayLeaseToken!,
++                            GatewayLeaseVersion, cancellation.Token).ConfigureAwait(false);
++                        if (renewed.LeaseVersion != GatewayLeaseVersion || renewed.ValidUntilUtc <= DateTimeOffset.UtcNow)
++                            throw new InvalidDataException("Gateway returned an invalid lease renewal.");
++                        GatewayLeaseValidUntilUtc = renewed.ValidUntilUtc;
++                    }
++                    catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { return; }
++                    catch (Exception error)
++                    {
++                        FLLog.Warning("Gateway", $"Character lease renewal failed ({error.GetType().Name}).");
++                        var stillValid = GatewayLeaseValidUntilUtc - DateTimeOffset.UtcNow;
++                        if (stillValid <= TimeSpan.FromSeconds(10))
++                        {
++                            if (!TransferInProgress) Client.Disconnect(DisconnectReason.LoginError);
++                            return;
++                        }
++                        try { await Task.Delay(TimeSpan.FromSeconds(Math.Min(15, stillValid.TotalSeconds / 2)),
++                            cancellation.Token).ConfigureAwait(false); }
++                        catch (OperationCanceledException) { return; }
++                    }
++                }
++            }, cancellation.Token);
++        }
++
++        private void StopGatewayLeaseRenewal() =>
++            Interlocked.Exchange(ref gatewayLeaseRenewalCancellation, null)?.Cancel();
++
+         Task<bool> IServerPlayer.DeleteCharacter(int index)
+         {
+             if (index < 0 || index >= CharacterList.Count)
+@@ -1863,7 +1955,7 @@ namespace LibreLancer.Server
+                     }
+                     else
+                     {
+-                        if (Character == null || Character.ID != expectedCharacterId || Space == null || Base != null)
++                        if (Character == null || StableCharacterId != expectedCharacterId || Space == null || Base != null)
+                             throw new InvalidOperationException("Character is not eligible for a space transfer.");
+                         transferId = id;
+                         transferCharacterId = expectedCharacterId;
+@@ -1894,7 +1986,7 @@ namespace LibreLancer.Server
+                 byte[] snapshot;
+                 lock (saveSync)
+                 {
+-                    if (Character == null || Character.ID != expectedCharacterId || transferId != id)
++                    if (Character == null || StableCharacterId != expectedCharacterId || transferId != id)
+                         throw new InvalidOperationException("Character ownership changed during transfer freeze.");
+ 
+                     RunSave();
+@@ -1978,7 +2070,10 @@ namespace LibreLancer.Server
+             if (Volatile.Read(ref sourceDisconnected) != 0)
+                 FinalizeDisconnectedTransfer();
+             else
++            {
++                StartGatewayLeaseRenewal();
+                 SpaceInitialSpawn(null);
++            }
+             return true;
+         }
+ 
+@@ -1990,6 +2085,7 @@ namespace LibreLancer.Server
+                 if (transferState != TransferFrozen || transferId != id || Character == null)
+                     return false;
+                 var characterId = Character.ID;
++                StopGatewayLeaseRenewal();
+                 Volatile.Write(ref transferState, TransferReleased);
+                 Game.CharactersInUse.Remove(characterId);
+                 Game.PublishServerEvent(new ServerEvent
+@@ -2112,6 +2208,7 @@ namespace LibreLancer.Server
+ 
+         private void LoggedOut()
+         {
++            StopGatewayLeaseRenewal();
+             if (Character != null)
+             {
+                 using var c = Character.BeginTransaction();
+@@ -2186,7 +2283,7 @@ namespace LibreLancer.Server
+                     return;
+                 pendingClusterJumpers = jumpers;
+                 pendingClusterJumpSourceWorld = Space?.World;
+-                rpcClient.StartJumpTunnel(system, target, Character.ID);
++                rpcClient.StartJumpTunnel(system, target, StableCharacterId);
+                 return;
+             }
+ 
