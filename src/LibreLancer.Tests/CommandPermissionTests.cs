@@ -20,6 +20,7 @@ public sealed class CommandPermissionTests
     [InlineData("spawnloot", "command.spawnloot")]
     [InlineData("stop", "command.stop")]
     [InlineData("warp", "command.warp")]
+    [InlineData("clusterjump", "command.clusterjump")]
     public void AdminCommandsDeclareTheirOwnPermission(string name, string permission)
     {
         var command = ConsoleCommands.AllCommands.Single(x => x.Name == name);
