@@ -25,7 +25,8 @@ internal sealed class FlHookCompatRuntime : IAsyncDisposable
     private readonly string basePath;
     private readonly FlHookCompatServerEventHub eventHub;
     private CoordinatorFlHookEventPublisher? clusterEventPublisher;
-    private readonly Channel<PendingEvent> pending = Channel.CreateBounded<PendingEvent>(new BoundedChannelOptions(4096)
+    private readonly object captureSync = new();
+    private readonly Channel<FlHookCompatServerEvent> pending = Channel.CreateBounded<FlHookCompatServerEvent>(new BoundedChannelOptions(4096)
     {
         FullMode = BoundedChannelFullMode.Wait,
         SingleReader = true,
@@ -33,10 +34,11 @@ internal sealed class FlHookCompatRuntime : IAsyncDisposable
     });
     private readonly List<LoadedManagedPlugin> plugins = [];
     private Task? dispatcher;
-    private int queueOverflowLogged;
+    private int pluginDispatchOverflowLogged;
+    private int captureFailed;
 
     public bool ClusterEventCaptureReady => !config.FlHookCompatClusterEventsEnabled ||
-        dispatcher is { IsCompleted: false } && Volatile.Read(ref queueOverflowLogged) == 0;
+        dispatcher is { IsCompleted: false } && Volatile.Read(ref captureFailed) == 0;
 
     public FlHookCompatRuntime(ServerConfig config, string basePath, string instanceId)
     {
@@ -130,8 +132,23 @@ internal sealed class FlHookCompatRuntime : IAsyncDisposable
     {
         var pendingEvent = ConvertEvent(serverEvent);
         if (pendingEvent is null) return;
-        if (!pending.Writer.TryWrite(pendingEvent) && Interlocked.Exchange(ref queueOverflowLogged, 1) == 0)
-            FLLog.Warning("FLHookCompat", "Plugin event queue is full; some local plugin events may be dropped.");
+        lock (captureSync)
+        {
+            if (captureFailed != 0) return;
+            // Persist cluster capture before the best-effort plugin notification queue.
+            try
+            {
+                var recorded = eventHub.Record(pendingEvent.Kind, pendingEvent.PlayerId,
+                    pendingEvent.SystemId, pendingEvent.CharacterId);
+                if (!pending.Writer.TryWrite(recorded) && Interlocked.Exchange(ref pluginDispatchOverflowLogged, 1) == 0)
+                    FLLog.Warning("FLHookCompat", "Plugin notification queue is full; local callbacks may be skipped. The cluster event was already recorded.");
+            }
+            catch (Exception exception) when (exception is not StackOverflowException and not OutOfMemoryException)
+            {
+                Volatile.Write(ref captureFailed, 1);
+                FLLog.Error("FLHookCompat", $"Could not record a server event durably; cluster readiness is false: {exception.Message}");
+            }
+        }
     }
 
     private static PendingEvent? ConvertEvent(ServerEvent serverEvent)
@@ -181,7 +198,7 @@ internal sealed class FlHookCompatRuntime : IAsyncDisposable
     {
         await foreach (var item in pending.Reader.ReadAllAsync())
         {
-            var failures = eventHub.Publish(item.Kind, item.PlayerId, item.SystemId, item.CharacterId);
+            var failures = eventHub.DispatchRecorded(item);
             foreach (var failure in failures)
                 FLLog.Error("FLHookCompat", $"Plugin event handler failed: {failure.Message}");
         }
