@@ -976,3 +976,328 @@ index d0f9265..1c698bf 100644
 @@ -165 +165,2 @@ client 2163-handle-in-space-gateway-character-previews.patch
  client 2164-add-gateway-market-trade-transport.patch
 +client 2165-add-quote-bound-dynamic-market-trades.patch
+
+diff --git a/src/LibreLancer/Net/Protocol/NetMarketQuoteV1.cs b/src/LibreLancer/Net/Protocol/NetMarketQuoteV1.cs
+new file mode 100644
+index 000000000..49bfd37cd
+--- /dev/null
++++ b/src/LibreLancer/Net/Protocol/NetMarketQuoteV1.cs
+@@ -0,0 +1,76 @@
++using LancerNexus.Protocol;
++using System;
++
++namespace LibreLancer.Net.Protocol;
++
++/// <summary>
++/// Minimal game-wire quote preview. It carries no authority; the server re-quotes and
++/// matches every field before accepting a Gateway market commit.
++/// </summary>
++public sealed class NetMarketQuoteV1
++{
++    public int SchemaVersion { get; set; } = 1;
++    public string SystemId { get; set; } = "";
++    public string MarketId { get; set; } = "";
++    public string GoodId { get; set; } = "";
++    public byte Side { get; set; }
++    public int Quantity { get; set; }
++    public long MarketRevision { get; set; }
++    public long ReputationRevision { get; set; }
++    public long QuoteUnitPrice { get; set; }
++    public long TotalPrice { get; set; }
++    public long ExpiresUtcTicks { get; set; }
++    public int PricingPolicyVersion { get; set; }
++
++    public bool IsValid() => SchemaVersion == 1 && !string.IsNullOrWhiteSpace(SystemId) &&
++        !string.IsNullOrWhiteSpace(MarketId) && !string.IsNullOrWhiteSpace(GoodId) &&
++        Side is 1 or 2 && Quantity > 0 && MarketRevision > 0 && ReputationRevision > 0 &&
++        QuoteUnitPrice >= 0 && TotalPrice >= 0 && ExpiresUtcTicks > DateTime.UtcNow.Ticks &&
++        PricingPolicyVersion == 1;
++
++    public bool IsFor(string goodId, int quantity, bool sell) => IsValid() &&
++        string.Equals(GoodId, goodId, StringComparison.OrdinalIgnoreCase) && Quantity == quantity &&
++        Side == (sell ? (byte)MarketTradeSideV1.Sell : (byte)MarketTradeSideV1.Buy);
++
++    public bool MatchesQuote(MarketQuoteResponseV1 quote, long expectedReputationRevision) => IsValid() &&
++        quote.Status == MarketQuoteStatusV1.Quoted && quote.ExpiresUtc > DateTimeOffset.UtcNow &&
++        string.Equals(quote.SystemId, SystemId, StringComparison.OrdinalIgnoreCase) &&
++        string.Equals(quote.MarketId, MarketId, StringComparison.OrdinalIgnoreCase) &&
++        string.Equals(quote.GoodId, GoodId, StringComparison.OrdinalIgnoreCase) &&
++        (byte)quote.Side == Side && quote.Quantity == Quantity &&
++        quote.MarketRevision == MarketRevision && quote.ReputationRevision == ReputationRevision &&
++        expectedReputationRevision == ReputationRevision && quote.QuoteUnitPrice == QuoteUnitPrice &&
++        quote.TotalPrice == TotalPrice && quote.PricingPolicyVersion == PricingPolicyVersion;
++
++    public void Put(PacketWriter writer)
++    {
++        writer.PutVariableInt32(SchemaVersion);
++        writer.Put(SystemId);
++        writer.Put(MarketId);
++        writer.Put(GoodId);
++        writer.Put(Side);
++        writer.PutVariableInt32(Quantity);
++        writer.PutVariableInt64(MarketRevision);
++        writer.PutVariableInt64(ReputationRevision);
++        writer.PutVariableInt64(QuoteUnitPrice);
++        writer.PutVariableInt64(TotalPrice);
++        writer.PutVariableInt64(ExpiresUtcTicks);
++        writer.PutVariableInt32(PricingPolicyVersion);
++    }
++
++    public static NetMarketQuoteV1 Read(PacketReader reader) => new()
++    {
++        SchemaVersion = reader.GetVariableInt32(),
++        SystemId = reader.GetString() ?? "",
++        MarketId = reader.GetString() ?? "",
++        GoodId = reader.GetString() ?? "",
++        Side = reader.GetByte(),
++        Quantity = reader.GetVariableInt32(),
++        MarketRevision = reader.GetVariableInt64(),
++        ReputationRevision = reader.GetVariableInt64(),
++        QuoteUnitPrice = reader.GetVariableInt64(),
++        TotalPrice = reader.GetVariableInt64(),
++        ExpiresUtcTicks = reader.GetVariableInt64(),
++        PricingPolicyVersion = reader.GetVariableInt32()
++    };
++}
+
+diff --git a/src/LibreLancer/Server/MarketTradeSaveProjection.cs b/src/LibreLancer/Server/MarketTradeSaveProjection.cs
+new file mode 100644
+index 000000000..72226248c
+--- /dev/null
++++ b/src/LibreLancer/Server/MarketTradeSaveProjection.cs
+@@ -0,0 +1,79 @@
++using System;
++using LibreLancer.Data;
++using LibreLancer.Data.Schema.Save;
++
++namespace LibreLancer.Server;
++
++internal static class MarketTradeSaveProjection
++{
++    public static bool TryPurchase(SaveGame save, string goodId, int quantity, string? hardpoint,
++        string? bundledAmmoGoodId, int bundledAmmoQuantity, long totalPrice)
++    {
++        var player = save.Player;
++        if (player is null || string.IsNullOrWhiteSpace(goodId) || quantity <= 0 || totalPrice < 0 ||
++            player.Money < totalPrice)
++            return false;
++        if (!string.IsNullOrWhiteSpace(hardpoint) && quantity != 1)
++            return false;
++        if (bundledAmmoQuantity < 0 ||
++            (bundledAmmoQuantity > 0 && string.IsNullOrWhiteSpace(bundledAmmoGoodId)))
++            return false;
++
++        player.Money -= totalPrice;
++        if (!string.IsNullOrWhiteSpace(hardpoint))
++        {
++            player.Equip.Add(new PlayerEquipment
++            {
++                Item = new HashValue(goodId),
++                Hardpoint = hardpoint.Equals("internal", StringComparison.OrdinalIgnoreCase) ? "" : hardpoint
++            });
++        }
++        else
++        {
++            player.Cargo.Add(new PlayerCargo { Item = new HashValue(goodId), Count = quantity });
++        }
++        if (bundledAmmoQuantity > 0)
++            player.Cargo.Add(new PlayerCargo
++            {
++                Item = new HashValue(bundledAmmoGoodId!), Count = bundledAmmoQuantity
++            });
++        return true;
++    }
++
++    public static bool TrySell(SaveGame save, string goodId, string? hardpoint, bool isMissionCargo,
++        int quantity, long totalPrice)
++    {
++        var player = save.Player;
++        if (player is null || string.IsNullOrWhiteSpace(goodId) || quantity <= 0 || totalPrice < 0 ||
++            player.Money > long.MaxValue - totalPrice)
++            return false;
++
++        var itemHash = new HashValue(goodId);
++        if (!string.IsNullOrWhiteSpace(hardpoint))
++        {
++            if (quantity != 1)
++                return false;
++            var expectedHardpoint = hardpoint.Equals("internal", StringComparison.OrdinalIgnoreCase)
++                ? "" : hardpoint;
++            var index = player.Equip.FindIndex(x => x.Item == itemHash &&
++                string.Equals(x.Hardpoint ?? "", expectedHardpoint, StringComparison.OrdinalIgnoreCase));
++            if (index < 0)
++                return false;
++            player.Equip.RemoveAt(index);
++        }
++        else
++        {
++            var index = player.Cargo.FindIndex(x => x.Item == itemHash &&
++                x.IsMissionCargo == isMissionCargo && x.Count >= quantity);
++            if (index < 0)
++                return false;
++            var cargo = player.Cargo[index];
++            cargo.Count -= quantity;
++            if (cargo.Count == 0)
++                player.Cargo.RemoveAt(index);
++        }
++
++        player.Money += totalPrice;
++        return true;
++    }
++}
+
+diff --git a/src/LibreLancer.Tests/NetMarketQuoteV1Tests.cs b/src/LibreLancer.Tests/NetMarketQuoteV1Tests.cs
+new file mode 100644
+index 000000000..1b295c4d2
+--- /dev/null
++++ b/src/LibreLancer.Tests/NetMarketQuoteV1Tests.cs
+@@ -0,0 +1,87 @@
++using System;
++using LancerNexus.Protocol;
++using LibreLancer.Net.Protocol;
++using LiteNetLib.Utils;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class NetMarketQuoteV1Tests
++{
++    [Fact]
++    public void QuoteRoundTripsOverGamePacketEncoding()
++    {
++        var quote = MakeQuote();
++        var writer = new PacketWriter();
++        quote.Put(writer);
++
++        var roundTrip = NetMarketQuoteV1.Read(new PacketReader(new NetDataReader(writer.GetCopy())));
++
++        Assert.Equal(quote.SchemaVersion, roundTrip.SchemaVersion);
++        Assert.Equal(quote.SystemId, roundTrip.SystemId);
++        Assert.Equal(quote.MarketId, roundTrip.MarketId);
++        Assert.Equal(quote.GoodId, roundTrip.GoodId);
++        Assert.Equal(quote.Side, roundTrip.Side);
++        Assert.Equal(quote.Quantity, roundTrip.Quantity);
++        Assert.Equal(quote.MarketRevision, roundTrip.MarketRevision);
++        Assert.Equal(quote.ReputationRevision, roundTrip.ReputationRevision);
++        Assert.Equal(quote.QuoteUnitPrice, roundTrip.QuoteUnitPrice);
++        Assert.Equal(quote.TotalPrice, roundTrip.TotalPrice);
++        Assert.Equal(quote.ExpiresUtcTicks, roundTrip.ExpiresUtcTicks);
++        Assert.Equal(quote.PricingPolicyVersion, roundTrip.PricingPolicyVersion);
++    }
++
++    [Fact]
++    public void QuoteMustMatchGoodSideQuantityMarketAndLivePriceRevisions()
++    {
++        var expected = MakeQuote();
++        var actual = MakeCoordinatorQuote();
++
++        Assert.True(expected.IsFor("commodity_food", 3, sell: false));
++        Assert.True(expected.MatchesQuote(actual, expected.ReputationRevision));
++        Assert.False(expected.IsFor("commodity_food", 2, sell: false));
++        Assert.False(expected.IsFor("commodity_food", 3, sell: true));
++        Assert.False(expected.MatchesQuote(actual with { MarketRevision = actual.MarketRevision + 1 },
++            expected.ReputationRevision));
++        Assert.False(expected.MatchesQuote(actual with { TotalPrice = actual.TotalPrice + 1 },
++            expected.ReputationRevision));
++        Assert.False(expected.MatchesQuote(actual, expected.ReputationRevision + 1));
++        Assert.False(expected.MatchesQuote(actual with { MarketId = "other_base" }, expected.ReputationRevision));
++    }
++
++    private static NetMarketQuoteV1 MakeQuote() => new()
++    {
++        SystemId = "li01",
++        MarketId = "li01_01_base",
++        GoodId = "commodity_food",
++        Side = (byte)MarketTradeSideV1.Buy,
++        Quantity = 3,
++        MarketRevision = 42,
++        ReputationRevision = 7,
++        QuoteUnitPrice = 18,
++        TotalPrice = 54,
++        ExpiresUtcTicks = DateTime.UtcNow.AddSeconds(30).Ticks,
++        PricingPolicyVersion = 1
++    };
++
++    private static MarketQuoteResponseV1 MakeCoordinatorQuote() => new()
++    {
++        CorrelationId = Guid.NewGuid(),
++        CharacterId = 8,
++        SystemId = "li01",
++        MarketId = "li01_01_base",
++        GoodId = "commodity_food",
++        Side = MarketTradeSideV1.Buy,
++        Quantity = 3,
++        Status = MarketQuoteStatusV1.Quoted,
++        MarketRevision = 42,
++        ReputationRevision = 7,
++        MarketFactionId = "li_n_grp",
++        AppliedReputation = 0,
++        ReputationFactorPartsPerMillion = 1_000_000,
++        QuoteUnitPrice = 18,
++        TotalPrice = 54,
++        ExpiresUtc = DateTimeOffset.UtcNow.AddSeconds(30),
++        PricingPolicyVersion = 1
++    };
++}
+
+diff --git a/src/LibreLancer.Tests/MarketTradeSaveProjectionTests.cs b/src/LibreLancer.Tests/MarketTradeSaveProjectionTests.cs
+new file mode 100644
+index 000000000..d22019833
+--- /dev/null
++++ b/src/LibreLancer.Tests/MarketTradeSaveProjectionTests.cs
+@@ -0,0 +1,55 @@
++using LibreLancer.Data.Schema.Save;
++using LibreLancer.Server;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class MarketTradeSaveProjectionTests
++{
++    [Fact]
++    public void ProjectsMountedPurchaseAndBundledAmmoIntoSnapshotOnly()
++    {
++        var save = new SaveGame { Player = new SavePlayer { Money = 500 } };
++
++        var accepted = MarketTradeSaveProjection.TryPurchase(save, "li_gun", 1, "HpWeapon01",
++            "li_gun_ammo", 30, 125);
++
++        Assert.True(accepted);
++        Assert.Equal(375, save.Player!.Money);
++        var equipped = Assert.Single(save.Player.Equip);
++        Assert.Equal(new LibreLancer.Data.HashValue("li_gun"), equipped.Item);
++        Assert.Equal("HpWeapon01", equipped.Hardpoint);
++        var ammo = Assert.Single(save.Player.Cargo);
++        Assert.Equal(new LibreLancer.Data.HashValue("li_gun_ammo"), ammo.Item);
++        Assert.Equal(30, ammo.Count);
++    }
++
++    [Fact]
++    public void ProjectsMissionCargoSaleAndRejectsMissingOrWrongCargo()
++    {
++        var save = new SaveGame { Player = new SavePlayer { Money = 20 } };
++        save.Player.Cargo.Add(new PlayerCargo
++        {
++            Item = new LibreLancer.Data.HashValue("commodity_food"), Count = 8, IsMissionCargo = true
++        });
++
++        Assert.False(MarketTradeSaveProjection.TrySell(save, "commodity_food", null, false, 3, 15));
++        Assert.Equal(20, save.Player.Money);
++        Assert.Equal(8, Assert.Single(save.Player.Cargo).Count);
++
++        Assert.True(MarketTradeSaveProjection.TrySell(save, "commodity_food", null, true, 3, 15));
++        Assert.Equal(35, save.Player.Money);
++        Assert.Equal(5, Assert.Single(save.Player.Cargo).Count);
++    }
++
++    [Fact]
++    public void RefusesPurchaseWhenSnapshotCannotAffordQuotedTotal()
++    {
++        var save = new SaveGame { Player = new SavePlayer { Money = 99 } };
++
++        Assert.False(MarketTradeSaveProjection.TryPurchase(save, "commodity_food", 1, null, null, 0, 100));
++        Assert.Equal(99, save.Player!.Money);
++        Assert.Empty(save.Player.Cargo);
++        Assert.Empty(save.Player.Equip);
++    }
++}
