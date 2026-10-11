@@ -1,0 +1,81 @@
+From: Lancer Nexus
+Subject: [PATCH] Parse signed numeric hashes in SaveGame inventory
+
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -160,0 +161 @@ client 2158-trace-gateway-character-inventory.patch
++client 2159-parse-signed-save-item-hashes.patch
+diff --git a/src/LibreLancer.Data/Schema/Save/SavePlayer.cs b/src/LibreLancer.Data/Schema/Save/SavePlayer.cs
+index fe798651a..9258d274a 100644
+--- a/src/LibreLancer.Data/Schema/Save/SavePlayer.cs
++++ b/src/LibreLancer.Data/Schema/Save/SavePlayer.cs
+@@ -12,6 +12,18 @@ using LibreLancer.Data.Ini;
+ 
+ namespace LibreLancer.Data.Schema.Save;
+ 
++internal static class SaveItemHashParser
++{
++    public static HashValue Parse(string value)
++    {
++        if (uint.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var unsignedHash))
++            return unsignedHash;
++        if (int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var signedHash))
++            return unchecked((uint)signedHash);
++        return new HashValue(value);
++    }
++}
++
+ public class PlayerEquipment
+ {
+     public HashValue Item;
+@@ -20,8 +32,7 @@ public class PlayerEquipment
+     public PlayerEquipment() { }
+     public PlayerEquipment(Entry e)
+     {
+-        var s = e[0].ToString();
+-        Item = !uint.TryParse(s, out uint hash) ? new HashValue(s) : hash;
++        Item = SaveItemHashParser.Parse(e[0].ToString());
+         if (e.Count < 2) return;
+         //Extra
+         Hardpoint = e[1].ToString();
+@@ -47,9 +58,7 @@ public class PlayerCargo
+     public PlayerCargo() { }
+     public PlayerCargo(Entry e)
+     {
+-        var s = e[0].ToString();
+-        if (!uint.TryParse(s, out uint hash)) Item = new HashValue(s);
+-        else Item = hash;
++        Item = SaveItemHashParser.Parse(e[0].ToString());
+         Count = e[1].ToInt32();
+         if (e.Count > 2 && !string.IsNullOrWhiteSpace(e[2].ToString()))
+             PercentageHealth = e[2].ToSingle();
+diff --git a/src/LibreLancer.Tests/SignedSaveItemHashTests.cs b/src/LibreLancer.Tests/SignedSaveItemHashTests.cs
+new file mode 100644
+index 000000000..1350ef041
+--- /dev/null
++++ b/src/LibreLancer.Tests/SignedSaveItemHashTests.cs
+@@ -0,0 +1,23 @@
++using LibreLancer.Data.Schema.Save;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class SignedSaveItemHashTests
++{
++    [Fact]
++    public void SignedNumericEquipmentAndCargoHashesPreserveTheirBits()
++    {
++        const int signedHash = -1128247292;
++        var save = SaveGame.FromString(
++            "signed-item-hash",
++            "[Player]\nequip = -1128247292, internal, 1\ncargo = -1128247292, 2\n");
++
++        var equipment = Assert.Single(save.Player!.Equip);
++        var cargo = Assert.Single(save.Player.Cargo);
++
++        Assert.Equal(unchecked((uint)signedHash), (uint)equipment.Item);
++        Assert.Equal(unchecked((uint)signedHash), (uint)cargo.Item);
++        Assert.Equal(2, cargo.Count);
++    }
++}
