@@ -1,0 +1,68 @@
+diff --git a/patches/series b/patches/series
+index 74f0bf8..40a70dc 100644
+--- a/patches/series
++++ b/patches/series
+@@ -144,3 +144,4 @@ client 2140-clusterjump-test-command.patch
+ client 2143-ignore-unresolved-npc-selected-target.patch
+ client 2144-temporary-spawn-rpc-diagnostics.patch
+ client 2145-clear-stale-npc-goto-target-on-restore.patch
++client 2146-ignore-disposed-npc-aim-target-physics.patch
+diff --git a/src/LibreLancer/Server/Components/SNPCComponent.cs b/src/LibreLancer/Server/Components/SNPCComponent.cs
+index e4fb8aa..2fba385 100644
+--- a/src/LibreLancer/Server/Components/SNPCComponent.cs
++++ b/src/LibreLancer/Server/Components/SNPCComponent.cs
+@@ -540,10 +540,8 @@ namespace LibreLancer.Server.Components
+         private Vector3 GetAimPosition(GameObject other, float projectileSpeed, float maxRange,
+             bool isAutoTurret)
+         {
+-            var myPos = Parent.PhysicsComponent?.Body.Position ?? Parent.WorldTransform.Position;
+-            var myVelocity = Parent.PhysicsComponent?.Body.LinearVelocity ?? Vector3.Zero;
+-            var otherPos = other.PhysicsComponent?.Body.Position ?? other.WorldTransform.Position;
+-            var otherVelocity = other.PhysicsComponent?.Body.LinearVelocity ?? Vector3.Zero;
++            var (myPos, myVelocity) = GetAimTargetMotion(Parent);
++            var (otherPos, otherVelocity) = GetAimTargetMotion(other);
+ 
+             if (projectileSpeed > float.Epsilon &&
+                 Aiming.GetTargetLeading(otherPos - myPos, otherVelocity - myVelocity, projectileSpeed, out var t))
+@@ -557,6 +555,14 @@ namespace LibreLancer.Server.Components
+             return AddInaccuracy(otherPos, myPos, staticDist, maxRange, isAutoTurret);
+         }
+ 
++        internal static (Vector3 Position, Vector3 Velocity) GetAimTargetMotion(GameObject obj)
++        {
++            var body = obj.PhysicsComponent?.Body;
++            return body is { IsDisposed: false }
++                ? (body.Position, body.LinearVelocity)
++                : (obj.WorldTransform.Position, Vector3.Zero);
++        }
++
+         private GameObject? GetHostileAndFire(double time, GameWorld world)
+         {
+             // Get hostile
+diff --git a/src/LibreLancer.Tests/NpcTargetingTests.cs b/src/LibreLancer.Tests/NpcTargetingTests.cs
+index 775fb77..625fe22 100644
+--- a/src/LibreLancer.Tests/NpcTargetingTests.cs
++++ b/src/LibreLancer.Tests/NpcTargetingTests.cs
+@@ -1,3 +1,4 @@
++using System.Numerics;
+ using LibreLancer.Data.Schema.Pilots;
+ using LibreLancer.Data.Schema.Ships;
+ using LibreLancer.Server.Components;
+@@ -25,4 +26,17 @@ public class NpcTargetingTests
+ 
+         Assert.Equal(expected, SNPCComponent.ClassifyAttackTarget(obj));
+     }
++
++    [Fact]
++    public void AimTargetMotion_FallsBackToWorldTransformWithoutPhysicsBody()
++    {
++        var obj = new GameObject();
++        var position = new Vector3(12, 34, 56);
++        obj.SetLocalTransform(new Transform3D(position, Quaternion.Identity));
++
++        var (restoredPosition, velocity) = SNPCComponent.GetAimTargetMotion(obj);
++
++        Assert.Equal(position, restoredPosition);
++        Assert.Equal(Vector3.Zero, velocity);
++    }
+ }
