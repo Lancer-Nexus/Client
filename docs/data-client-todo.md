@@ -10,24 +10,27 @@ Stand der Sichtung: 2026-10-11. Die Quell-TODOs enthalten teils veraltete
 Statuszeilen wie „Änderungen sind noch nicht committet“; diese wurden nicht als
 Client-Aufgaben übernommen.
 
+Die Reihenfolge, Abhängigkeiten und Abnahmekriterien zur Umsetzung stehen im
+[Client-Umsetzungsplan](data-client-plan.md).
+
 ## Client-Aufgaben
 
 ### Musik-Playlists in Räumen
 
 Quelle: [Data/TODO-musik.md](../../Data/TODO-musik.md)
 
-- [ ] Den Ablauf von `[Room_Sound] music` vom INI-Parser bis zur Wiedergabe
-  dokumentieren. Der aktuelle Code speichert ein einzelnes `Music`-Feld und
-  optional `MusicOneShot`; `SoundManager.PlayMusic` löst einen einzelnen
-  Nickname auf.
-- [ ] Eine kompatible Syntax für mehrere Nicknames festlegen und im Parser
-  unterstützen; bestehende Einzelwerte und `oneshot` müssen unverändert
-  funktionieren.
-- [ ] Wechselverhalten festlegen: Auswahlmodus, Vermeidung direkter Wiederholung,
-  Wechsel bei Raumwechsel oder Timer sowie Verhalten mehrerer Titel mit
-  `oneshot`.
-- [ ] Parser- und Wiedergabetests ergänzen, einschließlich eines Raums mit
-  mehreren Titeln und eines einzelnen Titels mit `oneshot`.
+- [x] Den Ablauf vom `[Room_Sound] music`-Parser über `GameItemDb` und
+  `BaseRoom` bis `RoomGameplay`/`SoundManager.PlayMusic` nachvollziehen.
+- [x] Kommagetrennte Nicknames in einer `music`-Zeile unterstützen; einzelne
+  Nicknames und das bestehende `oneshot`-Suffix bleiben kompatibel.
+- [x] Playlist-Regeln festlegen: zufälliger Track beim Raumwechsel, danach
+  Weiterschalten nach Trackende ohne direkte Wiederholung. Ein Einzeltitel
+  bleibt geloopt. Eine Playlist mit `oneshot` spielt genau einen zufällig
+  gewählten Track und endet; es gibt keinen Timerwechsel.
+- [x] Parser- und Auswahltests für mehrere Titel, `oneshot`, Einzeltrack,
+  Leereintrag und Vermeidung direkter Wiederholungen ergänzen.
+- [ ] Wiedergabe und Trackwechsel in `Br0104Bar` mit dem lokalen
+  Freelancer-Datenbestand zur Laufzeit prüfen.
 - [ ] Erst nach erfolgreichem Engine-Test die Bar-Raum-INIs im Data-Repository
   auf Playlists umstellen und anschließend dessen INIs nach NAP synchronisieren.
 
@@ -85,9 +88,12 @@ Quelle: [Data/TODO-solar.md](../../Data/TODO-solar.md)
 
 Quelle: [Data/TODO-video.md](../../Data/TODO-video.md)
 
-- [ ] Den Client-Aufrufpfad für `Freelancer.ini`-`StartupMovies` vom Parsen bis
-  zur Wiedergabe nachvollziehen. Bei der Sichtung wurde die INI-Liste gefunden;
-  der dazugehörige Wiedergabeaufruf ist noch nicht belegt.
+- [x] `StartupMovies`-Verwendung geprüft: `FreelancerIni` parst
+  `movie_file`; im Client-Quellbaum wurde kein Verbraucher und kein
+  Wiedergabeaufruf gefunden. Der Playback-Pfad ist derzeit nicht angebunden.
+- [ ] Entscheiden und planen, ob Startup-Movie-Wiedergabe im Client umgesetzt
+  werden soll; bei Umsetzung Playback-Pfad und Decoder für Zielplattformen
+  ergänzen und testen.
 - [ ] Unterstützte Video-/Audioformate und Decoder auf den Zielplattformen
   feststellen. MP4/H.264/AAC erst dann als Clientformat freigeben, wenn ein
   echter Wiedergabetest im Client gelingt.

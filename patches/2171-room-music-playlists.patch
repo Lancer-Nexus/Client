@@ -1,0 +1,230 @@
+diff --git a/src/LibreLancer.Data/Schema/Universe/Rooms/RoomSound.cs b/src/LibreLancer.Data/Schema/Universe/Rooms/RoomSound.cs
+--- a/src/LibreLancer.Data/Schema/Universe/Rooms/RoomSound.cs
++++ b/src/LibreLancer.Data/Schema/Universe/Rooms/RoomSound.cs
+@@ -8,6 +8,7 @@
+ public partial class RoomSound
+ {
+     public string? Music;
++    public List<string> MusicTracks = [];
+     public bool MusicOneShot;
+     [Entry("ambient")]
+     public string? Ambient;
+@@ -15,7 +16,20 @@
+     [EntryHandler("music", MinComponents = 1)]
+     private void MusicEntry(Entry e)
+     {
+-        Music = e[0].ToString();
+-        MusicOneShot = e.Count > 1 && e[1].ToString().Equals("oneshot", StringComparison.OrdinalIgnoreCase);
++        foreach (var component in e)
++        {
++            var value = component.ToString();
++            if (value.Equals("oneshot", StringComparison.OrdinalIgnoreCase))
++            {
++                MusicOneShot = true;
++            }
++            else if (!string.IsNullOrWhiteSpace(value))
++            {
++                MusicTracks.Add(value);
++            }
++        }
++
++        if (Music == null && MusicTracks.Count > 0)
++            Music = MusicTracks[0];
+     }
+ }
+diff --git a/src/LibreLancer.Data/GameData/World/BaseRoom.cs b/src/LibreLancer.Data/GameData/World/BaseRoom.cs
+--- a/src/LibreLancer.Data/GameData/World/BaseRoom.cs
++++ b/src/LibreLancer.Data/GameData/World/BaseRoom.cs
+@@ -18,6 +18,7 @@
+     public List<BaseHotspot> Hotspots = [];
+     public List<string> ForSaleShipPlacements = [];
+     public string? Music;
++    public List<string> MusicTracks = [];
+     public bool MusicOneShot;
+     public string? PlayerShipPlacement;
+     public ResolvedThn? StartScript;
+diff --git a/src/LibreLancer.Data/GameItemDb.cs b/src/LibreLancer.Data/GameItemDb.cs
+--- a/src/LibreLancer.Data/GameItemDb.cs
++++ b/src/LibreLancer.Data/GameItemDb.cs
+@@ -290,6 +290,7 @@
+                 {
+                     SourceFile = room.File,
+                     Music = room.RoomSound?.Music,
++                    MusicTracks = room.RoomSound?.MusicTracks.ToList() ?? [],
+                     MusicOneShot = room.RoomSound?.MusicOneShot ?? false,
+                     SceneScripts = [],
+                     PlayerShipPlacement = room.PlayerShipPlacement?.Name,
+diff --git a/src/LibreLancer/GameStates/RoomGameplay.cs b/src/LibreLancer/GameStates/RoomGameplay.cs
+--- a/src/LibreLancer/GameStates/RoomGameplay.cs
++++ b/src/LibreLancer/GameStates/RoomGameplay.cs
+@@ -52,6 +52,7 @@
+         private Base currentBase;
+         private StarSystem starSystem;
+         private BaseRoom currentRoom;
++        private RoomMusicPlaylist? roomMusicPlaylist;
+         private Cutscene? scene;
+         private UiContext ui;
+         private Action<NetBaseNpcDialog>? baseNpcDialogHandler;
+@@ -999,13 +1000,17 @@
+             Game.Saves.Selected = -1;
+             session.RoomEntered(virtualRoom ?? currentRoom.Nickname, currentBase.Nickname);
+ 
+-            if (currentRoom.Music == null)
++            roomMusicPlaylist = currentRoom.MusicTracks.Count > 1
++                ? new RoomMusicPlaylist(currentRoom.MusicTracks, Random.Shared)
++                : null;
++
++            if (currentRoom.MusicTracks.Count == 0 && currentRoom.Music == null)
+             {
+                 Game.Sound.StopMusic();
+             }
+             else
+             {
+-                Game.Sound.PlayMusic(currentRoom.Music, 0, currentRoom.MusicOneShot);
++                PlayRoomMusic();
+             }
+ 
+             if (session.PlayerShip != null)
+@@ -1087,6 +1092,25 @@
+             }
+         }
+ 
++        private void PlayRoomMusic()
++        {
++            var tracks = currentRoom.MusicTracks;
++            var track = roomMusicPlaylist != null
++                ? tracks[roomMusicPlaylist.NextIndex()]
++                : tracks.Count > 0 ? tracks[0] : currentRoom.Music;
++            if (track != null)
++            {
++                // Playlist entries are played once; the room advances when a track ends.
++                // A one-track room keeps the original looping behavior unless it is oneshot.
++                var oneshot = currentRoom.MusicOneShot || tracks.Count > 1;
++                Game.Sound.PlayMusic(track, 0, oneshot);
++            }
++            else
++            {
++                Game.Sound.StopMusic();
++            }
++        }
++
+         private RTCHotspot? GetHotspot(int mX, int mY)
+         {
+             foreach (var hp in hotspots)
+@@ -1449,6 +1473,9 @@
+ 
+             session.Update();
+ 
++            if (roomMusicPlaylist != null && !currentRoom.MusicOneShot && !Game.Sound.MusicPlaying)
++                PlayRoomMusic();
++
+             if (!paused && locationAnnouncementDelay >= 0)
+             {
+                 locationAnnouncementDelay -= delta;
+diff --git a/src/LibreLancer/GameStates/RoomMusicPlaylist.cs b/src/LibreLancer/GameStates/RoomMusicPlaylist.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer/GameStates/RoomMusicPlaylist.cs
+@@ -0,0 +1,25 @@
++using System;
++using System.Collections.Generic;
++
++namespace LibreLancer;
++
++internal sealed class RoomMusicPlaylist(IReadOnlyList<string> tracks, Random random)
++{
++    private int previousIndex = -1;
++
++    public int NextIndex()
++    {
++        if (tracks.Count == 0)
++            return -1;
++        if (tracks.Count == 1)
++            return previousIndex = 0;
++
++        if (previousIndex < 0)
++            return previousIndex = random.Next(tracks.Count);
++
++        var next = random.Next(tracks.Count - 1);
++        if (next >= previousIndex)
++            next++;
++        return previousIndex = next;
++    }
++}
+diff --git a/src/LibreLancer.Tests/RoomMusicPlaylistTests.cs b/src/LibreLancer.Tests/RoomMusicPlaylistTests.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Tests/RoomMusicPlaylistTests.cs
+@@ -0,0 +1,63 @@
++using System;
++using System.IO;
++using System.Linq;
++using System.Text;
++using LibreLancer.Data.Ini;
++using LibreLancer.Data.Schema.Universe.Rooms;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class RoomMusicPlaylistTests
++{
++    [Fact]
++    public void RoomSoundParsesMultipleTracksAndOneshot()
++    {
++        using var input = new MemoryStream(Encoding.UTF8.GetBytes("""
++            [Room_Sound]
++            music = music_bar_generic04, music_bar_generic05, music_bar_generic06, oneshot
++            """));
++        var section = Assert.Single(IniFile.ParseFile("room.ini", input, true, false));
++
++        Assert.True(RoomSound.TryParse(section, out var sound));
++        Assert.Equal("music_bar_generic04", sound!.Music);
++        Assert.Equal(new[] { "music_bar_generic04", "music_bar_generic05", "music_bar_generic06" }, sound.MusicTracks);
++        Assert.True(sound.MusicOneShot);
++    }
++
++    [Fact]
++    public void RoomSoundPreservesSingleTrackAndOneshotSyntax()
++    {
++        using var input = new MemoryStream(Encoding.UTF8.GetBytes("""
++            [Room_Sound]
++            music = music_newlondon, oneshot
++            """));
++        var section = Assert.Single(IniFile.ParseFile("room.ini", input, true, false));
++
++        Assert.True(RoomSound.TryParse(section, out var sound));
++        Assert.Equal("music_newlondon", sound!.Music);
++        Assert.Equal(new[] { "music_newlondon" }, sound.MusicTracks);
++        Assert.True(sound.MusicOneShot);
++    }
++
++    [Fact]
++    public void PlaylistNeverRepeatsThePreviousTrackUntilOnlyOneTrackExists()
++    {
++        var playlist = new RoomMusicPlaylist(new[] { "first", "second", "third" }, new Random(1234));
++        var selected = Enumerable.Range(0, 100).Select(_ => playlist.NextIndex()).ToArray();
++
++        Assert.All(selected, index => Assert.InRange(index, 0, 2));
++        for (var i = 1; i < selected.Length; i++)
++            Assert.NotEqual(selected[i - 1], selected[i]);
++    }
++
++    [Fact]
++    public void PlaylistWithZeroOrOneTrackHasStableSelection()
++    {
++        Assert.Equal(-1, new RoomMusicPlaylist(Array.Empty<string>(), new Random(1)).NextIndex());
++
++        var playlist = new RoomMusicPlaylist(new[] { "only" }, new Random(1));
++        Assert.Equal(0, playlist.NextIndex());
++        Assert.Equal(0, playlist.NextIndex());
++    }
++}
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -168,4 +168,5 @@
+ client 2167-return-to-menu-without-powercore.patch
+ client 2168-normalize-gateway-character-bootstrap.patch
+ client 2169-reject-invalid-market-good-quotes.patch
+ client 2170-flhook-async-durable-event-capture.patch
++client 2171-room-music-playlists.patch
