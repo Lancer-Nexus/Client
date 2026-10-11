@@ -1,0 +1,54 @@
+diff --git a/src/LibreLancer/GameStates/SpaceGameplay.cs b/src/LibreLancer/GameStates/SpaceGameplay.cs
+--- a/src/LibreLancer/GameStates/SpaceGameplay.cs
++++ b/src/LibreLancer/GameStates/SpaceGameplay.cs
+@@ -109,6 +109,9 @@
+         private double bestPathRecheckTimer;
+         private TargetShipWireframe targetWireframe = new();
+         private double accum = 0;
++        // Avoid a catch-up spiral when a fixed world tick takes longer than its time budget.
++        private const int MaxFixedUpdatesPerFrame = 1;
++        private double nextSimulationOverloadWarning;
+ 
+         public bool Dead = false;
+         private readonly MouseTargetingGesture mouseTargeting = new();
+@@ -887,10 +890,12 @@
+         {
+             accum += delta;
+             double updateInterval = 1 / 60.0 * session.AdjustedInterval;
+-
+-            while (accum >= updateInterval)
++            var fixedUpdates = 0;
++
++            while (accum >= updateInterval && fixedUpdates < MaxFixedUpdatesPerFrame)
+             {
+                 accum -= updateInterval;
++                fixedUpdates++;
+                 double FixedDelta = 1 / 60.0;
+ 
+                 world.Update(paused ? 0 : FixedDelta);
+@@ -926,6 +931,17 @@
+                 }
+             }
+ 
++            if (accum >= updateInterval)
++            {
++                var droppedTicks = (long)(accum / updateInterval);
++                accum -= droppedTicks * updateInterval;
++                if (Game.TimerTick >= nextSimulationOverloadWarning)
++                {
++                    FLLog.Warning("Client", $"Simulation overload: dropped {droppedTicks} stale client simulation ticks to keep the game responsive.");
++                    nextSimulationOverloadWarning = Game.TimerTick + 5.0;
++                }
++            }
++
+             var fraction = accum / updateInterval;
+ 
+             world.UpdateInterpolation((float)fraction);
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -153,3 +153,4 @@
+ client 2151-neutral-disconnected-player-reputation.patch
+ client 2152-normalize-formation-leader-autopilot-state.patch
+ client 2153-grow-player-update-bitset.patch
++client 2154-bound-client-simulation-catchup.patch
