@@ -1,0 +1,72 @@
+diff --git a/src/LibreLancer/World/ProjectileManager.cs b/src/LibreLancer/World/ProjectileManager.cs
+--- a/src/LibreLancer/World/ProjectileManager.cs
++++ b/src/LibreLancer/World/ProjectileManager.cs
+@@ -166,3 +166,10 @@
+         {
+-            var result = spawns.GroupBy(x => x.NetId)
++            var result = BuildSpawnQueue(spawns);
++            spawns.Clear();
++            return result;
++        }
++
++        internal static ProjectileSpawn[] BuildSpawnQueue(IEnumerable<(ObjNetId NetId, int Index, Vector3 Target)> queuedSpawns)
++        {
++            var result = queuedSpawns.GroupBy(x => x.NetId)
+                 .Select(x =>
+@@ -174,4 +181,4 @@
+-                    // OtherTargets is consumed by ascending gun bit on the
+-                    // client, so targets must be packed in weapon-index order.
+-                    foreach (var v in x.OrderBy(v => v.Index))
++                    // The wire format carries one target per weapon bit. Multiple
++                    // muzzle projectiles from one weapon therefore share one entry.
++                    foreach (var v in x.GroupBy(v => v.Index).Select(g => g.First()).OrderBy(v => v.Index))
+                     {
+@@ -201,3 +208,2 @@
+                 }).ToArray();
+-            spawns.Clear();
+             return result;
+diff --git a/src/LibreLancer.Tests/ProjectileSpawnQueueTests.cs b/src/LibreLancer.Tests/ProjectileSpawnQueueTests.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Tests/ProjectileSpawnQueueTests.cs
+@@ -0,0 +1,34 @@
++using System.Numerics;
++using LibreLancer.Net;
++using LibreLancer.Net.Protocol;
++using LibreLancer.World;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class ProjectileSpawnQueueTests
++{
++    [Fact]
++    public void BuildSpawnQueueEncodesAtMostOneTargetPerWeaponBit()
++    {
++        var owner = new ObjNetId(17);
++        var sharedTarget = new Vector3(1, 2, 3);
++        var weaponOneTarget = new Vector3(4, 5, 6);
++        var duplicateWeaponTarget = new Vector3(7, 8, 9);
++        var weaponTwoTarget = new Vector3(10, 11, 12);
++
++        var result = ProjectileManager.BuildSpawnQueue(new[]
++        {
++            (owner, 0, sharedTarget),
++            (owner, 1, weaponOneTarget),
++            (owner, 1, duplicateWeaponTarget),
++            (owner, 2, weaponTwoTarget)
++        });
++
++        var spawn = Assert.Single(result);
++        Assert.Equal(0b111UL, spawn.Guns);
++        Assert.Equal(0b110UL, spawn.Unique);
++        Assert.Equal(new[] { weaponOneTarget, weaponTwoTarget }, spawn.OtherTargets);
++        Assert.Equal(System.Numerics.BitOperations.PopCount(spawn.Unique), spawn.OtherTargets.Length);
++    }
++}
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -150 +150,2 @@
+ client 2149-ignore-removed-spatial-attack-targets.patch
++client 2150-coalesce-projectile-spawn-targets.patch
