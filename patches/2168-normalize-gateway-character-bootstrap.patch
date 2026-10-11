@@ -1,0 +1,69 @@
+From: Lancer Nexus
+Subject: [PATCH] Normalize equipment in Gateway character bootstrap snapshots
+
+diff --git a/src/LibreLancer/Server/Player.cs b/src/LibreLancer/Server/Player.cs
+--- a/src/LibreLancer/Server/Player.cs
++++ b/src/LibreLancer/Server/Player.cs
+@@ -2202,7 +2202,10 @@ async Task<bool> IServerPlayer.CreateNewCharacter(string name, int index)
+                     try
+                     {
+                         using var initialSave = new MemoryStream();
+-                        IniWriter.WriteIni(initialSave, newCharacter.ToIni());
++                        var initialCharacter = NetCharacter.OpenSaveGame(Game, newCharacter);
++                        var gatewayBootstrapSave = SaveWriter.CreateSave(initialCharacter, null, 0,
++                            DateTime.UtcNow, Game.GameData, null, null, null);
++                        IniWriter.WriteIni(initialSave, gatewayBootstrapSave.ToIni());
+                         var initialPayload = initialSave.ToArray();
+                         var gatewayId = await Game.RegisterNewCharacterAsync(playerGuid, GatewaySessionId, name,
+                             initialPayload);
+diff --git a/src/LibreLancer.Tests/MockDataTest.cs b/src/LibreLancer.Tests/MockDataTest.cs
+index 589cb1d5f..95db59e8e 100644
+--- a/src/LibreLancer.Tests/MockDataTest.cs
++++ b/src/LibreLancer.Tests/MockDataTest.cs
+@@ -1,10 +1,14 @@
+ using System;
+ using System.IO;
++using System.Linq;
+ using LibreLancer.Data;
+ using LibreLancer.Data.GameData.Items;
++using LibreLancer.Data.Ini;
+ using LibreLancer.Data.IO;
++using LibreLancer.Data.Schema.Save;
+ using LibreLancer.Physics;
+ using LibreLancer.Resources;
++using LibreLancer.Server;
+ using Xunit;
+ 
+ namespace LibreLancer.Tests;
+@@ -63,4 +67,24 @@ public class MockDataTest
+         var gdm = ConstructMockData();
+         Assert.Equal("gun01", gdm.Items.Equipment.Get("gun01").Nickname);
+     }
++
++    [Fact]
++    public void GatewayBootstrapSaveResolvesAndWritesEquipmentNicknames()
++    {
++        var gameData = ConstructMockData();
++        var convex = new ConvexShapeCollection(x => throw new InvalidOperationException("Tried to open sur"));
++        var server = new GameServer(gameData, convex);
++        var itemHash = FLHash.CreateID("gun01");
++        var sourceSave = SaveGame.FromString("bootstrap", $"[Player]\nname = Pilot\nequip = {itemHash}, internal, 1\ncargo = {itemHash}, 2\n");
++
++        var character = NetCharacter.OpenSaveGame(server, sourceSave);
++        var gatewaySave = SaveWriter.CreateSave(character, null, 0, DateTime.UtcNow, gameData,
++            null, null, null);
++        using var payload = new MemoryStream();
++        IniWriter.WriteIni(payload, gatewaySave.ToIni());
++        var restoredSave = SaveGame.FromString("gateway-bootstrap", System.Text.Encoding.UTF8.GetString(payload.ToArray()));
++
++        Assert.Equal("gun01", restoredSave.Player!.Equip.Single().Item.String);
++        Assert.Equal("gun01", restoredSave.Player.Cargo.Single().Item.String);
++    }
+ }
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -167,2 +167,3 @@
+ client 2166-block-launch-without-powercore.patch
+ client 2167-return-to-menu-without-powercore.patch
++client 2168-normalize-gateway-character-bootstrap.patch
