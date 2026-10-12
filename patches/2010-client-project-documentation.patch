@@ -1,0 +1,2615 @@
+diff --git a/README.md b/README.md
+index 3c2ab9f..c3bb826 100644
+--- a/README.md
++++ b/README.md
+@@ -18,7 +18,9 @@ The Lancer Nexus Client is the MMO-oriented client fork of [LibreLancer](https:/
+
+ The client targets the current .NET version used by the upstream project. Cluster features must remain optional behind configuration or capability negotiation so that standalone development and upstream synchronization continue to work.
+
+-Proposed graphics and rendering work is tracked in the [renderer roadmap](docs/renderer-roadmap.md). It records current normal-map, PBR, SMAA and particle-blur support alongside planned post-processing and lighting work.
++Client changes are maintained as patches in `patches/series`. After changing the patch stack, validate a fresh overlay with `python3 scripts/verify-lancer-nexus-overlay.py`; the LancerEdit Release build and NAP tests were verified against `origin/main` with patch 2122.
++
++Proposed graphics and rendering work is tracked in the [renderer roadmap](docs/renderer-roadmap.md). The [graphics implementation plan](docs/graphics-implementation-plan.md) orders the NAP surface-map integration, renderer effects, and complete Vulkan backend work with explicit validation gates. It records current normal-map, PBR, SMAA and particle-blur support alongside planned post-processing and lighting work.
+
+ ## Related repositories
+
+@@ -28,6 +30,8 @@ Proposed graphics and rendering work is tracked in the [renderer roadmap](docs/r
+
+ See `AGENTS.md` for contribution and integration rules. Native Nexus adjustments are maintained in the patch series for `lancerdecode` and `blurgtext`; the build applies and verifies their pinned overlays before compiling. BlurgText disables FreeType SVG hooks only when the system FreeType API lacks them.
+
++The Linux x64 shader toolchain uses DXC 1.8.2502 so it builds on glibc 2.35 hosts. Windows keeps its DXC 1.9.2602 pin. After changing a DXC pin, relocate the cached `obj/dxc.tar.gz` and the DXC binary/libraries under `bin/builddeps` before running `./build.sh ShaderDependencies` to fetch the configured version.
++
+ ## Shared Protocol
+
+ The shared contracts are checked out in the `Protocol` submodule. Update it before MMO/client builds with:
+@@ -36,7 +40,7 @@ The shared contracts are checked out in the `Protocol` submodule. Update it befo
+ git submodule update --init --remote --merge Protocol
+ ```
+
+-CI performs the same update before the existing LibreLancer build. Standalone client builds remain possible when the cluster integration is disabled.
++CI checks out the committed `Protocol` submodule revision recursively so the build uses the version recorded by this repository. Standalone client builds remain possible when the cluster integration is disabled.
+
+ Lancer Nexus client changes are carried by the patch series in `patches/series`. The root build orchestrator applies it before building; direct `./build.sh` runs the same idempotent patch applier when the overlay is present. The applier rejects partial or conflicting patch states instead of forcing them.
+
+@@ -48,10 +52,14 @@ The Lancer Nexus collector stages Linux client builds with the `lancer` apphost
+
+ `NexusGatewayLogin` reads `client-version.json` from the running client release directory, POSTs `ClientVersionHello` before credentials, then requests placement with the authenticated session. The client connects to the assigned endpoint with the Gateway JoinTicket. A required update displays a prompt and exits with code 42 after acknowledgement. Missing or damaged local version metadata requests repair with exit code 43. The Updater validates signed NAP data packages, including their structure and content hashes, stages them with the client into one release and atomically activates the combined snapshot. The Client acknowledges startup after game data and its first UI state load; the Updater can restore the previous healthy release if that signal times out. On 2026-10-09, the Linux game reached its first UI state with the full game-data container mounted and loose `DATA` absent. Windows game runtime and live rollback behavior remain unverified.
+
+-NAP V1 provides the `Nexus.Assets` reader/writer and `nexus-pack` CLI for `pack`, `inspect`, `verify`, overlay `diff` and `compact`. The Client and LLServer mount packages listed in the local `packages/active.json` snapshot after validating each package's path, size and SHA-256. The Updater stages required and selected signed `.nap` packages plus their dependency/override closure beside the client release and activates the combined snapshot. Download CI exercises a signed client `tar.zst` and NAP package from the DownloadServer through Updater hash and structure verification into one activated release. LancerEdit has Data-menu actions to pack a selected folder as NAP, unpack a verified NAP, and export an edited active snapshot. A synthetic Editor-path test verifies that packing a selected `DATA` folder and unpacking it preserves the complete relative file tree and bytes; 28/28 NAP asset tests pass. On 2026-10-09, a Linux LancerEdit GUI roundtrip packed a synthetic folder through the native dialogs, unpacked the resulting NAP through the Data menu, and reproduced all three paths and file contents byte-for-byte; CLI verification passed for all three entries. Windows LancerEdit behavior remains unverified. InterfaceEdit now mounts the verified active NAP snapshot and shares LancerEdit’s persistent writable workspace; focused VFS/workspace tests and Linux Release build pass. A 2026-10-09 Linux GUI smoke opened a synthetic project with an active one-file NAP, displayed mount/workspace status and opened the workspace in Nautilus; GUI save/restart behavior and Windows editor runtime remain unverified; the editor Data menu shows snapshot/workspace status and can open the workspace, and project-load/save failures appear in the editor; see `docs/asset-packages/interfaceedit-plan.md`. The dedicated Ubuntu/Windows NAP test workflow is committed, but its manual dispatch was rejected because GitHub reports Actions disabled for this repository; Windows NAP execution therefore remains unverified. See `docs/asset-packages/implementation-status.md`; package only assets you have rights to distribute.
++NAP V1 provides the `Nexus.Assets` reader/writer and `nexus-pack` CLI for `pack`, `inspect`, `verify`, overlay `diff` and `compact`. The Client and LLServer mount packages listed in the local `packages/active.json` snapshot after validating each package's path, size and SHA-256. The Updater stages required and selected signed `.nap` packages plus their dependency/override closure beside the client release and activates the combined snapshot. Download CI exercises a signed client `tar.zst` and NAP package from the DownloadServer through Updater hash and structure verification into one activated release. LancerEdit has Data-menu actions to pack a selected folder as NAP, unpack a verified NAP, and export an edited active snapshot. A synthetic Editor-path test verifies that packing a selected `DATA` folder and unpacking it preserves the complete relative file tree and bytes; 28/28 NAP asset tests pass. On 2026-10-09, a Linux LancerEdit GUI roundtrip packed a synthetic folder through the native dialogs, unpacked the resulting NAP through the Data menu, and reproduced all three paths and file contents byte-for-byte; CLI verification passed for all three entries. Windows LancerEdit behavior remains unverified. InterfaceEdit NAP mounting was removed during the upstream alignment in patch 2121; it currently uses loose game data. Its earlier mount/workspace GUI smoke applies to the pre-alignment overlay and must be repeated if that integration is restored. LancerEdit retains the NAP workspace, pack, unpack and export tools; see `docs/asset-packages/implementation-status.md`. The dedicated Ubuntu/Windows NAP test workflow is committed, but its manual dispatch was rejected because GitHub reports Actions disabled for this repository; Windows NAP execution therefore remains unverified. See `docs/asset-packages/implementation-status.md`; package only assets you have rights to distribute.
+
+ ## Dedicated server runtime status
+
++LLServer can optionally load trusted source-recompiled FLHookCompat managed plugins. This feature is disabled by default and requires an LLServer build with `-p:EnableFlHookCompat=true`, plus `FlHookCompatEnabled: true`, Gateway `LoginUrl`, and `InstanceId` in the clustered server profile. Provision the public-key-only `trust-root.json` and place each assigned plugin under `flhook-plugins/<plugin-id>/` with `manifest-envelope.json`, `plugin.dll`, and optional `configuration.json`. Set `FlHookCompatPluginIds` and `FlHookCompatApprovedCapabilities` explicitly. The current plugin capability is `server.events.subscribe`; events are authenticated local account/character lifecycle and local system changes. Plugins run in-process and must be trusted first-party code.
++
++Optional Coordinator publishing is enabled with `FlHookCompatClusterEventsEnabled: true`; the server must be built with both `EnableClusterIntegration=true` and `EnableFlHookCompat=true`. Configure `CoordinatorQuicEndpoint`, `CoordinatorQuicServerName`, `ClusterAgentNodeId`, `CoordinatorQuicClientCertificate`, and `CoordinatorQuicCaCertificate`. The client certificate must be the Agent's mTLS identity (Client Authentication EKU and one DNS SAN matching `ClusterAgentNodeId`); its password is read from `LANCER_NEXUS_COORDINATOR_QUIC_CLIENT_CERT_PASSWORD`. Events enter a bounded worker queue before they are appended and fsynced to the durable JSONL outbox, then are retried over mTLS/QUIC until Coordinator returns a matching `Stored` or `Duplicate`. The acknowledged epoch/sequence cursor is written atomically to `FlHookCompatEventCursorFile`; the outbox defaults beside the server database and can be moved with `FlHookCompatEventOutboxFile`. The outbox preserves sequenced events across process restarts, fails closed on corrupt or missing pending history, and permits one LLServer process per outbox path. Runtime status sets `FlHookEventCaptureReady=false` and `IsReady=false` if the capture worker fails, its queue reaches 75% of capacity, or the queue overflows. Queue overflow is logged and fails capture closed; an abrupt process exit can lose events still waiting in memory. A maximum of 100,000 pending events and 256 MiB of journal data is enforced; operators must restore Coordinator connectivity before reaching either limit. Coordinator replay for downstream consumers and cluster command APIs remain open.
++
+ `LLServer` can optionally publish an atomic JSON runtime snapshot for the host Agent. Set `RuntimeStatusFile`, `InstanceId`, `SystemId`, `InstanceEndpoint`, and `MaxPlayers` in its server configuration. `MaxPlayers` controls the listener limit and must match the Agent's `Agent__Instance__MaxPlayers`. The snapshot reports the actual listener running state and connected peers; it contains no credentials. Optionally set `DrainFlagFile` to a host-local path; while that file exists, the snapshot reports `IsDraining=true`, and the Coordinator stops assigning new sessions while existing sessions remain connected. The host lifecycle controller can enter or leave drain by creating or removing the flag file. Leave these fields unset for standalone deployments. The Agent treats missing or stale snapshots as not ready; LLServer removes the snapshot on a clean stop.
+
+ Cluster LLServer instances use `NpcCoordinatorUrl` plus the environment variable `LANCER_NEXUS_COORDINATOR_API_KEY` for Coordinator-issued NPC identities. Keep the key out of `llserver.json`. A single background worker per hosted system keeps a block of 128 IDs buffered and asks for another block below 32. The game simulation only takes an ID from a local queue; when the pool is empty, the NPC remains pending and is inserted into the world after the Coordinator replies. Network delays therefore do not block the game loop. The Coordinator's MySQL NPC ownership migration must be applied before startup.
+@@ -89,6 +97,12 @@ The active series contains six functional Client patches: Gateway and player tra
+
+ LLServer accepts `SystemIds` to host a Nexus system group with one database, player limit and endpoint. `SystemId` remains the primary fallback. Jumps within the set stay local; jumps outside use Gateway transfer. `BindAddress` can restrict the UDP listener to a private IPv4 interface, and cluster mode disables the legacy discovery listener. The eight-group baseline is generated by Scripts after collection.
+
++For a deployable Cluster LLServer package, use `./build.sh --nexus-cluster-server LinuxDaily` from the Client checkout in the Lancer-Nexus workspace; this opts into `EnableClusterIntegration` and `EnableFlHookCompat` for LLServer publishing. The flag does not enable plugin execution.
++
++Cluster permission revision synchronization is opt-in at build time with `-p:EnableClusterIntegration=true`. Cluster instances require the per-instance `LANCER_NEXUS_GAME_INSTANCE_KEY` and the internal Redis `LANCER_NEXUS_PERMISSION_REDIS_ENDPOINT=host:port`. LLServer reports `IsReady=false` until it has subscribed to Redis, loaded and activated the current Gateway SQL permission snapshot, and received its revision ACK. Redis carries invalidations only; a disconnected listener makes the instance unready. Standalone builds remain independent of Cluster.
++
++Clustered character creation registers the exact display name and initial SaveGame with Gateway under the active account/session; a Gateway rejection rolls back the local compatibility row. LLServer loads the authoritative Gateway roster, reconstructs missing local cache rows only from validated Gateway snapshots, and deletes through Gateway's history-preserving tombstone before removing a local row. A legacy character without a Gateway snapshot is available only on instances that still have its local SQLite row; missing legacy state is omitted instead of replaced with a default pilot. After selection, LLServer acquires the fenced lease and loads the latest Gateway SaveGame snapshot. If no snapshot exists yet, it imports the matching local SQLite row once as revision 1. LLServer checkpoints the live SaveGame to Gateway every minute, persists explicit Freelancer saves, and writes a transferred SaveGame under the target lease fence after transfer commit. Gateway validates each read and write against the active instance, session, lease token and version. On normal disconnect, LLServer confirms the final Gateway snapshot before releasing the exact session, token and lease version; if persistence or release fails, the lease remains active until expiry. On graceful `StopServer`, LLServer rejects new logins, drains active login work, pauses world simulation, captures each active leased character on the simulation loop, and waits for the final Gateway snapshot write before stopping the loop. Characters already in transfer use the transfer snapshot protocol. A forced process kill cannot run the shutdown checkpoint; local SQLite remains a compatibility/bootstrap cache, not the cluster persistence authority.
++
+ ## NPC retirement recovery infrastructure
+
+ Patch 1126 adds a durable background retirement outbox under the configured NPC
+diff --git a/docs/NEXUS-ASSET-PACKAGES.md b/docs/NEXUS-ASSET-PACKAGES.md
+new file mode 100644
+index 0000000..f85eb06
+--- /dev/null
++++ b/docs/NEXUS-ASSET-PACKAGES.md
+@@ -0,0 +1,294 @@
++# Nexus Asset Packages (NAP) – Technische Spezifikation
++
++**Projekt:** Lancer-Nexus/Client  
++**Status:** V1-Umsetzung und Linux-Spielstart verifiziert; Windows-Ausführung und einzelne Recovery-/Editorpfade sind offen. Maßgeblich für den konkreten Stand ist [`asset-packages/implementation-status.md`](asset-packages/implementation-status.md).  
++**Version:** 0.1 (2026-10-09)  
++**Formate:** `.nap` (Assetcontainer), `.napd` (Delta-/Patchtransport)
++
++## 1. Ziel und Randbedingungen
++
++Ein beliebig erweiterbares, versions- und patchfähiges Container-Dateisystem für Freelancer-`DATA`-Ressourcen (INI, Modelle, Texturen, Animationen, Audio, Universum, Missionen und optionale Contentpakete) auf Windows und Linux. Client, dedizierter Server und Editor sollen dieselbe VFS-Grundlage verwenden. Keine vollständige Entpackung vor dem Spielstart. Der Launcher/Updater installiert Pakete atomar und repariert defekte Installationen.
++
++**Nichtziele für V1:** Verschlüsselung/DRM; Streaming unbekannter Assets mitten in einer laufenden Szene; generelle Migration aller Schreibzugriffe in Container; bytegenaue Quake-PAK-Kompatibilität.
++
++**Rechtlicher Hinweis:** Originale Freelancer-Spieldaten dürfen nicht automatisch mit Builds verteilt werden. Verpackung und Distribution ausschließlich mit entsprechenden Nutzungsrechten; für reine Entwicklungsinstallationen lokale Konvertierung bereitstellen.
++
++## 2. Repository-Ausgangslage (Stand Prüfung 09.10.2026)
++
++- `src/LibreLancer.Data/IO/FileSystem.cs`: `IFileProvider` bietet `Open`, `FileExists`, `GetBackingFileName`, `GetFiles`, `GetDirectories` und `Refresh`; Provider werden bei der Auflösung rückwärts durchsucht. `IOverlayFileProvider` ergänzt Maskierung und Tombstone-aware Enumeration.
++- Patch 2070 stellt weiterhin das lose DATA-Verzeichnis-Overlay bereit. Die späteren NAP-Patches ergänzen den Containerprovider, Tombstones, effektive Enumeration, Client-/LLServer-Mounts und den LancerEdit-Workspace.
++- Der Updater prüft signierte Client- und NAP-Artefakte, erstellt im Staging einen gemeinsamen Release-Snapshot und aktiviert ihn über einen Release-Pointer. Client plus NAP werden im DownloadServer/Updater-Integrationstest gemeinsam verifiziert und aktiviert; der Linux-Spielstart mit vollständigem NAP und ohne loses `DATA` erreichte das erste UI. Windows-Spiel-/Editorlaufzeit, reale ENOSPC-Prüfung, produktive Veröffentlichung mit provisioniertem Trust Root und einzelne Editor-/Recoverypfade bleiben offen. Details und aktuelle Prüfergebnisse stehen in [`asset-packages/implementation-status.md`](asset-packages/implementation-status.md).
++- Client-/Engine-Änderungen bleiben gemäß `AGENTS.md` patch-only; README- und Statusdokumentation wird direkt im jeweiligen Repository gepflegt. Standalone-Betrieb ohne aktiven Snapshot bleibt erhalten.
++
++Quellen: `AGENTS.md`, `README.md`, `patches/series`, `src/LibreLancer.Data/IO/FileSystem.cs`, `src/Nexus.Assets/NexusPackageFileProvider.cs`, `src/LibreLancer/GameConfig.cs`, `src/LLServer.Core/ServerApp.cs`, sowie der verlinkte Statusbericht.
++
++## 3. Architektur
++
++```plaintext
++Gateway/Version API -> signiertes Release-Manifest
++                              |
++                      Launcher / Updater
++                      |      |      |
++                   Download Verify Staging
++                              |
++                 atomarer active.json Wechsel
++                              |
++                     Package Mount Manager
++                +-------------+------------+
++                |             |            |
++             hotfix.nap    models.nap   sound.nap ...
++                +-------------+------------+
++                              |
++                  NexusPackageFileProvider
++                              |
++                    LibreLancer FileSystem
++                         Client/Server/Editor
++```
++
++Der Mount Manager konsumiert das **lokale, verifizierte und aktivierte Manifest** und erzeugt eine sortierte Provider-Liste. Dateiöffnung erfolgt über virtuelle `DATA/`-relative Namen. Ressourcen können wahlfrei in mehreren Paketen liegen; Kategorien und Verzeichnisse sind lediglich Metadaten, keine feste Layoutvorgabe.
++
++### Beispiel-Pakete
++
++```plaintext
++packages/core/game-config.nap
++packages/core/universe.nap
++packages/graphics/models.nap
++packages/graphics/textures.nap
++packages/graphics/animations.nap
++packages/audio/sounds.nap
++packages/audio/music.nap
++packages/audio/voices-de.nap
++packages/systems/liberty.nap
++packages/systems/rheinland.nap
++packages/updates/hotfix-2026-10.nap
++```
++
++### Lookup- und Konfliktregel
++
++1. Normalisiere den *virtuellen* Pfad (Backslash zu Slash, bekannte `EXE/../DATA/`-Schreibweise canonicalisieren). Akzeptiere niemals absolute Pfade, `..`-Traversal, NUL oder Gerätepfade.
++2. Der Manifest-Mount-Plan ordnet alle Provider nach `(priority ASC, mountOrder ASC, packageId ASC)`; **letzter Provider gewinnt**, entsprechend der existierenden VFS-Suche. Gleiche Priorität ohne eindeutige Mount-Reihenfolge wird beim Manifest-Build abgewiesen.
++3. Innerhalb eines Pakets sind doppelte normalisierte Pfade verboten; Vergleich für Freelancer kompatibel case-insensitive ordinal. Gleichnamige Einträge mehrerer Pakete benötigen explizite Override-Deklaration oder werden im CI abgelehnt.
++4. Tombstone-Einträge maskieren ältere Dateien. Das ist in V1 über `IOverlayFileProvider` und die Tombstone-Prüfungen in `FileSystem` umgesetzt; `Open() => null` allein wird nicht als Löschsignal interpretiert. Regressionstests prüfen Maskierung und Verzeichnisenumeration.
++5. `GetFiles`/`GetDirectories` liefern den **vereinheitlichten effektiven** Verzeichnisstand ohne maskierte Ressourcen.
++6. Ältere, entpackte `DATA`-Installationen bleiben als unterste Fallback-Schicht optional erhalten.
++
++## 4. NAP-Dateiformat v1
++
++**Endian:** Little Endian. **Integer:** explizite fixed-width unsigned Typen; Grenzen vor jeder Allocation prüfen. **Strings:** UTF-8, normalisierte virtuelle Pfade. Kein ausführbarer Archivcode.
++
++### Header (feste Länge 128 Byte, vorgeschlagen)
++
++| Offset | Feld | Typ / Bedeutung |
++|---|---|---|
++| 0 | Magic | 8 Bytes `LNAP\0\r\n\x1A` |
++| 8 | HeaderVersion | u16 = 1 |
++| 10 | HeaderLength | u16 = 128 |
++| 12 | Flags | u32 (definierte Bits, unbekannte Pflichtbits ablehnen) |
++| 16 | PackageUuid | 16 Bytes |
++| 32 | ContentVersion | u64 |
++| 40 | ChunkSizeHint | u32, z. B. 256 KiB |
++| 44 | Reserved | 4 Bytes = 0 |
++| 48 | IndexOffset | u64 |
++| 56 | IndexLength | u64 |
++| 64 | ChunkTableOffset | u64 |
++| 72 | ChunkTableLength | u64 |
++| 80 | PayloadOffset | u64 |
++| 88 | PayloadLength | u64 |
++| 96 | IndexSha256 | 32 Bytes |
++
++Die genauen binären Tabellen werden vor dem ersten Writer-Release als schema-konforme Golden Fixtures eingefroren; Änderungen erfordern eine neue Major-Formatversion.
++
++### Index und Chunktabelle
++
++- **Index:** sortierte Einträge mit Pfad, Größe, SHA-256 des *unkomprimierten* Dateiinhalts, MIME/Asset-Hinweis optional, Flags (Datei/Tombstone), geordnete Chunkreferenzen und Offset/Length im letzten Chunk.
++- **Chunks:** je Chunk SHA-256 des unkomprimierten Inhalts, komprimierte Größe, unkomprimierte Größe, Byteoffset, Codec (`none`/`zstd`), optionale Dictionary-ID.
++- **Kompression:** unabhängig pro Chunk mit Zstandard; bereits stark komprimierte Medien als `none` oder nur bei nachweislichem Gewinn komprimieren. Beliebiger Random-Access auf Teilbereiche ohne Dekomprimierung des ganzen Pakets.
++- **Deduplikation:** im Builder zunächst innerhalb eines Pakets per SHA-256, später optional globaler Content Store. Hashgleichheit nicht als Vertrauensbeweis verwenden: signiertes Manifest und verifizierte Paketinhalte sind erforderlich.
++- **Schutzgrenzen:** maximale Indexgröße, Dateianzahl, Pfadlänge, Chunkgröße, Expansion Ratio, Überlaufprüfungen, keine überlappenden Payload-Regionen, keine unsicheren Dateinamen.
++- **Lesestrategie:** Index beim Mount laden; Chunkdaten auf Abruf lesen; LRU-Cache mit konfigurierbarem RAM-Budget; parallel lesbare, unabhängige Streams und threadsichere Indextabellen.
++
++`GetBackingFileName`-Kompatibilität: Zur Klärung aufrufender APIs alle Call-Sites prüfen. Falls ein echter OS-Pfad verlangt wird, kontrollierter schreibgeschützter Cache-Export mit Hashprüfungen und Race-Schutz; niemals Containerpfade als normale physische Dateien ausgeben.
++
++## 5. Manifeste und Aktivierung
++
++Zwei getrennte Dokumenttypen:
++
++**Release-Manifest (vom Herausgeber signiert):** Version, Plattform, Minimale Client-/Server-/VFS-Version, Paketliste, Versionen, URL/Mirrors, Größen, SHA-256, Mount-Priorität, Abhängigkeiten, erforderliche/optionale Pakete, Überschreibungsregeln, Signatur und Schlüssel-ID.
++
++**`active.json` (lokaler Installationszustand):** Manifest-Digest, Snapshot-ID, ausgewählte optionale Pakete, kanonische lokale Pfade, letzter gesunder Snapshot. Keine Authentifizierungs-Tokens oder Secrets. Schutz vor Manipulation durch Validierung aller referenzierten Paket-Hashes vor Aktivierung.
++
++Beispiel (schematisch, keine produktive Signatur):
++
++```json
++{
++  "schemaVersion": 1,
++  "release": "1.2.0",
++  "minimumClientVersion": "1.2.0",
++  "contentProtocol": 1,
++  "packages": [
++    {"id":"core", "version":3, "path":"core/game-config.nap", "size":1234567, "sha256":"<64-hex>", "required":true, "priority":100, "mountOrder":1, "dependencies":[]},
++    {"id":"animations", "version":4, "path":"graphics/animations.nap", "size":2345678, "sha256":"<64-hex>", "required":true, "priority":100, "mountOrder":2, "dependencies":["core"]},
++    {"id":"sounds-hotfix", "version":1, "path":"updates/sounds-007.nap", "size":345678, "sha256":"<64-hex>", "required":true, "priority":200, "mountOrder":1, "dependencies":["core"], "overrides":["audio/sounds.nap"]}
++  ],
++  "signature": {"algorithm":"Ed25519", "keyId":"release-2026", "value":"<base64-signature>"}
++}
++```
++
++Signiert wird eine festgelegte **kanonische Serialisierung ohne Signaturfeld** (z. B. RFC 8785 JSON Canonicalization Scheme); Testvektoren gehören zur Spezifikation. Öffentlicher Root-Schlüssel wird mit Launcher ausgeliefert; Rotation und Revocation planen. HTTPS plus Hash plus Signatur – nicht nur TLS/Hash.
++
++## 6. Patchverfahren
++
++### A. Overlay-Update (Standard)
++
++Ein neues `.nap` enthält neue/geänderte Dateien und ggf. Tombstones. Download nur der Patchdatei, Manifest entsprechend höherer Priorität mounten. Vorteile: kurzer Updateprozess, keine vollständige Rekonstruktion. Nachteil: wachsende Patchkette und zusätzliche Indexe. Grenzwerte für Kettenlänge/Overhead festlegen; regelmäßige Rebase/Compaction durch Herausgeber.
++
++### B. `.napd` Delta-Transport (optional V2)
++
++`napd` ist **kein direkt gemounteter Container**, sondern ein transportiertes, signiert referenziertes Rezept zur Erzeugung eines neuen `.nap` aus einem exakt definierten alten `.nap`:
++
++- Formatversion, `sourceSha256`, `targetSha256`, targetSize, Chunkoperationen `COPY(old-offset,length)`/`INSERT(payload)` und Kompressions-/Algorithmus-Metadaten.
++- Nur nutzen, falls vollständige Quell-Hashprüfung erfolgreich und Delta kleiner als Vollpaket ist; sonst neues NAP herunterladen.
++- Staging in separater Datei, strikte Längen-/Offset-/Expansion-Bounds, Full Target SHA-256 verifizieren, atomar umbenennen. Delta darf keine beliebigen Pfade schreiben.
++- Optional spätere blockbasierte/bsdiff-artige Encoder. Zuerst Overlay-Verfahren fertigstellen und messen.
++
++## 7. Updatezustandsmaschine und Ausfallsicherheit
++
++```plaintext
++Idle -> FetchManifest -> VerifySignature -> ResolveDependencies
++ -> Plan -> DownloadToStaging (Resume/Range) -> VerifyHashes
++ -> BuildDeltas(optional) -> VerifyCompleteSnapshot
++ -> WritePendingSnapshot -> AtomicSwitch(active.json)
++ -> Launch -> HealthAcknowledged -> CleanupOldSnapshots
++                        | failure
++                        v
++                   RestorePreviousSnapshot
++```
++
++- Manifest und Downloads unvertrauenswürdig behandeln; HTTPS erforderlich; Mirror URLs per Allowlist/Policy.
++- Updater- und Launcherprozess getrennt vom Spiel, um gesperrte Dateihandles unter Windows zu vermeiden.
++- Download-Locks, Journaling, resumierbare Downloads, verfügbare Diskkapazität und Interrupt-Verhalten beachten.
++- Umschaltung nur auf **vollständig** verifizierten Snapshot. Auf Windows/Linux atomaren Rename im selben Dateisystem plus File/Directory-Sync soweit unterstützt.
++- Erfolgreicher Prozessstart allein ist nicht gesund; Client muss Health-Signal nach tatsächlichem Data-Mount und Startbildschirm senden. Timeout/Crash => einmaliges Rollback mit Anti-Loop-Marker.
++- Während ein Prozess läuft, gemountete Pakete nicht verändern/löschen; alte Snapshot-Generation bis Freigabe behalten.
++- Fehler unterscheiden: Netzwerk, Signatur, Pakethash, inkompatible Version, fehlendes Paket, fehlender Speicherplatz, Mountfehler.
++- Statuscodes des bestehenden Clients 42 (Update erforderlich) und 43 (Repair) beibehalten bzw. sauber integrieren.
++
++## 8. Gateway-Kompatibilität
++
++Gateway gibt vor dem Eintritt die minimale Content-Protokollversion und einen signierten Manifest-Digest bzw. die erforderliche Release-ID zurück; Client/Updater vergleicht, installiert und bestätigt. `JoinTicket` bleibt von Update-Metadaten getrennt. Serverseitige Autorität entscheidet, welche Content-Version ein System benötigt. Keine clientseitige Annahme, dass reine Engine-Version genügt. Optionalpakete dürfen keine serverkritischen Gameplay-Definitionen verändern, die die Simulation inkonsistent machen.
++
++## 9. Sicherheit und Robustheit
++
++- Prüfe Signaturen **vor** Verwendung von Updateplänen; prüfe Hashes vor Mount/Aktivierung; Anti-Downgrade-Policy.
++- Pfadnormalisierung invariant und plattformübergreifend. `../`, absolute Pfade, NTFS ADS, Gerätenamen, ungültige UTF-8-Zeichen und case-insensitive Konflikte abweisen.
++- Keine Symlinks und keine Executable-Payload-Extraktion aus Paketen. NAP-Reader darf keine Containerinhalte ausführen.
++- Schutz vor decompression bombs, Hash-Kollision-Annahmen, Offset-/Integerüberläufen, doppelten Einträgen und fehlerhaften Chunkreferenzen.
++- Keine unnötige Datenprotokollierung sensibler Pfade/Token; sichere Fehlermeldungen und Auditdaten über Updatevorgang.
++
++## 10. C#-Komponenten und Projektaufteilung
++
++```plaintext
++src/Nexus.Assets/               # Portable .NET Library
++  NapReader, NapIndex, NapStream, NapWriter
++  NapManifest, PackageMountPlan, ChunkCache
++src/Nexus.Assets.Tests/         # Reader/Writer/Fuzz/Golden Tests
++src/Nexus.Packaging.Cli/        # pack, inspect, verify, diff, compact
++src/LibreLancer.Data/IO/       # NexusPackageFileProvider Adapter
++Updater/Launcher integration    # staging, activation, recovery
++```
++
++CLI-Ziele:
++
++```bash
++nexus-pack pack --source ./DATA --output ./packages/core.nap --compression zstd
++nexus-pack inspect ./packages/core.nap
++nexus-pack verify ./packages/core.nap
++nexus-pack diff --old old.nap --new new.nap --output update.napd
++nexus-pack compact --manifest release.json --output rebuilt.nap
++```
++
++Die konkreten Projektnamen und CLI-Flags werden an die tatsächliche Solution/Buildstruktur angepasst. Keine separate redundante VFS-Implementierung im Launcher schaffen.
++
++### LancerEdit
++
++Im Menü **Data** kann ein NAP-Container über **Unpack NAP Container...** in einen neu angelegten Unterordner extrahiert oder ein ausgewählter Ordner über **Pack Folder as NAP...** gepackt werden. Vor dem Entpacken werden alle Einträge verifiziert; vorhandene Ziele werden nicht überschrieben. Nach dem Laden eines aktiven NAP-Snapshots steht **Export Edited NAP Snapshot...** bereit. Diese Aktion fasst Paketstand und persistente Workspace-Änderungen zu einem vollständigen NAP zusammen. Signierung und Aktivierung bleiben Publisher-/Updater-Schritte.
++
++## 11. Test- und Abnahmekriterien
++
++1. Roundtrip für INI, BMP/DDS, CMP/3DB, ALE/Animation, WAV/OGG und zufällige Binärdateien, einschließlich leerer Dateien.
++2. Case-insensitive Pfade, `EXE/../DATA`, virtuelle Ordnerauflistung, ältere Fallback-Daten, deterministische Override-Priorität und Tombstones funktionieren identisch unter Windows/Linux.
++3. Mehrere parallele zufällige Seek/Read-Streams lesen bytegenau; Cache-Memory unter Limit; große Dateien streamen ohne Vollpufferung.
++4. Manipulierte Header/Index/Chunks, Überläufe, Path-Traversal, ungültige Signatur und beschädigte Downloads werden sicher abgelehnt.
++5. Abbruch während Download, Patch-Rekonstruktion, Aktivierung und Start führt zu vollständigem alten oder neuen Zustand – nie gemischter Content-Version.
++6. Optionalpakete und Abhängigkeiten werden sauber aktiviert/deaktiviert; serverkritische Content-Version wird vor dem Join geprüft.
++7. Client, LLServer und Editor laden reale Assets ohne Regression; bestehende Verzeichnisinstallation funktioniert weiterhin.
++8. Messungen dokumentieren Containergröße, Patchgröße, Mountzeit, Lese-Latenz, RAM und Startzeit; Grenzwerte vor Performance-Freigabe definieren.
++9. CI baut Reader, Writer und Tests für Windows und Linux; Golden-Fixtures und Fuzzing/Property-Tests ergänzen.
++
++## 12. Implementierungsreihenfolge
++
++**Phase 0 – Audit:** Repo/Overlay/VFS/Updater-Aufrufstellen inventarisieren, Content-Rechte klären, Schnittstellen und Tests erfassen.
++
++**Phase 1 – Leseformat:** feste Formatversion, golden fixtures, NAP Reader/Writer, CLI, robuste Unit-Tests.
++
++**Phase 2 – VFS-Mount:** Provider, Manifest-Priorität, Tombstones, `GetBackingFileName`-Kompatibilität, Integrationstests für Client/Server/Editor.
++
++**Phase 3 – Updater:** signiertes Release-Manifest, atomare Snapshots, Resume, Repair, Rollback und Gateway-Versioncheck.
++
++**Phase 4 – Overlay-Patches:** diff-basierter Paketbuilder, Delete/Override, Update-Matrix, Compaction.
++
++**Phase 5 – optionale Verbesserungen:** NAPD-Delta-Rekonstruktion, CDN/Mirrors, Content-On-Demand, globaler Chunkstore nach Messung.
++
++## 13. Offene Architekturentscheidungen
++
++- Physische Chunkgröße (64/256/1024 KiB) anhand realer Asset-Mixes benchmarken.
++- Verzeichnis-/Dateilängenlimits und Cache-Budget festsetzen.
++- Signatur-Schlüssellebenszyklus und Launcher-Truststore definieren.
++- Prüfen, welche Assets ausschließlich Dateipfade verlangen und temporär extrahiert werden müssen.
++- Server-/Client-Content-Digest: vollständige Release-Identität oder gezieltes Gameplay-Subset?
++- Legale Bezugsquelle und lokale Importfunktion für proprietäre Freelancer-Daten.
++
++
++## 14. Optionale Audio-Pipeline und moderne Audioformate
++
++**Ziel:** Audioressourcen in getrennten Paketen (`sounds.nap`, `music.nap`, `voices-<sprache>.nap`) unabhängig aktualisieren. Für bisherige WAV-Dateien können zur Build-Zeit modernere Formate verwendet werden, solange bestehende Spielreferenzen unverändert funktionieren und die Decoderfähigkeit des aktuellen LibreLancer-Forks nachgewiesen ist.
++
++### Vorgehen und Formate
++
++- **WAV/PCM:** Originaltreue, niedrigste Codec-Latenz; Standard-Fallback für kurze/loopkritische SFX. Container darf PCM-Blöcke optional per Zstd komprimieren.
++- **Ogg Vorbis:** Bevorzugt zu evaluieren für Musik, Ambient und längere Sounds, abhängig von tatsächlicher Decoderunterstützung und Loop-Verhalten.
++- **Opus:** Bevorzugt zu evaluieren für Sprachausgabe, gegebenenfalls längere Sounds; Decoder, Pre-Skip und Seek-Verhalten vorab prüfen.
++- **MP3:** Optionaler Decoder-/Importpfad; nur einsetzen, wenn sinnvoll und unterstützt.
++- **FLAC:** Optionale verlustfreie Alternative, falls decoderseitig verfügbar.
++
++Bereits komprimierte Audiodaten werden normalerweise in NAP mit `compression=none` gespeichert; eine zweite Zstd-Schicht bietet oft kaum Ersparnis und erhöht CPU-Aufwand. Lange Audiodaten sollen gestreamt statt vollständig vorab dekodiert werden.
++
++### Kompatibilitätsmodell und Aliase
++
++Ein vom Containerindex getrenntes, signiertes Audio-Mapping kann beispielhaft folgenden Eintrag enthalten:
++
++```json
++{
++  "audioAliases": [{
++    "virtualPath": "DATA/AUDIO/MUSIC/music_space.wav",
++    "assetPath": "AUDIO/MUSIC/music_space.ogg",
++    "codec": "vorbis",
++    "streaming": true,
++    "requiresDecoder": "vorbis"
++  }]
++}
++```
++
++**Invariante:** Die öffentliche VFS-API darf nicht stillschweigend unter einem `.wav`-Pfad Ogg-/Opus-Bytes ausgeben, wenn bestehende Aufrufer rohes WAV erwarten. Audio-Aliasauflösung erfolgt über einen dafür vorgesehenen Audio-Resolver/Loader, der Codec und Stream korrekt erkennt und an den passenden Decoder übergibt. Normale `IFileProvider`-Clients müssen weiterhin die erwarteten Rohdateien erhalten oder ausdrücklich migriert werden.
++
++### Encoding, Streaming und Validierung
++
++1. Bestehenden Audio-Ladepfad, Decoder, Ressourcentypen, Loop-Metadaten und Plattformen im Repository untersuchen; tatsächliche Vorbis/Opus/MP3-Unterstützung durch Code und Tests belegen.
++2. Opt-in Build-Konvertierung über `Nexus.AudioPipeline` mit `analyze`, `convert`, `verify`; pro Asset-Klasse bitrate/quality, Samplerate, Kanalanzahl und Zielcodec festlegbar.
++3. Encoder-Version und Parameter aufzeichnen; keine verlustbehaftete Mehrfachkodierung. Ursprungs-Assets beim lokalen Packaging erhalten können, ohne sie zu distribuieren.
++4. Loop-Punkte, Encoder-Delay, Pre-Skip, gapless playback, 3D-Sound, Sample-Präzision sowie Start-Latenz testen. Wo gleichwertige Wiedergabe nicht möglich ist, WAV belassen.
++5. Seek-fähige Container-Streams und blockweisen Zugriff für Audio erlauben; Dekodierung langer Dateien nicht vollständig im RAM erzwingen. Begrenzte Caches für kurze Effekte.
++6. Manifest enthält Abhängigkeit von notwendiger Client-Decoder-Version; atomare Paket-Aktivierung und Rollback auch für reine Audio-Updates.
++7. Ungültige Audiodaten/Metadaten robust ablehnen; nur synthetische, selbst erstellte oder lizenzierte Test-Assets verwenden.
++
++**Abnahmekriterien:** Audio-Aliase funktionieren, ursprüngliche WAV-Pfade brechen keine bestehenden Loader; Audio-Pakete lassen sich getrennt updaten und reparieren; Musik-Loops/kurze SFX zeigen keine unzulässigen Timing-Regressions; Linux und Windows getestete Decoderpfade; Audio-Fallback bei nicht kompatiblen Ressourcen.
+diff --git a/docs/asset-packages/active-snapshot.md b/docs/asset-packages/active-snapshot.md
+new file mode 100644
+index 0000000..d201380
+--- /dev/null
++++ b/docs/asset-packages/active-snapshot.md
+@@ -0,0 +1,32 @@
++# Local NAP Active Snapshot
++
++The Client and LLServer look for `packages/active.json` below their application directory. If the file is absent, the package provider is not added and the existing loose DATA/overlay behavior remains in effect. If it exists but is malformed or references invalid packages, startup fails closed.
++
++V1 snapshot shape:
++
++```json
++{
++  "schemaVersion": 1,
++  "manifestId": "data-release-id",
++  "packages": [
++    {
++      "id": "core",
++      "version": 3,
++      "path": "core/game-config.nap",
++      "size": 1234567,
++      "sha256": "<64 lowercase hex characters>",
++      "required": true,
++      "priority": 100,
++      "mountOrder": 1,
++      "dependencies": [],
++      "overrides": []
++    }
++  ]
++}
++```
++
++Package paths are relative to `packages/`; traversal, rooted paths, reparse points, mismatched sizes and SHA-256 values are rejected. NAP content and its index are checked when opened. Packages are ordered by `(priority ASC, mountOrder ASC, packageId ASC)`. Two packages at the same priority must use different mount orders. A later package that defines an already-defined virtual path must name the currently winning package ID in `overrides`; tombstones follow the same conflict rule.
++
++`active.json` is an installation snapshot, not the signed release manifest. The runtime validates its shape and every referenced package digest, but does not authenticate the snapshot itself. The updater validates the signed manifest and each NAP V1 structure, chunk and file hash before writing this snapshot into a staging release, then atomically activates the client and data release together. A Linux smoke test using a full game-data container with loose `DATA` absent reached the first UI state on 2026-10-09. Runtime rollback after an unhealthy start remains pending. Do not treat a manually edited snapshot as a trusted release decision.
++
++The Client and LLServer mount this provider above their existing loose DATA/overlay providers. VFS lookup masks fallback files for package overrides and tombstones. File and directory enumeration reports only effective visible entries. `GetBackingFileName()` returns no physical path for archived files. LancerEdit does not mount active packages yet, because its save operations require a deliberate materialization/export strategy.
+diff --git a/docs/asset-packages/audio-pipeline.md b/docs/asset-packages/audio-pipeline.md
+new file mode 100644
+index 0000000..713c668
+--- /dev/null
++++ b/docs/asset-packages/audio-pipeline.md
+@@ -0,0 +1,258 @@
++# NAP audio pipeline audit
++
++Audit date: 2026-10-09. This records the current Client decoder and runtime paths before any NAP audio conversion or alias implementation. No proprietary game audio was used; runtime decoder checks used generated one-second sine samples.
++
++## Codec compatibility
++
++| Input | Decoder path | Current evidence | NAP suitability |
++|---|---|---|---|
++| PCM WAV, mono/stereo, 8/16-bit | `extern/lancerdecode/src/formats/riff.c` | Synthetic WAV decoded by the native decoder smoke | Safe compatibility baseline; eligible for optional per-chunk Zstd |
++| MP3 file | `src/formats/mp3.c` using bundled `dr_mp3.h` | Synthetic MP3 decoded to signed 16-bit PCM | Runtime decode exists; lossy re-encoding is not a default conversion |
++| MP3 in RIFF/WAV | `riff.c` dispatches WAVE format `0x55` to `mp3_getstream`; `fact` and Freelancer `trim` chunks control sample trimming | Synthetic MP3-in-WAV decoded; codec/container properties reported as `mp3` / `wav` | Preserve the existing WAV wrapper and trim metadata for compatible legacy assets |
++| FLAC | `src/formats/flac.c` using bundled `dr_flac.h` | Synthetic FLAC decoded to signed 16-bit PCM; managed stream-reset regression passes with 8192-byte reads; active NAP Client music streaming confirmed on Linux | Native decoder and active-package music paths work on Linux; Windows runtime remains open |
++| Ogg Vorbis | `src/formats/vorbis.c` using bundled `stb_vorbis.c` | Synthetic Ogg/Vorbis decoded to signed 16-bit PCM; managed EOF/reset regression passes after patch 2172; active NAP Client playback, single-track loop and A/B playlist confirmed on Linux | Native and Client music/SFX loop paths work on Linux; acoustic loop-boundary quality and Windows runtime remain open |
++| Ogg FLAC | `src/autoload.c` dispatches the Ogg FLAC identification packet to `flac_getstream(..., isOgg: 1)` | Synthetic Ogg FLAC decoded to signed 16-bit PCM; managed EOF/reset and OpenAL loop checks pass; active NAP Client music streaming confirmed on Linux | Native decoder and active-package music paths work on Linux; Windows DLL is staged, but Windows runtime remains open |
++| Ogg Opus | `src/formats/opus.c` dynamically calls `libopusfile` | Synthetic Opus failed in the current x64 Linux smoke: `libopusfile_Open()` could not load the selected 32-bit `/usr/lib/libopusfile.so.0.4.2` into the 64-bit process | Not a dependable target until matching per-platform runtime libraries are packaged and verified. Windows code expects `libopusfile-0.dll`; the Client build/staging tree has no matching copy rule |
++
++The native smoke built `extern/lancerdecode` with its supplied CMake example and generated WAV, MP3, FLAC, and Ogg/Vorbis samples using FFmpeg. WAV, MP3, MP3-in-WAV, FLAC, and Ogg/Vorbis each decoded successfully. The Opus failure is an observed host/runtime dependency mismatch, not evidence that the Opus source path is absent. No Windows decoder execution was available.
++
++## Runtime data path
++
++1. `GameDataManager.GetAudioStream()` finds the `AudioEntry.File`, checks it through `Items.VFS`, and returns `Items.VFS.Open(...)`. `SoundManager.LoadGenericSoundAsync()` passes that stream to `SoundData.LoadStream()` for ordinary effects; `SoundManager.PlayMusic()` passes the stream to `MusicPlayer.Play()`.
++2. `SoundLoader.Open()` constructs `AudioDecoder`, which calls the native `lancerdecode` decoder. The native decoder consumes managed read/seek/tell callbacks; compressed formats produce PCM incrementally. `NapEntryStream` is seekable and reads across chunk boundaries, so it can back the decoder without extracting the encoded file. Its span-read path now copies directly from cached chunks without allocating a temporary buffer for every decoder refill; `NapArchiveTests` covers a span read crossing multiple chunks.
++3. Music uses `StreamingSource`: it queues 8 initial OpenAL buffers of 8192 bytes, then refills processed buffers on the audio-manager update path. `MusicPlayer` owns 24 buffers. One-shot sound effects instead use `SoundData.LoadStream()` and copy the complete decoded PCM into a native allocation. Voice lines are read from UTF data into memory and then decoded into `SoundData`; they are not streamed from NAP.
++4. `AudioDecoder` advertises `CanSeek == false` and only implements a reset to offset zero through its public `Seek()`. The native codec callbacks also reset to the start only. `StreamingSource` implements whole-track looping by seeking to zero; there is no per-asset loop-start/end metadata or gapless-loop contract in this runtime path.
++
++## Existing editor conversion
++
++`src/Editor/LibreLancer.ContentEdit/AudioImporter.cs` uses the same native `AudioDecoder`. It classifies PCM WAV and selected MP3/WAV trim cases for passthrough; other recognized decoder inputs fall through to `NeedsConversion`. `src/Editor/LancerEdit/Audio/AudioConverter.cs` converts those to Freelancer-compatible MP3-in-WAV through `Mp3Encoder`, or copies compatible WAV data. This is an editor import workflow, not an NAP package builder or runtime alias system. The LAME encoder is a separate native dependency (`libmp3lame`); Linux mapping exists in `src/PublishAssets/LibreLancer.ContentEdit.dll.config`.
++
++## Alias and packaging boundary
++
++The current runtime resolves only the path stored in `AudioEntry.File`. NAP mounts provide normal VFS reads but no audio-alias resolution. The `audioAliases` example in the NAP architecture document has no corresponding signed manifest, active-snapshot, or runtime implementation. Any future alias must resolve only inside the audio-loading path; changing general `IFileProvider.Open("*.wav")` behavior could return non-WAV bytes to unrelated readers.
++
++An alias design must retain the original WAV fallback, bind the alias and codec requirement to the signed active package snapshot, validate the target path and digest through the existing package validation, and reject aliases when the target decoder is unavailable. Long music may be evaluated for streaming codecs; converting one-shot SFX or voice data does not reduce runtime decoded-memory use in the current path.
++
++## Phase 6 entry gates and implementation order
++
++The NAP VFS/updater still has open Windows CI/game-runtime and interactive editor verification, so Phase 6 conversion is not ready to ship. When that base is complete:
++
++1. Add platform-specific `lancerdecode` and Opus dependency staging checks; fail packaging when a declared decoder is unavailable. Exercise decoder loading on Windows and Linux.
++2. Add a synthetic C# decoder test harness that reads WAV, MP3, FLAC, Vorbis and Opus streams from both loose files and NAP-backed `NapEntryStream`; include short-read behavior, boundary-crossing chunks, reset/loop reads, corrupt/truncated streams, mono/stereo and long-stream memory checks.
++3. Extend the signed release and active snapshot with a bounded, validated audio-alias table. Resolve aliases in `GameDataManager.GetAudioStream()` (or a dedicated audio resolver) while preserving the original path fallback.
++4. Add opt-in `nexus-pack audio analyze`, `convert`, and `verify` commands with explicit per-asset profiles, reproducible tool/version reporting, file hashes, channel/rate preservation, and PCM fallback. Do not make MP3 transcoding the default for already-lossy inputs.
++5. Repeated Ogg/Vorbis music and SFX playback is verified on Linux (see the follow-up below). Still validate loop-boundary quality, gapless behavior, SFX start latency, voice timing and AB listening in the real Client on both platforms. Keep loop-sensitive and short SFX as WAV/PCM until those quality checks pass.
++
++The original audit did not change decoder or audio-alias behavior. The package format can already store encoded audio bytes; that fact alone does not establish codec availability, streaming behavior, loop quality, or legal distribution rights.
++
++## Follow-up: Vorbis/FLAC playback and loops (2026-10-12)
++
++**Ergebnis zur Vorbis-Schleife:** Ja. Ogg/Vorbis-Musik wird im Client bei
++aktiviertem Loop nach EOF ab Streamanfang weitergespielt; die Regression und
++der OpenAL-Streaminglauf bestätigen den Neustart. Wiederholte Vorbis-SFX
++funktionieren ebenfalls, weil SFX vorab zu PCM dekodiert und anschließend
++über `AL_LOOPING` wiederholt werden. Belegt ist die Wiederholung, nicht ein
++nahtloser oder artefaktfreier Übergang: Loop-Punkte innerhalb der Datei und
++ein Hörtest an der Schleifengrenze fehlen weiterhin.
++
++**Codepfad bestätigt:** `MusicPlayer.Play(..., loop: true)` reicht den Loop-
++Schalter an `StreamingSource.Begin()` weiter. Beim Erreichen des Streamendes
++setzt `StreamingSource` den `AudioDecoder` auf Offset 0 zurück und füllt die
++OpenAL-Puffer erneut. Patch 2172 behandelt dabei den Vorbis-spezifischen
++Decoderreset, indem der Decoder über denselben seekbaren Eingabestream neu
++geöffnet wird. `AudioDecoder.CanSeek` bleibt nach außen `false`; unterstützt
++wird ausschließlich der interne Reset auf den Dateianfang.
++
++Für SFX decodiert `SoundData.LoadStream()` die Datei vollständig nach PCM;
++`SoundInstance.Play(loop: true)` setzt danach `AL_LOOPING` an der OpenAL-Quelle.
++Vorbis-SFX hängen beim Wiederholen somit nicht von einem erneuten Vorbis-Seek
++ab. Die geprüft unterstützte Semantik ist in beiden Fällen die Wiederholung
++der ganzen Datei. Vorbis-Kommentar-Tags oder sonstige Loop-Start-/Endpunkte
++werden in diesem Pfad nicht ausgewertet.
++
++**Windows-Prüfung:** Der Client-Workflow ist für den nativen Bau von
++`lancerdecode.dll`, das Kopieren in den Testausgabeordner und
++`AudioDecoderLoopTests` eingerichtet. GitHub Actions ist für dieses Repository
++derzeit deaktiviert; daher liegt noch kein erfolgreicher Windows-CI-Lauf vor.
++Windows-Loader und Decoderlaufzeit bleiben unbestätigt.
++
++- `GameDataManager.GetAudioStream()` resolves the file named by `AudioEntry`
++  from the VFS and passes the stream to `SoundManager`; decoding is selected by
++  file signature, so `.ogg`/`.flac` are usable without an extension table or
++  audio alias.
++- Music is streamed through `StreamingSource` in 8192-byte reads. One-shot
++  sounds instead decode completely into PCM; their repeats use OpenAL's
++  source-loop flag and do not seek the compressed decoder during playback.
++- Looping music reads the compressed stream again from offset zero when a
++  streaming buffer reaches EOF. A one-track room uses that loop mode; a
++  multi-track room plays each selected track once and advances after playback
++  stops. The Ogg/Vorbis reset regression confirms that the decoder can restart
++  after EOF. This verifies the reset prerequisite, not gapless audio at the
++  loop boundary.
++- A managed `AudioDecoder` run against the previous native build found that
++  Vorbis decoded correctly to EOF but `stb_vorbis_seek(..., 0)` did not restart
++  after EOF. Patch 2172 reopens the Vorbis decoder over the same seekable VFS
++  stream on reset. Failed reopen is guarded and returns EOF instead of
++  dereferencing a missing decoder.
++- Ogg FLAC initially failed despite native container dispatch. The managed
++  `AudioDecoder` seek callback returned the stream's new absolute position,
++  while the native stream contract expects zero on success. Ogg FLAC needs a
++  relative seek while parsing its mapping header, exposing the mismatch. The
++  callback now returns zero after a successful seek; the synthetic Ogg FLAC
++  decoder and reset regression passes with the same stream callback used by
++  Client audio.
++- Regression tests use the existing repository Ogg bell and a generated
++  synthetic FLAC and Ogg FLAC fixture. Each is decoded to EOF, rewound, decoded
++  again with the music buffer size, and compared byte-for-byte. The loose-file
++  cases pass 3/3; the same three formats pass from chunked NAP entries, bringing
++  the focused suite to 6/6 after rebuilding the managed decoder project.
++- A Vorbis failure-path regression now blocks rewind after decoding to EOF.
++  Reopening the decoder then fails, and a subsequent read returns EOF without
++  dereferencing the missing native decoder. Repeated reset attempts are also
++  covered: the native path skips closing an already absent decoder, remains at
++  EOF, and does not crash. This verifies the guarded decoder error path; it
++  does not establish audible music recovery after a failed loop.
++- A fresh focused Linux rerun on 2026-10-12 passed `AudioDecoderLoopTests`
++  (7/7) and `RoomMusicPlaylistTests` (5/5). This reconfirms decoder replay from
++  loose and chunked NAP streams and the playlist parsing/selection rules. It
++  does not establish audible loop-boundary quality or Windows runtime behavior.
++- A temporary runtime harness used a synthetic 0.7-second Ogg/Vorbis track and
++  OpenAL Soft's null driver. With looping enabled, `MusicPlayer` stayed in the
++  playing state after 5 seconds; the non-looping control reached stopped after
++  3 seconds.
++  The same positive/negative control through `SoundData` and
++  `SoundInstance.Play(loop)` kept the Vorbis SFX active after 3 seconds only
++  when looping was enabled. This verifies real decoder, stream/source and
++  OpenAL queue behavior without audible output; it does not prove loop-boundary
++  quality.
++- The same backend harness used synthetic Ogg FLAC: `MusicPlayer` remained
++  playing after 5 seconds with looping enabled and stopped after 3 seconds
++  without looping. An SFX loaded from Ogg FLAC, decoded to PCM and played with
++  `SoundInstance.Play(loop: true)` stayed active after 3 seconds. Its non-loop
++  control ended. This
++  verifies Ogg FLAC music and SFX loop paths under OpenAL Soft's null driver,
++  without audible output or loop-boundary quality measurements.
++- A focused Client regression test packs each synthetic Vorbis, FLAC and Ogg
++  FLAC track into NAP with 1024-byte chunks, opens it as a `NapEntryStream`,
++  decodes to EOF and resets to compare the PCM. All three cases pass, covering
++  repeated seek/read across chunk boundaries. This does not cover mounting an
++  active Client package snapshot or a no-loose-`DATA` launch by itself.
++- Focused native/managed decoder checks passed on Linux. An initial disposable
++  Client package opened track A but did not advance. Its assemblies were stale:
++  replacing only the Client and Media DLLs caused a missing
++  `BaseRoom.MusicTracks` field at runtime. After synchronizing the complete
++  Debug output into the disposable package, a 20-second test-save run logged
++  stream terminal states and repeatedly selected A/B in alternation; `strace`
++  confirmed repeated opens of both synthetic Ogg files. A separate 16.67-second
++  PulseAudio monitor capture from the Client had 44.1-kHz stereo PCM and a
++  measured -24 dBFS peak while the test tracks played. The capture was routed
++  to a temporary PulseAudio null sink, so it confirms non-silent Client/OpenAL
++  output without sending test tones to speakers. That earlier loose-data run
++  did not establish active-package mounting or perceptual loop-boundary quality.
++- A separate 22-second Debug Client run mounted a verified active snapshot with
++  the retail DATA tree packed as `freelancer-data.nap` and a second NAP overriding
++  the BR01 Deck room plus two synthetic Vorbis tracks. The install had no loose
++  `DATA` directory. Logs reached `Game: Finished loading game data` and
++  `UI: Interface loaded`, then selected both NAP-backed tracks 20 times in
++  alternation. A 21.41-second PulseAudio monitor capture routed to a temporary
++  null sink contained 44.1-kHz stereo PCM (mean -34.2 dBFS, peak -7.5 dBFS);
++  0.5-second FFT windows during playback showed the generated 440-Hz and
++  660-Hz track tones in turn.
++  This confirms active-snapshot VFS reads and non-silent playback during the
++  track sequence on Linux; it does not prove audible loop-boundary quality or
++  active-package FLAC/Ogg FLAC playback.
++- A further 18-second Debug Client run used the same active NAP snapshot with
++  only the 0.7-second, 440-Hz Vorbis track assigned to the BR01 Deck room.
++  The Client logged one selection with `oneshot=False` and no streaming terminal
++  state. The 17.41-second 44.1-kHz stereo Null-Sink capture kept a 440-Hz
++  spectral peak in every 0.5-second window from second 7 through second 15.
++  This verifies repeated MusicPlayer playback after EOF through the active NAP
++  stream on Linux. It does not assess audible clicks or seamlessness at the
++  loop boundary.
++- An active-NAP Debug Client run also put synthetic FLAC and Ogg FLAC in the
++  same two-track BR01 Deck playlist. Both entries were selected repeatedly,
++  each stream reached EOF, and playback advanced between formats. Its
++  16.41-second 44.1-kHz stereo Null-Sink capture had a -10.6 dBFS peak; 0.2-
++  second FFT windows showed the generated ~393-Hz FLAC and ~525-Hz Ogg FLAC
++  tones in turn. This confirms both streaming decoder paths from the active
++  snapshot on Linux, without claiming acoustic quality or Windows support.
++- A separate temporary probe loaded synthetic Vorbis, FLAC and Ogg FLAC SFX
++  through `NexusPackageFileProvider.LoadActive()` and `SoundData.LoadStream()`,
++  then played each with the Client `AudioManager` on OpenAL Soft/PulseAudio.
++  All three looped instances remained active after 2.5 seconds; each non-looping
++  control stopped after 1.4 seconds, including the 1.0-second Ogg FLAC sample.
++  The 18.83-second 44.1-kHz stereo Null-Sink capture had a -28.6 dBFS mean and
++  -22.4 dBFS peak, with the generated 440-Hz Vorbis, ~392-Hz FLAC and ~524-Hz
++  Ogg FLAC tones visible during their runs. This proves NAP-backed decode and
++  SFX loop playback at the decoder/AudioManager layer on Linux; it is not a
++  full game-scene SFX trigger test or an acoustic boundary assessment.
++- `BuildNatives --with-win64` and `BuildEngine --with-win64` succeeded through
++  the actual BuildLL path. The final `bin/librelancer-win-x64/lib/x64/`
++  directory contains `lancerdecode.dll`, byte-identical to the x64 native stage
++  in `bin/natives/x64/`. It is x86-64 PE32+ and imports only `KERNEL32.dll`
++  and `msvcrt.dll`. Wine is unavailable here, so Windows loader resolution and
++  fixture decoding remain unverified.
++  Ordinary FLAC, Ogg/Vorbis and Ogg FLAC are not blocked on a new alias or
++  format resolver.
++
++## Code-Abgleich: Musik- und SFX-Loops (2026-10-12)
++
++Der Quellcode bestätigt den oben beschriebenen Loop-Support für Ogg/Vorbis:
++`extern/lancerdecode/src/formats/vorbis.c` implementiert `ogg_seek()` für den
++Reset auf Byte 0, indem der Vorbisdecoder geschlossen und auf demselben
++Seek-fähigen Stream neu geöffnet wird. `StreamingSource` setzt den Decoder bei
++EOF auf den Anfang zurück und füllt die OpenAL-Musikpuffer erneut.
++`SoundManager.PlayMusic()` aktiviert diesen Modus standardmäßig
++(`oneshot = false`). Ein Raum mit genau einem Track behält dieses Loop-Verhalten,
++sofern `MusicOneShot` nicht gesetzt ist. Bei mehreren Tracks wird jeder Track
++einmal abgespielt und die Playlist wählt anschließend den nächsten aus.
++
++SFX folgen einem eigenen Weg: `SoundData.LoadStream()` dekodiert den Sound
++zunächst vollständig nach PCM. Wiederholung ist optional und wird vom Aufrufer
++über `SoundInstance.Play(loop: true)` angefordert; `AudioManager` setzt dafür
++`AL_LOOPING`. Der Decoder muss während der Wiedergabe nicht zurückgesetzt
++werden. Ohne dieses Flag bleibt der SFX ein One-Shot.
++
++Damit ist wiederholte Vorbis-Musik- und SFX-Wiedergabe auf Linux durch
++Decoderregressionen und OpenAL-/Clientläufe belegt. Die Prüfung belegt keinen
++nahtlosen Übergang oder frei definierbare Loop-Punkte. Der Vorbis-Reset-
++Regressionstest liegt unter `src/LibreLancer.Tests/AudioDecoderLoopTests.cs`;
++Windows-Laufzeit und ein Hörtest der Loop-Grenze bleiben offen.
++
++Der fokussierte Regressionstest wurde am 2026-10-12 erneut ausgeführt:
++`AudioDecoderLoopTests` bestand mit 7/7 Fällen: drei Decoder-Resets (Vorbis,
++FLAC und Ogg FLAC) aus losen Dateien, drei Wiederholungen aus chunked
++NAP-Einträgen und ein Vorbis-Reopen-Fehlerfall. `RoomMusicPlaylistTests`
++bestand im selben Lauf mit 5/5 Fällen; zusammen waren es 12/12 Tests. Die
++Vorbis-Fixture ergab nach Reset byteidentisches PCM; ein blockierter Rewind
++führt kontrolliert zu EOF statt zu einem Absturz. Der Testlauf bestätigt
++Decoder-Reset und reproduzierbare PCM-Daten; Musik- und SFX-Loop-Wiedergabe
++ist zusätzlich durch die oben beschriebenen OpenAL- und Clientläufe belegt.
++Reproduzierbarer Aufruf:
++`DOTNET_ROOT=/opt/dotnet-10 DOTNET_ROOT_X64=/opt/dotnet-10 dotnet test
++src/LibreLancer.Tests/LibreLancer.Tests.csproj --no-restore
++-p:UseSharedCompilation=false --filter
++'FullyQualifiedName~AudioDecoderLoopTests|FullyQualifiedName~RoomMusicPlaylistTests'`.
++
++Die vollständige `LibreLancer.Tests`-Suite wurde am selben Tag in Release
++erneut ausgeführt und bestand mit 677/677 Tests. Das ist ein breiterer
++verwalteter Client-Testlauf; Windows-Loader, native Windows-Decodierung und
++akustische Loop-Grenzen bleiben davon unbestätigt.
++
++Der fokussierte Lauf wurde anschließend unter Linux ohne erneuten Build mit
++`--no-build --no-restore` wiederholt: `AudioDecoderLoopTests` und
++`RoomMusicPlaylistTests` bestanden erneut zusammen mit 12/12 Fällen. Das
++bestätigt die zuvor dokumentierte Decoder- und Playlistabdeckung; den OpenAL-
++Loop-Nachweis liefern weiterhin die separaten Backend- und Clientläufe oben.
++
++Ein erneuter fokussierter Linux-Lauf am 2026-10-12 bestand mit `AudioDecoderLoopTests` 7/7. Der Aufruf war:
++`DOTNET_ROOT=/opt/dotnet-10 DOTNET_ROOT_X64=/opt/dotnet-10 /opt/dotnet-10/dotnet test src/LibreLancer.Tests/LibreLancer.Tests.csproj --no-restore -p:UseSharedCompilation=false --filter FullyQualifiedName~AudioDecoderLoopTests`.
++Damit ist der aktuelle Decoder-Reset-Test bestätigt. Der erste Versuch ohne `DOTNET_ROOT` konnte wegen des nicht gefundenen .NET-10-Runtimes nicht bauen; der Lauf mit explizitem Runtimepfad war erfolgreich.
++
++Ein weiterer fokussierter Lauf am 2026-10-12 baute die aktuelle Debug-Testassembly
++und bestand `AudioDecoderLoopTests` sowie `RoomMusicPlaylistTests` zusammen mit
++12/12 Fällen. Verwendet wurde der oben dokumentierte .NET-10-Aufruf mit dem
++Filter `FullyQualifiedName~AudioDecoderLoopTests|FullyQualifiedName~RoomMusicPlaylistTests`.
++Damit ist der Decoder-Reset samt Playlistregel erneut bestätigt; der separate
++OpenAL-/Clientnachweis belegt tatsächliches Wiederholen, aber keine nahtlose
++Schleifengrenze.
+diff --git a/docs/asset-packages/code-audit.md b/docs/asset-packages/code-audit.md
+new file mode 100644
+index 0000000..74fcdc1
+--- /dev/null
++++ b/docs/asset-packages/code-audit.md
+@@ -0,0 +1,50 @@
++# NAP Code Audit
++
++Auditstand: 2026-10-09. Quellen wurden im aktuellen Client-Checkout geprüft; der Arbeitsbaum enthält umfangreiche unabhängige lokale Änderungen. Diese wurden nicht bereinigt oder überschrieben.
++
++## VFS
++
++- `src/LibreLancer.Data/IO/FileSystem.cs`: `IFileProvider` hat `Open`, `FileExists`, `GetBackingFileName`, `GetFiles`, `GetDirectories` und `Refresh`. Dateiöffnung und Existenzprüfung fragen Provider rückwärts ab, daher gewinnt der zuletzt gemountete Provider.
++- `FileSystem.GetFiles` und `GetDirectories` führen Provider-Ergebnisse mit case-insensitive HashSets zusammen. Die Methoden kennen keine Tombstones und entfernen keine maskierten älteren Einträge. Korrekte Sichtbarkeit maskierter Dateien benötigt einen effektiven Index oder eine gezielte VFS-Erweiterung.
++- `patches/2070-package-and-mount-data-overlays.patch` ist in `patches/series` eingetragen. `FreelancerDataOverlayFileProvider` mappt DATA-Pfade auf ein Verzeichnis. `GameConfig.CreateFreelancerFileSystem()` bindet `lib/data` ein; `LLServer.Core.ServerApp` bindet sein Serveroverlay ein. Das ist Verzeichnisfallback, kein Containerreader.
++- Phase 2 adds `IOverlayFileProvider` interception to `FileSystem` and `NexusPackageFileProvider`. Client startup (`GameConfig.CreateFreelancerFileSystem`) and LLServer startup load `packages/active.json`; absent snapshots keep the previous loose-data path. The mount checks package path confinement, reparse points, size and whole-package SHA-256 before loading the NAP index. The separate Updater validates NAP V1 section bounds, index/path/reference structure, decompressed chunk hashes, complete file hashes and signed content-version agreement before publishing the staged active snapshot.
++
++## Physische Pfadconsumer
++
++`GetBackingFileName()` wird in folgenden Gruppen benutzt:
++
++- **Editor-Mount:** `src/Editor/LancerEdit/GameDataContext.cs::Load` erstellt `FileSystem.FromPath(folder)` und ergänzt danach `NexusPackageFileProvider.LoadActive(AppContext.BaseDirectory)` sowie einen persistenten Workspace-Provider. LancerEdit liest aktive Pakete aus demselben Client-Releaseverzeichnis wie der Spielclient.
++- **Lesen mit physischem Pfad:** `src/LibreLancer.Data/Schema/FreelancerIni.cs` übergibt den Pfad an `ResourceDll.FromStream`. `ResourceDll.SavePath` wird anschließend von `src/Editor/LibreLancer.ContentEdit/EditableInfocardManager.cs::Save` für `File.Create` verwendet. Das ist damit zugleich ein Schreibpfad und kein rein lesender DLL-Import.
++- **Datei-Saves:** `StarSystemSaveStrategy`, `UniverseSaveStrategy`, `NewsSaveStrategy`, `BaseNpcSaveStrategy` und `TradingPlannerTab.Markets` schreiben INI-Dateien direkt über den zurückgegebenen OS-Pfad. `MissionScriptDocument` lädt und schreibt referenzierte NPC-Schiffdateien ebenfalls über physische Pfade.
++- **Verzeichnis-/Mehrdatei-Saves:** `UniverseEditorTab.NewSystem` benötigt einen physischen Systems-Ordner, legt Unterverzeichnisse und neue INIs direkt an und aktualisiert danach die Universe-Datei.
++- **Interface-Editor:** `src/Editor/InterfaceEdit/ResourceWindow.cs` schreibt `resources.xml` mit `File.WriteAllText` an den Backing-Pfad.
++
++`InterfaceEdit/Project.cs::Load` erstellt aktuell nur `FileSystem.FromPath(FlFolder)` und lädt weder den aktiven Client-Paketsnapshot noch den persistenten NAP-Workspace. Damit ist der direkte `resources.xml`-Schreibpfad derzeit ein reiner Loose-Data-Pfad und kein NAP-Workspace-Save. Die NAP-Pack-/Entpack-Integration ist in LancerEdit umgesetzt; InterfaceEdit bleibt als separates Editor-Integrationspaket offen.
++
++Package-backed saves resolve to the persistent workspace above package and loose DATA providers. The LancerEdit Data menu now offers NAP extraction, directory packing, and export of the active package snapshot plus workspace edits. Extraction verifies every entry before writing into a staging directory and moves the completed directory into the selected parent; tombstones are omitted. Packing and export run off the UI thread and report completion or errors through editor dialogs. Export produces a verified full NAP but does not sign or activate a release. DLL resource editing uses the workspace path stored in `ResourceDll.SavePath`. These new interactive flows and Windows behavior still need runtime verification.
++
++Package-backed INI saves in `NewsSaveStrategy`, `UniverseSaveStrategy`, `StarSystemSaveStrategy`, `AsteroidFieldList`, `UniverseEditorTab`, and `MissionScriptDocument` now resolve through `WritableDataPath`. A missing physical target raises an explicit `IOException`, and mission NPC references are no longer silently discarded when no writable path can be resolved. `BaseNpcSaveStrategy` and commodity market saves retain their existing explicit failure handling.
++
++## Updater und Gateway
++
++- `src/LibreLancer/Net/NexusGatewayLogin.cs` lädt `client-version.json`, sendet `ClientVersionHello` an `/api/v1/client/version` und blockiert Login bei Update-/Protokollinkompatibilität. Der Clientvertrag enthält `DataManifestId` und Gateway-Antwort `RequiredDataManifestId` im Protocol-Submodule.
++- `README.md` dokumentiert gemeinsame Client-/NAP-Aktivierung; ein Linux-Start mit vollständigem NAP-Container und ohne loses `DATA` erreichte am 2026-10-09 das erste UI. Der Updater weist NAP-Strukturfehler vor Aktivierung zurück und serialisiert Installationsläufe über einen exklusiven Lock im Installationsstamm. Updater-Tests decken den fehlenden UI-Health-Ack-Timeout einschließlich Prozessbeendigung und Rückkehr zum vorherigen Release ab. Native Kindprozess-Tests beenden den Updater abrupt nach dem Verschieben des Releases, nach dem Flush des temporären Pointers und nach dem atomaren Pointerwechsel. Der aktive Snapshot bleibt jeweils vollständig; nach einem Tempfile-Abbruch gelingt auch der nächste Aktivierungslauf. Der Windows-CI-Lauf ist mangels erreichbarer GitHub-API noch nicht bestätigt. Windows-Spielruntime bleibt unvalidiert. Login-Acknowledgements verwenden Exitcode 42, fehlende/defekte Clientmetadaten Exitcode 43.
++- `src/Editor/LancerEdit/Updater/UpdateChecks.cs` und `UpdateDownloader.cs` behandeln Editorupdates. Sie sind kein installierter Spielcontent-Updater und sollten nicht ohne gesonderte Prüfung als NAP-Installationspfad verwendet werden.
++
++## Build und Tests
++
++- Zielprojekte verwenden .NET 10. `ZstdSharp.Port` wird bereits in `src/LibreLancer.Base/LibreLancer.Base.csproj` verwendet.
++- Die NAP-V1-Projekte sind isoliert als `src/Nexus.Assets`, `src/Nexus.Packaging.Cli` und `src/Nexus.Assets.Tests` angelegt; Tests laufen unabhängig vom bestehenden, lokal veränderten Gesamttestprojekt.
++- Phase 1 bindet keine Original-Freelancer-Dateien ein. Tests verwenden synthetische Bytes.
++
++## Folgeabhängigkeiten
++
++LancerEdit mounts the active Client package snapshot and routes package-backed physical save paths to a persistent workspace. The workspace can be compacted with package layers into a new verified full NAP, but signing and activation remain explicit publisher steps. Interactive editor saves and Windows behavior are unverified. The separate Updater repository verifies signed NAP package metadata and the complete NAP V1 structure/content, downloads required/selected packages with dependency and override closure, writes `packages/active.json` in the Client staging release, and activates Client plus data through one release pointer. The Client acknowledges readiness after its first UI state loads; the Updater can restore the previous release and records failed package identity to prevent an activation loop. A full DATA image in one NAP passed a Linux launch with no loose DATA and reached the first UI on 2026-10-09. Linux tests cover a missing-ack timeout, process termination, old-release restoration and failed-snapshot suppression. Windows runtime and real process interruption between activation steps remain open. Gateway-/Protocol-Verträge must decide whether `DataManifestId` identifies the whole release or a gameplay-critical subset.
++
++The Updater resumes hash-addressed downloads using validated byte ranges and retains partial data after transport interruption. It checks available volume space before package download, client extraction and data-package copies. Real disk-full injection and Windows filesystem behavior still need verification.
++
++## Audio pipeline
++
++The native decoder supports PCM WAV, MP3, FLAC and Ogg/Vorbis in source and synthetic Linux smoke checks. Ogg/Opus source exists but depends on a dynamically loaded platform library; the current x64 environment resolves a 32-bit `libopusfile` and cannot load Opus. `GameDataManager.GetAudioStream()` reads only the path stored in `AudioEntry.File`; no audio-alias layer exists. See [`audio-pipeline.md`](audio-pipeline.md) for codec evidence, stream/loop behavior and Phase 6 gates.
++
++`src/Nexus.Assets/NapOverlayBuilder.cs` builds `.nap` overlays from two verified archives and compacts an active package mount. The CLI diff sidecar describes the one base package dependency/override relationship; publishers must review and merge it into their signed manifest.
+diff --git a/docs/asset-packages/editor-workspace.md b/docs/asset-packages/editor-workspace.md
+new file mode 100644
+index 0000000..de60995
+--- /dev/null
++++ b/docs/asset-packages/editor-workspace.md
+@@ -0,0 +1,15 @@
++# LancerEdit NAP Workspace
++
++When LancerEdit starts from a Client release with `packages/active.json`, it mounts the same active package snapshot above the selected Freelancer installation. Package-backed edits are written to a separate persistent workspace, not into the NAP archive or the selected installation.
++
++The workspace path is logged at data-load time. It is stored below `<LocalApplicationData>/LancerEdit/NAPWorkspace/<install-id>` (or the application-local fallback when no local application-data directory is available). Files already present in the workspace override both NAP packages and loose DATA files. Saves for packaged files and directories resolve to workspace paths; loose files that are not shadowed by a package keep their original backing paths.
++
++To export the effective package content plus workspace edits as a new full NAP:
++
++```bash
++nexus-pack compact <client-release-directory> <output.nap> --workspace <logged-workspace-directory> --version <content-version>
++```
++
++The output must be outside both the Client release and workspace. Compaction verifies the resulting NAP but does not sign a release manifest or include loose DATA fallback files. Review the package identity, mount order and override relationships, then update and sign the release manifest through the normal publishing process. Keep the workspace until the exported package has been validated and activated.
++
++The workspace is local editor state. It is not loaded by the game client or LLServer and is not included in the signed active snapshot automatically.
+diff --git a/docs/asset-packages/local-migration.md b/docs/asset-packages/local-migration.md
+new file mode 100644
+index 0000000..f922941
+--- /dev/null
++++ b/docs/asset-packages/local-migration.md
+@@ -0,0 +1,11 @@
++# Local DATA to NAP migration
++
++This is a developer-only conversion path. It packages files already present in a local installation and does not grant distribution rights.
++
++```bash
++dotnet run --project src/Nexus.Packaging.Cli/Nexus.Packaging.Cli.csproj -- pack /path/to/Freelancer/DATA /path/to/output/local-data.nap
++dotnet run --project src/Nexus.Packaging.Cli/Nexus.Packaging.Cli.csproj -- inspect /path/to/output/local-data.nap
++dotnet run --project src/Nexus.Packaging.Cli/Nexus.Packaging.Cli.csproj -- verify /path/to/output/local-data.nap
++```
++
++V1 currently provides an archive reader and CLI verification only. The game does not mount the package; keep the original installation configured until the later VFS and updater phases are implemented.
+diff --git a/docs/asset-packages/nap-v1-format.md b/docs/asset-packages/nap-v1-format.md
+new file mode 100644
+index 0000000..102e1cb
+--- /dev/null
++++ b/docs/asset-packages/nap-v1-format.md
+@@ -0,0 +1,49 @@
++# NAP V1 Binary Format
++
++This document freezes the binary layout implemented by `Nexus.Assets` format version 1. All integer fields are unsigned, fixed-width, little-endian. UTF-8 decoding is strict. V1 does not execute archive contents.
++
++## Header: 128 bytes
++
++| Offset | Size | Field |
++|---:|---:|---|
++| 0 | 8 | Magic bytes `4c 4e 41 50 00 0d 0a 1a` (`LNAP\0 CR LF SUB`) |
++| 8 | 2 | Header version, exactly 1 |
++| 10 | 2 | Header size, exactly 128 |
++| 12 | 4 | Flags, zero in V1 |
++| 16 | 16 | First 16 bytes of the deterministic package identifier hash |
++| 32 | 8 | Content version |
++| 40 | 4 | Chunk size hint, 1 through 1,048,576 |
++| 44 | 4 | Reserved, zero |
++| 48 | 8 | Index offset |
++| 56 | 8 | Index length |
++| 64 | 8 | Chunk-table offset |
++| 72 | 8 | Chunk-table length |
++| 80 | 8 | Payload offset |
++| 88 | 8 | Payload length |
++| 96 | 32 | SHA-256 of the complete index bytes |
++
++Sections are contiguous in this order: header, index, chunk table, payload. The reader rejects overlap, out-of-file ranges and payload trailing/short bytes.
++
++## Index
++
++Starts with 8 bytes `NAPIDX1\0`, then a u32 entry count. Entries are sorted by normalized UTF-8 path using ordinal ordering; paths must also be unique under ordinal case-insensitive comparison.
++
++Each entry is: u16 path byte length; path bytes; u8 flags (`0` file, `1` tombstone); u64 uncompressed file length; 32-byte SHA-256 of uncompressed file bytes; u32 chunk-reference count; that many u32 chunk-table indices. Empty regular files have length and reference count zero and SHA-256 of the empty byte string. Tombstones have zero length, zero hash bytes and zero chunk references.
++
++Virtual paths use `/`, are relative, contain no empty, `.` or `..` components, NUL, colon, Windows-invalid characters, trailing dot/space, or reserved Windows device names. `DATA/` and `EXE/../DATA/` prefixes are canonicalized away. Component limit is 255 UTF-16 code units; encoded path limit is 4096 bytes. UTF-8 must be strictly valid.
++
++## Chunk table and payload
++
++Each fixed 64-byte chunk record is: 32-byte SHA-256 of uncompressed bytes; u64 stored length; u64 uncompressed length; u64 absolute payload offset; u8 codec; 7 reserved zero bytes. Codec `0` is stored bytes and requires equal stored/uncompressed lengths. Codec `1` is one independent Zstandard frame. Chunk lengths are 1 through 1 MiB; stored chunk length is capped at 1 MiB + 64 KiB. V1 has no dictionaries.
++
++The writer chunks each source file in order, deduplicates identical chunks by SHA-256 and length within the package, and emits no payload for empty files or tombstones. The package identifier is the first 16 bytes of SHA-256 over each sorted entry's UTF-8 path concatenated with its 32-byte content hash. The reader validates chunk bounds, codec, reserved bytes, non-overlap, decompressed length and chunk hash. `verify` also validates the complete uncompressed file hash.
++
++## Golden vector
++
++With content version 1, chunk size 16, compression level 3, and one file `a.bin` containing byte `7f`, the complete deterministic NAP file SHA-256 is:
++
++```plaintext
++6b2865ad4e2ed41aada33af2045b331cd85b16e8bda8c40271b3931c63aa0be1
++```
++
++The vector is asserted by `Nexus.Assets.Tests.NapArchiveTests.MatchesVersionOneGoldenVector`. Any incompatible binary layout change requires a new major format version.
+diff --git a/docs/asset-packages/overlay-patch-builder.md b/docs/asset-packages/overlay-patch-builder.md
+new file mode 100644
+index 0000000..bf7f957
+--- /dev/null
++++ b/docs/asset-packages/overlay-patch-builder.md
+@@ -0,0 +1,9 @@
++# NAP Overlay Patch Builder
++
++`nexus-pack diff <base.nap> <target.nap> <patch.nap> <base-package-id>` verifies both source archives, compares normalized case-insensitive paths and complete file hashes, and emits only added/changed files plus tombstones for deletions. It also writes `<patch.nap>.plan.json` with the base package dependency/override declaration. Review that plan and merge it into the signed release manifest; the sidecar is advisory and is not signed.
++
++The base ID must identify the package layer represented by `<base.nap>`. The patch is mounted after that layer and its manifest entry must declare the listed dependency and override. If the base snapshot contains multiple packages, build against the effective package state and declare all package relationships needed by the signed release plan; the simple CLI command takes one base ID.
++
++`nexus-pack compact <application-dir> <output.nap> [--version N] [--workspace <dir>]` loads `packages/active.json`, compacts the effective NAP package tree into a new full package, removes obsolete layers and tombstones, and verifies the result. If supplied, `--workspace` overlays persistent LancerEdit changes above the active packages. The output must be outside the active application and workspace directories. Compaction does not include loose DATA fallback files or sign/activate a release; update the signed manifest through the publisher workflow.
++
++Both commands use temporary files for source materialization. `diff` preserves the target archive content version. Compaction defaults to content version 1 unless `--version` is supplied. Neither command creates `.napd` transport deltas.
+diff --git a/docs/data-client-plan.md b/docs/data-client-plan.md
+new file mode 100644
+index 0000000..e3d0576
+--- /dev/null
++++ b/docs/data-client-plan.md
+@@ -0,0 +1,566 @@
++# Freelancer Data: Client-Umsetzungsplan
++
++Dieser Plan ordnet die in [data-client-todo.md](data-client-todo.md) erfassten
++Client-Arbeiten in eine ausführbare Reihenfolge ein. Die Quelldokumente im
++[Data-Repository](../../Data/README.md) bleiben für Änderungen an INIs,
++Assets, NAP-Paketen und Importwerkzeugen maßgeblich.
++
++## Ziel und Arbeitsgrenzen
++
++- Parser-, Engine-, Renderer- und Wiedergabeänderungen erfolgen im Client als
++  fokussierte Patches unter `patches/`; die Patchserie und eine frische
++  Overlay-Rekonstruktion gehören zu jeder Codeänderung.
++- Freelancer-Daten und Originalassets bleiben lokale Testeingaben. Sie werden
++  nicht in Client-Git oder synthetische Testfixtures kopiert.
++- Data-Änderungen (INI-Werte, Asset-Ersetzungen, Video-Transkodierung,
++  NAP-Inhalte und deren Generator) werden als getrennte Data-Arbeit geführt.
++- Ein erfolgreiches Parsen ist kein Nachweis für korrekte Darstellung oder
++  Wiedergabe. Jede Datenfamilie braucht einen gezielten Laufzeitnachweis.
++
++## Phasen und Reihenfolge
++
++### Phase 0 – Testbasis und offene Befunde festhalten
++
++- [x] Lokale Referenzinstallation read-only erfasst: `DATA/`, `EXE/` und
++  `Freelancer.exe` sind vorhanden; die EXE ist ein 32-Bit-PE. Ein belastbarer
++  Produkt-/Buildstand ist aus den verfügbaren lokalen Metadaten nicht
++  ablesbar. Data-SDK-Quellstand der Sichtung: Commit `d16fe9d` (2026-10-11).
++  Keine Originaldateien oder Zugangsdaten wurden kopiert oder veröffentlicht.
++- [x] Repräsentative Eingabefälle aus den Data-TODOs festgelegt: `Br01CornwallRockAsteroidField.ini`,
++  `Omega13.ini` samt Ringsystem, `Li01BadlandsNebula.ini`, `Br0104Bar.ini`, die
++  drei `Startup`-Movie-Einträge in der lokalen `freelancer.ini` sowie synthetische
++  Ogg/Vorbis-, FLAC- und Ogg-FLAC-Musik. Auswahl dokumentiert; der Bar-Raum-
++  Laufzeitnachweis steht in Phase 3. Die visuellen und Video-Laufzeitprüfungen
++  bleiben offen.
++- [x] Data-Fehlzielzählung mit `Data/tools/check_ini_references.py`
++  reproduziert und gegengeprüft: ein read-only Lauf gegen die lokale CD-DATA
++  (Build-Namensregeln plus SDK-INI-Overlay) meldet 50 Zielpfade / 83
++  INI-Zeilen. Die 48 Tabellenziele in `Data/missing.md` stimmen damit überein;
++  zwei zusätzliche Detailmaps sind als HD-Dateien in `Data/tools/hd_overrides.txt`
++  deklariert, aber im lokalen CD-Baum nicht vorhanden. Bei der Phase-0-Sichtung
++  enthielt der Data-NAP nur `.gitkeep`; Phase 3 synchronisierte später 1252 SDK-
++  INIs, aber keine Binärassets. Die physische HD-Präsenz bleibt offen.
++  Absolute Entwicklerpfade werden vom Generator ausgeschlossen. Keine fehlende
++  Ressource wird automatisch dem Client zugerechnet.
++- [ ] Den Abgleich nach Aufbau des vollständigen NAP mit `--nap NAP`
++  wiederholen und die beiden HD-Detailmaps physisch bestätigen; der aktuelle
++  NAP enthält synchronisierte INIs, aber noch keine Audio-/Modell-/Texturassets.
++- [x] Linux-Debugclient aus dem aktuellen Arbeitsbaum mit temporärer
++  Konfiguration gegen die lokale Freelancer-Installation gestartet. Innerhalb
++  von 3,88 s wurden `Game: Finished loading game data` und `UI: Interface
++  loaded` erreicht; der 17-s-Startmenülauf blieb ohne Error/Exception und wurde
++  kontrolliert beendet. Die 913-zeilige Logdatei enthält 77 Parserwarnungen,
++  u. a. unbekannte `explosion_impulse`-/`particle_effect`-Felder in
++  `AsteroidArch.ini` und einen `:gap`-Eintrag in einer Room-INI. Das sind
++  Befunde für Phase 1, keine bestätigten Clientfehler. Konfiguration und Log
++  liegen lokal unter `/tmp/lancer-phase0-client-baseline-20261012/`; die
++  Originalinstallation blieb unverändert.
++- [x] Separater Debug-Lauf mit `--new-game` betrat `FP7_system` und renderte
++  Schiffe, Station, Sterne und Nebel aus der lokalen Retail-DATA. Das Log
++  erreichte `Game: Finished loading game data`, `UI: Interface loaded` und
++  `Game: Entering system FP7_system`; in 1.342 Logzeilen fanden sich 108
++  Warnungen und keine Error-, Fatal- oder Exception-Zeilen. Der Client wurde
++  kontrolliert beendet. Screenshot und Log liegen lokal unter
++  `/tmp/lancer-solar-runtime-20261012/window.png` und `stdout.log`. Dieser
++  Standalone-Lauf belegt den Renderpfad für diese Retail-Szene, aber weder
++  HD-/NAP-Inhalte noch registrierte Clusterwelten oder einen Vergleich mit dem
++  Originalspiel.
++- [x] Ein weiterer isolierter Debug-Lauf betrat `br01` am Zentrum des Cornwall-
++  Asteroidenfelds (`25319, 0, 60104`). Dafür wurde ausschließlich eine
++  temporäre `EXE/newplayer.fl`-Kopie angepasst (`system=br01`,
++  `Mission=No_Mission`); Retail-DATA blieb unverändert. Der Client meldete
++  `Initing 95asteroids`, `Entering system br01` und `Not loading mission`; der
++  Screenshot `/tmp/lancer-br01-asteroid-runtime-20261012/window-clean.png`
++  zeigt die Asteroiden im freien Raum. Das 1.064-zeilige Log hat 93 Warnungen,
++  aber keine Error-, Fatal- oder Exception-Zeilen. Das ist ein Retail-
++  Renderbaseline, kein HD-/NAP- oder Originalspielvergleich.
++- [x] `StartupMovies`-Verwendung im Client suchen: `FreelancerIni` parst
++  `movie_file` in eine Liste, im aktuellen Client-Quellbaum gibt es außer
++  Deklaration, Initialisierung und Parserzugriff keinen Verbraucher oder
++  Wiedergabeaufruf. Der tatsächliche Playback-Pfad ist damit derzeit nicht
++  angebunden.
++
++**Abnahme:** Für jeden Fall ist klar, welche Daten geladen werden, wie der
++Test gestartet wird und woran Erfolg oder Fehler erkannt wird. Ungeklärte
++Asset- und Laufzeitpfade bleiben ausdrücklich offen. Die Bestandszählung oben
++ist eine Klassifikation der vorhandenen Markdown-Liste, noch kein unabhängig
++reproduzierter Inventarlauf.
++
++### Phase 1 – Parser- und Datenflussprüfung
++
++**Erster Asteroidenbefund aus dem Stock-DATA-Start (2026-10-12):** Der Client
++meldete 77 Parserwarnungen, darunter `explosion_impulse` in `[AsteroidMine]`
++und `particle_effect` in `[DynamicAsteroid]`. `Schema/Solar/Asteroid.cs` hat
++keinen Eintrag für `explosion_impulse`; `Schema/Solar/DynamicAsteroid.cs` hat
++keinen Eintrag für `particle_effect`. `GameItemDb` überträgt bei dynamischen
++Asteroiden Modell und Explosion, aber keinen Partikeleffekt. Das belegt eine
++nicht abgebildete Datenstrecke, noch nicht deren sichtbare Auswirkung. Vor
++Änderungen ist das Verhalten im Originalspiel zu prüfen. Der Start verwendete
++die lokale Installation ohne SDK/NAP-Overlay.
++
++**Retail-/SDK-Abgleich und Binärspur (2026-10-12):** Beide `AsteroidArch.ini`
++enthalten dieselben drei Minen mit `explosion_impulse = 1000, 100, 1000` und
++dieselben drei dynamischen Asteroiden mit den Partikeleffekten
++`gf_blsmallasteroid` bzw. zweimal `gf_dynamiclavaast`. Ein Ghidra-String-Xref
++in Retail-`Freelancer.exe` (SHA-256 `ea4cb797…6d1fe9`) führt zu
++`FUN_00408cd0` bei `0x00408cd0`: der Parser liest `particle_effect`, bildet aus
++dem Wert eine ID und speichert sie bei Objekt-Offset `+0x54`, dazu ein
++Vorhanden-Flag bei `+0x58`. Der nachgelagerte Verbraucher und der Zeitpunkt der
++Effektausgabe sind damit nicht identifiziert. Für `explosion_impulse` gibt es
++keinen direkten Stringtreffer in den installierten EXE/DLL-Dateien; ein
++ignorierter Schlüssel ist damit nicht bewiesen. Der Originalspiel-Vergleich
++für Minenexplosion und dynamische Asteroidenzerstörung bleibt Voraussetzung
++für jede Implementierung.
++
++- [x] Asteroidenfelder vom Schema über `GameItemDb` bis Renderer und
++  `AsteroidFieldComponent` verfolgt; konkrete Verbraucher und Lücken stehen
++  im Befund unten.
++- [x] Nebel- und planetare Ringdateien vom Schema über `GameItemDb` bis zum
++  Renderer verfolgt; konkrete Verbraucher und Lücken stehen im Befund unten.
++- [x] Schwarze-Loch-Dateien und ihre Referenzen in SDK-Systemdaten sowie
++  Client-Parser/Renderer geprüft; ein aktiver Daten- oder Renderpfad ist nicht
++  belegt (siehe Befund unten).
++- [x] SolarArch-/StarArch-Felder für Modelle, Planetengröße und Sternvisuals
++  vom Schema über `GameItemDb` bis Modell-/Rendererverbrauchern verfolgt.
++- [x] Schlüssel-zu-Code-Abgleich für Solar- und Sternarchetypen durchgeführt;
++  übertragene und nicht angebundene Werte stehen im Befund unten.
++- [ ] Die sichtbare Wirkung der HD-Planeten-/Sternwerte im repräsentativen
++  HD-/NAP-Clientlauf prüfen. Parser- und Datenmodellpfade allein reichen dafür
++  nicht aus.
++- [ ] Die offene Laufzeitprüfung in repräsentativen HD-/NAP-Systemen fortführen;
++  der FP7-Retail-Standalone-Lauf ist nur ein Baseline-Rendernachweis und deckt
++  keine der dokumentierten HD-Abweichungen ab.
++- [x] Asteroiden-HD-Felder im Code abgeglichen: `fill_dist`,
++  `empty_cube_frequency`, Feldfarben, Billboard-`start_dist` und
++  `fade_dist_percent` erreichen Laufzeitverbraucher. `Band.render_parts` und
++  `Band.fade` werden geparst und zwischengespeichert, aber vom Renderer nicht
++  verwendet. Weitere ungeverbrauchte Felder und das Exclusion-Verhalten sind
++  im nachfolgenden Befund festgehalten; visuelle Abnahme bleibt offen.
++- [x] Parser-Inventar für `Data/SDK/solar/SolarArch.ini` erstellt: alle 28
++  unterschiedlichen Schlüssel in `[Solar]` besitzen einen `[Entry]`- oder
++  `[EntryHandler]`-Eintrag in `Schema/Archetype.cs`; unbekannte Schlüssel wurden
++  nicht gefunden. Das bestätigt Parserdeklarationen, nicht die Laufzeitnutzung
++  oder die korrekte Darstellung der Werte.
++
++**Asteroidenfeld-Codepfad (2026-10-12):** `Schema/Universe/AsteroidField.cs`
++liest `Field`, `Band`, `ExclusionBand`, `AsteroidBillboards` und
++`ExclusionZones`. `GameItemDb.GetAsteroidField()` überträgt `Field.CubeSize`,
++`FillDist`, Leerwürfelhäufigkeit und Feldfarben; der Renderer verwendet diese
++Werte für Würfelraster, Dichte, Distanz und Tönung. Billboard-`Count`,
++`StartDist`, `FadeDistPercent`, `Shape`, `Size` und `ColorShift` werden bis zur
++Billboard-Darstellung weitergereicht. `Band.Shape`, `Height`, `OffsetDist`,
++`TextureAspect` und `ColorShift` beeinflussen den gezeichneten Ringzylinder.
++
++Der Codepfad zeigt mögliche HD-Abweichungen, deren sichtbare Wirkung noch mit
++dem Originalspiel verglichen werden muss. Im Data-SDK-Stand `d16fe9d`
++(2026-10-11) kommen `Field.max_alpha` achtmal und `contains_fog_zone` einmal
++vor; keines wird ins Laufzeitmodell übernommen. `ExclusionBand` ist in acht SDK
++Dateien belegt, wird nach der Schema-Deserialisierung aber nicht weiter
++referenziert. `Band.Zone`, `AmbientIntensity`, `CullMode` und `VertIncrease`
++werden nicht ins Laufzeitmodell übernommen. `RenderParts` und `Fade` werden
++zwar übertragen, aber nicht vom Renderer verwendet (der Zylinder zeichnet
++konstant 20 Seiten). `AsteroidBillboards.AmbientIntensity` ist in 95 SDK-Dateien
++gesetzt, wird aber nicht übernommen.
++
++Die Exclusion-Metadaten `ExcludeBillboards`, `ExcludeDynamicAsteroids`,
++`EmptyCubeFrequency` und `BillboardCount` landen im Modell, werden aber nicht
++als Steuerwerte verwendet. Der Renderer schließt statische Würfel für jede
++Exclusion-Zone aus, ohne `ExcludeBillboards` abzufragen; Billboards prüfen die
++Zonen nicht. Die dynamische Asteroidenkomponente verhindert Spawns in jeder
++Exclusion-Zone, ohne `ExcludeDynamicAsteroids` abzufragen. Das beschreibt das
++Implementierungsverhalten, nicht die beabsichtigte Freelancer-Semantik.
++
++**HD-Asteroiden-INI-Pfade (2026-10-12):** Ein read-only Abgleich aller
++`[Asteroids] file`-Einträge in `Data/SDK/universe/systems/**/*.ini` fand 210
++Verweise; alle 210 passen case-insensitiv zu Dateien in
++`Data/SDK/solar/asteroids/`. BR01 verweist auf
++`solar\asteroids\Br01CornwallRockAsteroidField.ini`, und genau diese Datei
++existiert im SDK. `sync_inis_to_nap.py --dry-run` ordnet beide INIs dem
++`World`-Container mit erhaltenem relativem Pfad zu. Es gibt damit keinen
++statischen Dateinamen- oder Klassenpfadbruch. Der NAP-Container enthält lokal
++noch keine synchronisierten Dateien; ein vollständiger Paketlauf und die
++visuelle HD-Prüfung bleiben offen.
++
++**Fehlende Asteroidentextur `roids.txm` (2026-10-12):** Die SDK-`Shapes.ini`
++enthält sieben Verweise auf die nicht vorhandene Textur. Ein normalisierter
++Pfadscan fand jedoch weder in Retail-DATA noch in den SDK-System- und
++Asteroiden-INIs einen Verweis auf `solar/asteroids/Shapes.ini`; auch die 15
++darin deklarierten Shape-Namen werden außerhalb dieser Datei nicht verwendet.
++Der aktuelle Datenbestand erreicht den defekten Pfad deshalb nicht. Im
++Clientcode würde eine später aktivierte Shape-Definition die Textur über
++`FindTexture()` als `null` erhalten; `Billboards.DrawTri()` berechnet danach
++einen Hash über die fehlende Textur und kann mit einer Nullreferenz abbrechen.
++Die BR01-Laufzeitbaseline lädt `RockShapes.ini` und deckt diesen Fall nicht ab.
++Eine Asset-Ersetzung oder INI-Änderung bleibt eine Data-Entscheidung.
++
++**Nebel- und planetare Ringpfade (2026-10-12):** `Schema/Universe/Nebula.cs`
++liest Fog, Exterior, Clouds, Lightning, Lights und Exclusion-Zonen. `GameItemDb.GetNebula()`
++überträgt Fog-Werte, erste `[NebulaLight]`-Daten, erste `[Clouds]`-Daten,
++Außenpuffs, Lightning-Parameter und Exclusion-Shells. `NebulaRenderer` nutzt
++Fog-Übergänge, Innen-/Außenpuffs, Lightning und Ausschlusszonen; `SunRenderer`
++verwendet die Burnthrough-Intensität und den Skalierer.
++
++Mehrere gültig geparste Felder sind nicht angebunden: `plane_slices` und
++`equator_bias` stehen im Data-SDK in jeweils 59 Nebeldateien, werden nicht ins
++Laufzeitmodell kopiert; der Renderer erzeugt Außenpuffs stattdessen auf drei
++fest codierten Höhen. `ambient_intensity` und `intensity_increase` in
++`[DynamicLightning]` kommen jeweils 20-mal vor, werden ebenfalls nicht
++übertragen. `GameItemDb` liest nur `NebulaLights[0]`; zwei SDK-Dateien enthalten
++mehrere `[NebulaLight]`-Abschnitte (`Hi01SiniestreEdgeNebula.ini`,
++`Bw06KunashirEdgeNebula.ini`), sodass spätere Abschnitte nicht im Modell landen.
++Das sind Codepfad-Lücken; ihre sichtbare Wirkung ist noch offen.
++
++Planetare `ring = zone, solar\rings\*.ini`-Einträge werden im
++`SystemObject`-Schema geparst und von `GameItemDb` als `RingZone`/`RingFile`
++übernommen. Im Client-Quellbaum enden diese Werte danach im Datenmodell; ein
++Renderer- oder Ladeverbraucher für die Ringdatei wurde nicht gefunden. Davon
++getrennt unterstützt `Zone.ShapeKind.Ring` die Geometrie von Ringzonen für
++Punkt-/Abstandsabfragen; diese Zonenform rendert nicht automatisch das visuelle
++Ringasset. Der visuelle Originalspielvergleich bleibt erforderlich.
++
++**Schwarze-Loch-Dateien (2026-10-12):** Ein Abgleich der lokalen,
++read-only Retail-Datei `DATA/SOLAR/BLACKHOLE/bh.ini` mit
++`Data/SDK/solar/blackhole/Bh.ini` zeigt, dass die SDK-Variante `[Sound]`,
++`[FadeChunks]` und `[CloseChunks]` entfernt und die `lava_wisp`-Formen durch
++`rock_wisp` ersetzt. In den SDK-System-INI-Dateien wurde keine Referenz auf die
++Black-Hole-Konfiguration gefunden. Der Client besitzt keinen dedizierten
++Black-Hole-Parser oder -Renderer. Die generischen `Nebula`-Schemas decken die
++Black-Hole-Schlüssel wie `ball_scale`, `flash`, `puff_density`, `puff_size`,
++`puff_opacity` und `Fog.opacity` nicht ab. Damit ist für diese Dateien kein
++aktiver Client-Datenpfad nachgewiesen; eine sichtbare Auswirkung oder eine
++Entscheidung zu den entfernten Retail-Abschnitten lässt sich daraus nicht
++ableiten. Der Vergleich im Originalspiel bleibt offen.
++
++**Solar-, Planeten- und Sternpfade (2026-10-12):** `SolararchIni` lädt
++Solar-Archetypen mit `material_library`, `da_archetype` und `solar_radius`;
++`GameItemDb.InitArchetypes()` überträgt diese in das Datenmodell. Der generische
++`ResolveDrawable()` übergibt Modell und Bibliotheken an `DataPath()`. Dieses
++prüft jeden angegebenen Pfad mit `VFS.FileExists()`; fehlt er, wird ein Fehler
++geloggt und `null` geliefert. Es gibt keinen automatischen Basename-Fallback
++und keine Flatten-/Aliasregel. Das Systemobjekt löst den Archetyp auf und
++`GameObject` lädt dessen Modell. Für die von Data auf flache Pfade
++umgestellten `.mat`-/`.txm`-Dateien gibt es keine Client-Sonderbehandlung: die
++INI-Referenz und der tatsächliche VFS-/NAP-Pfad müssen exakt übereinstimmen.
++`Data/TODO-solar.md` meldet 932 aufgelöste Asset-Verweise. Ein aktueller
++read-only Lauf von `Data/tools/check_ini_references.py --data-root` gegen den
++lokalen Retail-DATA-Baum reproduziert 932 Verweise aus `SolarArch.ini`, findet
++dort aber zwei Ziele in 21 Fundstellen nicht: `solar/planets/detailmap_gas.txm`
++(9) und `solar/planets/detailmap_ice.txm` (12). Der Checker bildet die
++Retail-Umbenennungen aus `build_nap.py` ab; sein `--data-root`-Modus enthält
++keine HD-Dateien, die nur im NAP liegen. Daher beweist dieser Befund weder,
++dass die zwei Ziele im finalen HD-NAP fehlen, noch bestätigt er die vollständige
++932er-Paketabdeckung. Der aktuelle NAP-Bestand ist leer bis auf `.gitkeep`;
++der vollständige NAP-Referenzlauf und ein visueller HD-Test stehen aus.
++`solar_radius` wird für Navmap-Icons und den Besuchsradius verwendet; das
++sichtbare Planetenmaß stammt vom geladenen Modell.
++
++Ein statischer Abgleich der 28 unterschiedlichen `[Solar]`-Schlüssel aus dem
++aktuellen HD-`SolarArch.ini` mit den `[Entry]`- und `[EntryHandler]`-
++Deklarationen von `Schema.Archetype` ergab vollständige Parserdeklaration. Das
++schließt ungenutzte Werte oder Laufzeitabweichungen nicht aus.
++
++Bei Systemobjekten wird `atmosphere_range` für `GameWorld.InAtmosphere()`-
++Abfragen übernommen. `burn_color` und `ambient_color` werden zwar ins
++Datenmodell kopiert, haben im untersuchten Spielquellbaum aber keinen
++Verbraucher; die Datenmodellklasse kennzeichnet diese Eigenschaften als noch
++nicht im Spiel verwendet.
++
++`StarArchIni` parst `lens_flare`, `lens_glow`, `intensity_fade_in/out` und
++`zone_occlusion_fade_in/out`. `GameItemDb.InitStars()` übernimmt aktuell Radius,
++Glow/Center und Spines; `SunRenderer` zeichnet Glow, Center und Spines. Die
++Lens- und Fade-Felder gelangen nicht ins Laufzeitmodell und haben keinen
++Renderer-Verbraucher. Ihre konkreten Werte stehen in den SDK-Stararchiven; die
++Abweichung ist ein Codebefund, noch kein Sichtvergleich mit dem Originalspiel.
++
++**Schlüssel-zu-Laufzeit-Abgleich SolarArch/StarArch (2026-10-12):** Die
++HD-`SolarArch.ini` enthält 321 `[Solar]`-Abschnitte mit 28 unterschiedlichen
++Schlüsseln; `StarArch.ini` enthält 38 `[Star]`-Abschnitte mit 11 Schlüsseln.
++Der Abgleich der Schemafelder mit `GameItemDb.InitArchetypes()` und den
++nachgelagerten Lesern bestätigt für Solararchetypen die Übernahme von
++`nickname`, `type`, `loadout`, `shape_name`, `solar_radius`,
++`phantom_physics`, `docking_sphere`, `open_anim`, `lodranges`,
++`material_library`, `DA_archetype`, `envmap_material`, `hit_pts` und
++`destructible`. Modell und Materialien laufen über `ResolveDrawable()` und den
++exakten VFS-Pfad; `GameObject` lädt das Modell und setzt Envmap, Physik und
++separable Teile. `GameWorld` übernimmt LOD-Werte; `ServerWorld` verwendet
++Solar-Loadouts und Trefferpunkte. `solar_radius` steuert Navmap-Icongröße und
++Besuchsradius, nicht die sichtbare Modellgröße des Planeten.
++
++Die folgenden 14 weiteren Solar-Schlüssel sind zwar im gemeinsamen
++`Schema.Archetype` deklariert, werden im Solar-Konvertierungspfad aber nicht ins
++Laufzeitmodell übertragen: `ids_name`, `ids_info`, `mass`, `explosion_arch`,
++`open_sound`, `close_sound`, `docking_camera`, `jump_out_hp`, `fuse`,
++`shield_link`, `surface_hit_effects`, `animated_textures`, `distance_render` und
++`nomad`. Einige Felder haben getrennte Verbraucher bei Schiffen oder anderen
++Solar-Schemas; ihre Deklaration allein belegt daher keine Unterstützung für
++Solararchetypen.
++
++Für Sterne übernimmt `GameItemDb.InitStars()` 5 der 11 Schlüssel:
++`nickname`, `radius`, `star_glow`, `star_center` und `spines`. `SunRenderer`
++zeichnet Radius, Glow, Center und Spines. Die übrigen sechs Schlüssel
++`lens_flare`, `lens_glow`, `intensity_fade_in`, `intensity_fade_out`,
++`zone_occlusion_fade_in` und `zone_occlusion_fade_out` werden geparst, aber im
++Client-Spielpfad nicht weitergereicht oder gerendert. Diese Quellcodebilanz
++bestätigt keine sichtbare HD-Wirkung; der Paket-/Renderlauf bleibt offen.
++
++- [ ] Fehlende und ungültige optionale Ressourcenfälle erfassen. Parser- und
++  Regressionstests nur für bestätigte Client-Grenzen ergänzen.
++- [ ] Vor Änderungen an Musik- oder Videoformaten den aktuellen Loader,
++  Decoder, Plattformpfad, Loop-/Synchronisationsverhalten und Fehlerpfad
++  anhand des Codes belegen.
++
++**Abnahme:** Jedes untersuchte Feld hat einen belegten Verbraucher oder ist
++als ungenutzt/offen markiert. Parserlücken haben einen kleinen reproduzierbaren
++Testfall.
++
++### Phase 2 – Visuelle Datenlaufzeit: Asteroiden, Solar, Nebel und Ringe
++
++- [x] Retail-Baseline im BR01-Cornwall-Asteroidenfeld aufgenommen: Client-Build,
++  Systemeintritt, Asteroidenrenderer und freier Szenen-Screenshot sind unter
++  `/tmp/lancer-br01-asteroid-runtime-20261012/` belegt. HD-Änderungen und
++  Vergleich mit dem Originalspiel bleiben offen.
++- [x] BR01 Cornwall mit Retail- und HD-SDK-Feld-INI im selben Client-Build
++  gestartet. Beide Läufe erreichten das System ohne Laufzeitfehler; Logs und
++  Bilder liegen unter `/tmp/lancer-proton-freelancer-asteroid-20261012/`.
++  `fill_dist` (1650 → 3300) und Billboard-`start_dist` (1000 → 2000) werden im
++  Client-Renderer verwendet; Würfelhäufigkeit und Farben sind unverändert.
++  Das SDK-`RockShapes.ini` wurde im Testbaum unter dem referenzierten Namen
++  bereitgestellt. Für den Originalrenderer scheiterten Proton 7.0 und Wine
++  10.20 vor der Szene an der nicht erkannten 3D-Karte; DXVK scheiterte an
++  `VK_KHR_surface`. Ein Proton-9-Beta-Lauf auf dem Intel-HD4600-Desktop rendert
++  inzwischen das animierte Titelmenü samt 3D-Hintergrund aus einer vollständigen
++  temporären Retail-Kopie (`DATA`, `EXE`, `DLLS`). Die Retail-Installation blieb
++  unverändert. XTest- und isolierte uinput-Eingaben konnten „New Game“ nicht
++  auslösen, daher gibt es weiterhin keinen Original-Szenenvergleich. Beleg:
++  `/tmp/lancer-proton-freelancer-asteroid-20261012/`.
++  Im Wiederholungslauf ließ sich der 3D-Warnhinweis per Win32 `BM_CLICK` auf
++  `IDYES` schließen; Win32-SendInput-/PostMessage-Klicks lösten danach keinen
++  Szenenwechsel aus. Die X11-Aufnahme blieb schwarz, obwohl das Spiel weitere
++  Renderwarnungen protokollierte. Dieser Lauf belegt daher keinen sichtbaren
++  Menü- oder Szenenzustand.
++  Ein Test mit `fullscreen = 0` und `size = 1024,768` ergab ein zentriertes
++  1024×768-Fenster, aber weiterhin nur eine schwarze X11-Aufnahme. Die
++  Testkopie-Konfiguration wurde auf den Retail-Stand zurückgesetzt.
++- [ ] Mit der Phase-0-Basis Asteroidenfelder und -formen sowie Feldgrenzen in
++  repräsentativen Systemen prüfen: Laden, Abstände, Sichtbarkeit, Dichte,
++  Farben und Stabilität.
++- [ ] Omega 13 sowie betroffene Ringsysteme prüfen: Schwarzes Loch,
++  `rock_wisp`-Puffs, Ringformen/-texturen, Sichtbarkeit, Speicherbedarf und
++  Laufzeitstabilität.
++- [ ] Planeten mit flachen Materialpfaden, Sterne, Sonnen, Nebel und
++  Asteroiden-/Sonnen-Loadouts prüfen; Material- und Texturauflösung im Log
++  erfassen.
++- [ ] Auswirkungen entfernter `[Sound]`, `[FadeChunks]` und `[CloseChunks]`
++  datengetrieben vergleichen. Dauerhafte INI-Entscheidungen werden danach im
++  Data-Repository getroffen.
++- [ ] Fehlende `solar/asteroids/roids.txm`-Referenzen mit dem Data-Team bzw.
++  Data-Inventar klären; Ersatztextur oder SDK-Verweis nicht im Client
++  vorwegnehmen.
++
++**Abnahme:** Repräsentative Fälle haben Laufzeitlogs und Bildnachweise; jeder
++Fehler ist einem Datenproblem, einer bestätigten Client-Lücke oder einem noch
++offenen Befund zugeordnet. Danach können erforderliche Engine-Fixes als
++separate Client-Patches umgesetzt werden.
++
++### Phase 2a – Bestätigte Parser- und Renderlücken umsetzen
++
++Diese Phase setzt die Befunde aus Phase 1 und 2 tatsächlich im Client um.
++Ein Punkt wird hier nur begonnen, wenn ein reproduzierbarer Laufzeitbefund
++zeigt, dass die Daten gültig sind und Parser, Engine oder Renderer sie falsch
++oder gar nicht verarbeiten. Pro Befund gilt: Reproduktion festhalten, kleinsten
++Patch erstellen, Regression ergänzen, betroffene Konfiguration bauen und den
++ursprünglichen Laufzeitfall wiederholen.
++
++- [ ] **Asteroiden:** fehlende Verwendung von `shape`, `exclusion`, `zone`,
++  `render_parts` oder `fade` ergänzen, wenn die Prüfung eine konkrete
++  Client-Lücke belegt; Abstände, Dichte, Farben und Feldgrenzen danach im
++  selben repräsentativen System erneut prüfen.
++- [ ] **Schwarze Löcher und Ringe:** bestätigte Lücken bei Chunk-/Sound-
++  Verhalten, `rock_wisp`, Ringformen oder Texturauflösung gezielt beheben und
++  Regressionen für betroffene Felder bzw. optionale Ressourcen ergänzen.
++- [ ] **Solar, Planeten und Nebel:** bestätigte Fehler bei Material- und
++  Detailmap-Pfaden, HD-Solarfeldern, Nebeln, Sternen, Sonnen oder Loadouts
++  korrigieren und die betroffenen Renderfälle erneut aufnehmen.
++- [ ] **Gemeinsame Asset-Auflösung:** eine Client-Korrektur für fehlende
++  `roids.txm`-Verweise nur umsetzen, wenn Data-Inventar und Laufzeittest eine
++  Engine-Lücke statt eines fehlenden oder ungültigen Datenassets belegen.
++- [ ] Jeden bestätigten Fix als fokussierten Patch in `patches/` pflegen, in
++  `patches/series` registrieren und die vollständige Patchserie frisch
++  rekonstruieren und verifizieren.
++
++**Abnahme:** Der ursprüngliche Fehler ist mit demselben lokalen Datensatz
++behoben, passende Regressionen bestehen und Data-Quelldateien bleiben
++unverändert. Bei Datenursachen wird stattdessen ein verlinkter Data-Auftrag
++erfasst.
++
++### Phase 3 – Raum-Musik-Playlists
++
++- [x] Rückwärtskompatible Syntax `music = track_a, track_b, track_c`
++  eingeführt; Einzelwerte und das bestehende `oneshot`-Suffix bleiben erhalten.
++- [x] Zufällige Auswahl ohne direkte Wiederholung implementiert. Playlisttracks
++  spielen einmal und der nächste Track startet nach Ende des Streams. Ein
++  einzelner Track bleibt geloopt; `oneshot` auf einer Playlist spielt einen
++  zufälligen Track genau einmal. Der Wechsel ist trackende- und nicht
++  timerbasiert.
++- [x] Parser- und Auswahltests für Einzeltrack, Playlist, `oneshot`, leere
++  Auswahl und Wiederholungsvermeidung ergänzt; vier gezielte Tests liefen im
++  aktuellen Client-Overlay mit Patch 2171 erfolgreich.
++- [x] Wiedergabe und Trackwechsel in `Br0104Bar` mit dem lokalen Retail-
++  Datenbestand im Debug-Client geprüft. Dafür wurde eine isolierte Kopie
++  verwendet: `Br01_04_Base` startete direkt in `Br01_04_Bar`; die Raum-INI
++  verwies auf zwei synthetische Ogg-Tracks von 0,7 s und 0,9 s. Das Log meldet
++  den Daten- und UI-Start sowie zehn EOF-Wechsel zwischen beiden Tracks ohne
++  Error-, Fatal- oder Exception-Einträge. OpenAL lief über den Null-Treiber;
++  dies belegt Parser, Streamende und Playliststeuerung, nicht die akustische
++  Qualität der Originaltracks.
++- [x] Nach der Client-Abnahme 131 generische Bar-INIs im Data-Repository auf
++  `music_bar_generic01` bis `music_bar_generic10` umgestellt und SDK-INIs mit
++  `tools/sync_inis_to_nap.py` synchronisiert. Nach Erhalt der CRLF-Zeilenenden
++  wurden 131 Ziele aktualisiert und 1121 blieben unverändert; der finale Dry-Run
++  meldete 1252 unveränderte INIs. Alle 131 `NAP/World`-Dateien sind byte-
++  identisch.
++
++**Abnahme:** Bestehende Einzeltrackräume bleiben kompatibel; Parser- und
++Auswahltests sowie der Bar-Lauf belegen Playlist-Auswahl und Wechsel. Ein
++separater Hörtest mit Original-Bar-Musik ist weiterhin offen.
++
++### Phase 4 – Startup-Videos und Zielplattformen
++
++- [x] Den `StartupMovies`-Pfad geprüft: `FreelancerIni` liest `movie_file`,
++  aber im Client-Quellbaum gibt es keinen Verbraucher und keinen
++  Wiedergabeaufruf. Startup-Movies werden derzeit nicht abgespielt.
++- [x] Decoder-Codebestand geprüft: `src` enthält nur das Parsen von
++  `StartupMovies`/`movie_file`; ein Video-Decoder und ein Wiedergabepfad fehlen.
++  Die HD-Data-Dokumentation nennt WMV9/VC-1 mit WMA als Bestandsformat.
++- [ ] Einen Decoder und unterstützte Formate für jede Zielplattform auswählen
++  und nach Anbindung mit einem echten Client-Lauf verifizieren.
++- [ ] Mit einem synthetischen oder anderweitig rechtmäßig bereitgestellten
++  Testclip Bild, Ton, Synchronität, Abbruch, Fehler und fehlenden Decoder
++  prüfen. Keine Originalvideos als Testfixture committen.
++- [ ] MP4/H.264/AAC nur nach erfolgreichem Test auf den Zielplattformen als
++  Clientformat freigeben. WMV bleibt bis dahin im Data-Bestand.
++- [ ] Video-Upscaling/-Konvertierung, NAP-Ablage und Schutz vor Überschreiben
++  bleiben getrennte Data-Arbeiten.
++
++**Abnahme:** Der Pfad von der Konfiguration bis zur Wiedergabe ist belegt;
++Formatfreigaben enthalten Plattform- und Testnachweis.
++
++### Phase 4a – Startup-Video-Wiedergabe umsetzen (bei bestätigtem Bedarf)
++
++- [ ] Nach der Entscheidung aus Phase 4 einen Playback-Einstieg für
++  `StartupMovies` im bestehenden Client-Start-/UI-Lifecycle integrieren.
++  Überspringen, Abbruch, fehlende Datei und fehlender Decoder müssen
++  kontrolliert zum normalen Spielstart führen.
++- [ ] Einen Decoderpfad wählen, der auf jeder unterstützten Zielplattform
++  verfügbar und wartbar ist. Implementierung erst nach erfolgreichem
++  synthetischem Cliptest für Bild, Ton, Synchronität, Abbruch und Fehlerpfad.
++- [ ] Den Client-Fix mit Regressionstests als Patchserie pflegen und auf den
++  freigegebenen Plattformen im Client abnehmen. Ein alternatives
++  Spielvideoformat wird erst danach im Data-Repository freigegeben.
++
++**Abnahme:** Konfigurierte Startup-Movies werden auf den freigegebenen
++Plattformen abgespielt; ein fehlender oder nicht decodierbarer Film verhindert
++den Spielstart nicht. Upscaling, Konvertierung und NAP-Inhalte bleiben
++getrennte Data-Arbeiten.
++
++### Phase 5 – Ogg-/FLAC-Musik und Schleifen
++
++- [x] Vorhandenen Audiofluss geprüft: `AudioEntry.File` wird über den VFS
++  geöffnet und durch `lancerdecode` anhand der Dateisignatur decodiert;
++  Vorbis und FLAC benötigen keine neue INI-Syntax oder Audio-Aliase.
++- [x] Wiedergabeart abgegrenzt: Musik wird gestreamt und benötigt beim
++  Loopen einen Decoderreset; Einzelsounds werden vollständig nach PCM
++  decodiert und durch OpenAL-Schleifenwiedergabe wiederholt.
++- [x] Den Vorbis-Reset nach EOF korrigiert: Decoder schließen und den Ogg-
++  Vorbisstream ab Byte 0 neu öffnen; bei fehlgeschlagenem Reset liefert der
++  Stream kontrolliert EOF. Die Änderung liegt als Patch 2172 im
++  `lancerdecode`-Ziel der Patchserie.
++- [x] Regressionen für Ogg/Vorbis und FLAC ergänzen. Beide lesen mit der
++  Musikpuffergröße 8192 Byte bis EOF, starten neu und müssen identische
++  PCM-Daten liefern; nach Ogg FLAC-Erweiterung bestand die gezielte Suite 3/3.
++- [x] Raum-Playlistintegration mit synchronisiertem Debug-Paket nachgewiesen:
++  der 20-Sekunden-Testsave-Lauf protokolliert Stream-Ende und wechselt zwischen
++  zwei 0,7-s-Ogg-Tracks; `strace` bestätigt beide Dateien wiederholt.
++- [x] Client-PCM-Ausgabe über PulseAudio-Monitor aufgezeichnet: 44,1-kHz-
++  Stereo, 16,67 s und -24 dBFS Spitzenpegel während der Testtracks; Ausgabe
++  lief in einen Null-Sink.
++- [ ] Hörtest mit Vorbis-Musik im echten Client durchführen: mindestens eine
++  vollständige Wiederholung und einen Wechsel zwischen zwei Playlisttracks
++  abhören.
++- [x] Vorbis, FLAC und Ogg FLAC aus NAP-Einträgen mit 1024-Byte-Chunks
++  dekodieren, zurücksetzen und PCM vergleichen; die drei gezielten Fälle
++  bestehen.
++- [x] Aktiven NAP-Paketbestand im vollständigen Linux-Client ohne loses
++  `DATA` starten. Ein 22-Sekunden-Debuglauf lud die Daten aus dem aktiven
++  Snapshot, erreichte die Oberfläche und spielte zwei NAP-gebundene Vorbis-
++  Playlisttracks abwechselnd. Die Null-Sink-Aufnahme zeigt beide generierten
++  Töne auch im Frequenzspektrum. Ein zweiter Lauf bestätigte den aktiven
++  Ein-Track-Loop: bei `oneshot=False` blieb der 440-Hz-Ton nach EOF im
++  Null-Sink-Spektrum nachweisbar; Loop-Grenzen wurden nicht akustisch beurteilt.
++- [x] NAP-gebundene Vorbis-, FLAC- und Ogg-FLAC-SFX mit `SoundData` und
++  `AudioManager` auf OpenAL geprüft: alle Loop-Instanzen blieben nach 2,5 s
++  aktiv; die One-Shot-Kontrollen endeten. Das war ein Engine-Audiolauf, kein
++  vollständiger Spielszene-Triggernachweis.
++- [x] `lancerdecode` mit MinGW-w64 als x86-64 Windows-DLL gebaut; PE32+-Format
++  und native Systemimporte (`KERNEL32.dll`, `msvcrt.dll`) geprüft.
++- [x] `BuildEngine --with-win64` legt die x64-PE32+-DLL bytegleich unter
++  `bin/librelancer-win-x64/lib/x64/lancerdecode.dll` ab.
++- [ ] Windows-Loaderauflösung und Fixture-Decodierung im CI-Runner bestätigen; der Workflow-Schritt ist eingerichtet, ein erfolgreicher Lauf steht noch aus.
++- [x] Ogg FLAC separat mit synthetischem Fixture als `codec=flac` und
++  `container=ogg` erkannt, dekodiert und nach EOF zurückgesetzt; auch Musik-
++  und SFX-Loops sowie Endekontrollen im Audio-Backend getestet. Die gezielte
++  Decoder-Suite besteht 3/3 unter Linux.
++- [x] FLAC und Ogg FLAC aus einem aktiven Linux-NAP-Clientstream decodieren;
++  die Deck-Playlist spielte beide synthetischen Formate wiederholt und die
++  Null-Sink-Aufnahme zeigte ihre Testtöne.
++- [ ] Vorbis/FLAC/Ogg FLAC unter Windows mit der gestagten DLL zur Laufzeit
++  decodieren; Loaderauflösung und Windows-Audiowiedergabe bleiben offen.
++
++**Abnahme:** Decoder- und Resettests bestehen auf jeder Zielplattform,
++gestreamte Musik läuft hörbar über das Trackende hinweg, und Paketstarts laden
++den passenden nativen Decoder. Ein Parser- oder Decoder-Unit-Test allein gilt
++nicht als hörbarer Laufzeitnachweis.
++
++### Phase 6 – Regression und Abschluss je Datenfamilie
++
++- [ ] Für jeden bestätigten Fix fokussierte Parser-/Engine-Tests und den
++  zugehörigen Laufzeittest ausführen.
++- [ ] Client-Patches aus einer frischen LibreLancer-Basis rekonstruieren und
++  `python3 scripts/verify-lancer-nexus-overlay.py` ausführen.
++- [ ] Betroffene Build-Konfigurationen bauen; bei Render- und Medienpfaden
++  zusätzlich den tatsächlichen Client auf der betreffenden Zielplattform
++  starten.
++- [ ] Logs, Testfälle, Plattformgrenzen und verbleibende Data-Aufgaben in
++  `data-client-todo.md` bzw. den zugehörigen Statusdokumenten nachtragen.
++
++**Abnahme:** Keine Aufgabe wird allein wegen eines erfolgreichen Builds oder
++Parsers als visuell/funktional abgeschlossen markiert. Jede erledigte Aufgabe
++hat passende Tests oder einen dokumentierten manuellen Laufzeitnachweis.
++
++## Abhängigkeiten und Arbeitsblöcke
++
++1. Phase 0 ist Voraussetzung für vergleichbare Laufzeitaussagen.
++2. Phase 1 läuft vor gezielten Codekorrekturen und kann parallel zur
++   Datentest-Vorbereitung erfolgen.
++3. Phase 2 liefert die reproduzierten Befunde für Phase 2a; konkrete
++   Client-Patches folgen nur aus bestätigten Engine-Lücken.
++4. Phase 3 und Phase 4 sind unabhängig. Die Musik-INI-Umstellung folgt auf
++   den echten Clienttest; Phase 4a auf Format-/Plattformnachweis und die
++   Entscheidung, Startup-Movies wiederzugeben.
++5. Phase 5 prüft Decoder- und Loop-Pfade vor NAP-Audio-Aliases oder
++   Konvertierungsarbeit. Windows- und NAP-Prüfungen bleiben offen.
++6. NAP- oder Updater-Änderungen sind keine Voraussetzung, solange dieselben
++   lokalen Daten reproduzierbar über die bestehende Verzeichnisinstallation
++   geladen werden. NAP-Laufzeit wird anschließend separat geprüft, sobald der
++   relevante Loader-/Decoderpfad das Paket-Backing tatsächlich nutzt.
++
++## Quellen und Statusführung
++
++- Aufgabenübersicht: [data-client-todo.md](data-client-todo.md)
++- Data-Quellen: [Asteroiden](../../Data/TODO-asteroiden.md),
++  [Schwarze Löcher](../../Data/TODO-blackhole.md), [Musik](../../Data/TODO-musik.md),
++  [Solar/Nebel](../../Data/TODO-solar.md), [Video](../../Data/TODO-video.md)
++- Audio-Decoder- und Paketbefunde: [Audio-Pipeline](asset-packages/audio-pipeline.md)
++- Änderungen an Reihenfolge oder Abnahmebedingungen werden in diesem Plan
++  festgehalten. Einzelne TODO-Checkboxen werden erst nach belegter Prüfung
++  aktualisiert.
+diff --git a/docs/data-client-todo.md b/docs/data-client-todo.md
+index b80f46c..45dc88c 100644
+--- a/docs/data-client-todo.md
++++ b/docs/data-client-todo.md
+@@ -1,6 +1,6 @@
+ # Freelancer Data: offene Client-Arbeiten
+
+-Diese Liste überträgt aus dem benachbarten [Data-Repository](../../LN-Data/README.md)
++Diese Liste überträgt aus dem benachbarten [Data-Repository](../../Data/README.md)
+ die Aufgaben, die LibreLancer-Client, Engine, Renderer oder Laufzeit betreffen.
+ Die Quelldokumente bleiben maßgeblich für Änderungen an SDK-INIs, NAP-Dateien
+ und dem Datenimport. Originaldateien werden nicht in diesem Client-Repository
+@@ -17,37 +17,141 @@ Die Reihenfolge, Abhängigkeiten und Abnahmekriterien zur Umsetzung stehen im
+
+ ### Musik-Playlists in Räumen
+
+-Quelle: [LN-Data/TODO-musik.md](../../LN-Data/TODO-musik.md)
+-
+-Stand: Patch `2171-room-music-playlists.patch` (Commit `7a3518ce8`) setzt die Parser- und Auswahllogik um.
+-
+-- [x] `[Room_Sound] music` nimmt mehrere Nicknames und `oneshot` an (`RoomSound.MusicTracks`, `BaseRoom.MusicTracks`); ein einzelner Nickname und `oneshot` verhalten sich wie zuvor.
+-- [x] Wechselverhalten: zufällige Auswahl ohne direkte Wiederholung (`RoomMusicPlaylist`), nächster Titel, sobald der aktuelle endet; bei mehreren Titeln spielt jeder einmal, ein einzelner Titel schleift weiter.
+-- [x] Parser- und Auswahltests (`RoomMusicPlaylistTests`: mehrere Titel mit `oneshot`, einzelner Titel mit `oneshot`, keine Wiederholung, null/ein Titel).
+-- [ ] Wiedergabetest im Client: Raum mit mehreren Titeln (`Br0104Bar.ini` o. ä.), Wechsel am Titelende, Verhalten mit `oneshot` (bei `oneshot` wird einmalig ein Titel gespielt und nicht gewechselt), Raumwechsel.
+-- [ ] Audioformat beachten: Die Musik liegt in `LN-Data` seit der Konvertierung als Ogg Vorbis (`.ogg`) vor. Den Streaming-Pfad (`StreamingSource`) mit `.ogg` prüfen, besonders das Ende eines Titels (`Game.Sound.MusicPlaying`) und lückenlosen Wechsel.
+-- [ ] Erst nach erfolgreichem Engine-Test die Bar-Raum-INIs im Data-Repository auf Playlists umstellen und anschließend dessen INIs nach NAP synchronisieren (Datenaufgabe, Räume und Titel in `TODO-musik.md`).
++Quelle: [Data/TODO-musik.md](../../Data/TODO-musik.md)
++
++- [x] Den Ablauf vom `[Room_Sound] music`-Parser über `GameItemDb` und
++  `BaseRoom` bis `RoomGameplay`/`SoundManager.PlayMusic` nachvollziehen.
++- [x] Kommagetrennte Nicknames in einer `music`-Zeile unterstützen; einzelne
++  Nicknames und das bestehende `oneshot`-Suffix bleiben kompatibel.
++- [x] Playlist-Regeln festlegen: zufälliger Track beim Raumwechsel, danach
++  Weiterschalten nach Trackende ohne direkte Wiederholung. Ein Einzeltitel
++  bleibt geloopt. Eine Playlist mit `oneshot` spielt genau einen zufällig
++  gewählten Track und endet; es gibt keinen Timerwechsel.
++- [x] Parser- und Auswahltests für mehrere Titel, `oneshot`, Einzeltrack,
++  Leereintrag und Vermeidung direkter Wiederholungen ergänzen.
++- [x] Wiedergabe und Trackwechsel in `Br0104Bar` mit dem lokalen
++  Freelancer-Datenbestand zur Laufzeit geprüft. Der isolierte Debug-Lauf nutzte
++  eine Retail-DATA-Kopie, startete `Br01_04_Base` in der Bar und ersetzte die
++  Raum-Musik durch zwei synthetische Ogg-Tracks. Das Log zeigt zehn Trackwechsel
++  im Wechsel `test_bar_b` / `test_bar_a`, ohne Error-, Fatal- oder
++  Exception-Einträge; OpenAL lief im Null-Treiber, daher kein Hörtest.
++- [x] Danach 131 generische Bar-Raum-INIs im Data-Repository auf die zehn
++  generischen Titel umgestellt und alle 1252 SDK-INIs nach NAP synchronisiert.
++  Nach Erhalt der CRLF-Zeilenenden wurden 131 Ziele aktualisiert, 1121 blieben
++  unverändert; der finale Dry-Run meldete 1252 unveränderte Dateien.
++  Alle 131 Bar-Ziele in `NAP/World` stimmen byteweise mit den SDK-INIs überein.
+
+ ### Asteroidenfelder und Asteroidentexturen
+
+-Quelle: [Data/TODO-asteroiden.md](../../LN-Data/TODO-asteroiden.md)
++Quelle: [Data/TODO-asteroiden.md](../../Data/TODO-asteroiden.md)
+
+ - [ ] Die aus der HD-Edition übernommenen Abstände (`fill_dist`, `start_dist`),
+   Dichte und Farben in den betroffenen Systemen im Client darstellen und mit
+   dem Originalverhalten vergleichen.
+-- [ ] Für die neu verwendeten Abschnitte und Felder (`shape`, `exclusion`,
+-  `zone`, `render_parts`, `fade`) prüfen, ob Parser, GameItemDb und Renderer
+-  Werte nicht nur einlesen, sondern korrekt verwenden. Fehlende oder
+-  unbekannte Werte mit gezielten Parsertests abdecken.
++- [x] Codepfad für Feldwerte, Billboards, Band und Exclusion-Zonen von Schema
++  über `GameItemDb` bis Renderer/Komponente geprüft. `fill_dist`,
++  `empty_cube_frequency`, Farben, Billboard-`start_dist` und
++  `fade_dist_percent` werden verwendet; `Band.render_parts`/`fade` werden
++  gespeichert, aber nicht gerendert. `ExclusionBand`, mehrere Band-/Billboard-
++  Felder sowie die Exclusion-Steuerflags sind derzeit nicht oder nur teilweise
++  angebunden. Details stehen im [Client-Umsetzungsplan](data-client-plan.md#phase-1--parser--und-datenflussprüfung).
++- [x] Retail-Laufzeitbaseline für BR01 Cornwall aufgenommen: ein isolierter
++  Debug-Client mit temporär missionsfreiem Startsave betrat das Zentrum des
++  Asteroidenfelds und zeigte Asteroiden in der Szene. Log, Warnungen und
++  Screenshot liegen unter `/tmp/lancer-br01-asteroid-runtime-20261012/`.
++  Dieser Lauf prüft weder HD-Werte noch das Originalspiel.
++- [x] Client-A/B-Lauf für Cornwall mit Retail-Feld-INI und HD-SDK-Feld-INI
++  durchgeführt. Beide Varianten erreichten `Entering system Br01`; der HD-Lauf
++  lud das Feld nach Bereitstellung der referenzierten SDK-`RockShapes.ini`
++  ebenfalls ohne Error/Fatal/Exception. Die INI-Werte ändern gegenüber Retail
++  `fill_dist` von 1650 auf 3300 und `start_dist` von 1000 auf 2000; die
++  Würfelhäufigkeit (0,5), Feldfarben und Asteroidenwürfel bleiben gleich.
++  Quellcode und Lauf bestätigen den erweiterten Render-Radius und die spätere
++  Billboard-Einblendung im Client. Logs und Vergleichsbilder liegen unter
++  `/tmp/lancer-proton-freelancer-asteroid-20261012/`. Das ist kein Vergleich
++  mit dem Originalrenderer.
++- [ ] Originalspielvergleich bleibt offen. Proton 7.0 und portables Wine 10.20
++  endeten vor der Szene mit „Freelancer did not detect a 3D capable video
++  card“; DXVK scheiterte an `VK_KHR_surface`. Ein Proton-9-Beta-Lauf auf dem
++  Intel-HD4600-Desktop rendert mit einer vollständigen, temporären Retail-Kopie
++  nun das animierte Freelancer-Titelmenü und dessen 3D-Hintergrund. Die Kopie
++  enthält `DATA`, `EXE` und `DLLS` unter
++  `/tmp/lancer-proton-freelancer-asteroid-20261012/FL/`; die Retail-Installation
++  blieb unverändert. `xdotool`/XTest und isolierte uinput-Tastatur-/Mausereignisse
++  wählten „New Game“ nicht aus. Deshalb ist weiterhin keine Retail-Szenenreferenz
++  für den A/B-Lauf vorhanden. Log und Menüaufnahme liegen im selben
++  `/tmp/lancer-proton-freelancer-asteroid-20261012/`-Verzeichnis.
++  Im Wiederholungslauf erschien der Grafikkartenhinweis erneut; Win32
++  `BM_CLICK` auf `IDYES` schloss ihn. Ein anschließender Win32-SendInput- und
++  PostMessage-Klick auf „New Game“ löste keinen Szenenwechsel aus. Die X11-
++  Aufnahme war danach schwarz, während das Spiel weiter Renderwarnungen schrieb;
++  der sichtbare Szenenzustand dieses Wiederholungslaufs ist daher unklar.
++  Auch mit `fullscreen = 0` und `size = 1024,768` in der temporären
++  `freelancer.ini` blieb die Fensteraufnahme nach dem Warnhinweis schwarz. Die
++  Konfiguration wurde danach auf den Retail-Stand zurückgesetzt.
++- [x] HD-Asteroidenreferenzen statisch abgeglichen: alle 210
++  `[Asteroids] file`-Verweise aus SDK-System-INIs zeigen auf Dateien in
++  `SDK/solar/asteroids/`; der Sync-Trockentest legt BR01s System- und
++  Asteroiden-INI unter `NAP/World/` mit passendem Pfad ab. Kein statischer
++  Dateinamenbruch gefunden. Der echte NAP-Bestand ist weiterhin leer, daher
++  bleibt der Paket-/HD-Clientlauf offen.
++- [ ] Ungeklärte HD-Semantik und sichtbare Wirkung der erfassten Lücken in
++  `Br01CornwallRockAsteroidField.ini` mit dem Originalspiel vergleichen;
++  anschließend nur bestätigte Client-Abweichungen gezielt korrigieren.
++- [x] Retail-DATA und SDK für die offenen `AsteroidArch.ini`-Felder
++  abgeglichen: dieselben drei `[AsteroidMine]`-Einträge besitzen
++  `explosion_impulse` (1000, 100, 1000) und dieselben drei
++  `[DynamicAsteroid]`-Einträge besitzen `particle_effect` (`gf_blsmallasteroid`
++  einmal, `gf_dynamiclavaast` zweimal).
++- [x] Clientpfad bestätigt: `Asteroid` und `DynamicAsteroid` deklarieren diese
++  Felder nicht; `GameItemDb.InitAsteroids()` übernimmt die `explosion_arch`-
++  Effekte, aber weder den Impuls noch den dynamischen Asteroiden-Partikeleffekt.
++  Der Stock-DATA-Startlog meldete die Schlüssel als unbekannt.
++- [x] Retail-Binärpfad für `particle_effect` identifiziert: Ghidra findet in
++  `Freelancer.exe` den Parser `FUN_00408cd0` bei `0x00408cd0`; er liest den
++  Effektwert, bildet eine ID und speichert sie im Objekt. Das belegt das Parsen,
++  aber noch nicht, wann oder ob dieser Effekt abgespielt wird. Für
++  `explosion_impulse` fand die Literalsuche in den installierten EXE/DLLs keinen
++  direkten Treffer; das allein beweist nicht, dass der Schlüssel ignoriert wird.
++- [ ] Minenexplosion und Zerstörung dynamischer Asteroiden im Originalspiel
++  gezielt beobachten und mit dem Client vergleichen. Die sichtbare Wirkung,
++  der Verbraucher des gespeicherten Partikeleffekts und die Bedeutung des
++  Impulswerts bleiben offen; bis dahin keine Parser- oder Runtime-Änderung.
+ - [ ] Die Asteroidenformen und Feldgrenzen in repräsentativen Systemen prüfen;
+   Fehler bei Laden, Sichtbarkeit, Dichte oder Absturz reproduzierbar festhalten.
+-- [ ] Fehlende Referenzen auf `solar/asteroids/roids.txm` im Client-Lauf
+-  identifizieren und dokumentieren. Textur ersetzen oder SDK-Verweis ändern
+-  bleibt eine Entscheidung und Änderung im Data-Repository.
++- [x] Die sieben `solar/asteroids/roids.txm`-Verweise der SDK-`Shapes.ini` bis
++  zum Clientpfad geprüft. Weder Retail-DATA noch SDK-System-/Asteroiden-INIs
++  referenzieren `solar/asteroids/Shapes.ini`; auch ihre 15 Shape-Namen werden
++  außerhalb der Datei nicht verwendet. Der aktuelle Datenbestand aktiviert
++  diesen Fehler daher nicht. Würde eine Konfiguration diese Shapes verwenden,
++  kann der fehlende Textureintrag im Billboard-Renderer zu einer
++  Nullreferenz führen. Die Retail-Laufzeitbaseline BR01 benutzt
++  `RockShapes.ini` und prüft diesen Sonderfall nicht.
++- [ ] Falls Data eine aktive Konfiguration für `Shapes.ini` ergänzt, den
++  betroffenen Client-Lauf reproduzieren. Textur ersetzen oder SDK-Verweis
++  ändern bleibt eine Entscheidung und Änderung im Data-Repository.
+
+ ### Schwarze Löcher, Nebel und Ringsysteme
+
+-Quelle: [Data/TODO-blackhole.md](../../LN-Data/TODO-blackhole.md)
++Quelle: [Data/TODO-blackhole.md](../../Data/TODO-blackhole.md)
++
++- [x] Lokale Retail- und SDK-`Bh.ini` read-only verglichen: SDK entfernt
++  `[Sound]`, `[FadeChunks]`, `[CloseChunks]` und ersetzt `lava_wisp` durch
++  `rock_wisp`.
++- [x] SDK-Systemreferenzen sowie Client-Schemas und Renderer nach einem
++  Black-Hole-Pfad geprüft. Kein Systemverweis und kein dedizierter Client-Parser/
++  Renderer gefunden; unterstützte Nebel-Schemas decken mehrere Black-Hole-Felder
++  nicht ab. Details: [Client-Umsetzungsplan](data-client-plan.md#phase-1--parser--und-datenflussprüfung).
++- [x] Nebelpfad von Schema über `GameItemDb.GetNebula()` bis
++  `NebulaRenderer`/`SunRenderer` geprüft. Nicht angebundene SDK-Werte und
++  Mehrfach-`NebulaLight`-Abschnitte sind im
++  [Client-Umsetzungsplan](data-client-plan.md#phase-1--parser--und-datenflussprüfung)
++  festgehalten.
++- [x] Planetare `ring`-Dateireferenzen bis ins Datenmodell verfolgt; ein
++  Renderer-Verbraucher fehlt im aktuellen Quellbaum. `Zone.ShapeKind.Ring`
++  funktioniert separat als Geometrie für Zonenabfragen.
++- [ ] Nebel- und Ringbefunde im Originalspiel visuell vergleichen; insbesondere
++  die Omega-13-`rock_wisp`-Puffs und die planetaren Ringassets prüfen.
+
+ - [ ] Das Omega-13-Schwarze-Loch sowie betroffene Ringsysteme im Client laden und
+   Darstellung, Sichtbarkeit, Speicherbedarf und Laufzeitstabilität prüfen.
+@@ -63,28 +167,65 @@ Quelle: [Data/TODO-blackhole.md](../../LN-Data/TODO-blackhole.md)
+
+ ### Solar-, Planeten- und Nebelwerte
+
+-Quelle: [Data/TODO-solar.md](../../LN-Data/TODO-solar.md)
+-
++Quelle: [Data/TODO-solar.md](../../Data/TODO-solar.md)
++
++- [x] Solar-Archetypen bis `ResolveDrawable()` und zum Modellladen des
++  Systemobjekts verfolgt. `material_library` und `DA_archetype` verwenden die
++  exakt angegebenen VFS-Pfade; fehlende Dateien werden als Fehler protokolliert
++  und es gibt keinen Flatten-/Alias-Fallback. Das HD-INI passt seine flachen
++  `.mat`-/`.txm`-Pfade an die Paketnamen an. `Data/NAP/Material` enthält lokal
++  nur `.gitkeep`. Der read-only Retail-DATA-Lauf reproduziert 932
++  `SolarArch.ini`-Verweise, weist aber `detailmap_gas.txm` (9 Stellen) und
++  `detailmap_ice.txm` (12 Stellen) als fehlend aus. Das kann der vollständige
++  NAP-Bestand mit HD-Dateien ergänzen; der Paket-/Renderlauf bleibt offen.
++  Details:
++  [Client-Umsetzungsplan](data-client-plan.md#phase-1--parser--und-datenflussprüfung).
++- [x] `solar_radius` bis Navmap und Besuchsradius, `atmosphere_range` bis
++  `GameWorld.InAtmosphere()` verfolgt. `burn_color`/`ambient_color` werden
++  kopiert, aber im Spielquellbaum nicht verwendet.
++- [x] `StarArch.ini` geprüft: Glow, Center und Spines erreichen `SunRenderer`;
++  Lens-Flare-, Lens-Glow- und Fade-Felder werden geparst, aber nicht ins
++  Laufzeitmodell übernommen. Details: [Client-Umsetzungsplan](data-client-plan.md#phase-1--parser--und-datenflussprüfung).
++- [x] Schlüssel-zu-Code-Abgleich vervollständigt: 14 von 28 `SolarArch.ini`-
++  Schlüsseln werden in das Solar-Laufzeitmodell übernommen; bei `StarArch.ini`
++  erreichen 5 von 11 Schlüsseln den Renderer. Die geparsten, aber im Solar-/Stern-
++  pfad nicht angebundenen Schlüssel und getrennte Schiffverbraucher sind im
++  [Client-Umsetzungsplan](data-client-plan.md#phase-1--parser--und-datenflussprüfung)
++  dokumentiert.
++- [ ] HD-Planetmaterialien und geänderte Stern-/Solarwerte im repräsentativen
++  Client-Lauf visuell prüfen.
++- [x] Stock-Renderbaseline im separaten Debug-Client-Lauf festgehalten:
++  `FP7_system` aus lokaler Retail-DATA geladen; Screenshot zeigt Schiffe,
++  Station, Sterne und Nebel. Log bestätigt Daten- und UI-Laden sowie den
++  Systemeintritt, mit 108 Warnungen und ohne Error/Fatal/Exception. Beleg:
++  `/tmp/lancer-solar-runtime-20261012/`. Der Lauf verwendet weder HD-/NAP-
++  Inhalte noch Clusterwelten und vergleicht nicht mit dem Originalspiel.
+ - [ ] Planetendarstellung mit den flachen Materialpfaden (`solar/planets/*.mat`
+   und `detailmap_*.txm`) im Client prüfen; Material- und Texturauflösung im
+   Laufzeitlog festhalten.
+ - [ ] Die 59 geänderten Nebelkonfigurationen sowie Sterne, Sonnen und
+   Asteroiden-/Sonnen-Loadouts in repräsentativen Systemen visuell und auf
+   Laufzeitfehler prüfen.
+-- [ ] Von der HD-Edition stammende Solar-INI-Felder auf Parser- und
+-  Renderer-Verwendung prüfen. Ein erfolgreiches Parsen allein gilt nicht als
+-  Laufzeitnachweis.
+-- [ ] Die fehlenden `solar/asteroids/roids.txm`-Verweise zusammen mit dem
+-  Asteroiden-TODO erfassen, damit Daten- und Clientprüfung dieselbe Ausnahme
+-  verwenden.
++- [x] Parserdeklarationen der 28 unterschiedlichen `[Solar]`-Schlüssel aus
++  `SDK/solar/SolarArch.ini` mit `Schema/Archetype.cs` abgeglichen; alle besitzen
++  ein `[Entry]` oder `[EntryHandler]`, kein unbekannter Schlüssel gefunden.
++- [ ] HD-Planetenmaterialien und geänderte Stern-/Solarwerte im repräsentativen
++  Clientlauf visuell prüfen. Der Quellcode-Abgleich belegt keine korrekte
++  Darstellung; der vollständige HD-NAP mit den Texturassets fehlt lokal noch.
++- [x] Fehlende `solar/asteroids/roids.txm`-Verweise zusammen mit dem
++  Asteroiden-TODO erfasst; die sieben Einträge sind derzeit nicht über die
++  Retail- oder SDK-Konfiguration erreichbar.
+
+ ### Startup-Videos und moderne Videoformate
+
+-Quelle: [Data/TODO-video.md](../../LN-Data/TODO-video.md)
++Quelle: [Data/TODO-video.md](../../Data/TODO-video.md)
+
+ - [x] `StartupMovies`-Verwendung geprüft: `FreelancerIni` parst
+   `movie_file`; im Client-Quellbaum wurde kein Verbraucher und kein
+   Wiedergabeaufruf gefunden. Der Playback-Pfad ist derzeit nicht angebunden.
++- [x] Decoder-Inventar geprüft: in `src` ist kein Video-Decoder oder
++  Video-Wiedergabe-Backend eingebunden. Die HD-Data-Dokumentation führt
++  WMV9/VC-1 mit WMA als vorhandene Movie-Formate auf.
+ - [ ] Entscheiden und planen, ob Startup-Movie-Wiedergabe im Client umgesetzt
+   werden soll; bei Umsetzung Playback-Pfad und Decoder für Zielplattformen
+   ergänzen und testen.
+@@ -123,6 +264,65 @@ beschrieben.
+   prüfen; fehlende Original-Ressourcen-DLLs dürfen dafür im Clientpaket nicht
+   vorausgesetzt werden.
+
++### Ogg-/FLAC-Musik und Sounds
++
++Quelle: [Audio-Pipeline-Audit](asset-packages/audio-pipeline.md)
++
++- [x] Direkte AudioEntry-Wiedergabe geprüft: der native `lancerdecode`-Pfad
++  erkennt Ogg/Vorbis und FLAC per Signatur und dekodiert beide zu PCM.
++- [x] Musik-Loop geprüft: der alte Vorbis-Reset nach EOF startete den Stream
++  nicht erneut. Patch 2172 öffnet den Decoder ab Streamanfang neu; Vorbis-
++  und FLAC-Resetregressionen bestehen 2/2 mit dem 8192-Byte-Musikpuffer.
++- [x] SFX-Loop-Pfad abgegrenzt: Einzelsounds werden zuerst vollständig zu PCM
++  dekodiert; wiederholte Wiedergabe nutzt OpenAL `AL_LOOPING` und hängt nicht
++  von einem Vorbis-Decoderreset ab.
++- [x] NAP-gebundene Vorbis-, FLAC- und Ogg-FLAC-SFX aus dem aktiven Snapshot
++  über `SoundData`/`AudioManager` abgespielt: Loop-Instanzen blieben nach 2,5 s
++  aktiv, One-Shot-Kontrollen endeten nach 1,4 s. Die Client-SFX-Trigger in
++  einer Spielsituation sind damit nicht gesondert abgenommen.
++- [x] Raum-Playlistintegration mit synchronisiertem Debug-Paket nachgewiesen:
++  `MusicPlayer` meldet Streamende, `RoomGameplay` wählt daraufhin A/B
++  abwechselnd; 20-Sekunden-Clientlauf und Dateiöffnungen belegen den Übergang.
++- [x] Nichtstille Client-PCM-Ausgabe im 44,1-kHz-Stereo-PulseAudio-Monitor
++  nachgewiesen (-24 dBFS Spitzenpegel), geroutet auf einen temporären Null-Sink.
++- [ ] Vorbis-Musik und Playlistwechsel im echten Client auf Lautsprecher oder
++  Kopfhörer anhören und Loop-Übergangsqualität beurteilen.
++- [x] Audio-Decoder mit Vorbis, FLAC und Ogg FLAC aus chunked NAP-Einträgen
++  lesen, zurücksetzen und byte-identische PCM-Ausgaben prüfen.
++- [x] Aktiven NAP-Paketbestand im vollständigen Linux-Client ohne loses
++  `DATA` starten. Der Debuglauf lud Spieldaten aus dem aktiven Snapshot und
++  wählte zwei NAP-gebundene Vorbis-Tracks abwechselnd; beide Testtöne sind in
++  der Null-Sink-PCM-Aufnahme im Frequenzspektrum erkennbar. Ein separater
++  Ein-Track-Lauf mit `oneshot=False` hielt den 440-Hz-Vorbis-Track über EOF
++  hinaus aktiv; die akustische Loop-Grenze bleibt zu beurteilen.
++- [x] `lancerdecode` als x86-64 Windows-DLL cross-kompiliert; PE32+ und
++  `KERNEL32.dll`/`msvcrt.dll`-Importe geprüft.
++- [x] Der BuildLL-Lauf `BuildEngine --with-win64` legt die x64-PE32+-DLL
++  bytegleich unter `bin/librelancer-win-x64/lib/x64/` ab.
++- [ ] Windows-Ladeauflösung und Fixture-Decodierung im CI-Runner bestätigen; der Workflow-Schritt ist eingerichtet, ein erfolgreicher Lauf steht noch aus.
++- [x] Ogg FLAC separat mit synthetischem Fixture getestet: Container-/Codec-
++  Erkennung, PCM-Decoding, Reset nach EOF und Musik-/SFX-Loopkontrollen
++  bestehen unter Linux.
++- [x] Synthetische FLAC- und Ogg-FLAC-Musik aus dem aktiven Linux-NAP-Client
++  gestreamt und im Null-Sink-Spektrum bestätigt; beide Formate wechselten in
++  der Deck-Playlist wiederholt.
++- [x] Vollständige `LibreLancer.Tests`-Suite in Release am 2026-10-12 bestanden:
++  677/677 Tests. Das ergänzt den fokussierten Audio-/Playlistlauf (12/12),
++  bestätigt für sich allein aber keine Windows-Laufzeit oder Hörqualität.
++- [ ] Vorbis/FLAC/Ogg FLAC unter Windows mit gestagter DLL auf Seek-/Chunk-
++  grenzen prüfen; Loaderauflösung und Laufzeit-Decodierung sind offen.
++
++### Grafische Erweiterungen: Normalmaps, Cubemaps und Vulkan
++
++- [ ] Den [Grafik-Umsetzungsplan](graphics-implementation-plan.md) in der
++  Reihenfolge P0–P9 abarbeiten. Zuerst den NAP-Bestand vervollständigen und
++  die vorhandenen Surface-Karten mit INI-Auflösung, Tangenten und Material-
++  Parametern im Client nutzbar machen; anschließend IBL, Render-Passes,
++  Post-Processing und das vollständige SDL_GPU/Vulkan-Backend abnehmen.
++- [ ] Die [Data-Aufgaben](../../Data/TODO-surface-maps.md) und das
++  [aktuelle Inventar](evidence/graphics-input-inventory-20261012.json)
++  für die leeren INIs/Bibliotheken und den unvollständigen Container verwenden.
++
+ ## Gemeinsame Prüfpunkte und Zuständigkeit
+
+ - [ ] Eine Client-Ladeprüfung mit einer lokalen Freelancer-Installation und
+@@ -149,104 +349,8 @@ dupliziert:
+
+ ## Daten-Quellen
+
+-- [Asteroiden](../../LN-Data/TODO-asteroiden.md)
+-- [Schwarze Löcher](../../LN-Data/TODO-blackhole.md)
+-- [Musik](../../LN-Data/TODO-musik.md)
+-- [Solar und Nebel](../../LN-Data/TODO-solar.md)
+-- [Video](../../LN-Data/TODO-video.md)
+-
+-## Ergänzungen aus LN-Data (Stand 2026-10-11)
+-
+-Datenstand in `LN-Data`: SDK 1.3.1 mit den INIs des HD-Packs (HD-Werte gelten), 7369 Nicht-INI-Dateien im NAP (elf Klassenordner), 343 per KI um Faktor 4 hochskalierte Texturcontainer (605 Texturen), 1700 Audiodateien von WAV nach Ogg Vorbis (1620) und FLAC (80) gewandelt, INIs auf `.ogg`/`.flac` umgestellt. 19 712 Datei-Verweise geprüft, 32 Ziele fehlen (`LN-Data/missing.md`, erzeugt von `tools/check_refs.py`; die Zahlen in README, WISSEN und missing.md stimmen jetzt überein). Struktur geprüft, in keiner Engine gestartet. Die Plugin-Quellen liegen in `LN-Data/reference/freelancer-plugins/`, die Analyse in `LN-Data/TODO-plugins.md`.
+-
+-### Daten laden (NAP, HD-Pack, hochskalierte Texturen, Audio)
+-
+-- [ ] `NAP/` mit `nexus-pack pack` zu NAP-V1-Paketen bauen (Vorschlag: Basis, HD-Pack, Hochskalierung, INIs getrennt) und mounten. Override-Deklarationen aus `tools/hd_overrides.txt` (1603) und `tools/upscaled_containers.txt` (343) ableiten.
+-- [ ] Client und LLServer mit diesen Daten bis zum ersten UI und in ein System starten (Linux). Das ist der fehlende Spieltest.
+-- [ ] 1024- und 2048-Pixel-Texturen (DXT1/DXT5, TGA) laden, besonders Planeten (256 → 2048) und `solar/rings/rings.txm`.
+-- [ ] Hochskalierte Container laden: DXT1/3/5, DDS unkomprimiert 24 Bit, TGA 8/16/24/32 mit Mip-Kette (neu geschriebener UTF-Container, `tools/utf_write.py`). Bei Fehlern den Container aus der Sicherung zurückholen und aus `upscaled_containers.txt` nehmen.
+-- [ ] Die 10 neuen HD-INIs lesen; die vier Plugin-INIs (`Storyfactions.ini`, `Territory.ini`, `Ranks.ini`, `HudShift.ini`) müssen ohne Plugin wirkungslos bleiben.
+-- [ ] **Audio:** Die 1700 Audiodateien sind `.ogg` (Vorbis, 1620) und `.flac` (80); die INIs verweisen darauf (`audio/Sounds.ini`, `Music.ini`, `StorySounds.ini` u. a.). Prüfen, dass Client und LLServer sie über `GameDataManager` und den NAP-Stream dekodieren, auch Streaming-Musik, dass Dialoge und Effekte ohne Alias laden und dass die Schleifen lückenlos laufen. Es gibt keine Loop-Start/Ende-Metadaten (`audio-pipeline.md`). Opus ist ausgeschlossen. Ein `.thn` (`s059x_nrml_jonner_rh_01_bar_01.thn`) verweist auf `.ogg`.
+-- [ ] Verhalten bei den 32 fehlenden Zielen: Kollisionsmodelle `*_col.cmp` (5), 17 `spacepop`-INIs, `tlr_a/d/tube_a`, `trading_depot`, `roids.txm`, `hudtarget.txm`, `exit/openingscreen.tga`. Absturz, Warnung oder stiller Fallback?
+-
+-### Plugin-Funktionen des HD-Packs
+-
+-Das HD-Pack lädt über `EXE/dacom.ini` rund 20 Client-Plugins für `Freelancer.exe` 1.1. Sie sind **Binärpatches im Prozessspeicher**: Sie überschreiben beim Laden feste Adressen in `Freelancer.exe` oder `common.dll`, hängen eigene Hooks ein und lesen ihre Einstellungen mit dem `INI_Reader` aus `common.dll`. Adressen und Patches sind deshalb nicht übertragbar. Gebraucht wird die **Funktion**, nicht der Code; sie soll in LibreLancer als normales Feature mit der vorhandenen INI umgesetzt werden (Format unverändert).
+-
+-**Referenzen** (alle im Repository `LN-Data`, Ordner `reference/freelancer-plugins/`; dort `README.md` mit Herkunft, Stand und Lizenz je Plugin; Analyse und Spezifikation in `TODO-plugins.md`):
+-
+-- `adoxa/<plugin>/`: Quellcode von Jason Hood, Quelle `https://adoxa.altervista.org/freelancer/plugins.html`. Lizenz laut Seite: „freely used by any mod“, keine formale Lizenzdatei.
+-- `github/<plugin>/`: Quellcode aus eigenen GitHub-Repos mit jeweils eigener Lizenz (Tabelle „Quellen im Netz“).
+-- Die kompilierten DLLs sind nicht enthalten; nichts davon wird gebaut oder geladen.
+-
+-#### Priorität A: ohne diese Funktionen sind die HD-INIs wirkungslos
+-
+-| Plugin (Version) | Funktion | Konfiguration | Wirkung ohne Plugin | Quellcode (LN-Data) |
+-|---|---|---|---|---|
+-| **Story Factions** 1.01 | Legt fest, welche Fraktionen in der Reputationsliste als Story-Fraktionen ausgeblendet werden. Die Liste ist im Original fest einprogrammiert, die INI ersetzt sie vollständig. | `DATA\Storyfactions.ini`, `[StoryFactions]`, ein Fraktions-Nickname pro Zeile (`fc_ln_grp`, `fc_kn_grp`, `fc_rn_grp`, `fc_n_grp`, `fc_or_grp`, `fc_f_grp`, `fc_q_grp`, `fc_ouk_grp`, `fc_uk_grp`). Fehlt die Datei: eingebaute Liste. | keine | `adoxa/storyfactions/` |
+-| **Territory** 1.03 | Ändert die Meldung beim Systemeintritt („X System, Y Space.“) und ergänzt Häuser auf der Nav-Map. Im Original sind Territorien und die vier Häuser (Li, Br, Ku, Rh) fest eingebaut. | `DATA\UNIVERSE\Territory.ini`: `[Settings]` (`caps`, `codepage`), `[Houses]` (`format`/`format_id` mit `%s` für System und Haus, `house`/`house_id`, `systems` mit Nickname oder Bereich wie `Li01-5`, `NavMap = X, Y[, Schrift]`), `[Systems]` (`format`, `systems`) | keine | `adoxa/territory/` |
+-| **Ranks** 1.00 | Zeigt zum Level einen Rangnamen („Pilot 12“); im Mehrspielermodus je Fraktion. Rangnamen sind Stringressourcen in der DLL. | `DATA\MISSIONS\ranks.ini`: `[SP Ranks]`, `[MP Ranks]` (je Fraktion `group = <nickname>`), `[Rank Settings]` (`just_levels`, `offset`); Schlüssel `next_rank = LEVEL[, ID]`, `set_ranks = INTERVAL, COUNT[, ID]`, `format` (`%%d` Level, `%s` Rang), `first_rank_id` | keine | `adoxa/ranks/` |
+-| **HUD Shift** 2.12.1 | Verschiebt HUD-Elemente, damit sie bei Breitbild am Rand bleiben; Werte je Seitenverhältnis (16:9, 15:9, 16:10, 5:4). | `DATA\INTERFACE\HudShift.ini`: `[HUDShift]` (`Horizontal = auto` oder Wert, `Vertical`, `GaugeBars`, `PlayerStatus`, `TargetStatus`), `[Group]` (`nickname`, `location = left/right/top/bottom`, `position`). Die Adressen in `position` sind absolute EXE-Adressen und müssen durch Anker ersetzt werden. | HUD bei Breitbild falsch platziert | `adoxa/hudshift/` |
+-
+-Umsetzungshinweise: Story Factions ist eine konfigurierbare Ausschlussliste für das Reputationsfenster. Territory braucht datengetriebene Territorien, Nav-Map-Beschriftung aus der INI und Formatstrings mit Platzhaltern (`^` = Zeilenumbruch, höchstens 63 Zeichen). Ranks braucht eine Rang-Tabelle je Fraktion mit lokalisierten Namen. HUD Shift soll die Verschiebung aus dem Seitenverhältnis berechnen und mit Ankern statt Adressen arbeiten.
+-
+-#### Priorität B und C: Mehrspieler, Bedienung, Komfort
+-
+-| Plugin (Version) | Funktion | Priorität | Hinweis | Quellcode (LN-Data) |
+-|---|---|---|---|---|
+-| **MP Rep** 1.03 | Holt im Mehrspielermodus die Reputation vom Server für politische Zonen, Patrouillen und Schiffskauf (ersetzt `GetGroupFeelingsTowards`; benötigt auch einen Server-Patch). | B | Protokollpunkt mit dem Gateway (Reputation, Besitz, Lease). Original wertet clientseitig aus. | `adoxa/mprep/` |
+-| **Zone** 1.20 | Meldet Namen benannter Zonen beim Betreten und Verlassen, Farbe nach Gefahr (`property_flags`, Bits 3–5). | B | Parameter `upper`, `low=`, `medium=`, `high=`, `ultra=`; Texte als Ressourcen. | `adoxa/zone/` |
+-| **Wheel Scroll** 1.12 | Mausrad in Fenstern (Reputation, Kontakte, Waffen, Chat). | B | kleiner Aufwand | `adoxa/wheelscroll/` |
+-| **Turret Zoom** 1.41 | Mausrad steuert die Kamera der Turmansicht, Modifikatoren Shift/Ctrl/Alt. | B | Parameter im HD-Pack: `inverse max=1000 shift=200 ctrl=20 alt=4 s+c=0.4 c+a=0.2 switch=100 interval=500 adjust=0.75` | `adoxa/turretzoom/` |
+-| **flplusplus** | Konfigurierbare Sichtweite/LOD, TTF-Schriften, Speicher- und Screenshot-Pfad, FPS-Limit, Fehlerkorrekturen. | B | HD-Daten brauchen größere Sichtweite und eigene Schriften. | `github/flplusplus/` |
+-| **FLSharp** | Hook-basierte Korrekturen, Auflösungsliste, Hauptmonitor als Standard. | B | Die Fehlerliste (siehe unten) als Abnahmetests übernehmen. | `github/FLSharp/` |
+-| **HUDless** 1.02 | HUD per Taste ausblenden (`MINIMIZE HUD`, `OPEN LOG`); HUD, dann Cursor, dann beides wiederherstellen. | C | | `adoxa/hudless/` |
+-| **Hail** 1.01 | Taste für „Hail“ (Eintrag `USER_RADIO` in `keylist.ini`). | C | | `adoxa/hail/` |
+-| **Numeric Damage** 1.00 | Zeigt Trefferpunkte (Hülle, Schild) numerisch. | C | | `adoxa/numeric/` |
+-| **MultiIntro** | Mehr als drei Intro-Bildschirme, zufällig. | C | **GPL-3.0**: kein Code übernehmen ohne Lizenzprüfung. | `github/MultiIntro-Updated/` |
+-| **DelayDisplay** | Waffen-Abklingzeit in der Kontaktliste. | C | **Keine Lizenz** (Dekompilation des Plugins von M0tah). Variante mit Lizenz: `TheStarport/FLUF`, `modules/delay_display` (AGPL-3.0, nicht kopiert). | `github/DelayDisplay/` |
+-| **TargetScreen** | Dynamische Zielansicht (Nachbau von Venemons Dynamic Target Screen). | C | MIT | `github/DynamicTargetScreen/` |
+-
+-**FLSharp-Fehler, die der neue Code nicht wiederholen darf:** Handelsrouten-Lichter bleiben aus; Wegpunkte werden im falschen System gelöscht; Mehrfachlauf-Waffen (Mündungsfeuer, Ton, Munitionszähler); `use_animation` aus `weapon_equip.ini`; Client-Server-Updates (mindestens alle 2 s, 40 ms Minimum, 750 ms in der Handelsroute); Rotationssperre beim Start; Kopieren/Einfügen in Eingabefeldern; Abstürze bei fehlerhaften Spielständen; Infokarten für dynamische Solare.
+-
+-#### Entfällt oder gehört woanders hin
+-
+-| Plugin | Grund | Quellcode (LN-Data) |
+-|---|---|---|
+-| MP3 Codec Fix 1.12 | findet den Fraunhofer-MP3-Codec; im neuen Audiosystem kein Thema | `adoxa/mp3codec/` |
+-| Console 1.24 | Entwicklerkonsole für den Einzelspielermodus (mehrere Schiffe besitzen u. a.), im Mehrspielermodus nicht vorgesehen | `adoxa/console/` |
+-| JFLP.DLL 1.27 | Sammelpatch für Steuerung und Anzeige; Funktionen einzeln bewerten | `adoxa/jflp/` |
+-| Lighting Bug Fix | Beleuchtungsfehler; im HD-Pack deaktiviert, hängt am alten Renderer (MIT) | `github/fl-lighting-bug-fix/` |
+-| cyrillic_chat | kyrillischer Chat; im HD-Pack deaktiviert (MIT) | `github/cyrillic_chat/` |
+-| VersionText | Quellcode nicht auffindbar (verlinktes Repo liefert 404) | – |
+-| FLHook | Serverseitiges Hook-Framework (TheStarport, GPL-3.0), gehört zur Serverarchitektur und wird über `FLHookCompat` getrennt bewertet | `github/FLHook/` |
+-
+-#### Quellen im Netz
+-
+-| Plugin | Quelle |
+-|---|---|
+-| adoxa-Plugins (Jason Hood) | `https://adoxa.altervista.org/freelancer/plugins.html` |
+-| flplusplus | `https://github.com/FLHDE/flplusplus` (BSD-3-Clause) |
+-| FLSharp | `https://github.com/BC46/FLSharp` (MIT) |
+-| MultiIntro | `https://github.com/FLHDE/MultiIntro-Updated` (GPL-3.0) |
+-| DelayDisplay | `https://github.com/FLHDE/DelayDisplay` (ohne Lizenz) |
+-| TargetScreen | `https://github.com/FLHDE/DynamicTargetScreen` (MIT) |
+-| cyrillic_chat | `https://github.com/FLHDE/cyrillic_chat` (MIT) |
+-| Lighting Bug Fix | `https://github.com/FLHDE/fl-lighting-bug-fix` (MIT) |
+-| FLHook | `https://github.com/TheStarport/FLHook` (GPL-3.0) |
+-
+-#### Vorgehen
+-
+-1. Priorität A mit den vier vorhandenen INIs umsetzen, Formate unverändert.
+-2. MP Rep als Protokollpunkt mit dem Gateway abstimmen.
+-3. FLSharp-Fehlerliste als Abnahmetests übernehmen.
+-4. Komfort (Zone, Wheel Scroll, Turret Zoom, flplusplus-Optionen), dann Priorität C nach Bedarf.
+-5. Prüfen, ob `Freelancer.ini`/`dacom.ini` in LibreLancer überhaupt Plugin-Einträge braucht oder die Funktionen in der Engine bleiben.
+-6. Erwartung testen: Die vier INIs bleiben ohne Plugin wirkungslos.
+-
+-**Lizenz:** GPL-3.0-Code (MultiIntro, FLHook) nicht ohne Prüfung übernehmen. Für MIT/BSD gilt Namensnennung. DelayDisplay hat keine Lizenz. Die adoxa-Plugins nennen nur „freely used by any mod“.
+-
+-### Weiterer Spielinhalt
+-
+-- [ ] **HD-Spiellogik:** Das HD-Pack entfernt viele `faction_weight`-Einträge und ändert Skripte, Gerüchte und Encounter. Entscheidung: HD-Werte gelten. Im Spiel prüfen.
+-
++- [Asteroiden](../../Data/TODO-asteroiden.md)
++- [Schwarze Löcher](../../Data/TODO-blackhole.md)
++- [Musik](../../Data/TODO-musik.md)
++- [Solar und Nebel](../../Data/TODO-solar.md)
++- [Video](../../Data/TODO-video.md)
+diff --git a/docs/evidence/graphics-input-inventory-20261012.json b/docs/evidence/graphics-input-inventory-20261012.json
+new file mode 100644
+index 0000000..3829e44
+--- /dev/null
++++ b/docs/evidence/graphics-input-inventory-20261012.json
+@@ -0,0 +1,498 @@
++{
++  "date": "2026-10-12",
++  "dataCommit": "83187b356e6c9cfd04ba337b3cc5d381be85cfef",
++  "containers": [
++    {
++      "path": "Data/NAP/Surface/fx/SurfaceMaps.ini",
++      "size": 0,
++      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
++      "status": "empty"
++    },
++    {
++      "path": "Data/NAP/Surface/fx/SurfaceMapsBases.ini",
++      "size": 0,
++      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
++      "status": "empty"
++    },
++    {
++      "path": "Data/NAP/Surface/fx/SurfaceMapsShips.ini",
++      "size": 0,
++      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
++      "status": "empty"
++    },
++    {
++      "path": "Data/NAP/Surface/fx/SurfaceMapsSolar.ini",
++      "size": 0,
++      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
++      "status": "empty"
++    },
++    {
++      "path": "Data/NAP/Surface/fx/envcube_nebula.mat",
++      "size": 2098592,
++      "sha256": "c360f2222aea189f6bf0c62d37ff2ba2bd2d82c8bde4a14cb110abd0a30af0eb",
++      "status": "present",
++      "textureCount": 1,
++      "resourceCounts": {
++        "cube": 1
++      },
++      "formats": [
++        "uncompressed"
++      ],
++      "dimensions": [
++        "256x256"
++      ],
++      "mipCounts": [
++        9
++      ]
++    },
++    {
++      "path": "Data/NAP/Surface/fx/envcube_space.mat",
++      "size": 2098592,
++      "sha256": "c0b9908383e7e6837bf61d7c9f256636bf16cb455f800e3ebe9a10ebe3eba9db",
++      "status": "present",
++      "textureCount": 1,
++      "resourceCounts": {
++        "cube": 1
++      },
++      "formats": [
++        "uncompressed"
++      ],
++      "dimensions": [
++        "256x256"
++      ],
++      "mipCounts": [
++        9
++      ]
++    },
++    {
++      "path": "Data/NAP/Surface/fx/envcube_sun.mat",
++      "size": 2098588,
++      "sha256": "862be2bc062cf6d636c998b88c6fb9ca36434c7d5ff862544d0a78eba0b2b70f",
++      "status": "present",
++      "textureCount": 1,
++      "resourceCounts": {
++        "cube": 1
++      },
++      "formats": [
++        "uncompressed"
++      ],
++      "dimensions": [
++        "256x256"
++      ],
++      "mipCounts": [
++        9
++      ]
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_bases.txm",
++      "size": 17791372,
++      "sha256": "df3f50163e28c3517effaa86d17f2803d1a9b0a7805c01efd097ea7656d3cac2",
++      "status": "present",
++      "textureCount": 35,
++      "resourceCounts": {
++        "normal": 12,
++        "roughness": 12,
++        "metallic": 11
++      },
++      "formats": [
++        "ATI1",
++        "ATI2"
++      ],
++      "dimensions": [
++        "1024x1024",
++        "256x256"
++      ],
++      "mipCounts": [
++        7,
++        9
++      ]
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_bases_backdrops_1.txm",
++      "size": 7395464,
++      "sha256": "78ac8aca7aee70e53425e0f7902530b6dc29bd0a69352e866949dac12092f182",
++      "status": "present",
++      "textureCount": 43,
++      "resourceCounts": {
++        "normal": 18,
++        "roughness": 18,
++        "metallic": 7
++      },
++      "formats": [
++        "ATI1",
++        "ATI2"
++      ],
++      "dimensions": [
++        "256x256",
++        "512x512"
++      ],
++      "mipCounts": [
++        7,
++        8
++      ]
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_bases_bretonia_1.txm",
++      "size": 50051648,
++      "sha256": "dec2f7ed17c55242447c24ae29cb37ef6bd5d1eb88103f9193ada9cd71652d16",
++      "status": "present",
++      "textureCount": 290,
++      "resourceCounts": {
++        "normal": 122,
++        "roughness": 122,
++        "metallic": 46
++      },
++      "formats": [
++        "ATI1",
++        "ATI2"
++      ],
++      "dimensions": [
++        "256x256",
++        "512x512"
++      ],
++      "mipCounts": [
++        7,
++        8
++      ]
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_bases_bretonia_2.txm",
++      "size": 50007388,
++      "sha256": "ba43fb8c84633d8ba17e24c94d073e2adfb85d82f0d120891c4b03d422349224",
++      "status": "present",
++      "textureCount": 289,
++      "resourceCounts": {
++        "normal": 122,
++        "roughness": 122,
++        "metallic": 45
++      },
++      "formats": [
++        "ATI1",
++        "ATI2"
++      ],
++      "dimensions": [
++        "256x256",
++        "512x512"
++      ],
++      "mipCounts": [
++        7,
++        8
++      ]
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_bases_bretonia_3.txm",
++      "size": 25165824,
++      "sha256": "6a7043a40e61fa549084a5711f79c4f8fcc2454c9e41a592350cce477f1d34e7",
++      "status": "invalid",
++      "textureCount": 46,
++      "resourceCounts": {
++        "normal": 21,
++        "roughness": 20,
++        "metallic": 5
++      },
++      "formats": [
++        "ATI1",
++        "ATI2"
++      ],
++      "dimensions": [
++        "256x256",
++        "512x512"
++      ],
++      "mipCounts": [
++        7,
++        8
++      ],
++      "errorCount": 407,
++      "errorSamples": [
++        {
++          "entry": "\\/Texture Library/rt_bases_bretonia_equip_17/MIPS",
++          "error": "missing DDS header"
++        },
++        {
++          "entry": "\\/Texture Library/mt_bases_bretonia_equip_17/MIPS",
++          "error": "missing DDS header"
++        },
++        {
++          "entry": "\\/Texture Library/nm_bases_bretonia_equip_18/MIPS",
++          "error": "missing DDS header"
++        },
++        {
++          "entry": "\\/Texture Library/rt_bases_bretonia_equip_18/MIPS",
++          "error": "missing DDS header"
++        },
++        {
++          "entry": "\\/Texture Library/mt_bases_bretonia_equip_18/MIPS",
++          "error": "missing DDS header"
++        }
++      ]
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_bases_bretonia_4.txm",
++      "size": 0,
++      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
++      "status": "empty"
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_bases_bretonia_5.txm",
++      "size": 0,
++      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
++      "status": "empty"
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_bases_generic_1.txm",
++      "size": 0,
++      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
++      "status": "empty"
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_bases_generic_2.txm",
++      "size": 0,
++      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
++      "status": "empty"
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_bases_kusari_1.txm",
++      "size": 0,
++      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
++      "status": "empty"
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_bases_kusari_2.txm",
++      "size": 0,
++      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
++      "status": "empty"
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_bases_kusari_3.txm",
++      "size": 0,
++      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
++      "status": "empty"
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_bases_kusari_4.txm",
++      "size": 0,
++      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
++      "status": "empty"
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_bases_kusari_5.txm",
++      "size": 0,
++      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
++      "status": "empty"
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_bases_liberty_1.txm",
++      "size": 0,
++      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
++      "status": "empty"
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_bases_liberty_2.txm",
++      "size": 0,
++      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
++      "status": "empty"
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_bases_liberty_3.txm",
++      "size": 0,
++      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
++      "status": "empty"
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_bases_liberty_4.txm",
++      "size": 0,
++      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
++      "status": "empty"
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_bases_liberty_5.txm",
++      "size": 0,
++      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
++      "status": "empty"
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_bases_liberty_6.txm",
++      "size": 0,
++      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
++      "status": "empty"
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_bases_pirate_1.txm",
++      "size": 0,
++      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
++      "status": "empty"
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_bases_pirate_2.txm",
++      "size": 0,
++      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
++      "status": "empty"
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_bases_rheinland_1.txm",
++      "size": 0,
++      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
++      "status": "empty"
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_bases_rheinland_2.txm",
++      "size": 0,
++      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
++      "status": "empty"
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_bases_rheinland_3.txm",
++      "size": 0,
++      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
++      "status": "empty"
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_bases_rheinland_4.txm",
++      "size": 0,
++      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
++      "status": "empty"
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_bases_rheinland_5.txm",
++      "size": 0,
++      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
++      "status": "empty"
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_planets.txm",
++      "size": 20976176,
++      "sha256": "75a9f480e50fb083f00284a4f7873df392c01e23c91741e86cf488403dc3d67b",
++      "status": "present",
++      "textureCount": 15,
++      "resourceCounts": {
++        "normal": 15
++      },
++      "formats": [
++        "ATI2"
++      ],
++      "dimensions": [
++        "1024x1024"
++      ],
++      "mipCounts": [
++        9
++      ]
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_ships.txm",
++      "size": 38289088,
++      "sha256": "482cc62e05372a027df508afe1c69f2e1203e7745edd7f7c64111bfba5c601c2",
++      "status": "present",
++      "textureCount": 65,
++      "resourceCounts": {
++        "normal": 22,
++        "roughness": 22,
++        "metallic": 21
++      },
++      "formats": [
++        "ATI1",
++        "ATI2"
++      ],
++      "dimensions": [
++        "1024x1024",
++        "512x512"
++      ],
++      "mipCounts": [
++        8,
++        9
++      ]
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_ships_auto_1.txm",
++      "size": 0,
++      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
++      "status": "empty"
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_ships_auto_2.txm",
++      "size": 0,
++      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
++      "status": "empty"
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_solar.txm",
++      "size": 8874304,
++      "sha256": "4e9ed4f1c91391147dfbf3f0035d2d934affe7b6b4388a3afece4196fdb59a06",
++      "status": "present",
++      "textureCount": 17,
++      "resourceCounts": {
++        "normal": 6,
++        "roughness": 6,
++        "metallic": 5
++      },
++      "formats": [
++        "ATI1",
++        "ATI2"
++      ],
++      "dimensions": [
++        "1024x1024",
++        "256x256"
++      ],
++      "mipCounts": [
++        7,
++        9
++      ]
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_solar_auto_1.txm",
++      "size": 0,
++      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
++      "status": "empty"
++    },
++    {
++      "path": "Data/NAP/Surface/fx/normalmaps_solar_auto_2.txm",
++      "size": 0,
++      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
++      "status": "empty"
++    }
++  ],
++  "iniSources": [
++    {
++      "path": "Data/SDK/fx/SurfaceMaps.ini",
++      "size": 13788,
++      "sections": {
++        "texture": 4,
++        "normalmap": 55,
++        "cubemap": 3
++      },
++      "napSize": 0
++    },
++    {
++      "path": "Data/SDK/fx/SurfaceMapsBases.ini",
++      "size": 578083,
++      "sections": {
++        "texture": 26,
++        "normalmap": 2620
++      },
++      "napSize": 0
++    },
++    {
++      "path": "Data/SDK/fx/SurfaceMapsShips.ini",
++      "size": 10711,
++      "sections": {
++        "texture": 2,
++        "normalmap": 46
++      },
++      "napSize": 0
++    },
++    {
++      "path": "Data/SDK/fx/SurfaceMapsSolar.ini",
++      "size": 18797,
++      "sections": {
++        "texture": 2,
++        "normalmap": 85
++      },
++      "napSize": 0
++    }
++  ],
++  "archiveFiles": [],
++  "scope": "Metadata and UTF/DDS bounds only; active NAP archive and visual runtime not validated by this inventory.",
++  "archiveScanRoots": [
++    "Data",
++    "output"
++  ]
++}
+diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
+new file mode 100644
+index 0000000..dcfba63
+--- /dev/null
++++ b/docs/graphics-implementation-plan.md
+@@ -0,0 +1,242 @@
++# Grafik-Erweiterungen: Umsetzungsplan
++
++Stand: 2026-10-12. Dieser Plan verbindet die neu eingelesenen Dokumente
++[Renderer-Roadmap](renderer-roadmap.md), [Surface Maps](surface-maps.md) und
++[Vulkan-Untersuchung](vulkan-backend-untersuchung.md) mit dem aktuellen
++Client-Quelltext und dem lokalen Data-Bestand. Die Erweiterungen sind damit
++geplant; ein fertiges Vulkan-Backend oder sichtbares Normalmapping auf
++Retail-Modellen wird hier nicht behauptet.
++
++## Ziel und Zuständigkeit
++
++Vorhandene NAP-Normalmaps und Cubemaps sollen auf Schiffen, Basen und
++Solar-Objekten tatsächlich wirken. Dazu kommen Roughness/Metallic, eine
++geordnete Render-Pipeline und ein Vulkan-Backend mit vollständiger Spiel- und
++Editor-Unterstützung. Die weiteren Effekte der Renderer-Roadmap werden über
++dieselben Grundlagen umgesetzt und jeweils einzeln abgenommen.
++
++Client/Engine verantwortet Parser, Materialien, Mesh-/Shaderpfade, Backends,
++Editor und Tests. Data verantwortet Karten, Zuordnungs-INIs, Generatoren,
++IBL-Vorberechnung und NAP-Inhalte. Laufzeitassets bleiben lokale Eingaben;
++synthetische Fixtures und Metadaten dürfen in Git. Engineänderungen bleiben
++als funktional gebündelte Patches unter `patches/series` erhalten.
++
++## Verifizierter Ausgangspunkt
++
++| Bereich | Aktueller Befund | Konsequenz |
++|---|---|---|
++| Renderer | `OpenGL` und `Null`; keine SDL_GPU-Implementierung im Client | Vulkan als vollständiges zusätzliches Backend entwickeln |
++| Material | `BasicMaterial` liest NM/PBR-Parameter; Normalmap allein aktiviert PBR nicht | Materialauswahl und Pixelbeleuchtung ausdrücklich anbinden |
++| Tangenten | Basic-FVF erwartet Tangenten in zusätzlichen UV-Slots; normale Retail-Layouts werden dadurch nicht automatisch erweitert | Tangenten aus Geometrie und der gewählten UV-Menge erzeugen |
++| Shader | BC5-Z wird mit `sqrt(1-dot(xy,xy))` rekonstruiert, ohne Begrenzung | NaNs durch Quantisierung/hohe Stärke verhindern; TBN-Ausrichtung prüfen |
++| Cubes | Basic bindet Envmap auf Slot 3; PBR verwendet diesen Slot für Metallic und bindet dort keine Envmap | Reflexion und IBL mit eigenem PBR-Bindungsplan ergänzen |
++| Surface-INI | Kein `SurfaceMaps`-Verbraucher in Schema/Engine gefunden | INIs sind vorhanden, werden aber noch nicht materialwirksam geladen |
++| NAP-Daten | 41 Dateien in `Data/NAP/Surface`, 224.847.036 Bytes; 30 leer, 10 strukturell lesbar, eine Bibliothek mit Daten außerhalb der Dateigrenze | Vor dem Vollprofil Daten vervollständigen und Archive erneut prüfen |
++
++Die vier kuratierten Bibliotheken enthalten bereits **55 Normalmaps** und
++zugehörige Roughness-/Metallic-Karten; die drei `envcube_*` sind vorhanden.
++Die aktuelle SDK-Zuordnung enthält 55 kuratierte, 46 Schiffs-, 85 Solar- und
++2620 Basis-Einträge. Alle vier NAP-Kopien der Zuordnungs-INIs sind derzeit
++leer. `normalmaps_bases_bretonia_3.txm` ist unvollständig; der Massenbestand
++darf deshalb noch nicht als vollständig geladen gelten.
++
++Der reproduzierte Metadatenbefund steht in
++[graphics-input-inventory-20261012.json](evidence/graphics-input-inventory-20261012.json).
++Er prüft UTF/DDS-Struktur und Dateigrenzen, keine Bildqualität und keine
++aktive Installation. Die Dokumentzahlen 2670 Karten/1,2 GB und 361
++Shader-Varianten sind ältere Inventarstände und werden vor Umsetzung neu
++ermittelt. Ein aktuelles `surface.nap` muss separat gegen `active.json`
++verifiziert werden.
++
++## Entscheidungen für die Umsetzung
++
++- Normalmaps/Cubemaps werden zuerst auf dem vorhandenen OpenGL-Pfad
++  nutzbar gemacht; dieselben Materialien müssen anschließend auf Vulkan
++  funktionieren. Die vorhandenen NAP-Daten werden dabei weiterverwendet.
++- Als Vulkan-Weg wird **SDL_GPU mit Vulkan-Treiber** vorbereitet. SDL3 und
++  die HLSL/SPIR-V-Kette sind vorhanden. Der Spike in P5 muss die Eignung
++  beweisen; bei nicht lösbaren API-Grenzen wird mit dokumentiertem Befund
++  auf ein direktes Vulkan-Backend umgeplant, statt Teilfunktionen abzuliefern.
++- Der Renderer bleibt Forward-basiert. Clustered Forward wird nach Messung
++  ergänzt; Transparenz, Nebel, Partikel und vorhandenes Antialiasing bleiben
++  vollständig abgedeckt.
++- Qualitätsprofile: Original, Minimal (kuratierte Karten), Standard
++  (zusätzlich Schiffe/Solar), Voll (zusätzlich Basen). Während der Einführung
++  bleibt Original der Referenzstand; die anderen Profile sind auswählbar.
++- Bestehende `Nm_name`/`Rt_name`/`Mt_name` und explizite Archetyp-Envmap-Werte
++  haben Vorrang. Die INI ergänzt fehlende Zuordnungen; Stärke 0 deaktiviert
++  den jeweiligen Effekt. Fehlende optionale Karten führen zu einer
++  verständlichen Warnung und einem gültigen Material.
++
++## Reihenfolge und Abnahme
++
++| Paket | Ergebnis | Abhängigkeit | Nachweis |
++|---|---|---|---|
++| P0 | Vollständiges Daten-/Shaderinventar und Referenzbilder | keine | Dateigrenzen, NAP-Hashes, feste Szenen und Messbericht |
++| P1 | Surface-INI und bedarfsgeladene Bibliotheken | P0 | Parser-/VFS-Tests und Auflösungsprotokoll |
++| P2 | Normalmapping auf Retail-Meshes | P1 | Bilder für Schiff, Basis, Planet und DFM; Fehlerfälle |
++| P3 | Cubemap-Reflexion, Roughness/Metallic und IBL | P2 | gerichtete Cube-Fixtures, Energie-/Roughness-Vergleich |
++| P4 | Render-Passes, HDR, Tonemapping, Bloom und Blur | P0; Materialien aus P2/P3 | Pass-/Resize-Tests und CPU-/GPU-Zeiten |
++| P5 | SDL_GPU/Vulkan-Spike und Shader-Bindungsformat | P0 | echte Pipeline mit Retail-FVF, BC5, Cube und Skinning |
++| P6 | Vollständiger Vulkan-Spiel-/Editorpfad | P4/P5 | Szenenmatrix gegen GL, Lifecycle-/Readback-Tests |
++| P7 | Erweiterte Beleuchtung und atmosphärische Effekte | P3/P4/P6 | Qualitäts-/Kostenmessung je Effekt |
++| P8 | Decals, Parallax, SSR, Motion Blur, TAA/Upscaling | passende P4/P7-Grundlagen | Artefakt-, History- und Vergleichstests |
++| P9 | Plattform- und Releaseabnahme | P1–P8 | Linux/Windows-Matrix, signierte Datenpakete, Rückfallpfade |
++
++### P0 – Bestand und Referenzen
++
++- [ ] SDK-INIs nach NAP synchronisieren; leere/trunkierte Karten mit den
++  vorhandenen Data-Generatoren reproduzieren. Bereits gültige Assets
++  erhalten. Zuordnungen und doppelte Diffuse-Namen je Profil ausweisen.
++- [ ] BC5/BC4, DDS-Mipzahlen, sechs Cubeflächen, UTF-Datenlängen und alle
++  INI-Ziele prüfen; `surface.nap` erstellen/verifizieren und den verifizierten
++  aktiven Snapshot ohne loses `DATA` laden.
++- [ ] Feste Kameras/Beleuchtung für `li_fighter`, `bw_pygar_airlock`, einen
++  Gesteinsplaneten, eine DFM-Figur, Nebel/Kampf, Asteroidenfeld und
++  LancerEdit-Vorschau festlegen. Original-/Minimal-/Voll-Bilder speichern.
++- [ ] CPU-/GPU-Framezeiten, Drawcalls, Zustandskombinationen, Uploads,
++  Texturresidenten und Pipeline-Kompilierung auf benannter Hardware messen.
++  Leistungsbudgets daraus ableiten; keine ungemessenen FPS-Zusagen.
++
++### P1 – Daten und Residency
++
++- [ ] `SurfaceMapsIni` mit `[Texture]`, `[NormalMap]`, `[CubeMap]` sowie
++  `[Data] surface_maps`-Ladeliste implementieren. Profilabhängig nur die
++  vorgesehenen INIs einlesen. Groß-/Kleinschreibung, doppelte Einträge,
++  unbekannte Schlüssel und begrenzte endliche Faktoren prüfen.
++- [ ] Textur-/Materialzuordnung indexieren. Mehrdeutige Diffuse-Namen
++  diagnostizieren; optional Bibliotheks-/Materialidentität ergänzen.
++  Für kompatible Dubletten gilt die dokumentierte letzte Zuordnung.
++- [ ] Bibliotheken über denselben NAP-VFS wie bestehende Assets öffnen.
++  Erst beim benötigten Material laden; Residency-Budget, Referenzzählung,
++  Eviction und Freigabe nach GPU-Fence vorsehen. Nicht alle Basisbibliotheken
++  beim Start in GPU-Speicher übernehmen.
++- [ ] Im Editor Herkunft, aufgelöste Karten, UV-Auswahl, Stärke und Profil
++  anzeigen. Änderungen in einer INI/Workspace-Datei speichern.
++
++### P2 – Meshes und Normalmapping
++
++- [ ] UV-Auswahl pro Kartenkanal eindeutig definieren; echte zweite UVs und
++  Materialanimation erhalten. Laufzeit-Tangentdaten ergänzen, ohne die
++  Original-CMP/3DB/DFM-Dateien umzuschreiben.
++- [ ] Tangenten mit konsistenter Händigkeit aus Position, Normale, Index und
++  gewählten UVs erzeugen. Gespiegelte UVs, Naht-/Hartkantensplits und
++  degenerierte Dreiecke abdecken. Zusätzliche Vertices dürfen 16-Bit-Indizes
++  nicht überlaufen; Meshes bei Bedarf aufteilen. Bereits vorhandene gültige
++  Tangenten weiterverwenden.
++- [ ] Tangenten/Normalen beim DFM-Skinning konsistent transformieren; LODs,
++  nichtuniforme Skalierung und animierte Multipart-Meshes prüfen.
++- [ ] BC5 XY linear lesen, Stärke anwenden, Z mit begrenztem Radikanden
++  rekonstruieren und normalisieren. TBN-Reihenfolge und +Y-Konvention anhand
++  gerichteter Fixtures bestätigen. Roughness/Metallic ebenfalls linear
++  lesen; Farbtexturen und Emission getrennt behandeln.
++- [ ] Karten im Standardmaterial tatsächlich über Pixelbeleuchtung auswerten.
++  Eine reine Normalmap muss wirken, ohne eine künstliche Metallic-Karte zu
++  verlangen. Neutralmap, Stärke 0 und fehlende Tangenten bleiben stabil.
++- [ ] Native BC5-Unterstützung und einen belegten Fallback für Geräte ohne
++  das Format prüfen; beschädigte DDS-Daten abweisen.
++
++### P3 – Cubemaps und PBR
++
++- [ ] `envcube_space`, `envcube_sun`, `envcube_nebula` über Archetypwerte und
++  Surface-Katalog binden; sechs Achsen, Cube-Orientierung, Mips und
++  Reflexionsstärke im Basic-/PBR-Pfad testen.
++- [ ] Im PBR-Pfad eine kollisionsfreie Bindung vorsehen: vorhandene Dt/Et/Nm/
++  Mt/Rt-Slots 0–4, Specular-Cube/Irradiance/BRDF-LUT auf 5–7 als Entwurf.
++  Ressourcen je Shader reflektieren; tatsächliche Backendgrenzen prüfen.
++- [ ] Für IBL GGX-vorgefilterte Specular-Mips, diffuse Irradiance und eine
++  BRDF-LUT offline erzeugen. Gewöhnliche Cube-Mipmaps sind kein Nachweis für
++  eine Roughness-Vorfilterung. Ergebnisse in Data/NAP paketieren.
++- [ ] Metallische Flächen mit Umgebungslicht versorgen; ohne Karte Metallic 0
++  wählen. Roughness, Strength und Belichtung als Material-/Lichtparameter
++  im vorhandenen Uniform-Block bündeln. Glass/Alpha/Vanilla-Envmap bewahren.
++
++### P4 – Pässe und Post-Processing
++
++- [ ] Pass-Ein-/Ausgaben, Farb-/Tiefen-/Stencil-Lebensdauer, Clears, Resolve,
++  Resize und minimierte Fenster explizit machen; Debug-Marker und Timings
++  hinzufügen. Offscreen-Widgets und Editor-Viewports einbeziehen.
++- [ ] HDR-Scene-Target, linear/sRGB-Farbmanagement, Belichtung und Tonemapping
++  gemeinsam liefern. UI nach der Tonemapping-Stufe korrekt komponieren;
++  MSAA/SMAA vollständig integrieren.
++- [ ] Bloom mit Downsample-Pyramide, konfigurierbaren Schwellen und
++  separablem Blur liefern. UI-Blur, Tiefenunschärfe und Cutscene-Radialblur
++  bekommen eigene begrenzte Einsatzfälle und Qualitätsschalter.
++
++### P5/P6 – Vulkan über SDL_GPU
++
++- [ ] Backendneutrale Vertex-/Wrap-/Depth-Aufzählungen, Screenshot-/Readback-
++  Schnittstelle und backendabhängige SDL-Fenstererzeugung einführen.
++- [ ] SDL3-Mindestversion und native Bereitstellung pro Plattform festlegen;
++  SDL2/GLES/Null-Pfade erhalten. Geräte-/Formatfähigkeiten beim Start prüfen
++  und eine nicht verfügbare Auswahl verständlich auf einen gültigen Backend
++  zurückführen. Ein leeres, minimiertes Swapchain-Ziel ist ein Normalfall.
++- [ ] Shader-Bündel versionieren und pro Variante eine logische Slot-zu-
++  Backend-Bindungstabelle erstellen. SPIR-V-Sets und DXIL/MSL-Bindungen je
++  Stufe lückenlos verdichten, bevor weitere Formatübersetzungen stattfinden.
++  GL-Namen/Slots bleiben in der Kompatibilitätstabelle erhalten. Uniform-
++  Anzahl und Blockgrößen gegen die gewählte SDL-Version prüfen.
++- [ ] Storage-Teilbereiche für Bones/Partikel/Beams über geprüfte Start-/
++  Längenparameter in bestehenden Uniforms abbilden. Partikel-/Beam-Draws
++  mit `first_vertex=0` und explizitem Basisindex implementieren.
++- [ ] Aufzeichnenden Renderpfad mit Upload-Versionen implementieren:
++  immutable Zustands-/Uniform-Snapshots, Transfer-Puffer, Ressourcen-Cycling
++  und Frame-Fences. Uploads vor ihren abhängigen Draws ausführen; ein
++  späterer Glyphen-/Texturupload darf frühere Draws nicht rückwirkend ändern.
++  Passgrenzen für Copy/Clear/Blit/Targetwechsel korrekt erhalten.
++- [ ] Pipeline-/Sampler-Caches nach Shader, Vertexlayout, Blend, Tiefe,
++  Stencil, Cull, Fill, Depth-Bias, Primitive, MSAA und Zielformat erstellen.
++  Cache-Aufbau, Invalidierung und vorgewärmte Varianten messen.
++- [ ] Texturen inkl. BC4/BC5/Cube, Buffer/Streams, async Readback, MSAA-Resolve,
++  SMAA-Stencil, 2D/Text, Nebel, Partikel, Beams, DFM, Sterne/Planeten,
++  Asteroiden, Navmap, ImGui und sämtliche Editor-Vorschauen implementieren.
++- [ ] Gegen GL vergleichen: Culling, Clip-/Depth-Konvention, Alpha-Test,
++  Transparenzsortierung, Textorientierung und sRGB. Resize, Alt-Tab,
++  Vollbildwechsel, wiederholte Vorschauen und Gerätefehler testen.
++- [ ] Linux Vulkan auf verfügbarer Zielhardware und Windows Vulkan prüfen.
++  SDL_GPU-D3D12/Metal gesondert abnehmen, bevor diese Treiber freigegeben
++  werden; ein Linux-Erfolg ist dafür kein Nachweis.
++
++Die Bindungsverdichtung ist eine aktuelle Anforderung der
++[SDL-Shader-API](https://wiki.libsdl.org/SDL3/SDL_CreateGPUShader).
++[Storage-Bindungen](https://wiki.libsdl.org/SDL3/SDL_BindGPUVertexStorageBuffers)
++enthalten keinen Subrange-Offset; der bisherige Clientvertrag muss deshalb
++im Shader erhalten werden. Copy- und Render-Pässe folgen den Grenzen von
++[SDL_BeginGPURenderPass](https://wiki.libsdl.org/SDL3/SDL_BeginGPURenderPass).
++
++### P7/P8 – Weitere Grafikpakete
++
++- [ ] Soft Particles und volumetrischer Nebel/Lichtstrahlen: lineare Tiefe,
++  Transparenz und bestehende Freelancer-Nebelparameter erhalten.
++- [ ] Gerichtete Schatten zuerst mit Kaskaden/PCF, anschließend zusätzliche
++  Lichttypen; Shadow-Depth-Targets und Comparison-Sampler abstrahieren.
++- [ ] SSAO mit Geometrie-/Nebelmasken und Forward+ mit vielen Lichtquellen
++  implementieren; die feste Lichtgrenze erst nach Messung ersetzen.
++- [ ] Instancing/Batching für Asteroiden, Partikel und wiederholte Objekte
++  sowie Shader-/Pipeline-Warmup anhand der P0-Messung ausbauen.
++- [ ] Decals für Einschläge/Markierungen, Z-Fighting-/Sortier-/Skinningregeln
++  liefern. Parallax nur mit geeigneten Height-Daten entwickeln; eine
++  Normalmap ist keine Höhenkarte.
++- [ ] SSR mit Cubemap-Fallback; kameraweite Motion Blur mit Bewegungsvektoren
++  und Disocclusion-Schutz. Partikelblur deckt diesen Pfad nicht ab.
++- [ ] TAA nach Jitter-/History-/Motion-Vektor-Grundlagen, danach skalierbares
++  Upscaling. Camera Cuts, Resize, HUD, Nebel und Transparenz auf Ghosting
++  prüfen. Native Auflösung und SMAA bleiben auswählbar.
++
++## Freigabegates und nächste konkrete Arbeit
++
++- [ ] Pro Paket Parser-/Mathematik-/Lifecycle-Tests mit synthetischen Daten,
++  fokussierter Shaderbuild, vollständige frische Overlay-Rekonstruktion und
++  BuildLL-Build. GPU-Funktionen benötigen echte Frame-/Bildnachweise.
++- [ ] Identische Szenen mit Original/Erweiterung und GL/Vulkan dokumentieren;
++  CPU-/GPU-Zeit, VRAM, Uploadvolumen und Ladevorgänge mit dem Profil nennen.
++- [ ] Fehlerfälle: leere/trunkierte NAP-Datei, fehlende Karte, UV-Degeneration,
++  Format nicht unterstützt, Cache-Eviction, Resize und Geräteverlust.
++- [ ] Updater-/NAP-Release mit geprüften Größen/Hashes und aktivem Snapshot;
++  keine vollständige Grafikfreigabe aufgrund eines Compilererfolgs.
++
++**Nächster Arbeitsschritt:** P0-Bestandslücken im Data-Import schließen und
++den kuratierten NAP-Satz verifizieren. Danach P1 als erster Enginepatch
++implementieren und mit einem Schiff im bestehenden GL-Client prüfen.
++Der Vulkan-Spike P5 erhält parallel dieselben synthetischen BC5-/Cube-/
++Skinned-Fixtures; die vollständige Vulkan-Umsetzung bleibt Teil des Plans.
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+index 8667cc2..dabccc5 100644
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -1,5 +1,8 @@
+ # Renderer-Roadmap
+
++Die aktuelle Umsetzungsreihenfolge und Abnahme stehen im
++[Grafik-Umsetzungsplan](graphics-implementation-plan.md).
++
+ Diese Liste plant moderne Renderer-Erweiterungen für LibreLancer. Sie ist eine Arbeitsliste, keine Zusage, dass die genannten Effekte bereits implementiert oder upstream abgestimmt sind. Bestehende Freelancer-Darstellung und niedrigere Hardwareprofile bleiben Abnahmekriterien.
+
+ ## Bereits vorhanden
+diff --git a/docs/surface-maps.md b/docs/surface-maps.md
+index 95f1ac2..4840e28 100644
+--- a/docs/surface-maps.md
++++ b/docs/surface-maps.md
+@@ -1,5 +1,8 @@
+ # Surface Maps: Normal Maps und Cube Maps per INI
+
++Die aktuelle Umsetzungsreihenfolge und Abnahme stehen im
++[Grafik-Umsetzungsplan](graphics-implementation-plan.md).
++
+ **Status:** Beschreibung und Aufgabenliste, noch nichts im Client umgesetzt. **Stand:** 2026-10-12.
+ **Datenseite:** Repository `LN-Data` (`tools/make_surface_maps.py`, `SDK/fx/SurfaceMaps.ini`, `TODO-surface-maps.md`).
+ Engine-Änderungen bleiben gemäß `AGENTS.md` patch-only unter `patches/series`.
+diff --git a/docs/vulkan-backend-untersuchung.md b/docs/vulkan-backend-untersuchung.md
+index bd93f7b..812f304 100644
+--- a/docs/vulkan-backend-untersuchung.md
++++ b/docs/vulkan-backend-untersuchung.md
+@@ -1,5 +1,8 @@
+ # Vulkan-Backend: Untersuchung des Clients
+
++Die aktuelle Umsetzungsreihenfolge und Abnahme stehen im
++[Grafik-Umsetzungsplan](graphics-implementation-plan.md).
++
+ **Zweck:** Bestandsaufnahme der Grafikschicht, der Render-Pipeline, der Shader und der Lichtquellen als Grundlage für einen Plan zu einem Vulkan-Backend (oder einem gleichwertigen modernen Backend). Dieses Dokument enthält Befunde und offene Fragen, **keinen Plan und keinen Code**.
+
+ **Stand der Untersuchung:** 2026-10-12, Checkout `Client` auf Commit `7a3518ce8` (Branch `codex/lancer-nexus-integration-2026-10-10`). Erweitert am selben Tag um die Sichtung der SDL_GPU-Dokumentation und der gebündelten SDL3-Version (Abschnitt 13).

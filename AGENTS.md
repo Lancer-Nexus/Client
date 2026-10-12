@@ -88,9 +88,9 @@ LLServer SystemIds defines owned worlds; SystemId is the primary fallback. Trave
 - Before recording a manually applied overlay, reconstruct and compare the full
   series with `python3 scripts/verify-lancer-nexus-overlay.py`. The record command
   enforces this check and requires Python 3. Only CRLF/LF differences are ignored.
-- A GUI compilation failure involving removed admin types can indicate unapplied
-  patch 1098. Inspect the local overlay against a fresh reconstruction before
-  adding replacement contracts or another patch. Patch 1097 also restores failure
+- A GUI compilation failure involving removed admin types can indicate an
+  incomplete server operations bundle. Inspect the local overlay against a fresh reconstruction before
+  adding replacement contracts or another patch. The build integration bundle also restores failure
   propagation in the build entry point.
 - The integrity checker is read-only; preserve unrelated modifications and repair
   identified overlay drift by applying the relevant maintained patch.
@@ -126,3 +126,11 @@ LLServer SystemIds defines owned worlds; SystemId is the primary fallback. Trave
 ## Restart-time ambient NPC recovery
 
 - Before publishing a world or starting population simulation, drain pending checkpoint writes and restore that system's current ambient NPC checkpoints from Coordinator. Resolve stable NPC references and preserve the serialized AI/autopilot state. Keep recovery fail-closed when the checkpoint store is unavailable or corrupt; only a Coordinator 404 after listing means ownership changed and may be skipped.
+
+## Consolidated functional bundles
+
+The active series is eleven Client bundles and two native bundles, described in
+`patches/README.md`. Preserve the pinned baselines and the recorded overlay
+hashes when regenerating a bundle. Validate a fresh complete reconstruction
+before recording the applied state or publishing; historical patch numbers
+in older audit documents refer to Git history.
