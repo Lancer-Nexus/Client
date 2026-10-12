@@ -1,0 +1,30 @@
+--- a/src/LibreLancer.Tests/DurableFlHookEventCaptureTests.cs
++++ b/src/LibreLancer.Tests/DurableFlHookEventCaptureTests.cs
+@@ -19,12 +19,18 @@
+         var directory = Path.Combine(Path.GetTempPath(), "flhook-capture-" + Guid.NewGuid().ToString("N"));
+         Directory.CreateDirectory(directory);
+         var eventHub = new FlHookCompatServerEventHub("li-01", durableJournalPath: Path.Combine(directory, "events.jsonl"));
++        var producerThreadId = Environment.CurrentManagedThreadId;
++        var writerThreadId = 0;
++        var journalVisibleBeforeNotification = 0;
+         using var firstNotificationStarted = new ManualResetEventSlim();
+         using var releaseFirstNotification = new ManualResetEventSlim();
+         await using var capture = new DurableFlHookEventCapture(eventHub, value =>
+         {
+             if (value.Sequence == 1)
+             {
++                Interlocked.Exchange(ref writerThreadId, Environment.CurrentManagedThreadId);
++                if (eventHub.ReadAfter(0, 10).Events.Any(item => item.Sequence == value.Sequence))
++                    Interlocked.Exchange(ref journalVisibleBeforeNotification, 1);
+                 firstNotificationStarted.Set();
+                 releaseFirstNotification.Wait();
+             }
+@@ -32,6 +38,8 @@
+ 
+         capture.Enqueue(FlHookCompatServerEventKind.PlayerConnected, "account-1", null, null);
+         Assert.True(firstNotificationStarted.Wait(TimeSpan.FromSeconds(5)));
++        Assert.NotEqual(producerThreadId, Volatile.Read(ref writerThreadId));
++        Assert.Equal(1, Volatile.Read(ref journalVisibleBeforeNotification));
+         capture.Enqueue(FlHookCompatServerEventKind.PlayerDisconnected, "account-1", null, null);
+         capture.Enqueue(FlHookCompatServerEventKind.PlayerConnected, "account-2", null, null);
+         Assert.False(capture.IsReady);

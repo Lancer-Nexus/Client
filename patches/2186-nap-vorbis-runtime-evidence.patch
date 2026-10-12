@@ -1,0 +1,151 @@
+--- a/docs/asset-packages/audio-pipeline.md
++++ b/docs/asset-packages/audio-pipeline.md
+@@ -9,9 +9,9 @@
+ | PCM WAV, mono/stereo, 8/16-bit | `extern/lancerdecode/src/formats/riff.c` | Synthetic WAV decoded by the native decoder smoke | Safe compatibility baseline; eligible for optional per-chunk Zstd |
+ | MP3 file | `src/formats/mp3.c` using bundled `dr_mp3.h` | Synthetic MP3 decoded to signed 16-bit PCM | Runtime decode exists; lossy re-encoding is not a default conversion |
+ | MP3 in RIFF/WAV | `riff.c` dispatches WAVE format `0x55` to `mp3_getstream`; `fact` and Freelancer `trim` chunks control sample trimming | Synthetic MP3-in-WAV decoded; codec/container properties reported as `mp3` / `wav` | Preserve the existing WAV wrapper and trim metadata for compatible legacy assets |
+-| FLAC | `src/formats/flac.c` using bundled `dr_flac.h` | Synthetic FLAC decoded to signed 16-bit PCM; managed stream-reset regression passes with 8192-byte reads | Native and Client decoder paths work; music streaming can rewind the decoder; audible Client and package tests remain open |
+-| Ogg Vorbis | `src/formats/vorbis.c` using bundled `stb_vorbis.c` | Synthetic Ogg/Vorbis decoded to signed 16-bit PCM; managed EOF/reset regression passes after patch 2172 | Native and Client decoder paths work; music streaming can rewind after EOF; audible Client and package tests remain open |
+-| Ogg FLAC | `src/autoload.c` dispatches the Ogg FLAC identification packet to `flac_getstream(..., isOgg: 1)` | Synthetic Ogg FLAC decoded to signed 16-bit PCM; managed EOF/reset and OpenAL loop checks pass | Native and managed music/SFX loop paths verified on Linux; Windows DLL is staged in the final package, while Windows runtime decode and full Client package-mount tests remain open |
++| FLAC | `src/formats/flac.c` using bundled `dr_flac.h` | Synthetic FLAC decoded to signed 16-bit PCM; managed stream-reset regression passes with 8192-byte reads; active NAP Client music streaming confirmed on Linux | Native decoder and active-package music paths work on Linux; Windows runtime remains open |
++| Ogg Vorbis | `src/formats/vorbis.c` using bundled `stb_vorbis.c` | Synthetic Ogg/Vorbis decoded to signed 16-bit PCM; managed EOF/reset regression passes after patch 2172; active NAP Client playback, single-track loop and A/B playlist confirmed on Linux | Native and Client music/SFX loop paths work on Linux; acoustic loop-boundary quality and Windows runtime remain open |
++| Ogg FLAC | `src/autoload.c` dispatches the Ogg FLAC identification packet to `flac_getstream(..., isOgg: 1)` | Synthetic Ogg FLAC decoded to signed 16-bit PCM; managed EOF/reset and OpenAL loop checks pass; active NAP Client music streaming confirmed on Linux | Native decoder and active-package music paths work on Linux; Windows DLL is staged, but Windows runtime remains open |
+ | Ogg Opus | `src/formats/opus.c` dynamically calls `libopusfile` | Synthetic Opus failed in the current x64 Linux smoke: `libopusfile_Open()` could not load the selected 32-bit `/usr/lib/libopusfile.so.0.4.2` into the 64-bit process | Not a dependable target until matching per-platform runtime libraries are packaged and verified. Windows code expects `libopusfile-0.dll`; the Client build/staging tree has no matching copy rule |
+ 
+ The native smoke built `extern/lancerdecode` with its supplied CMake example and generated WAV, MP3, FLAC, and Ogg/Vorbis samples using FFmpeg. WAV, MP3, MP3-in-WAV, FLAC, and Ogg/Vorbis each decoded successfully. The Opus failure is an observed host/runtime dependency mismatch, not evidence that the Opus source path is absent. No Windows decoder execution was available.
+@@ -105,7 +105,7 @@
+   FLAC track into NAP with 1024-byte chunks, opens it as a `NapEntryStream`,
+   decodes to EOF and resets to compare the PCM. All three cases pass, covering
+   repeated seek/read across chunk boundaries. This does not cover mounting an
+-  active Client package snapshot or a no-loose-`DATA` launch.
++  active Client package snapshot or a no-loose-`DATA` launch by itself.
+ - Focused native/managed decoder checks passed on Linux. An initial disposable
+   Client package opened track A but did not advance. Its assemblies were stale:
+   replacing only the Client and Media DLLs caused a missing
+@@ -116,8 +116,45 @@
+   PulseAudio monitor capture from the Client had 44.1-kHz stereo PCM and a
+   measured -24 dBFS peak while the test tracks played. The capture was routed
+   to a temporary PulseAudio null sink, so it confirms non-silent Client/OpenAL
+-  output without sending test tones to speakers. Perceptual loop-boundary
+-  quality and full active-package mounting remain open.
++  output without sending test tones to speakers. That earlier loose-data run
++  did not establish active-package mounting or perceptual loop-boundary quality.
++- A separate 22-second Debug Client run mounted a verified active snapshot with
++  the retail DATA tree packed as `freelancer-data.nap` and a second NAP overriding
++  the BR01 Deck room plus two synthetic Vorbis tracks. The install had no loose
++  `DATA` directory. Logs reached `Game: Finished loading game data` and
++  `UI: Interface loaded`, then selected both NAP-backed tracks 20 times in
++  alternation. A 21.41-second PulseAudio monitor capture routed to a temporary
++  null sink contained 44.1-kHz stereo PCM (mean -34.2 dBFS, peak -7.5 dBFS);
++  0.5-second FFT windows during playback showed the generated 440-Hz and
++  660-Hz track tones in turn.
++  This confirms active-snapshot VFS reads and non-silent playback during the
++  track sequence on Linux; it does not prove audible loop-boundary quality or
++  active-package FLAC/Ogg FLAC playback.
++- A further 18-second Debug Client run used the same active NAP snapshot with
++  only the 0.7-second, 440-Hz Vorbis track assigned to the BR01 Deck room.
++  The Client logged one selection with `oneshot=False` and no streaming terminal
++  state. The 17.41-second 44.1-kHz stereo Null-Sink capture kept a 440-Hz
++  spectral peak in every 0.5-second window from second 7 through second 15.
++  This verifies repeated MusicPlayer playback after EOF through the active NAP
++  stream on Linux. It does not assess audible clicks or seamlessness at the
++  loop boundary.
++- An active-NAP Debug Client run also put synthetic FLAC and Ogg FLAC in the
++  same two-track BR01 Deck playlist. Both entries were selected repeatedly,
++  each stream reached EOF, and playback advanced between formats. Its
++  16.41-second 44.1-kHz stereo Null-Sink capture had a -10.6 dBFS peak; 0.2-
++  second FFT windows showed the generated ~393-Hz FLAC and ~525-Hz Ogg FLAC
++  tones in turn. This confirms both streaming decoder paths from the active
++  snapshot on Linux, without claiming acoustic quality or Windows support.
++- A separate temporary probe loaded synthetic Vorbis, FLAC and Ogg FLAC SFX
++  through `NexusPackageFileProvider.LoadActive()` and `SoundData.LoadStream()`,
++  then played each with the Client `AudioManager` on OpenAL Soft/PulseAudio.
++  All three looped instances remained active after 2.5 seconds; each non-looping
++  control stopped after 1.4 seconds, including the 1.0-second Ogg FLAC sample.
++  The 18.83-second 44.1-kHz stereo Null-Sink capture had a -28.6 dBFS mean and
++  -22.4 dBFS peak, with the generated 440-Hz Vorbis, ~392-Hz FLAC and ~524-Hz
++  Ogg FLAC tones visible during their runs. This proves NAP-backed decode and
++  SFX loop playback at the decoder/AudioManager layer on Linux; it is not a
++  full game-scene SFX trigger test or an acoustic boundary assessment.
+ - `BuildNatives --with-win64` and `BuildEngine --with-win64` succeeded through
+   the actual BuildLL path. The final `bin/librelancer-win-x64/lib/x64/`
+   directory contains `lancerdecode.dll`, byte-identical to the x64 native stage
+--- a/docs/data-client-plan.md
++++ b/docs/data-client-plan.md
+@@ -202,8 +202,17 @@
+ - [x] Vorbis, FLAC und Ogg FLAC aus NAP-Einträgen mit 1024-Byte-Chunks
+   dekodieren, zurücksetzen und PCM vergleichen; die drei gezielten Fälle
+   bestehen.
+-- [ ] Aktiven NAP-Paketbestand im vollständigen Client mounten und ohne lose
+-  `DATA` starten.
++- [x] Aktiven NAP-Paketbestand im vollständigen Linux-Client ohne loses
++  `DATA` starten. Ein 22-Sekunden-Debuglauf lud die Daten aus dem aktiven
++  Snapshot, erreichte die Oberfläche und spielte zwei NAP-gebundene Vorbis-
++  Playlisttracks abwechselnd. Die Null-Sink-Aufnahme zeigt beide generierten
++  Töne auch im Frequenzspektrum. Ein zweiter Lauf bestätigte den aktiven
++  Ein-Track-Loop: bei `oneshot=False` blieb der 440-Hz-Ton nach EOF im
++  Null-Sink-Spektrum nachweisbar; Loop-Grenzen wurden nicht akustisch beurteilt.
++- [x] NAP-gebundene Vorbis-, FLAC- und Ogg-FLAC-SFX mit `SoundData` und
++  `AudioManager` auf OpenAL geprüft: alle Loop-Instanzen blieben nach 2,5 s
++  aktiv; die One-Shot-Kontrollen endeten. Das war ein Engine-Audiolauf, kein
++  vollständiger Spielszene-Triggernachweis.
+ - [x] `lancerdecode` mit MinGW-w64 als x86-64 Windows-DLL gebaut; PE32+-Format
+   und native Systemimporte (`KERNEL32.dll`, `msvcrt.dll`) geprüft.
+ - [x] `BuildEngine --with-win64` legt die x64-PE32+-DLL bytegleich unter
+@@ -213,9 +222,11 @@
+   `container=ogg` erkannt, dekodiert und nach EOF zurückgesetzt; auch Musik-
+   und SFX-Loops sowie Endekontrollen im Audio-Backend getestet. Die gezielte
+   Decoder-Suite besteht 3/3 unter Linux.
+-- [ ] Ogg FLAC, Vorbis und FLAC in einem aktiven NAP-Clientstart auf Linux
+-  sowie auf Windows mit gestagter DLL decodieren; erst danach plattformübergreifend
+-  als unterstützt dokumentieren.
++- [x] FLAC und Ogg FLAC aus einem aktiven Linux-NAP-Clientstream decodieren;
++  die Deck-Playlist spielte beide synthetischen Formate wiederholt und die
++  Null-Sink-Aufnahme zeigte ihre Testtöne.
++- [ ] Vorbis/FLAC/Ogg FLAC unter Windows mit der gestagten DLL zur Laufzeit
++  decodieren; Loaderauflösung und Windows-Audiowiedergabe bleiben offen.
+ 
+ **Abnahme:** Decoder- und Resettests bestehen auf jeder Zielplattform,
+ gestreamte Musik läuft hörbar über das Trackende hinweg, und Paketstarts laden
+--- a/docs/data-client-todo.md
++++ b/docs/data-client-todo.md
+@@ -116,6 +116,10 @@
+ - [x] SFX-Loop-Pfad abgegrenzt: Einzelsounds werden zuerst vollständig zu PCM
+   dekodiert; wiederholte Wiedergabe nutzt OpenAL `AL_LOOPING` und hängt nicht
+   von einem Vorbis-Decoderreset ab.
++- [x] NAP-gebundene Vorbis-, FLAC- und Ogg-FLAC-SFX aus dem aktiven Snapshot
++  über `SoundData`/`AudioManager` abgespielt: Loop-Instanzen blieben nach 2,5 s
++  aktiv, One-Shot-Kontrollen endeten nach 1,4 s. Die Client-SFX-Trigger in
++  einer Spielsituation sind damit nicht gesondert abgenommen.
+ - [x] Raum-Playlistintegration mit synchronisiertem Debug-Paket nachgewiesen:
+   `MusicPlayer` meldet Streamende, `RoomGameplay` wählt daraufhin A/B
+   abwechselnd; 20-Sekunden-Clientlauf und Dateiöffnungen belegen den Übergang.
+@@ -125,8 +129,12 @@
+   Kopfhörer anhören und Loop-Übergangsqualität beurteilen.
+ - [x] Audio-Decoder mit Vorbis, FLAC und Ogg FLAC aus chunked NAP-Einträgen
+   lesen, zurücksetzen und byte-identische PCM-Ausgaben prüfen.
+-- [ ] Aktiven NAP-Paketbestand im vollständigen Client mounten und ohne lose
+-  `DATA` starten.
++- [x] Aktiven NAP-Paketbestand im vollständigen Linux-Client ohne loses
++  `DATA` starten. Der Debuglauf lud Spieldaten aus dem aktiven Snapshot und
++  wählte zwei NAP-gebundene Vorbis-Tracks abwechselnd; beide Testtöne sind in
++  der Null-Sink-PCM-Aufnahme im Frequenzspektrum erkennbar. Ein separater
++  Ein-Track-Lauf mit `oneshot=False` hielt den 440-Hz-Vorbis-Track über EOF
++  hinaus aktiv; die akustische Loop-Grenze bleibt zu beurteilen.
+ - [x] `lancerdecode` als x86-64 Windows-DLL cross-kompiliert; PE32+ und
+   `KERNEL32.dll`/`msvcrt.dll`-Importe geprüft.
+ - [x] Der BuildLL-Lauf `BuildEngine --with-win64` legt die x64-PE32+-DLL
+@@ -135,8 +143,11 @@
+ - [x] Ogg FLAC separat mit synthetischem Fixture getestet: Container-/Codec-
+   Erkennung, PCM-Decoding, Reset nach EOF und Musik-/SFX-Loopkontrollen
+   bestehen unter Linux.
+-- [ ] Ogg FLAC sowie Vorbis/FLAC in einem aktiven NAP-Clientstart und unter
+-  Windows mit gestagter DLL auf Seek-/Chunkgrenzen prüfen.
++- [x] Synthetische FLAC- und Ogg-FLAC-Musik aus dem aktiven Linux-NAP-Client
++  gestreamt und im Null-Sink-Spektrum bestätigt; beide Formate wechselten in
++  der Deck-Playlist wiederholt.
++- [ ] Vorbis/FLAC/Ogg FLAC unter Windows mit gestagter DLL auf Seek-/Chunk-
++  grenzen prüfen; Loaderauflösung und Laufzeit-Decodierung sind offen.
+ 
+ ## Gemeinsame Prüfpunkte und Zuständigkeit
+ 

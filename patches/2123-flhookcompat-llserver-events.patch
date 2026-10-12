@@ -1,0 +1,544 @@
+diff --git a/src/LLServer.Core/LLServer.Core.csproj b/src/LLServer.Core/LLServer.Core.csproj
+--- a/src/LLServer.Core/LLServer.Core.csproj
++++ b/src/LLServer.Core/LLServer.Core.csproj
+@@ -7,6 +7,11 @@
+         <TargetFramework>net10.0</TargetFramework>
+         <RootNamespace>LLServer</RootNamespace>
+         <Nullable>enable</Nullable>
++        <EnableFlHookCompat Condition="'$(EnableFlHookCompat)' == ''">false</EnableFlHookCompat>
++    </PropertyGroup>
++
++    <PropertyGroup Condition="'$(EnableFlHookCompat)' == 'true'">
++        <DefineConstants>$(DefineConstants);LANCER_NEXUS_FLHOOKCOMPAT</DefineConstants>
+     </PropertyGroup>
+ 
+     <ItemGroup>
+@@ -15,6 +20,11 @@
+         <ProjectReference Include="..\LibreLancer.Entities\LibreLancer.Entities.csproj" />
+         <ProjectReference Include="..\LibreLancer\LibreLancer.csproj" />
+         <ProjectReference Include="..\Nexus.Assets\Nexus.Assets.csproj" />
++    </ItemGroup>
++
++    <ItemGroup Condition="'$(EnableFlHookCompat)' == 'true'">
++        <ProjectReference Include="../../../FLHookCompat/src/LancerNexus.FlhookCompat.Contracts/LancerNexus.FlhookCompat.Contracts.csproj" />
++        <ProjectReference Include="../../../FLHookCompat/src/LancerNexus.FlhookCompat.Hosting/LancerNexus.FlhookCompat.Hosting.csproj" />
+     </ItemGroup>
+ 
+     <ItemGroup>
+diff --git a/src/LLServer.Core/ServerApp.cs b/src/LLServer.Core/ServerApp.cs
+--- a/src/LLServer.Core/ServerApp.cs
++++ b/src/LLServer.Core/ServerApp.cs
+@@ -31,6 +31,9 @@
+     private NpcTransferQuicReceiver? npcTransferReceiver;
+     private X509Certificate2? npcTransferServerCertificate;
+     private X509Certificate2? npcTransferClientCaCertificate;
++#if LANCER_NEXUS_FLHOOKCOMPAT
++    private FlHookCompatRuntime? flHookCompatRuntime;
++#endif
+ 
+     public bool StartServer()
+     {
+@@ -159,6 +162,28 @@
+         listener.MaxConnections = Config.MaxPlayers > 0 ? Config.MaxPlayers : 200;
+         if(Config.ThreadCount > 0)
+             Server.ThreadCount = Config.ThreadCount;
++#if LANCER_NEXUS_FLHOOKCOMPAT
++        if (Config.FlHookCompatEnabled)
++        {
++            if (string.IsNullOrWhiteSpace(Config.InstanceId) || string.IsNullOrWhiteSpace(Config.LoginUrl))
++                throw new InvalidOperationException("FLHookCompat requires a clustered instance and Gateway login.");
++            flHookCompatRuntime = new FlHookCompatRuntime(Config, GetBasePath(), Config.InstanceId);
++            try
++            {
++                flHookCompatRuntime.StartAsync().GetAwaiter().GetResult();
++                Server.ServerEventObserver = flHookCompatRuntime.TryPublish;
++            }
++            catch
++            {
++                flHookCompatRuntime.DisposeAsync().AsTask().GetAwaiter().GetResult();
++                flHookCompatRuntime = null;
++                throw;
++            }
++        }
++#else
++        if (Config.FlHookCompatEnabled)
++            throw new InvalidOperationException("FLHookCompat is enabled in configuration, but this LLServer build has no FLHookCompat support. Build with EnableFlHookCompat=true.");
++#endif
+         Server.Start();
+         if ((!string.IsNullOrWhiteSpace(Config.InstanceId) && !string.IsNullOrWhiteSpace(transferInstanceKey)) ||
+             npcTransferReceiver != null)
+@@ -211,7 +236,18 @@
+         npcTransferServerCertificate = null;
+         npcTransferClientCaCertificate?.Dispose();
+         npcTransferClientCaCertificate = null;
++#if LANCER_NEXUS_FLHOOKCOMPAT
++        if (Server is not null) Server.ServerEventObserver = null;
++#endif
+         Server?.Stop();
++#if LANCER_NEXUS_FLHOOKCOMPAT
++        if (flHookCompatRuntime is not null)
++        {
++            try { flHookCompatRuntime.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
++            catch (Exception exception) { FLLog.Error("FLHookCompat", $"Plugin host stopped: {exception.Message}"); }
++            flHookCompatRuntime = null;
++        }
++#endif
+         Server = null;
+         try { statusWriter?.GetAwaiter().GetResult(); }
+         catch (OperationCanceledException) { }
+diff --git a/src/LLServer.Core/ServerConfig.cs b/src/LLServer.Core/ServerConfig.cs
+--- a/src/LLServer.Core/ServerConfig.cs
++++ b/src/LLServer.Core/ServerConfig.cs
+@@ -26,6 +26,11 @@
+     public string? SystemId;
+     public string[] SystemIds = [];
+     public string? InstanceEndpoint;
++    public bool FlHookCompatEnabled;
++    public string FlHookCompatDirectory = "flhook-plugins";
++    public string? FlHookCompatTrustRootFile;
++    public string[] FlHookCompatPluginIds = [];
++    public string[] FlHookCompatApprovedCapabilities = [];
+     public int? TestNewCharacterRank;
+     public string? TestMissionNickname;
+ 
+@@ -52,6 +57,11 @@
+         SystemId = other.SystemId;
+         SystemIds = (string[])other.SystemIds.Clone();
+         InstanceEndpoint = other.InstanceEndpoint;
++        FlHookCompatEnabled = other.FlHookCompatEnabled;
++        FlHookCompatDirectory = other.FlHookCompatDirectory;
++        FlHookCompatTrustRootFile = other.FlHookCompatTrustRootFile;
++        FlHookCompatPluginIds = (string[])other.FlHookCompatPluginIds.Clone();
++        FlHookCompatApprovedCapabilities = (string[])other.FlHookCompatApprovedCapabilities.Clone();
+         TestNewCharacterRank = other.TestNewCharacterRank;
+         TestMissionNickname = other.TestMissionNickname;
+     }
+diff --git a/src/LLServer.Core/FlHookCompatRuntime.cs b/src/LLServer.Core/FlHookCompatRuntime.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LLServer.Core/FlHookCompatRuntime.cs
+@@ -0,0 +1,214 @@
++#if LANCER_NEXUS_FLHOOKCOMPAT
++using System;
++using System.Collections.Generic;
++using System.IO;
++using System.Linq;
++using System.Runtime.InteropServices;
++using System.Text.Json;
++using System.Threading;
++using System.Threading.Channels;
++using System.Threading.Tasks;
++using LancerNexus.FlhookCompat;
++using LancerNexus.FlhookCompat.Hosting;
++using LibreLancer;
++using LibreLancer.Server;
++
++namespace LLServer;
++
++/// <summary>Optional bridge from authenticated local LLServer events to trusted managed plugins.</summary>
++internal sealed class FlHookCompatRuntime : IAsyncDisposable
++{
++    private static readonly Version HostApiVersion = new(1, 2, 0);
++    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
++    private readonly ServerConfig config;
++    private readonly string basePath;
++    private readonly FlHookCompatServerEventHub eventHub;
++    private readonly Channel<PendingEvent> pending = Channel.CreateBounded<PendingEvent>(new BoundedChannelOptions(4096)
++    {
++        FullMode = BoundedChannelFullMode.Wait,
++        SingleReader = true,
++        SingleWriter = false
++    });
++    private readonly List<LoadedManagedPlugin> plugins = [];
++    private Task? dispatcher;
++    private int queueOverflowLogged;
++
++    public FlHookCompatRuntime(ServerConfig config, string basePath, string instanceId)
++    {
++        this.config = config;
++        this.basePath = basePath;
++        eventHub = new FlHookCompatServerEventHub(instanceId);
++    }
++
++    public async Task StartAsync()
++    {
++        if (config.FlHookCompatPluginIds is null || config.FlHookCompatApprovedCapabilities is null ||
++            config.FlHookCompatPluginIds.Distinct(StringComparer.Ordinal).Count() != config.FlHookCompatPluginIds.Length ||
++            config.FlHookCompatApprovedCapabilities.Distinct(StringComparer.Ordinal).Count() != config.FlHookCompatApprovedCapabilities.Length)
++            throw new InvalidOperationException("FLHookCompat plugin assignments and capabilities must be unique lists.");
++
++        var pluginRoot = Path.GetFullPath(config.FlHookCompatDirectory, basePath);
++        var trustRootPath = Path.GetFullPath(config.FlHookCompatTrustRootFile ?? Path.Combine(config.FlHookCompatDirectory, "trust-root.json"), basePath);
++        var trustRoot = JsonSerializer.Deserialize<FlHookCompatTrustRoot>(await File.ReadAllTextAsync(trustRootPath), JsonOptions)
++            ?? throw new InvalidDataException("FLHookCompat trust root is empty.");
++        var assignedPlugins = new HashSet<string>(config.FlHookCompatPluginIds, StringComparer.Ordinal);
++        var approvedCapabilities = new HashSet<string>(config.FlHookCompatApprovedCapabilities, StringComparer.Ordinal);
++        dispatcher = Task.Run(DispatchAsync);
++
++        foreach (var pluginId in config.FlHookCompatPluginIds)
++        {
++            if (!IsSafeDirectoryName(pluginId))
++                throw new InvalidDataException("FLHookCompat plugin assignment contains an unsafe plugin ID.");
++            var directory = Path.GetFullPath(pluginId, pluginRoot);
++            EnsureUnderDirectory(pluginRoot, directory);
++            var envelopePath = Path.Combine(directory, "manifest-envelope.json");
++            var envelope = JsonSerializer.Deserialize<FlHookCompatSignedManifest>(
++                await File.ReadAllTextAsync(envelopePath), JsonOptions)
++                ?? throw new InvalidDataException($"FLHookCompat manifest for {pluginId} is empty.");
++            var manifest = ReadDeclaredManifest(envelope);
++            if (!string.Equals(manifest.PluginId, pluginId, StringComparison.Ordinal))
++                throw new InvalidDataException($"FLHookCompat manifest identity does not match its assigned directory: {pluginId}.");
++
++            var packagePath = Path.Combine(directory, "plugin.dll");
++            var configurationPath = Path.Combine(directory, "configuration.json");
++            var configuration = File.Exists(configurationPath)
++                ? await File.ReadAllTextAsync(configurationPath)
++                : "{}";
++            if (System.Text.Encoding.UTF8.GetByteCount(configuration) > 64 * 1024)
++                throw new InvalidDataException($"FLHookCompat configuration for {pluginId} exceeds 64 KiB.");
++
++            await using var package = new FileStream(packagePath, FileMode.Open, FileAccess.Read, FileShare.Read,
++                64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
++            var loaded = await ManagedPluginLoader.LoadAsync(envelope, trustRoot, package, HostApiVersion,
++                RuntimeInformation.RuntimeIdentifier, approvedCapabilities, assignedPlugins, pluginModeEnabled: true,
++                api: new PluginApi(eventHub), configurationJson: configuration);
++            plugins.Add(loaded);
++            FLLog.Info("FLHookCompat", $"Loaded assigned managed plugin {loaded.Manifest.PluginId} ({loaded.Manifest.PluginVersion}).");
++        }
++    }
++
++    /// <summary>Copies only stable identifiers into a bounded queue; plugin callbacks never run on the simulation thread.</summary>
++    public void TryPublish(ServerEvent serverEvent)
++    {
++        var pendingEvent = ConvertEvent(serverEvent);
++        if (pendingEvent is null) return;
++        if (!pending.Writer.TryWrite(pendingEvent) && Interlocked.Exchange(ref queueOverflowLogged, 1) == 0)
++            FLLog.Warning("FLHookCompat", "Plugin event queue is full; some local plugin events may be dropped.");
++    }
++
++    private static PendingEvent? ConvertEvent(ServerEvent serverEvent)
++    {
++        Player? player;
++        FlHookCompatServerEventKind kind;
++        string? systemId = null;
++        long? characterId = null;
++        switch (serverEvent.Type)
++        {
++            case ServerEventType.PlayerConnected:
++                player = serverEvent.GetPayload<PlayerConnectedEventPayload>().ConnectedPlayer;
++                kind = FlHookCompatServerEventKind.PlayerConnected;
++                break;
++            case ServerEventType.PlayerDisconnected:
++                player = serverEvent.GetPayload<PlayerDisconnectedEventPayload>().DisconnectedPlayer;
++                kind = FlHookCompatServerEventKind.PlayerDisconnected;
++                break;
++            case ServerEventType.CharacterConnected:
++                player = serverEvent.GetPayload<CharacterConnectedEventPayload>().ConnectedCharacter;
++                kind = FlHookCompatServerEventKind.CharacterConnected;
++                characterId = player.Character?.ID;
++                break;
++            case ServerEventType.CharacterDisconnected:
++                player = serverEvent.GetPayload<CharacterDisconnectedEventPayload>().DisconnectedCharacter;
++                kind = FlHookCompatServerEventKind.CharacterDisconnected;
++                characterId = player.Character?.ID;
++                break;
++            case ServerEventType.PlayerSystemChanged:
++                var changed = serverEvent.GetPayload<PlayerSystemChangedEventPayload>();
++                player = changed.ChangedPlayer;
++                kind = FlHookCompatServerEventKind.PlayerSystemChanged;
++                systemId = changed.SystemId.ToLowerInvariant();
++                break;
++            default:
++                return null;
++        }
++
++        if (player.AccountId == Guid.Empty || player.GatewaySessionId == Guid.Empty ||
++            (kind is FlHookCompatServerEventKind.CharacterConnected or FlHookCompatServerEventKind.CharacterDisconnected &&
++                characterId is not > 0))
++            return null;
++        return new PendingEvent(kind, player.AccountId.ToString("N"), systemId, characterId);
++    }
++
++    private async Task DispatchAsync()
++    {
++        await foreach (var item in pending.Reader.ReadAllAsync())
++        {
++            var failures = eventHub.Publish(item.Kind, item.PlayerId, item.SystemId, item.CharacterId);
++            foreach (var failure in failures)
++                FLLog.Error("FLHookCompat", $"Plugin event handler failed: {failure.Message}");
++        }
++    }
++
++    public async ValueTask DisposeAsync()
++    {
++        pending.Writer.TryComplete();
++        if (dispatcher is not null)
++        {
++            try { await dispatcher; }
++            catch (Exception exception) { FLLog.Error("FLHookCompat", $"Event dispatcher stopped: {exception.Message}"); }
++            dispatcher = null;
++        }
++        for (var i = plugins.Count - 1; i >= 0; i--)
++        {
++            try { await plugins[i].DisposeAsync(); }
++            catch (Exception exception) { FLLog.Error("FLHookCompat", $"Plugin shutdown failed: {exception.Message}"); }
++        }
++        plugins.Clear();
++    }
++
++    private static FlHookCompatManifest ReadDeclaredManifest(FlHookCompatSignedManifest envelope)
++    {
++        try
++        {
++            var payload = Convert.FromBase64String(envelope.Payload);
++            return JsonSerializer.Deserialize<FlHookCompatManifest>(payload, JsonOptions)
++                ?? throw new InvalidDataException("FLHookCompat manifest payload is empty.");
++        }
++        catch (FormatException exception)
++        {
++            throw new InvalidDataException("FLHookCompat manifest payload is not base64.", exception);
++        }
++        catch (JsonException exception)
++        {
++            throw new InvalidDataException("FLHookCompat manifest payload is invalid JSON.", exception);
++        }
++    }
++
++    private static bool IsSafeDirectoryName(string value) => value is { Length: > 0 and <= 128 } &&
++        value is not "." and not ".." && value.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_' or '.');
++
++    private static void EnsureUnderDirectory(string root, string path)
++    {
++        var prefix = Path.TrimEndingDirectorySeparator(root) + Path.DirectorySeparatorChar;
++        if (!path.StartsWith(prefix, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
++            throw new InvalidDataException("FLHookCompat plugin path escaped its configured directory.");
++    }
++
++    private sealed record PendingEvent(FlHookCompatServerEventKind Kind, string PlayerId, string? SystemId, long? CharacterId);
++
++    private sealed class PluginApi(FlHookCompatServerEventHub events) : IFlHookCompatApi
++    {
++        public IPluginLogger Logger { get; } = new PluginLogger();
++        public JsonDocument EmptyConfiguration { get; } = JsonDocument.Parse("{}");
++        public JsonElement Configuration => EmptyConfiguration.RootElement;
++        public IFlHookCompatServerEvents? ServerEvents { get; } = events;
++    }
++
++    private sealed class PluginLogger : IPluginLogger
++    {
++        public void Information(string eventName, string message) => FLLog.Info("FLHookCompat/" + eventName, message);
++        public void Warning(string eventName, string message) => FLLog.Warning("FLHookCompat/" + eventName, message);
++        public void Error(string eventName, string message) => FLLog.Error("FLHookCompat/" + eventName, message);
++    }
++}
++#endif
+diff --git a/src/LibreLancer/Server/ServerEvent.cs b/src/LibreLancer/Server/ServerEvent.cs
+--- a/src/LibreLancer/Server/ServerEvent.cs
++++ b/src/LibreLancer/Server/ServerEvent.cs
+@@ -13,6 +13,7 @@
+     CharacterDisconnected,// on logout / swap
+ 
+     PlayerBanChanged,
++    PlayerSystemChanged,
+ }
+ 
+ public record CharacterConnectedEventPayload(Player ConnectedCharacter);
+@@ -20,6 +21,7 @@
+ public record PlayerConnectedEventPayload( Player ConnectedPlayer);
+ public record PlayerDisconnectedEventPayload(Player DisconnectedPlayer, DisconnectReason Reason);
+ public record PlayerBanChangedEventPayload(BannedPlayerDescription BannedPlayer, bool IsBanned);
++public record PlayerSystemChangedEventPayload(Player ChangedPlayer, string SystemId);
+ public struct ServerEvent
+ {
+     public ServerEventType Type;
+diff --git a/src/LibreLancer/Server/GameServer.cs b/src/LibreLancer/Server/GameServer.cs
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -1893,6 +1893,17 @@
+         private ConcurrentQueue<Action> worldRequests = new();
+         private ConcurrentQueue<IPacket> localPackets = new();
+         public readonly ConcurrentQueue<ServerEvent> ServerEvents = new();
++        public Action<ServerEvent>? ServerEventObserver { get; set; }
++
++        public void PublishServerEvent(ServerEvent serverEvent)
++        {
++            ServerEvents.Enqueue(serverEvent);
++            try { ServerEventObserver?.Invoke(serverEvent); }
++            catch (Exception exception)
++            {
++                FLLog.Error("Server", $"Server event observer failed: {exception.Message}");
++            }
++        }
+ 
+         public void OnLocalPacket(IPacket pkt)
+         {
+diff --git a/src/LibreLancer/Server/Player.cs b/src/LibreLancer/Server/Player.cs
+--- a/src/LibreLancer/Server/Player.cs
++++ b/src/LibreLancer/Server/Player.cs
+@@ -968,7 +968,7 @@
+                 SpaceInitialSpawn(null);
+             }
+ 
+-            Game.ServerEvents.Enqueue(new ServerEvent
++            Game.PublishServerEvent(new ServerEvent
+             {
+                 Type = ServerEventType.CharacterConnected,
+                 TimeUtc = DateTime.UtcNow,
+@@ -1296,7 +1296,7 @@
+                     FLLog.Info("Server", $"Account {playerGuid} is banned, kicking.");
+                     Client.Disconnect(DisconnectReason.Banned);
+ 
+-                    Game.ServerEvents.Enqueue(new ServerEvent
++                    Game.PublishServerEvent(new ServerEvent
+                     {
+                         Type = ServerEventType.PlayerDisconnected,
+                         TimeUtc = DateTime.UtcNow,
+@@ -1332,7 +1332,7 @@
+                     }, PacketDeliveryMethod.ReliableOrdered);
+                 }
+ 
+-                Game.ServerEvents.Enqueue(new ServerEvent
++                Game.PublishServerEvent(new ServerEvent
+                 {
+                     Type = ServerEventType.PlayerConnected,
+                     TimeUtc = DateTime.UtcNow,
+@@ -1351,7 +1351,7 @@
+ 
+                 Client.Disconnect(DisconnectReason.LoginError);
+ 
+-                Game.ServerEvents.Enqueue(new ServerEvent
++                Game.PublishServerEvent(new ServerEvent
+                 {
+                     Type = ServerEventType.PlayerDisconnected,
+                     TimeUtc = DateTime.UtcNow,
+@@ -1992,7 +1992,7 @@
+                 var characterId = Character.ID;
+                 Volatile.Write(ref transferState, TransferReleased);
+                 Game.CharactersInUse.Remove(characterId);
+-                Game.ServerEvents.Enqueue(new ServerEvent
++                Game.PublishServerEvent(new ServerEvent
+                 {
+                     Type = ServerEventType.CharacterDisconnected,
+                     TimeUtc = DateTime.UtcNow,
+@@ -2014,7 +2014,7 @@
+             if (Character != null)
+             {
+                 Game.CharactersInUse.Remove(Character.ID);
+-                Game.ServerEvents.Enqueue(new ServerEvent
++                Game.PublishServerEvent(new ServerEvent
+                 {
+                     Type = ServerEventType.CharacterDisconnected,
+                     TimeUtc = DateTime.UtcNow,
+@@ -2123,7 +2123,7 @@
+                     player.RpcClient.OnPlayerLeave(ID, Name);
+                 Game.CharactersInUse.Remove(Character.ID);
+ 
+-                Game.ServerEvents.Enqueue(new ServerEvent
++                Game.PublishServerEvent(new ServerEvent
+                 {
+                     Type = ServerEventType.CharacterDisconnected,
+                     TimeUtc = DateTime.UtcNow,
+@@ -2134,7 +2134,7 @@
+             }
+             else
+             {
+-                Game.ServerEvents.Enqueue(new ServerEvent
++                Game.PublishServerEvent(new ServerEvent
+                 {
+                     Type = ServerEventType.PlayerDisconnected,
+                     TimeUtc = DateTime.UtcNow,
+@@ -2161,7 +2161,7 @@
+                 inputPackets.Complete();
+                 packetQueueTask.Wait(1000);
+ 
+-                Game.ServerEvents.Enqueue(new ServerEvent
++                Game.PublishServerEvent(new ServerEvent
+                 {
+                     Type = ServerEventType.PlayerDisconnected,
+                     TimeUtc = DateTime.UtcNow,
+@@ -2242,6 +2242,12 @@
+                         world.Population.PopulateInitialAroundPlayer(pship);
+                         HandleSpaceEntry();
+                         msnRuntime?.SystemEnter(system, "Player");
++                        Game.PublishServerEvent(new ServerEvent
++                        {
++                            Type = ServerEventType.PlayerSystemChanged,
++                            TimeUtc = DateTime.UtcNow,
++                            Payload = new PlayerSystemChangedEventPayload(this, system)
++                        });
+                     }
+                     finally
+                     {
+diff --git a/src/LibreLancer.Tests/ServerEventObserverTests.cs b/src/LibreLancer.Tests/ServerEventObserverTests.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Tests/ServerEventObserverTests.cs
+@@ -0,0 +1,68 @@
++using System;
++using System.IO;
++using LibreLancer.Data.IO;
++using LibreLancer.Server;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class ServerEventObserverTests
++{
++    [Fact]
++    public void ObserverReceivesEventsWithoutStealingTheExistingServerQueue()
++    {
++        var game = new GameServer(new FileSystem(new EmptyFileSystem()));
++        ServerEvent observed = default;
++        game.ServerEventObserver = serverEvent => observed = serverEvent;
++        var expected = new ServerEvent
++        {
++            Type = ServerEventType.PlayerConnected,
++            TimeUtc = DateTime.UtcNow,
++            Payload = new object()
++        };
++
++        game.PublishServerEvent(expected);
++
++        Assert.Equal(expected.Type, observed.Type);
++        Assert.Same(expected.Payload, observed.Payload);
++        Assert.True(game.ServerEvents.TryDequeue(out var queued));
++        Assert.Equal(expected.Type, queued.Type);
++        Assert.Same(expected.Payload, queued.Payload);
++    }
++
++    [Fact]
++    public void ObserverFailureDoesNotPreventExistingServerEventDelivery()
++    {
++        var game = new GameServer(new FileSystem(new EmptyFileSystem()));
++        game.ServerEventObserver = _ => throw new InvalidOperationException("observer failure");
++        var expected = new ServerEvent
++        {
++            Type = ServerEventType.PlayerDisconnected,
++            TimeUtc = DateTime.UtcNow,
++            Payload = new object()
++        };
++
++        game.PublishServerEvent(expected);
++
++        Assert.True(game.ServerEvents.TryDequeue(out var queued));
++        Assert.Equal(expected.Type, queued.Type);
++    }
++
++    private sealed class EmptyFileSystem : BaseFileSystemProvider
++    {
++        public EmptyFileSystem() => Refresh();
++
++        public override void Refresh()
++        {
++            Root = new VfsDirectory();
++            var exe = new VfsDirectory { Name = "EXE", Parent = Root };
++            Root.Items["EXE"] = exe;
++            exe.Items.Add("freelancer.ini", new EmptyFile { Name = "freelancer.ini" });
++        }
++
++        private sealed class EmptyFile : VfsFile
++        {
++            public override Stream OpenRead() => new MemoryStream();
++        }
++    }
++}

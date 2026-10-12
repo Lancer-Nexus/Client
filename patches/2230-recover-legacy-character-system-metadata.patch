@@ -1,0 +1,235 @@
+--- a/src/LibreLancer/Net/NexusGatewayLogin.cs
++++ b/src/LibreLancer/Net/NexusGatewayLogin.cs
+@@ -114,7 +114,17 @@
+             characterId = matches[0].CharacterId;
+             expectedSystemId = matches[0].SystemId;
+             if (string.IsNullOrWhiteSpace(expectedSystemId))
+-                throw new InvalidDataException("The selected Gateway character has no known system assignment.");
++            {
++                expectedSystemId = await RecoverCharacterSystemMetadataAsync(login.AccessToken!,
++                    login.AccountId.Value, login.SessionId!.Value, characterId.Value, cancellationToken);
++                roster = await ListCharactersAsync(login.AccessToken!, login.AccountId.Value,
++                    login.SessionId.Value, cancellationToken);
++                var recovered = roster.SingleOrDefault(character => character.CharacterId == characterId);
++                if (recovered is null || string.IsNullOrWhiteSpace(recovered.SystemId) ||
++                    !string.Equals(recovered.SystemId, expectedSystemId, StringComparison.OrdinalIgnoreCase))
++                    throw new InvalidDataException("Gateway did not persist the recovered character system.");
++                expectedSystemId = recovered.SystemId;
++            }
+         }
+         var result = await RequestPlacementAsync(login, targetSystem, region, characterId, cancellationToken);
+         if (expectedSystemId is not null &&
+@@ -135,7 +145,15 @@
+         if (selected is null)
+             throw new InvalidDataException("The selected Gateway character does not exist in this account.");
+         if (string.IsNullOrWhiteSpace(selected.SystemId))
+-            throw new InvalidDataException("The selected Gateway character has no known system assignment.");
++        {
++            var recoveredSystem = await RecoverCharacterSystemMetadataAsync(login.AccessToken!, accountId,
++                sessionId, characterId, cancellationToken);
++            roster = await ListCharactersAsync(login.AccessToken!, accountId, sessionId, cancellationToken);
++            selected = roster.SingleOrDefault(character => character.CharacterId == characterId);
++            if (selected is null || string.IsNullOrWhiteSpace(selected.SystemId) ||
++                !string.Equals(selected.SystemId, recoveredSystem, StringComparison.OrdinalIgnoreCase))
++                throw new InvalidDataException("Gateway did not persist the recovered character system.");
++        }
+         var result = await RequestPlacementAsync(login, "", region, characterId, cancellationToken);
+         if (!string.Equals(result.SystemId, selected.SystemId, StringComparison.OrdinalIgnoreCase))
+             throw new InvalidDataException("Gateway placement does not match the selected character's saved system.");
+@@ -218,6 +236,32 @@
+         return roster.Characters;
+     }
+ 
++    private async Task<string> RecoverCharacterSystemMetadataAsync(string accessToken, Guid accountId,
++        Guid sessionId, long characterId, CancellationToken cancellationToken)
++    {
++        var request = new CharacterSystemMetadataRecoveryRequestV1
++        {
++            CorrelationId = Guid.NewGuid(),
++            AccountId = accountId,
++            SessionId = sessionId,
++            CharacterId = characterId
++        };
++        using var message = new HttpRequestMessage(HttpMethod.Post,
++            new Uri(gateway, "/api/v1/characters/system/recover"));
++        message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
++        message.Content = JsonContent.Create(request);
++        using var response = await http.SendAsync(message, cancellationToken);
++        if (response.StatusCode == HttpStatusCode.Unauthorized)
++            throw new UnauthorizedAccessException("Gateway character system recovery rejected the active session.");
++        var recovery = await response.Content.ReadFromJsonAsync<CharacterSystemMetadataRecoveryResultV1>(
++            cancellationToken: cancellationToken);
++        if (!response.IsSuccessStatusCode || recovery is null || !recovery.IsValid() ||
++            recovery.CorrelationId != request.CorrelationId ||
++            recovery.CharacterId != characterId || !recovery.Accepted || string.IsNullOrWhiteSpace(recovery.SystemId))
++            throw new InvalidDataException($"Gateway character system recovery failed: {recovery?.ReasonCode ?? "empty response"}.");
++        return recovery.SystemId;
++    }
++
+     /// <summary>Requests a target reservation for a transfer that the source server has approved for preparation.</summary>
+     public async Task<TransferStartResult> StartTransferAsync(
+         string accessToken, TransferStartRequest request, CancellationToken cancellationToken = default)
+--- a/src/LibreLancer/GameStates/LuaMenu.cs
++++ b/src/LibreLancer/GameStates/LuaMenu.cs
+@@ -406,8 +406,7 @@
+             public bool GatewayCharacterSelection() => pendingGatewayLogin is not null;
+ 
+             public bool CanLoadSelectedCharacter() => pendingGatewayLogin is not null &&
+-                cselInfo.ValidSelection() && !string.IsNullOrWhiteSpace(cselInfo.Characters[cselInfo.Selected].Location) &&
+-                !cselInfo.Characters[cselInfo.Selected].Location.Equals("unknown", StringComparison.OrdinalIgnoreCase);
++                cselInfo.ValidSelection();
+ 
+             public CharacterSelectInfo CharacterList() => cselInfo;
+             public ServerList ServerList() => serverList;
+@@ -475,12 +474,12 @@
+                     {
+                         var matches = roster.Where(character => string.Equals(character.DisplayName,
+                             requestedName, StringComparison.OrdinalIgnoreCase)).ToArray();
+-                        if (matches.Length == 1 && matches[0].SystemId is not null)
++                        if (matches.Length == 1)
+                             selected = matches[0];
+                         else
+-                            FLLog.Warning("Debug", $"Requested Gateway character '{requestedName}' was not uniquely found with a known system; opening character selection.");
++                            FLLog.Warning("Debug", $"Requested Gateway character '{requestedName}' was not uniquely found; opening character selection.");
+                     }
+-                    if (selected is null && roster.Length == 1 && roster[0].SystemId is not null &&
++                    if (selected is null && roster.Length == 1 &&
+                         string.IsNullOrWhiteSpace(requestedName))
+                         selected = roster[0];
+ 
+--- a/src/LibreLancer.Tests/NexusGatewayLoginTests.cs
++++ b/src/LibreLancer.Tests/NexusGatewayLoginTests.cs
+@@ -161,6 +161,69 @@
+     }
+ 
+     [Fact]
++    public async Task UnknownCharacterSystemIsRecoveredPersistedAndRefetchedBeforePlacement()
++    {
++        var folder = CreateMetadata();
++        try
++        {
++            var handler = new FakeHandler(false, unknownRosterSystem: true);
++            using var client = new NexusGatewayLogin(new Uri("https://gateway.example.test"), folder, handler);
++            var login = await client.LoginAsync("pilot@example.net", "secret", TestContext.Current.CancellationToken);
++
++            var result = await client.PlaceCharacterAsync(login, "eu", 73, TestContext.Current.CancellationToken);
++
++            Assert.True(result.Assigned);
++            Assert.Equal("Bearer access", handler.RecoveryAuthorization);
++            Assert.Equal("/api/v1/characters/list", handler.Requests[2].Path);
++            Assert.Equal("/api/v1/characters/system/recover", handler.Requests[3].Path);
++            Assert.Contains("\"characterId\":73", handler.Requests[3].Body);
++            Assert.Equal("/api/v1/characters/list", handler.Requests[4].Path);
++            Assert.Equal("/api/v1/placement/request", handler.Requests[5].Path);
++            Assert.Contains("\"characterId\":73", handler.Requests[5].Body);
++        }
++        finally { Directory.Delete(folder, true); }
++    }
++
++    [Fact]
++    public async Task DebugCharacterPlacementCanRecoverLegacySystemMetadata()
++    {
++        var folder = CreateMetadata();
++        try
++        {
++            var handler = new FakeHandler(false, unknownRosterSystem: true);
++            using var client = new NexusGatewayLogin(new Uri("https://gateway.example.test"), folder, handler);
++
++            var result = await client.LoginAndPlaceAsync("pilot@example.net", "secret", "li01", "eu",
++                TestContext.Current.CancellationToken, "Pilot");
++
++            Assert.True(result.Assigned);
++            Assert.Equal("/api/v1/characters/list", handler.Requests[2].Path);
++            Assert.Equal("/api/v1/characters/system/recover", handler.Requests[3].Path);
++            Assert.Equal("/api/v1/characters/list", handler.Requests[4].Path);
++            Assert.Equal("/api/v1/placement/request", handler.Requests[5].Path);
++        }
++        finally { Directory.Delete(folder, true); }
++    }
++
++    [Fact]
++    public async Task UnknownCharacterSystemRecoveryFailureStopsBeforePlacement()
++    {
++        var folder = CreateMetadata();
++        try
++        {
++            var handler = new FakeHandler(false, unknownRosterSystem: true, recoveryFails: true);
++            using var client = new NexusGatewayLogin(new Uri("https://gateway.example.test"), folder, handler);
++            var login = await client.LoginAsync("pilot@example.net", "secret", TestContext.Current.CancellationToken);
++
++            await Assert.ThrowsAsync<InvalidDataException>(() => client.PlaceCharacterAsync(
++                login, "eu", 73, TestContext.Current.CancellationToken));
++
++            Assert.DoesNotContain(handler.Requests, request => request.Path == "/api/v1/placement/request");
++        }
++        finally { Directory.Delete(folder, true); }
++    }
++
++    [Fact]
+     public async Task PlacementDoesNotProceedWhenSelectedCharacterIsNotInRoster()
+     {
+         var folder = CreateMetadata();
+@@ -284,11 +347,14 @@
+     }
+ 
+     private sealed class FakeHandler(bool updateRequired, bool mismatchedTransferTarget = false,
+-        bool includeRosterCharacter = true, bool wrongCharacterPlacementSystem = false) : HttpMessageHandler
+-    {
++        bool includeRosterCharacter = true, bool wrongCharacterPlacementSystem = false,
++        bool unknownRosterSystem = false, bool recoveryFails = false) : HttpMessageHandler
++    {
++        private bool recoveredSystem;
+         public List<(string Path, string Body)> Requests { get; } = [];
+         public string? PlacementAuthorization { get; private set; }
+         public string? RosterAuthorization { get; private set; }
++        public string? RecoveryAuthorization { get; private set; }
+         public string? TransferAuthorization { get; private set; }
+ 
+         protected override async Task<HttpResponseMessage> SendAsync(
+@@ -304,6 +370,8 @@
+                     ? PlacementPayload(request, body)
+                 : request.RequestUri.AbsolutePath == "/api/v1/characters/list"
+                     ? RosterPayload(request, body)
++                : request.RequestUri.AbsolutePath == "/api/v1/characters/system/recover"
++                    ? RecoveryPayload(request, body)
+                 : request.RequestUri.AbsolutePath == "/api/v1/transfers/start"
+                     ? TransferPayload(request, body)
+                     : request.RequestUri.AbsolutePath == "/api/v1/auth/refresh"
+@@ -314,7 +382,9 @@
+                     accountId = Guid.NewGuid(), sessionId = Guid.NewGuid(),
+                     expiresAtUtc = DateTime.UtcNow.AddMinutes(10)
+                 });
+-            return new HttpResponseMessage(HttpStatusCode.OK)
++            return new HttpResponseMessage(recoveryFails &&
++                request.RequestUri.AbsolutePath == "/api/v1/characters/system/recover"
++                    ? HttpStatusCode.Conflict : HttpStatusCode.OK)
+             {
+                 Content = new StringContent(payload, Encoding.UTF8, "application/json")
+             };
+@@ -331,8 +401,25 @@
+                 accepted = true,
+                 reasonCode = "listed",
+                 characters = includeRosterCharacter
+-                    ? new[] { new { characterId = 73L, displayName = "Pilot", systemId = "li03" } }
++                    ? new[] { new { characterId = 73L, displayName = "Pilot", systemId = unknownRosterSystem && !recoveredSystem ? null : "li03" } }
+                     : Array.Empty<object>()
++            });
++        }
++
++        private string RecoveryPayload(HttpRequestMessage request, string body)
++        {
++            RecoveryAuthorization = request.Headers.Authorization?.ToString();
++            if (!recoveryFails)
++                recoveredSystem = true;
++            var json = JsonDocument.Parse(body).RootElement;
++            return JsonSerializer.Serialize(new
++            {
++                schemaVersion = 1,
++                correlationId = json.GetProperty("correlationId").GetGuid(),
++                characterId = json.GetProperty("characterId").GetInt64(),
++                accepted = !recoveryFails,
++                reasonCode = recoveryFails ? "system_unknown" : "recovered",
++                systemId = recoveryFails ? null : "li03"
+             });
+         }
+ 

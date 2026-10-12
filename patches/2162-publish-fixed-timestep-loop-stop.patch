@@ -1,0 +1,50 @@
+From: Lancer Nexus
+Subject: [PATCH] Publish fixed timestep loop stop across threads
+
+diff --git a/src/LibreLancer/Server/FixedTimestepLoop.cs b/src/LibreLancer/Server/FixedTimestepLoop.cs
+index 65e35e584..25fffdae0 100644
+--- a/src/LibreLancer/Server/FixedTimestepLoop.cs
++++ b/src/LibreLancer/Server/FixedTimestepLoop.cs
+@@ -17,7 +17,7 @@ namespace LibreLancer.Server
+         private OnStep onStep;
+ 
+         private Stopwatch timer = null!;
+-        private bool running = false;
++        private volatile bool running = false;
+ 
+         private TimeSpan accumulatedTime;
+         private TimeSpan lastTime;
+diff --git a/src/LibreLancer.Tests/FixedTimestepLoopTests.cs b/src/LibreLancer.Tests/FixedTimestepLoopTests.cs
+new file mode 100644
+index 000000000..aee2acac5
+--- /dev/null
++++ b/src/LibreLancer.Tests/FixedTimestepLoopTests.cs
+@@ -0,0 +1,28 @@
++using System;
++using System.Threading.Tasks;
++using LibreLancer.Server;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class FixedTimestepLoopTests
++{
++    [Fact]
++    public async Task StopFromAnotherThreadEndsTheGameLoop()
++    {
++        var firstStep = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
++        var loop = new FixedTimestepLoop((_, _, _, _) => firstStep.TrySetResult());
++        var worker = Task.Run(loop.Start);
++
++        try
++        {
++            await firstStep.Task.WaitAsync(TimeSpan.FromSeconds(2));
++            loop.Stop();
++            await worker.WaitAsync(TimeSpan.FromSeconds(1));
++        }
++        finally
++        {
++            loop.Stop();
++        }
++    }
++}

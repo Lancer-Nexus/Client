@@ -1,0 +1,220 @@
+diff --git a/src/LLServer.Core/LLServer.Core.csproj b/src/LLServer.Core/LLServer.Core.csproj
+--- a/src/LLServer.Core/LLServer.Core.csproj
++++ b/src/LLServer.Core/LLServer.Core.csproj
+@@ -8,10 +8,14 @@
+         <RootNamespace>LLServer</RootNamespace>
+         <Nullable>enable</Nullable>
+         <EnableFlHookCompat Condition="'$(EnableFlHookCompat)' == ''">false</EnableFlHookCompat>
++        <EnableClusterIntegration Condition="'$(EnableClusterIntegration)' == ''">false</EnableClusterIntegration>
+     </PropertyGroup>
+ 
+     <PropertyGroup Condition="'$(EnableFlHookCompat)' == 'true'">
+         <DefineConstants>$(DefineConstants);LANCER_NEXUS_FLHOOKCOMPAT</DefineConstants>
++    </PropertyGroup>
++    <PropertyGroup Condition="'$(EnableClusterIntegration)' == 'true'">
++        <DefineConstants>$(DefineConstants);LANCER_NEXUS_CLUSTER</DefineConstants>
+     </PropertyGroup>
+ 
+     <ItemGroup>
+@@ -27,6 +31,10 @@
+         <ProjectReference Include="../../../FLHookCompat/src/LancerNexus.FlhookCompat.Hosting/LancerNexus.FlhookCompat.Hosting.csproj" />
+     </ItemGroup>
+ 
++    <ItemGroup Condition="'$(EnableClusterIntegration)' == 'true'">
++        <ProjectReference Include="../../../Cluster/src/LancerNexus.Cluster/LancerNexus.Cluster.csproj" />
++    </ItemGroup>
++
+     <ItemGroup>
+         <Folder Include="Properties" />
+     </ItemGroup>
+diff --git a/src/LLServer.Core/ServerApp.cs b/src/LLServer.Core/ServerApp.cs
+--- a/src/LLServer.Core/ServerApp.cs
++++ b/src/LLServer.Core/ServerApp.cs
+@@ -34,6 +34,9 @@
+ #if LANCER_NEXUS_FLHOOKCOMPAT
+     private FlHookCompatRuntime? flHookCompatRuntime;
+ #endif
++#if LANCER_NEXUS_CLUSTER
++    private ClusterPermissionSyncRuntime? permissionSyncRuntime;
++#endif
+ 
+     public bool StartServer()
+     {
+@@ -53,6 +56,13 @@
+             FLLog.Error("Config", "TestMissionNickname must be no longer than 128 characters");
+             return false;
+         }
++#if !LANCER_NEXUS_CLUSTER
++        if (!string.IsNullOrWhiteSpace(Config.InstanceId))
++        {
++            FLLog.Error("Permissions", "Cluster instances require a build with EnableClusterIntegration=true; refusing to start without permission revision synchronization.");
++            return false;
++        }
++#endif
+         if (!GameConfig.CheckFLDirectory(Config.FreelancerPath))
+         {
+             FLLog.Error("Config", $"'{Config.FreelancerPath ?? "NULL"}' is not a valid game folder");
+@@ -184,6 +194,18 @@
+         if (Config.FlHookCompatEnabled)
+             throw new InvalidOperationException("FLHookCompat is enabled in configuration, but this LLServer build has no FLHookCompat support. Build with EnableFlHookCompat=true.");
+ #endif
++#if LANCER_NEXUS_CLUSTER
++        if (!string.IsNullOrWhiteSpace(Config.InstanceId))
++        {
++            if (string.IsNullOrWhiteSpace(Config.LoginUrl))
++                throw new InvalidOperationException("Cluster permission synchronization requires Gateway LoginUrl.");
++            var permissionInstanceKey = Environment.GetEnvironmentVariable("LANCER_NEXUS_GAME_INSTANCE_KEY");
++            var permissionRedisEndpoint = Environment.GetEnvironmentVariable("LANCER_NEXUS_PERMISSION_REDIS_ENDPOINT");
++            permissionSyncRuntime = new ClusterPermissionSyncRuntime(Config.InstanceId!, Config.LoginUrl, permissionInstanceKey,
++                permissionRedisEndpoint);
++            permissionSyncRuntime.Start();
++        }
++#endif
+         Server.Start();
+         if ((!string.IsNullOrWhiteSpace(Config.InstanceId) && !string.IsNullOrWhiteSpace(transferInstanceKey)) ||
+             npcTransferReceiver != null)
+@@ -226,6 +248,14 @@
+             FLLog.Error("Server", $"Transfer resolver stopped: {exception.Message}");
+         }
+         statusCancellation?.Cancel();
++#if LANCER_NEXUS_CLUSTER
++        if (permissionSyncRuntime is not null)
++        {
++            try { permissionSyncRuntime.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
++            catch (Exception exception) { FLLog.Error("Permissions", $"Revision listener stopped: {exception.Message}"); }
++            permissionSyncRuntime = null;
++        }
++#endif
+         if (npcTransferReceiver != null)
+         {
+             try { npcTransferReceiver.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
+@@ -312,7 +342,9 @@
+                 InstanceId = Config.InstanceId!,
+                 SystemId = Config.SystemId!,
+                 SystemIds = Config.SystemIds,
+-                IsReady = network?.IsRunning == true,
++                IsReady = network?.IsRunning == true && ClusterPermissionsReady,
++                PermissionsReady = ClusterPermissionsReady,
++                PermissionRevision = CurrentPermissionRevision,
+                 IsDraining = !string.IsNullOrWhiteSpace(Config.DrainFlagFile) &&
+                              File.Exists(Path.GetFullPath(Config.DrainFlagFile, Platform.GetBasePath())),
+                 CurrentPlayers = network?.ConnectedPeersCount ?? 0,
+@@ -335,6 +367,31 @@
+             await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+         }
+     }
++
++    private bool ClusterPermissionsReady
++    {
++        get
++        {
++            if (string.IsNullOrWhiteSpace(Config.InstanceId)) return true;
++#if LANCER_NEXUS_CLUSTER
++            return permissionSyncRuntime?.IsReady == true;
++#else
++            return false;
++#endif
++        }
++    }
++
++    private long CurrentPermissionRevision
++    {
++        get
++        {
++#if LANCER_NEXUS_CLUSTER
++            return permissionSyncRuntime?.Revision ?? 0;
++#else
++            return 0;
++#endif
++        }
++    }
+ }
+ 
+ public sealed class InstanceRuntimeStatus
+@@ -348,6 +405,8 @@
+     public bool IsDraining { get; init; }
+     public int CurrentPlayers { get; init; }
+     public int MaxPlayers { get; init; }
++    public bool PermissionsReady { get; init; }
++    public long PermissionRevision { get; init; }
+     public string Endpoint { get; init; } = "";
+     public string[] Capabilities { get; init; } = [];
+ }
+diff --git a/src/LLServer.Core/ClusterPermissionSyncRuntime.cs b/src/LLServer.Core/ClusterPermissionSyncRuntime.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LLServer.Core/ClusterPermissionSyncRuntime.cs
+@@ -0,0 +1,73 @@
++#if LANCER_NEXUS_CLUSTER
++using System;
++using System.Net.Http;
++using System.Text;
++using System.Threading;
++using System.Threading.Tasks;
++using LancerNexus.Cluster;
++using LibreLancer;
++
++namespace LLServer;
++
++/// <summary>Owns SQL snapshot synchronization and its Redis invalidation listener for one cluster instance.</summary>
++internal sealed class ClusterPermissionSyncRuntime : IAsyncDisposable
++{
++    private readonly PermissionService permissions = new(new PermissionSnapshot(0, [], []));
++    private readonly PermissionSyncCoordinator coordinator;
++    private readonly RedisPermissionRevisionListener listener;
++    private readonly HttpClient http;
++    private readonly CancellationTokenSource cancellation = new();
++    private Task? listenerTask;
++
++    public ClusterPermissionSyncRuntime(string instanceId, string gatewayUrl, string? instanceKey, string? redisEndpoint)
++    {
++        if (!Uri.TryCreate(gatewayUrl, UriKind.Absolute, out var gatewayUri) ||
++            gatewayUri.Scheme != Uri.UriSchemeHttps || !string.IsNullOrEmpty(gatewayUri.UserInfo) ||
++            !string.IsNullOrEmpty(gatewayUri.Query) || !string.IsNullOrEmpty(gatewayUri.Fragment))
++            throw new InvalidOperationException("Cluster permission synchronization requires a private HTTPS Gateway URL.");
++        if (string.IsNullOrWhiteSpace(instanceKey) || Encoding.UTF8.GetByteCount(instanceKey) < 32)
++            throw new InvalidOperationException("Cluster permission synchronization requires the per-instance LANCER_NEXUS_GAME_INSTANCE_KEY.");
++        if (!IsValidRedisEndpoint(redisEndpoint))
++            throw new InvalidOperationException("Cluster permission synchronization requires LANCER_NEXUS_PERMISSION_REDIS_ENDPOINT in host:port form.");
++
++        http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
++        {
++            Timeout = TimeSpan.FromSeconds(10)
++        };
++        var gateway = new GatewayPermissionSyncClient(http, gatewayUri, instanceKey);
++        coordinator = new PermissionSyncCoordinator(instanceId,
++            permissions, gateway, gateway, TimeProvider.System);
++        listener = new RedisPermissionRevisionListener(redisEndpoint!, permissions, coordinator,
++            exception => FLLog.Error("Permissions", $"Revision synchronization unavailable: {exception.GetType().Name}: {exception.Message}"));
++    }
++
++    public bool IsReady => listener.IsReady && coordinator.IsReady && permissions.IsSynchronized;
++    public long Revision => permissions.Revision;
++
++    public void Start()
++    {
++        listenerTask = Task.Run(() => listener.RunAsync(cancellation.Token));
++    }
++
++    public async ValueTask DisposeAsync()
++    {
++        cancellation.Cancel();
++        if (listenerTask is not null)
++        {
++            try { await listenerTask.ConfigureAwait(false); }
++            catch (OperationCanceledException) { }
++            listenerTask = null;
++        }
++        http.Dispose();
++        cancellation.Dispose();
++    }
++
++    private static bool IsValidRedisEndpoint(string? endpoint)
++    {
++        if (string.IsNullOrWhiteSpace(endpoint)) return false;
++        var separator = endpoint.LastIndexOf(':');
++        return separator > 0 && endpoint[..separator].Trim().Length > 0 &&
++               int.TryParse(endpoint[(separator + 1)..], out var port) && port is > 0 and <= 65535;
++    }
++}
++#endif

@@ -1,0 +1,137 @@
+diff --git a/src/LibreLancer/Server/NPCManager.cs b/src/LibreLancer/Server/NPCManager.cs
+index 681aa2e..2fb44c8 100644
+--- a/src/LibreLancer/Server/NPCManager.cs
++++ b/src/LibreLancer/Server/NPCManager.cs
+@@ -353,9 +353,11 @@ namespace LibreLancer.Server
+                 if (identity.OwnershipVersion == long.MaxValue)
+                     throw new InvalidDataException("NPC ownership version cannot be incremented safely.");
+                 var state = MessagePackSerializer.Deserialize<NpcRuntimeStateV1>(identity.RuntimeState);
+-                if (string.IsNullOrWhiteSpace(state.Nickname) || string.IsNullOrWhiteSpace(state.DisplayName) ||
+-                    string.IsNullOrWhiteSpace(state.StateGraphId))
++                if (string.IsNullOrWhiteSpace(state.Nickname) || string.IsNullOrWhiteSpace(state.StateGraphId))
+                     throw new InvalidDataException("NPC runtime snapshot is missing the identity required for restoration.");
++                var displayName = ResolveNpcDisplayName(state.DisplayName, state.Nickname);
++                if (string.IsNullOrWhiteSpace(state.DisplayName))
++                    FLLog.Warning("NPC Checkpoint", $"Restoring ambient NPC '{state.Nickname}' with its nickname because the saved display name is empty.");
+ 
+                 var ship = World.Server.GameData.Items.Ships.Get(state.LoadoutArchetype)
+                     ?? throw new InvalidDataException($"NPC ship archetype '{state.LoadoutArchetype}' is unavailable.");
+@@ -389,7 +391,7 @@ namespace LibreLancer.Server
+                 var stateDescription = new StateGraphDescription(state.StateGraphId.ToUpperInvariant(), "LEADER");
+                 if (!World.Server.GameData.Items.Ini.StateGraphDb.Tables.TryGetValue(stateDescription, out var graph))
+                     throw new InvalidDataException($"NPC state graph '{state.StateGraphId}' is unavailable.");
+-                var obj = DoSpawn(new ObjectName(state.DisplayName), state.Nickname, faction, state.StateGraphId,
++                var obj = DoSpawn(new ObjectName(displayName), state.Nickname, faction, state.StateGraphId,
+                     costume, loadout, pilot, ToVector(state.Position), ToQuaternion(state.Orientation), null, 0,
+                     missionRuntime, registerNpc: false, stableNpcId: identity.NpcId,
+                     stableNpcOwnershipVersion: incrementOwnershipVersion
+@@ -524,8 +526,21 @@ namespace LibreLancer.Server
+             {
+                 if (autopilotStates.TryGetValue(entry.Object, out var autopilotState) &&
+                     entry.Object.TryGetComponent<AutopilotComponent>(out var autopilot))
++                {
++                    var targetReference = autopilotState.GetTargetReference();
++                    if (targetReference is not null && ResolveTransferReference(targetReference, restored) is null)
++                    {
++                        var normalized = NormalizeUnresolvedNpcGotoTarget(autopilotState,
++                            entry.State.Ai.StateId, snapshot.MissionRuntimeId.HasValue);
++                        if (!ReferenceEquals(normalized, autopilotState))
++                        {
++                            FLLog.Warning("NPC Checkpoint", $"Cleared unresolved Goto target for ambient NPC '{entry.State.Nickname}' during restore.");
++                            autopilotState = normalized;
++                        }
++                    }
+                     autopilot.RestoreTransferState(autopilotState,
+                         reference => ResolveTransferReference(reference, restored));
++                }
+             }
+             var activated = new List<GameObject>(restored.Count);
+             try
+@@ -650,5 +665,19 @@ namespace LibreLancer.Server
+                     World.GameWorld.GetObject(reference.Nickname),
+                 _ => null
+             };
++
++        internal static AutopilotTransferState NormalizeUnresolvedNpcGotoTarget(AutopilotTransferState state,
++            string aiState, bool hasMissionRuntime) =>
++            state.Behavior == AutopilotBehaviors.Goto && state.GetTargetReference() is not null &&
++            aiState == "none" && !hasMissionRuntime
++                ? new AutopilotTransferState
++                {
++                    PitchController = state.PitchController,
++                    YawController = state.YawController
++                }
++                : state;
++
++        internal static string ResolveNpcDisplayName(string? displayName, string nickname) =>
++            string.IsNullOrWhiteSpace(displayName) ? nickname : displayName;
+     }
+ }
+diff --git a/src/LibreLancer/Server/JumperNpc.cs b/src/LibreLancer/Server/JumperNpc.cs
+index 3865947..6072de4 100644
+--- a/src/LibreLancer/Server/JumperNpc.cs
++++ b/src/LibreLancer/Server/JumperNpc.cs
+@@ -130,6 +130,7 @@ public class JumperNpc
+                          directiveTarget.TryGetComponent<SNPCComponent>(out var targetNpc) && targetNpc.NpcId != Guid.Empty
+             ? targetNpc.NpcId
+             : (Guid?)null;
++        var displayName = go.Name?.GetName(world.Server.GameData, transform.Position);
+         var runtime = new NpcRuntimeStateV1
+         {
+             Position = ToProtocol(transform.Position),
+@@ -189,7 +190,7 @@ public class JumperNpc
+             },
+             CurrentTargetNpcId = aiTargetId,
+             Nickname = npc.Nickname,
+-            DisplayName = go.Name?.GetName(world.Server.GameData, transform.Position) ?? npc.Nickname,
++            DisplayName = string.IsNullOrWhiteSpace(displayName) ? npc.Nickname : displayName,
+             FactionId = npc.Faction?.Nickname ?? "",
+             PilotId = npc.Pilot?.Nickname ?? "",
+             StateGraphId = npc.StateGraph?.Description?.Name ?? "",
+diff --git a/src/LibreLancer.Tests/AutopilotTransferStateTests.cs b/src/LibreLancer.Tests/AutopilotTransferStateTests.cs
+index 29fa046..adc9a85 100644
+--- a/src/LibreLancer.Tests/AutopilotTransferStateTests.cs
++++ b/src/LibreLancer.Tests/AutopilotTransferStateTests.cs
+@@ -3,6 +3,7 @@ using System.Numerics;
+ using System.Text.Json;
+ using LibreLancer.World;
+ using LibreLancer.World.Components;
++using LibreLancer.Server;
+ using Xunit;
+ 
+ namespace LibreLancer.Tests;
+@@ -42,6 +43,34 @@ public sealed class AutopilotTransferStateTests
+             { Behavior = AutopilotBehaviors.Goto, TargetPosition = new Vector3(float.NaN, 0, 0) }.Validate());
+     }
+ 
++    [Fact]
++    public void UnresolvedAmbientNpcGotoTarget_IsClearedWithoutChangingMissionOrDirectiveStates()
++    {
++        var state = new AutopilotTransferState
++        {
++            Behavior = AutopilotBehaviors.Goto,
++            TargetNickname = "stale_target",
++            MaxThrottle = 1,
++            GotoRadius = 25,
++            PitchController = new PIDControllerTransferState(0, 0, 0, 0, 0),
++            YawController = new PIDControllerTransferState(0, 0, 0, 0, 0),
++            Avoidance = new AutopilotAvoidanceTransferState()
++        };
++
++        var restored = NPCManager.NormalizeUnresolvedNpcGotoTarget(state, "none", hasMissionRuntime: false);
++
++        Assert.NotSame(state, restored);
++        Assert.Equal(AutopilotBehaviors.None, restored.Behavior);
++        Assert.Null(restored.GetTargetReference());
++        Assert.Same(state.PitchController, restored.PitchController);
++        Assert.Same(state.YawController, restored.YawController);
++        restored.Validate();
++        Assert.Same(state, NPCManager.NormalizeUnresolvedNpcGotoTarget(state, "none", hasMissionRuntime: true));
++        Assert.Same(state, NPCManager.NormalizeUnresolvedNpcGotoTarget(state, "AiAttackState", hasMissionRuntime: false));
++        Assert.Equal("spacepop_1", NPCManager.ResolveNpcDisplayName(" ", "spacepop_1"));
++        Assert.Equal("Trader", NPCManager.ResolveNpcDisplayName("Trader", "spacepop_1"));
++    }
++
+     [Fact]
+     public void AvoidanceVectorJson_RoundTripsDirectionAndState()
+     {

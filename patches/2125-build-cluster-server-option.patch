@@ -1,0 +1,86 @@
+diff --git a/scripts/BuildLL/Program.cs b/scripts/BuildLL/Program.cs
+--- a/scripts/BuildLL/Program.cs
++++ b/scripts/BuildLL/Program.cs
+@@ -25,6 +25,7 @@
+         private static bool withWin32 = false;
+         private static bool withWin64 = false;
+         private static bool withUpdates = true;
++        private static bool withNexusClusterServer = false;
+         private static string updateChannel = "daily";
+         private static VSVersion vsVersion = VSVersion.Any;
+ 
+@@ -39,6 +40,7 @@
+             FlagArg("--with-win32", () => withWin32 = true, "Also build for 32-bit windows");
+             FlagArg("--with-win64", () => withWin64 = true, "(Linux only) Also build for 64-bit windows");
+             FlagArg("--no-updates", () => withUpdates = false, "Disables built in updater (SDK only)");
++            FlagArg("--nexus-cluster-server", () => withNexusClusterServer = true, "Build LLServer with optional Lancer Nexus Cluster and FLHookCompat integrations");
+ 
+             StringArg("--prefix", x => prefix = x, "Set cmake install prefix");
+             StringArg("--assemblyversion", x => versionSetting = x, "Set generated version");
+@@ -88,14 +90,14 @@
+             var objDir = "./obj/artifacts-headless";
+             var binDir = "./bin/librelancer-server-";
+             var outdir = binDir + rid;
+-            Dotnet.Restore("LibreLancer.sln", rid, objDir);
++            Dotnet.Restore("LibreLancer.sln", rid, objDir, ClusterBuildProperties);
+             var settings = new DotnetPublishSettings()
+             {
+                 Configuration = "Release",
+                 OutputDirectory = objDir,
+                 Runtime = rid,
+                 SelfContained = true,
+-                Extra = "-p:DisableShaders=True"
++                Extra = "-p:DisableShaders=True " + ClusterBuildPropertiesForServer
+             };
+             Dotnet.Publish("src/LLServer/LLServer.csproj", settings);
+             await CustomPublish.MergeAndPatch(objDir, binDir + rid, rid, ["LLServer"]);
+@@ -104,6 +106,14 @@
+             CopyFile("LICENSE", outdir);
+         }
+ 
++        private static string ClusterBuildPropertiesForServer => withNexusClusterServer
++            ? "-p:EnableClusterIntegration=true -p:EnableFlHookCompat=true"
++            : string.Empty;
++
++        private static string ClusterBuildProperties => withNexusClusterServer
++            ? ClusterBuildPropertiesForServer
++            : string.Empty;
++
+         private static HashSet<string> published = [];
+ 
+         static async Task FullBuild(string rid, bool sdk)
+@@ -112,7 +122,7 @@
+             var objDir = "./obj/artifacts";
+             var binDir = sdk ? "./bin/librelancer-sdk-" : "./bin/librelancer-";
+             var outdir = binDir + rid;
+-            Dotnet.Restore("LibreLancer.sln", rid, objDir);
++            Dotnet.Restore("LibreLancer.sln", rid, objDir, ClusterBuildProperties);
+             foreach (var proj in projs)
+             {
+                 if (!published.Add($"{proj}:{rid}"))
+@@ -122,7 +132,8 @@
+                     Configuration = "Release",
+                     OutputDirectory = objDir,
+                     Runtime = rid,
+-                    SelfContained = true
++                    SelfContained = true,
++                    Extra = Path.GetFileNameWithoutExtension(proj) == "LLServer" ? ClusterBuildPropertiesForServer : null
+                 };
+                 Dotnet.Publish(proj, settings);
+             }
+diff --git a/scripts/BuildLL/Runtime/Dotnet.cs b/scripts/BuildLL/Runtime/Dotnet.cs
+--- a/scripts/BuildLL/Runtime/Dotnet.cs
++++ b/scripts/BuildLL/Runtime/Dotnet.cs
+@@ -17,10 +17,10 @@
+         {
+             return CPUCount > 0 ? $"-maxcpucount:{CPUCount}" : "";
+         }
+-        public static void Restore(string project, string rid, string artifactsPath)
++        public static void Restore(string project, string rid, string artifactsPath, string? extra = null)
+         {
+             RunCommand("dotnet",
+-                $"restore {M()} {Verbosity} -r {rid} -p:UseArtifactsOutput=true -p:ArtifactsPath={P(artifactsPath)} /nr:false {P(project)}");
++                $"restore {M()} {Verbosity} -r {rid} -p:UseArtifactsOutput=true -p:ArtifactsPath={P(artifactsPath)} {extra} /nr:false {P(project)}");
+         }
+ 
+         public static void BuildDebug(string project)

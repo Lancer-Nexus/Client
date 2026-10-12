@@ -1,0 +1,259 @@
+diff --git a/src/LibreLancer/Render/Billboards.cs b/src/LibreLancer/Render/Billboards.cs
+index e7a5e92..fa316df 100644
+--- a/src/LibreLancer/Render/Billboards.cs
++++ b/src/LibreLancer/Render/Billboards.cs
+@@ -199,15 +199,13 @@ namespace LibreLancer.Render
+ 			Vector2 texc,
+ 			float angle,
+ 			int layer,
+-			ushort blend = BlendMode.Normal,
+-			bool depthTest = true
++			ushort blend = BlendMode.Normal
+ 		)
+ 		{
+ 			rendat[billboardCount] = RenderData.CreateTri(
+ 				texture,
+ 				blend,
+-				(ushort)vertexCountBasic,
+-				depthTest
++				(ushort)vertexCountBasic
+ 			);
+ 			CreateTriBillboard(
+ 				Position,
+@@ -240,13 +238,15 @@ namespace LibreLancer.Render
+ 			Vector2 bottomright,
+ 			float angle,
+ 			int layer,
+-			ushort blend = BlendMode.Normal
++			ushort blend = BlendMode.Normal,
++			bool depthTest = true
+ 		)
+ 		{
+ 			rendat[billboardCount] = new RenderData(
+ 				texture,
+ 				blend,
+-				(ushort)vertexCountBasic
++				(ushort)vertexCountBasic,
++				depthTest
+ 			);
+ 			CreateBillboard(
+ 				Position,
+diff --git a/src/LibreLancer/Render/LightEquipRenderer.cs b/src/LibreLancer/Render/LightEquipRenderer.cs
+index eab5951..6de1ba1 100644
+--- a/src/LibreLancer/Render/LightEquipRenderer.cs
++++ b/src/LibreLancer/Render/LightEquipRenderer.cs
+@@ -114,6 +114,7 @@ namespace LibreLancer.Render
+             var fade = GetViewConeFade(forward, sys!.Camera.Position - pos, equip.FlareCone);
+             if (fade <= 0)
+                 return;
++
+             DrawShine(fade);
+ 
+             sys.Billboards.Draw(
+@@ -137,13 +138,19 @@ namespace LibreLancer.Render
+         internal static float GetViewConeFade(Vector3 lightForward, Vector3 cameraDirection,
+             Vector2? flareCone)
+         {
+-            if (flareCone == null || lightForward.LengthSquared() < 1e-8f || cameraDirection.LengthSquared() < 1e-8f)
++            if (flareCone == null)
++                return 1f;
++
++            if (lightForward.LengthSquared() < 1e-8f || cameraDirection.LengthSquared() < 1e-8f)
+                 return 1f;
++
+             var cosAngle = Vector3.Dot(Vector3.Normalize(lightForward), Vector3.Normalize(cameraDirection));
++            // Freelancer stores the flare cone as outer, inner angles.
+             var cosStart = MathF.Cos(flareCone.Value.Y * MathF.PI / 180f);
+             var cosEnd = MathF.Cos(flareCone.Value.X * MathF.PI / 180f);
+             if (MathF.Abs(cosStart - cosEnd) < 1e-6f)
+                 return cosAngle >= cosStart ? 1f : 0f;
++
+             return MathHelper.Clamp((cosAngle - cosEnd) / (cosStart - cosEnd), 0f, 1f);
+         }
+ 
+@@ -189,8 +196,8 @@ namespace LibreLancer.Render
+                 !forceCull &&
+                 LightOn &&
+                 Vector3.DistanceSquared(camera.Position, pos) < CULL &&
+-                camera.FrustumCheck(new BoundingSphere(pos, equip.BulbSize * 3))
+-                && GetViewConeFade(forward, camera.Position - pos, equip.FlareCone) > 0
++                camera.FrustumCheck(new BoundingSphere(pos, equip.BulbSize * 3)) &&
++                GetViewConeFade(forward, camera.Position - pos, equip.FlareCone) > 0
+             );
+             this.sys = sys;
+             var showLight = !equip.Animated || !lt_on;
+@@ -200,10 +207,15 @@ namespace LibreLancer.Render
+                 var toLight = pos - camera.Position;
+                 var distance = toLight.Length();
+                 if (distance > 0.01f && physics.PointRaycast(
+-                        OcclusionOwner?.PhysicsComponent?.Body, camera.Position, toLight / distance,
+-                        Math.Max(0, distance - Math.Max(0.1f, equip.BulbSize)), true,
++                        OcclusionOwner?.PhysicsComponent?.Body,
++                        camera.Position,
++                        toLight / distance,
++                        Math.Max(0, distance - Math.Max(0.1f, equip.BulbSize)),
++                        allowDynAsteroids: true,
+                         out _, out _, out _))
++                {
+                     visible = false;
++                }
+             }
+ 
+             if (equip.EmitRange > 0 && showLight && camera.FrustumCheck(new BoundingSphere(pos, equip.EmitRange)))
+diff --git a/src/LibreLancer/Server/Ai/AiAttackState.cs b/src/LibreLancer/Server/Ai/AiAttackState.cs
+index 07fbbd3..8e26745 100644
+--- a/src/LibreLancer/Server/Ai/AiAttackState.cs
++++ b/src/LibreLancer/Server/Ai/AiAttackState.cs
+@@ -34,12 +34,8 @@ namespace LibreLancer.Server.Ai
+             if (obj.TryGetComponent<WeaponControlComponent>(out var weapons))
+             {
+                 weapons.AimPoint = ai.GetAimPosition(target, weapons, false); // Regular accuracy
+-                var fireInfo = ai.RunFireTimers((float)time);
+-                if (fireInfo.ShouldFireRegular || fireInfo.ShouldFireAutoTurrets)
+-                {
+-                    // Fire weapon groups based on fire info
+-                    ai.FireWeaponGroups(weapons, fireInfo, world);
+-                }
++                if (ai.RunFireTimers((float)time))
++                    ai.FireWeaponGroups(weapons, world);
+                 if (ai.ShouldFireMissiles(time))
+                     weapons.FireMissiles(world);
+             }
+diff --git a/src/LibreLancer/Server/Components/SSolarComponent.cs b/src/LibreLancer/Server/Components/SSolarComponent.cs
+index b573f7b..39f28f7 100644
+--- a/src/LibreLancer/Server/Components/SSolarComponent.cs
++++ b/src/LibreLancer/Server/Components/SSolarComponent.cs
+@@ -7,6 +7,7 @@ namespace LibreLancer.Server.Components
+     {
+         public bool SendSolarUpdate = false;
+         public bool SendPartsUpdate = false;
++        public bool SendAutoTurretUpdate = false;
+         private int stopUpdateTimer = 0;
+         private int stopPartsUpdateTimer = 0;
+         private const int UPDATE_TIMEOUT_TICKS = 8 * 60;
+diff --git a/src/LibreLancer/Server/JumperNpc.cs b/src/LibreLancer/Server/JumperNpc.cs
+index 58579cf..3865947 100644
+--- a/src/LibreLancer/Server/JumperNpc.cs
++++ b/src/LibreLancer/Server/JumperNpc.cs
+@@ -6,6 +6,7 @@ using System.Numerics;
+ using System.Text.Json;
+ using LancerNexus.Protocol;
+ using MessagePack;
++using System.Text.Json;
+ using LibreLancer.Data.GameData;
+ using LibreLancer.Data.GameData.World;
+ using LibreLancer.Data.Schema.Pilots;
+@@ -14,7 +15,6 @@ using LibreLancer.Net.Protocol;
+ using LibreLancer.Server.Components;
+ using LibreLancer.World;
+ using LibreLancer.World.Components;
+-using LibreLancer.World.Equipments;
+ using Pilot = LibreLancer.Data.GameData.Pilot;
+ 
+ namespace LibreLancer.Server;
+@@ -142,16 +142,18 @@ public class JumperNpc
+             AngularVelocity = ToProtocol(physics?.AngularVelocity ?? Vector3.Zero),
+             Health = healthComponent?.CurrentHealth ?? 0,
+             LoadoutArchetype = ld.Archetype,
+-            Equipment = go.AllEquipment
++            Equipment = go.GetComponents<EquipmentComponent>().Concat(go.GetChildComponents<EquipmentComponent>())
+                 .Select(equipment => new NpcEquipmentState
+                 {
+                     EquipmentId = equipment.Equipment.Nickname,
+-                    Hardpoint = equipment.Attachment?.Name ?? "internal",
+-                    Health = equipment.MaxHealth > 0
+-                        ? Math.Clamp(equipment.Health / equipment.MaxHealth, 0, 1)
++                    Hardpoint = equipment.Parent.Attachment?.Name ?? "internal",
++                    Health = equipment.Parent.Attachment != null &&
++                             equipment.Parent.TryGetComponent<SHealthComponent>(out var equipmentHealth) &&
++                             equipmentHealth.MaxHealth > 0
++                        ? Math.Clamp(equipmentHealth.CurrentHealth / equipmentHealth.MaxHealth, 0, 1)
+                         : 1,
+-                    Energy = equipment is PowerCore powerCore &&
+-                             equipment.Equipment is LibreLancer.Data.GameData.Items.PowerEquipment powerEquipment &&
++                    Energy = equipment.Equipment is LibreLancer.Data.GameData.Items.PowerEquipment powerEquipment &&
++                             equipment.Parent.TryGetComponent<PowerCoreComponent>(out var powerCore) &&
+                              powerEquipment.Def.Capacity > 0
+                         ? Math.Clamp(powerCore.CurrentEnergy / powerEquipment.Def.Capacity, 0, 1)
+                         : 1,
+@@ -210,18 +212,23 @@ public class JumperNpc
+         return npc;
+     }
+ 
+-    private static byte[] CaptureEquipmentExtension(EquipmentObject equipment, GameWorld world)
++    private static byte[] CaptureEquipmentExtension(EquipmentComponent equipment, GameWorld world)
+     {
+-        if (equipment is not Shield && equipment is not AbstractWeapon && equipment is not PowerCore)
++        var hasShield = equipment.Parent.TryGetComponent<SShieldComponent>(out var shield);
++        var hasWeapon = equipment.Parent.TryGetComponent<WeaponComponent>(out var weapon);
++        var hasPowerCore = equipment.Parent.TryGetComponent<PowerCoreComponent>(out var powerCore);
++        if (!hasShield && !hasWeapon && !hasPowerCore)
+             return [];
+         return JsonSerializer.SerializeToUtf8Bytes(new NpcEquipmentTransferExtensionV1
+         {
+-            Shield = equipment is Shield shield ? shield.CaptureTransferState() : null,
+-            WeaponCooldownSeconds = equipment is AbstractWeapon weapon ? weapon.CurrentCooldown : null,
+-            ThrustCapacityFraction = equipment is PowerCore powerCore &&
+-                                     equipment.Equipment is LibreLancer.Data.GameData.Items.PowerEquipment powerEquipment
+-                ? powerEquipment.Def.ThrustCapacity > 0
+-                    ? Math.Clamp(powerCore.CurrentThrustCapacity / powerEquipment.Def.ThrustCapacity, 0, 1)
++            Shield = hasShield ? shield.CaptureTransferState(world) : null,
++            WeaponCooldownSeconds = hasWeapon ? weapon.CurrentCooldown : null,
++            WeaponAngles = hasWeapon
++                ? new NpcWeaponAnglesTransferStateV1(weapon.Angles.X, weapon.Angles.Y)
++                : null,
++            ThrustCapacityFraction = hasPowerCore
++                ? powerCore.Equip.ThrustCapacity > 0
++                    ? Math.Clamp(powerCore.CurrentThrustCapacity / powerCore.Equip.ThrustCapacity, 0, 1)
+                     : 0
+                 : null
+         });
+diff --git a/src/LibreLancer/Server/NpcEquipmentTransferState.cs b/src/LibreLancer/Server/NpcEquipmentTransferState.cs
+index 91e1a34..615d438 100644
+--- a/src/LibreLancer/Server/NpcEquipmentTransferState.cs
++++ b/src/LibreLancer/Server/NpcEquipmentTransferState.cs
+@@ -10,9 +10,21 @@ internal sealed record NpcEquipmentTransferExtensionV1
+     public int SchemaVersion { get; init; } = 1;
+     public NpcShieldTransferStateV1? Shield { get; init; }
+     public double? WeaponCooldownSeconds { get; init; }
++    public NpcWeaponAnglesTransferStateV1? WeaponAngles { get; init; }
+     public float? ThrustCapacityFraction { get; init; }
+ }
+ 
++internal sealed record NpcWeaponAnglesTransferStateV1(float Yaw, float Pitch)
++{
++    public NpcWeaponAnglesTransferStateV1() : this(0, 0) { }
++
++    public void Validate()
++    {
++        if (!float.IsFinite(Yaw) || !float.IsFinite(Pitch))
++            throw new InvalidDataException("NPC weapon angle transfer state is invalid.");
++    }
++}
++
+ internal sealed record NpcShieldTransferStateV1(float Health, double SuppressionRemainingSeconds,
+     float SuppressedRestoreHealth)
+ {
+@@ -50,6 +62,22 @@ internal sealed record NpcAiTransferExtensionV1
+     public float StayInRangeRadius { get; init; }
+     public bool PopulationFleeing { get; init; }
+     public ulong? TradeCargoUnitPrice { get; init; }
++    public NpcAutoTurretTransferStateV1? AutoTurret { get; init; }
++}
++
++internal sealed record NpcAutoTurretTransferStateV1
++{
++    public float BurstTimer { get; init; }
++    public float FireTimer { get; init; }
++    public bool InBurst { get; init; }
++    public ulong RandomState { get; init; }
++
++    public void Validate()
++    {
++        if (!float.IsFinite(BurstTimer) || MathF.Abs(BurstTimer) > 3600 ||
++            !float.IsFinite(FireTimer) || MathF.Abs(FireTimer) > 3600 || RandomState == 0)
++            throw new InvalidDataException("NPC auto-turret transfer state is invalid.");
++    }
+ }
+ 
+ internal sealed record NpcShipSteeringTransferStateV1
