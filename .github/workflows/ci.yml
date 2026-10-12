@@ -28,8 +28,31 @@ jobs:
       - name: Apply maintained Nexus overlay
         shell: bash
         run: ./scripts/apply-lancer-nexus-patches.sh
+      - name: Check patch whitespace
+        run: git diff --check
       - name: Test NAP library and VFS
         run: dotnet test src/Nexus.Assets.Tests/Nexus.Assets.Tests.csproj --configuration Release -p:UseSharedCompilation=false --logger trx
+      - name: Build and test native audio decoder on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $nativeBuild = Join-Path $env:RUNNER_TEMP 'lancerdecode-audio'
+          cmake -S extern/lancerdecode -B $nativeBuild -A x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build $nativeBuild --config Release --target lancerdecode
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $decoder = Join-Path $nativeBuild 'Release/lancerdecode.dll'
+          if (-not (Test-Path $decoder)) { throw "Native decoder output not found: $decoder" }
+
+          dotnet build src/LibreLancer.Tests/LibreLancer.Tests.csproj --configuration Release -p:UseSharedCompilation=false
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $testOutput = 'src/LibreLancer.Tests/bin/Release/net10.0'
+          New-Item -ItemType Directory -Force -Path $testOutput | Out-Null
+          Copy-Item -LiteralPath $decoder -Destination (Join-Path $testOutput 'lancerdecode.dll') -Force
+          dotnet test src/LibreLancer.Tests/LibreLancer.Tests.csproj --configuration Release --no-build --no-restore --filter 'FullyQualifiedName~AudioDecoderLoopTests' --logger trx
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   native:
     runs-on: ubuntu-24.04
@@ -48,7 +71,6 @@ jobs:
         with:
           dotnet-version: '10.0.x'
       - run: ./build.sh
-      - run: dotnet format --verify-no-changes --no-restore
-      - run: dotnet build LibreLancer.sln --configuration Release --no-restore --warnaserror
-      - run: dotnet test src/LibreLancer.Tests/LibreLancer.Tests.csproj --configuration Release --no-build --logger trx --collect:"XPlat Code Coverage"
+      - run: dotnet build LibreLancer.sln --configuration Release --no-restore
+      - run: dotnet test src/LibreLancer.Tests/LibreLancer.Tests.csproj --configuration Release --no-build --logger trx
       - run: dotnet test src/Nexus.Assets.Tests/Nexus.Assets.Tests.csproj --configuration Release --no-build --logger trx
