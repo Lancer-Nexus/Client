@@ -98,6 +98,31 @@ Quelle: [Data/TODO-video.md](../../LN-Data/TODO-video.md)
   alternatives Format bestätigen. Upscaling, Konvertierung, NAP-Ablage und
   `build_nap.py`-Schutz vor Überschreiben bleiben Data-Aufgaben.
 
+### Mehrsprachige Texte und Sounds in NAP
+
+Die Datenimport- und NAP-Aufgaben stehen im
+[Data-Umsetzungsplan](../../Data/TODO-mehrsprachigkeit.md). Client-Aufgaben:
+Die vorhandenen Decoderpfade sind im [Audio-Pipeline-Audit](asset-packages/audio-pipeline.md)
+beschrieben.
+
+- [ ] Versioniertes JSON-Ressourcenmanifest aus NAP laden und anstelle der drei
+  Laufzeit-DLLs `InfoCards.dll`, `MiscText.dll` und `NameResources.dll`
+  verwenden. Numerische IDs und DLL-Reihenfolge für zusammengesetzte IDs
+  erhalten; RDL-Infocarddaten unverändert an den Renderer geben.
+- [ ] Spracheinstellung im Client mit Text-/Infocardauflösung und NAP-VFS
+  verbinden. BCP-47-Sprach-/Regionsauswahl und Fallback
+  `Sprache-Region → Sprache → Standard` umsetzen; Sprachwechsel muss Texte
+  ohne Änderung der Spiel-IDs neu laden können.
+- [ ] Sprachabhängige Sprach-/Dialogaufnahmen und weitere lokalisierte Sounds
+  über dieselben Sprachkennungen und Fallback-Regeln aus NAP auswählen.
+  Sprachneutrale SFX und Musik bleiben gemeinsam nutzbar; Audioformate und
+  Decoder laufen weiterhin über die bestehende Audio-Pipeline.
+- [ ] Tests für DLL-zu-JSON-Parität (IDs und Inhalte), ungültige JSON-Daten,
+  Sprach-/Regions-Fallback und NAP-Laden ergänzen. Zur Laufzeit Hauptmenütexte
+  in mindestens zwei Sprachen sowie je einen lokalisierten Dialog-/Soundpfad
+  prüfen; fehlende Original-Ressourcen-DLLs dürfen dafür im Clientpaket nicht
+  vorausgesetzt werden.
+
 ## Gemeinsame Prüfpunkte und Zuständigkeit
 
 - [ ] Eine Client-Ladeprüfung mit einer lokalen Freelancer-Installation und
