@@ -1,0 +1,325 @@
+diff --git a/src/LibreLancer.Tests/AnimationEquipmentInstantiationTests.cs b/src/LibreLancer.Tests/AnimationEquipmentInstantiationTests.cs
+deleted file mode 100644
+index 1aa35718..00000000
+--- a/src/LibreLancer.Tests/AnimationEquipmentInstantiationTests.cs
++++ /dev/null
+@@ -1,31 +0,0 @@
+-using LibreLancer.Data.GameData.Items;
+-using LibreLancer.World;
+-using LibreLancer.World.Components;
+-using Xunit;
+-
+-namespace LibreLancer.Tests;
+-
+-public class AnimationEquipmentInstantiationTests
+-{
+-    [Fact]
+-    public void AnimationEquipmentDoesNotReachVisualEquipmentFactory()
+-    {
+-        var ship = new GameObject();
+-        var animation = new AnimationEquipment
+-        {
+-            Nickname = "fixture_animation",
+-            Animation = "Sc_fire"
+-        };
+-
+-        EquipmentObjectManager.InstantiateEquipment(
+-            ship,
+-            null!,
+-            null,
+-            EquipmentType.Server,
+-            "HpWeapon01",
+-            animation);
+-
+-        Assert.Empty(ship.Children);
+-        Assert.False(ship.TryGetComponent<EquipmentComponent>(out _));
+-    }
+-}
+diff --git a/src/LibreLancer.Tests/NpcTargetingTests.cs b/src/LibreLancer.Tests/NpcTargetingTests.cs
+index 26fa1b66..4002da2d 100644
+--- a/src/LibreLancer.Tests/NpcTargetingTests.cs
++++ b/src/LibreLancer.Tests/NpcTargetingTests.cs
+@@ -35,7 +35,7 @@ public class NpcTargetingTests
+     {
+         var obj = new GameObject();
+         var position = new Vector3(12, 34, 56);
+-        obj.SetLocalTransform(new Transform3D(position, Quaternion.Identity));
++        obj.SetTransform(new Transform3D(position, Quaternion.Identity));
+ 
+         var (restoredPosition, velocity) = SNPCComponent.GetAimTargetMotion(obj);
+ 
+diff --git a/src/LibreLancer.Tests/ThnCharacterRootAttachmentTests.cs b/src/LibreLancer.Tests/ThnCharacterRootAttachmentTests.cs
+index 252171f6..c757731e 100644
+--- a/src/LibreLancer.Tests/ThnCharacterRootAttachmentTests.cs
++++ b/src/LibreLancer.Tests/ThnCharacterRootAttachmentTests.cs
+@@ -21,7 +21,7 @@ public sealed class ThnCharacterRootAttachmentTests
+         var rootMotionTransform = new Transform3D(
+             new Vector3(-7, 2, 11),
+             Quaternion.CreateFromAxisAngle(Vector3.UnitY, 0.75f));
+-        character.SetLocalTransform(rootMotionTransform);
++        character.SetTransform(rootMotionTransform);
+ 
+         var sceneObject = new ThnSceneObject
+         {
+@@ -60,7 +60,7 @@ public sealed class ThnCharacterRootAttachmentTests
+         var rootMotionTransform = new Transform3D(
+             new Vector3(5, 3, -8),
+             Quaternion.CreateFromAxisAngle(Vector3.UnitY, -0.4f));
+-        character.SetLocalTransform(rootMotionTransform);
++        character.SetTransform(rootMotionTransform);
+ 
+         var sceneObject = new ThnSceneObject
+         {
+@@ -94,7 +94,7 @@ public sealed class ThnCharacterRootAttachmentTests
+             new Vector3(4, 2, -6),
+             Quaternion.CreateFromAxisAngle(Vector3.UnitY, -0.6f));
+         var character = new GameObject { RenderComponent = characterRenderer };
+-        character.SetLocalTransform(worldTransform);
++        character.SetTransform(worldTransform);
+         var sceneObject = new ThnSceneObject { Object = character };
+         var parent = new ThnObjectParent(sceneObject, null, null, characterBoneName: "body_head");
+ 
+diff --git a/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs b/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs
+index 2994b3cb..57c28f4b 100644
+--- a/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs
++++ b/src/LibreLancer/Server/Components/SFuseRunnerComponent.cs
+@@ -122,7 +122,7 @@ namespace LibreLancer.Server.Components
+                 {
+                     if (IsAbsoluteDamage(damageRoot.DamageType))
+                     {
+-                        Parent.GetComponent<SHealthComponent>()?.DamageRootFromFuse(damageRoot.Hitpoints);
++                        Parent.GetComponent<SHealthComponent>()?.DamageRootFromFuse(damageRoot.Hitpoints, world);
+                     }
+                 }
+                 else if (act is FuseDamageGroup damageGroup)
+@@ -277,7 +277,7 @@ namespace LibreLancer.Server.Components
+                 return;
+             }
+ 
+-            var destroyedPart = health.Damage(action.Hitpoints, 0, null, part);
++            var destroyedPart = health.Damage(action.Hitpoints, 0, null, part, world);
+             if (destroyedPart == null || !Parent.Model.TryGetCollisionGroup(destroyedPart, out var collisionGroup))
+             {
+                 return;
+@@ -334,7 +334,7 @@ namespace LibreLancer.Server.Components
+ 
+                 if (action.Damage > 0 && target.TryGetComponent<SHealthComponent>(out var health))
+                 {
+-                    health.DamageExplosion(action.Damage, 0, Parent, origin, action.Radius);
++                    health.DamageExplosion(action.Damage, 0, Parent, origin, action.Radius, world);
+                 }
+             }
+         }
+diff --git a/src/LibreLancer/Server/Components/SHealthComponent.cs b/src/LibreLancer/Server/Components/SHealthComponent.cs
+index 4d384473..b9dec073 100644
+--- a/src/LibreLancer/Server/Components/SHealthComponent.cs
++++ b/src/LibreLancer/Server/Components/SHealthComponent.cs
+@@ -192,11 +192,11 @@ namespace LibreLancer.Server.Components
+             }
+         }
+ 
+-        public void DamageRootFromFuse(float hullDamage)
++        public void DamageRootFromFuse(float hullDamage, GameWorld world)
+         {
+             if (hullDamage > 0)
+             {
+-                HandleHullDamage(hullDamage, null, null);
++                HandleHullDamage(hullDamage, null, null, world);
+             }
+         }
+ 
+diff --git a/src/LibreLancer/Server/Components/SNPCComponent.cs b/src/LibreLancer/Server/Components/SNPCComponent.cs
+index 188ddbf4..f42bbf65 100644
+--- a/src/LibreLancer/Server/Components/SNPCComponent.cs
++++ b/src/LibreLancer/Server/Components/SNPCComponent.cs
+@@ -1,6 +1,7 @@
+ using System;
+ using System.Collections.Generic;
+ using System.IO;
++using System.Linq;
+ using System.Numerics;
+ using System.Text.Json;
+ using LibreLancer.Data.GameData;
+diff --git a/src/LibreLancer/Server/JumperNpc.cs b/src/LibreLancer/Server/JumperNpc.cs
+index 98578e34..37717b21 100644
+--- a/src/LibreLancer/Server/JumperNpc.cs
++++ b/src/LibreLancer/Server/JumperNpc.cs
+@@ -15,6 +15,7 @@ using LibreLancer.Net.Protocol;
+ using LibreLancer.Server.Components;
+ using LibreLancer.World;
+ using LibreLancer.World.Components;
++using LibreLancer.World.Equipments;
+ using Pilot = LibreLancer.Data.GameData.Pilot;
+ 
+ namespace LibreLancer.Server;
+@@ -144,13 +145,11 @@ public class JumperNpc
+                 {
+                     EquipmentId = equipment.Equipment.Nickname,
+                     Hardpoint = equipment.Attachment?.Name ?? "internal",
+-                    Health = equipment.Parent.Attachment != null &&
+-                             equipment.Parent.TryGetComponent<SHealthComponent>(out var equipmentHealth) &&
+-                             equipmentHealth.MaxHealth > 0
+-                        ? Math.Clamp(equipmentHealth.CurrentHealth / equipmentHealth.MaxHealth, 0, 1)
++                    Health = equipment.MaxHealth > 0
++                        ? Math.Clamp(equipment.Health / equipment.MaxHealth, 0, 1)
+                         : 1,
+-                    Energy = equipment.Equipment is LibreLancer.Data.GameData.Items.PowerEquipment powerEquipment &&
+-                             equipment.Parent.TryGetComponent<PowerCoreComponent>(out var powerCore) &&
++                    Energy = equipment is PowerCore powerCore &&
++                             equipment.Equipment is LibreLancer.Data.GameData.Items.PowerEquipment powerEquipment &&
+                              powerEquipment.Def.Capacity > 0
+                         ? Math.Clamp(powerCore.CurrentEnergy / powerEquipment.Def.Capacity, 0, 1)
+                         : 1,
+@@ -211,23 +210,19 @@ public class JumperNpc
+ 
+     private static byte[] CaptureEquipmentExtension(EquipmentObject equipment, GameWorld world)
+     {
+-        var hasShield = equipment.Parent.TryGetComponent<SShieldComponent>(out var shield);
+-        var hasWeapon = equipment.Parent.TryGetComponent<WeaponComponent>(out var weapon);
+-        var hasPowerCore = equipment.Parent.TryGetComponent<PowerCoreComponent>(out var powerCore);
+-        if (!hasShield && !hasWeapon && !hasPowerCore)
++        var shield = equipment as Shield;
++        var weapon = equipment as AbstractWeapon;
++        var powerCore = equipment as PowerCore;
++        if (shield is null && weapon is null && powerCore is null)
+             return [];
+         return JsonSerializer.SerializeToUtf8Bytes(new NpcEquipmentTransferExtensionV1
+         {
+-            Shield = hasShield ? shield.CaptureTransferState(world) : null,
+-            WeaponCooldownSeconds = hasWeapon ? weapon.CurrentCooldown : null,
+-            WeaponAngles = hasWeapon
+-                ? new NpcWeaponAnglesTransferStateV1(weapon.Angles.X, weapon.Angles.Y)
+-                : null,
+-            ThrustCapacityFraction = hasPowerCore
+-                ? powerCore.Equip.ThrustCapacity > 0
+-                    ? Math.Clamp(powerCore.CurrentThrustCapacity / powerCore.Equip.ThrustCapacity, 0, 1)
+-                    : 0
+-                : null
++            Shield = shield?.CaptureTransferState(),
++            WeaponCooldownSeconds = weapon?.CurrentCooldown,
++            WeaponAngles = weapon is null ? null : new NpcWeaponAnglesTransferStateV1(weapon.Angles.X, weapon.Angles.Y),
++            ThrustCapacityFraction = powerCore is null || powerCore.Equipment.Def.ThrustCapacity <= 0
++                ? null
++                : Math.Clamp(powerCore.CurrentThrustCapacity / powerCore.Equipment.Def.ThrustCapacity, 0, 1)
+         });
+     }
+ 
+diff --git a/src/LibreLancer/World/Components/ShipPhysicsComponent.cs b/src/LibreLancer/World/Components/ShipPhysicsComponent.cs
+index e3a107bb..e669d329 100644
+--- a/src/LibreLancer/World/Components/ShipPhysicsComponent.cs
++++ b/src/LibreLancer/World/Components/ShipPhysicsComponent.cs
+@@ -4,10 +4,12 @@
+ 
+ using System;
+ using System.IO;
++using System.Linq;
+ using System.Numerics;
+ using LibreLancer.Data.GameData;
+ using LibreLancer.Physics;
+ using LibreLancer.Server.Components;
++using LibreLancer.World.Equipments;
+ 
+ namespace LibreLancer.World.Components
+ {
+@@ -78,7 +80,7 @@ namespace LibreLancer.World.Components
+ 
+         internal LibreLancer.Server.NpcShipPhysicsTransferStateV1 CaptureNpcTransferState()
+         {
+-            var engine = Parent.GetComponent<SEngineComponent>() ??
++            var engine = Parent.AllEquipment.OfType<Engine>().FirstOrDefault() ??
+                 throw new InvalidOperationException("NPC ship physics has no engine component.");
+             return new LibreLancer.Server.NpcShipPhysicsTransferStateV1
+             {
+@@ -104,7 +106,7 @@ namespace LibreLancer.World.Components
+         internal void RestoreNpcTransferState(LibreLancer.Server.NpcShipPhysicsTransferStateV1 state)
+         {
+             state.Validate();
+-            var engine = Parent.GetComponent<SEngineComponent>() ??
++            var engine = Parent.AllEquipment.OfType<Engine>().FirstOrDefault() ??
+                 throw new InvalidDataException("NPC ship physics has no engine component during restore.");
+             Active = state.Active;
+             EngineState = state.EngineState;
+diff --git a/src/LibreLancer/World/Components/ShipSteeringComponent.cs b/src/LibreLancer/World/Components/ShipSteeringComponent.cs
+index c5a1d68b..12408079 100644
+--- a/src/LibreLancer/World/Components/ShipSteeringComponent.cs
++++ b/src/LibreLancer/World/Components/ShipSteeringComponent.cs
+@@ -125,10 +125,10 @@ namespace LibreLancer.World.Components
+ 
+             var strafe = CurrentStrafe;
+             if (strafe == StrafeControls.None &&
+-                Parent.TryGetComponent<AutopilotComponent>(out autoPilot) &&
+-                autoPilot.CurrentBehavior != AutopilotBehaviors.None)
++                Parent.TryGetComponent<AutopilotComponent>(out var strafeAutoPilot) &&
++                strafeAutoPilot.CurrentBehavior != AutopilotBehaviors.None)
+             {
+-                strafe = autoPilot.AutopilotStrafe;
++                strafe = strafeAutoPilot.AutopilotStrafe;
+             }
+ 
+             physics!.Steering = OutputSteering;
+diff --git a/src/LibreLancer/World/EquipmentObjectManager.cs b/src/LibreLancer/World/EquipmentObjectManager.cs
+index 5ee6e925..827be304 100644
+--- a/src/LibreLancer/World/EquipmentObjectManager.cs
++++ b/src/LibreLancer/World/EquipmentObjectManager.cs
+@@ -25,12 +25,6 @@ namespace LibreLancer.World
+ 
+         public static void InstantiateEquipment(GameObject parent, ResourceManager res, SoundManager? snd, EquipmentType type, string? hardpoint, Equipment equip)
+         {
+-            if (equip is AnimationEquipment animation)
+-            {
+-                if (animation.Animation != null)
+-                    parent.AnimationComponent?.StartAnimation(animation.Animation);
+-                return;
+-            }
+             var obj = Create(parent, res, snd, type, parent.GetHardpoint(hardpoint), equip);
+             parent.AddChild(obj);
+             HardpointHulls.Activate(obj);
+diff --git a/src/LibreLancer/World/Equipments/Engine.cs b/src/LibreLancer/World/Equipments/Engine.cs
+index 2f38c032..ba3bf80f 100644
+--- a/src/LibreLancer/World/Equipments/Engine.cs
++++ b/src/LibreLancer/World/Equipments/Engine.cs
+@@ -9,6 +9,7 @@ using LibreLancer.Net.Protocol;
+ using LibreLancer.Render;
+ using LibreLancer.Resources;
+ using LibreLancer.Sounds;
++using LibreLancer.World.Components;
+ 
+ namespace LibreLancer.World.Equipments;
+ 
+@@ -205,8 +206,8 @@ public class Engine : EquipmentObject<EngineEquipment>
+         }
+ 
+         var maxVelocity = Parent.PhysicsComponent is { } physics
+-            ? (physics.Ship.LinearDrag + Equipment.Def.LinearDrag) > 0
+-                ? Equipment.Def.MaxForce / (physics.Ship.LinearDrag + Equipment.Def.LinearDrag)
++            ? (Parent.GetComponent<ShipPhysicsComponent>()!.Ship.LinearDrag + Equipment.Def.LinearDrag) > 0
++                ? Equipment.Def.MaxForce / (Parent.GetComponent<ShipPhysicsComponent>()!.Ship.LinearDrag + Equipment.Def.LinearDrag)
+                 : 0
+             : 0;
+         var velocity = Parent.PhysicsComponent?.Body.LinearVelocity.Length() ?? 0;
+diff --git a/src/LibreLancer/World/GameWorld.cs b/src/LibreLancer/World/GameWorld.cs
+index 1c8885e3..26febb37 100644
+--- a/src/LibreLancer/World/GameWorld.cs
++++ b/src/LibreLancer/World/GameWorld.cs
+@@ -169,7 +169,7 @@ namespace LibreLancer.World
+ 
+                 // Universe objects declare their affiliation with `reputation`.
+                 // `faction` is a separate, rarely used like this, but still used for ex by solars.
+-                var objectFaction = GetObjectFaction(obj);
++                var objectFaction = obj.Reputation ?? obj.Faction;
+                 if (arch.IsUpdatableSolar() || objectFaction != null || hasAutoTurrets)
+                 {
+                     g.AddComponent(new SSolarComponent(g) { Faction = objectFaction });
+diff --git a/src/LibreLancer/World/ProjectileManager.cs b/src/LibreLancer/World/ProjectileManager.cs
+index b522995d..64a6c259 100644
+--- a/src/LibreLancer/World/ProjectileManager.cs
++++ b/src/LibreLancer/World/ProjectileManager.cs
+@@ -192,7 +192,7 @@ namespace LibreLancer.World
+                             if (spawn.Target != v.Target)
+                             {
+                                 targets ??= [];
+-                                targets.Add(spawn.Target);
++                                targets.Add(v.Target);
+                                 spawn.Unique |= (1UL << v.Index);
+                             }
+                         }
