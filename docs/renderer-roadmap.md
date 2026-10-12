@@ -69,3 +69,16 @@ Diese Liste plant moderne Renderer-Erweiterungen für LibreLancer. Sie ist eine 
 - [ ] Resize, Alt-Tab, minimiertes Fenster und mehrfaches Öffnen/Schließen von Vorschauen hinterlassen keine GL-Fehler oder Ressourcenlecks.
 - [ ] Jeder Effekt hat einen Qualitätsschalter, sinnvolle Standardwerte und einen messbaren Kosten-/Qualitätsvergleich.
 - [ ] Änderungen am Engine-Renderer bleiben in einem fokussierten Patch unter `patches/` und in `patches/series` registriert.
+
+## Backends und Priorisierung (Vorschlag, nur Aufgabenliste)
+
+Stand der Sichtung 2026-10-12. Vorhanden sind die Backends `OpenGL` und `Null`; die Render-Schnittstellen (`IRenderContext`, `IShader`, `ITextureCube`, `IStorageBuffer` …) sind abstrahiert, die Shader liegen als HLSL vor und laufen über `LLShaderCompiler` (SPIRV-Cross). Das Spiel ist ein Weltraumspiel mit viel Transparenz (Nebel, Partikel, Triebwerke, Schilde) und wenigen Lichtquellen.
+
+- [ ] **Zuerst die Pipeline (Abschnitte 1, 3, 4):** Render-Passes, HDR-Zwischenpuffer, Tonemapping und Bloom. Größter sichtbarer Gewinn für Sonnen, Triebwerke, Schüsse und Schilde, ohne neues Backend.
+- [ ] **Forward oder Clustered Forward statt Deferred:** Transparenz und MSAA/SMAA sprechen gegen Deferred. Forward+ gegen die aktuelle Beleuchtung benchmarken.
+- [ ] **Image-Based Lighting:** Cube Maps (`envcube_*` aus LN-Data) für den PBR-Pfad als Umgebungslicht prüfen.
+- [ ] **Volumetrische Nebel und Soft Particles:** Nebelfelder sind ein Merkmal des Spiels; als eigene Qualitätsstufe mit Fallback.
+- [ ] **Vulkan-Backend (Spike):** Prüfen, wie weit `IRenderContext` und die HLSL→SPIR-V-Kette tragen. Nutzen: Linux/Steam Deck, Mehrkern-Befehlsaufzeichnung für viele Schiffe, RenderDoc, MoltenVK für macOS. Aufwand und Risiko groß, vorher messen.
+- [ ] **Direct3D 11 und Metal nur bei konkretem Bedarf:** D3D11 nur, wenn OpenGL unter Windows Probleme macht; Metal besser über MoltenVK.
+- [ ] **Profil „Original-Look“** ohne Zusatzeffekte als Fallback und Referenz für Screenshot-Vergleiche erhalten.
+- [ ] Offene Messung: GPU-Zeit je Pass auf Zielhardware (Abschnitt 1), bevor ein Backend-Umbau entschieden wird.
