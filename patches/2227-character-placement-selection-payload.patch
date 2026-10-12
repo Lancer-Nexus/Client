@@ -1,0 +1,74 @@
+--- a/src/LibreLancer.Tests/GatewayCharacterLeaseClientTests.cs
++++ b/src/LibreLancer.Tests/GatewayCharacterLeaseClientTests.cs
+@@ -125,7 +125,7 @@
+ 
+         var loaded = await client.ReadSnapshotAsync(lease.CharacterId, lease.LeaseToken, lease.LeaseVersion);
+         var revision = await client.WriteSnapshotAsync(lease.CharacterId, lease.LeaseToken, lease.LeaseVersion,
+-            8, [1, 2, 3]);
++            8, [1, 2, 3], "LI03");
+ 
+         Assert.Equal(7, loaded!.Revision);
+         Assert.Equal(new byte[] { 9, 8, 7 }, loaded.Payload);
+@@ -135,6 +135,7 @@
+         Assert.Equal(lease.LeaseToken, handler.SnapshotWriteRequest!.LeaseToken);
+         Assert.Equal(8, handler.SnapshotWriteRequest.Revision);
+         Assert.Equal(new byte[] { 1, 2, 3 }, handler.SnapshotWriteRequest.Payload);
++        Assert.Equal("li03", handler.SnapshotWriteRequest.SystemId);
+         Assert.Equal("/api/v1/game/characters/snapshot/read", handler.Paths[^2]);
+         Assert.Equal("/api/v1/game/characters/snapshot/write", handler.Paths[^1]);
+     }
+@@ -196,7 +197,7 @@
+         var session = Guid.NewGuid();
+ 
+         var roster = await client.ListCharactersAsync(account, session);
+-        var characterId = await client.RegisterNewCharacterAsync(account, session, "Pilot One", [1, 2, 3]);
++        var characterId = await client.RegisterNewCharacterAsync(account, session, "Pilot One", [1, 2, 3], "LI01");
+         var preview = await client.ReadCharacterPreviewAsync(account, session, characterId);
+         await client.DeleteCharacterAsync(account, session, characterId);
+ 
+@@ -206,6 +207,7 @@
+         Assert.Equal(new byte[] { 5, 6, 7 }, preview!.Payload);
+         Assert.Equal(918, handler.BootstrapRequest!.CharacterId);
+         Assert.Equal(new byte[] { 1, 2, 3 }, handler.BootstrapRequest.Payload);
++        Assert.Equal("li01", handler.BootstrapRequest.SystemId);
+         Assert.Equal(918, handler.PreviewRequest!.CharacterId);
+         Assert.Equal(918, handler.DeleteRequest!.CharacterId);
+         Assert.Equal(new[]
+--- a/src/LibreLancer.Tests/NexusGatewayLoginTests.cs
++++ b/src/LibreLancer.Tests/NexusGatewayLoginTests.cs
+@@ -93,7 +93,7 @@
+             Assert.Equal("Bearer access", handler.RosterAuthorization);
+             Assert.Equal("/api/v1/placement/request", handler.Requests[3].Path);
+             Assert.Contains("\"characterId\":73", handler.Requests[3].Body);
+-            Assert.Contains("\"targetSystem\":\"li01\"", handler.Requests[3].Body);
++            Assert.Contains("\"targetSystem\":\"character-selection\"", handler.Requests[3].Body);
+         }
+         finally { Directory.Delete(folder, true); }
+     }
+--- a/src/LibreLancer/Net/NexusGatewayLogin.cs
++++ b/src/LibreLancer/Net/NexusGatewayLogin.cs
+@@ -111,7 +111,7 @@
+                     : "The selected Gateway character name is ambiguous.");
+             characterId = matches[0].CharacterId;
+         }
+-        if (string.IsNullOrWhiteSpace(targetSystem))
++        if (characterId is null && string.IsNullOrWhiteSpace(targetSystem))
+             throw new ArgumentException("Target system is required.", nameof(targetSystem));
+         var requestId = Guid.NewGuid();
+         var placement = new PlacementRequest
+@@ -119,7 +119,7 @@
+             RequestId = requestId,
+             SessionId = login.SessionId!.Value,
+             CharacterId = characterId,
+-            TargetSystem = targetSystem,
++            TargetSystem = characterId is null ? targetSystem : "character-selection",
+             ClientBuild = hello.BuildId,
+             Region = region,
+             IdempotencyKey = requestId.ToString("N")
+--- a/patches/series
++++ b/patches/series
+@@ -225,3 +225,4 @@
+ client 2224-fail-closed-unowned-character-systems.patch
+ client 2225-audio-loop-final-verification.patch
+ client 2226-character-aware-placement-followup.patch
++client 2227-character-placement-selection-payload.patch

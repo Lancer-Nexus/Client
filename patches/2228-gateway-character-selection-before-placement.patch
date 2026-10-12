@@ -1,0 +1,573 @@
+diff --git a/src/LibreLancer/GameStates/LuaMenu.cs b/src/LibreLancer/GameStates/LuaMenu.cs
+--- a/src/LibreLancer/GameStates/LuaMenu.cs
++++ b/src/LibreLancer/GameStates/LuaMenu.cs
+@@ -11,6 +11,7 @@
+ using System.Runtime.InteropServices;
+ using System.Threading;
+ using System.Threading.Tasks;
++using LancerNexus.Protocol;
+ using LibreLancer.Client;
+ using LibreLancer.Data.GameData;
+ using LibreLancer.ImUI.NodeEditor;
+@@ -398,7 +399,15 @@
+             private CancellationTokenSource? gatewayLoginCancellation;
+             private CGameSession netSession = null!;
+             private ServerList serverList = new();
+-            private CharacterSelectInfo cselInfo = null!;
++            private CharacterSelectInfo cselInfo = new();
++            private NexusGatewayLoginResult? pendingGatewayLogin;
++            private string? pendingGatewayCharacterName;
++
++            public bool GatewayCharacterSelection() => pendingGatewayLogin is not null;
++
++            public bool CanLoadSelectedCharacter() => pendingGatewayLogin is not null &&
++                cselInfo.ValidSelection() && !string.IsNullOrWhiteSpace(cselInfo.Characters[cselInfo.Selected].Location) &&
++                !cselInfo.Characters[cselInfo.Selected].Location.Equals("unknown", StringComparison.OrdinalIgnoreCase);
+ 
+             public CharacterSelectInfo CharacterList() => cselInfo;
+             public ServerList ServerList() => serverList;
+@@ -406,6 +415,9 @@
+             public void StartNetworking()
+             {
+                 StopNetworking();
++                pendingGatewayLogin = null;
++                pendingGatewayCharacterName = null;
++                cselInfo = new CharacterSelectInfo();
+                 netClient = new GameNetClient(state.Game);
+                 netSession = new CGameSession(state.Game, netClient);
+                 netClient.UUID = state.Game.Config.UUID;
+@@ -444,30 +456,70 @@
+                 {
+                     using var gateway = new NexusGatewayLogin(
+                         new Uri(state.Game.Config.ClusterGatewayUrl, UriKind.Absolute));
+-                    var result = await gateway.LoginAndPlaceAsync(email, password,
+-                        state.Game.Config.ClusterTargetSystem, state.Game.Config.ClusterRegion,
+-                        cancellation, state.Game.DebugCharacterName);
++                    var login = await gateway.LoginAsync(email, password, cancellation);
++                    if (!login.LoggedIn)
++                    {
++                        state.Game.QueueUIThread(() =>
++                        {
++                            if (netClient == client && !cancellation.IsCancellationRequested)
++                                state.ui.Event("UpdateRequired", login.VersionDecision.MessageKey);
++                        });
++                        return;
++                    }
++
++                    var roster = await gateway.ListCharactersAsync(login.AccessToken!, login.AccountId!.Value,
++                        login.SessionId!.Value, cancellation);
++                    CharacterRosterEntryV1? selected = null;
++                    var requestedName = state.Game.DebugCharacterName;
++                    if (!string.IsNullOrWhiteSpace(requestedName))
++                    {
++                        var matches = roster.Where(character => string.Equals(character.DisplayName,
++                            requestedName, StringComparison.OrdinalIgnoreCase)).ToArray();
++                        if (matches.Length == 1 && matches[0].SystemId is not null)
++                            selected = matches[0];
++                        else
++                            FLLog.Warning("Debug", $"Requested Gateway character '{requestedName}' was not uniquely found with a known system; opening character selection.");
++                    }
++                    if (selected is null && roster.Length == 1 && roster[0].SystemId is not null &&
++                        string.IsNullOrWhiteSpace(requestedName))
++                        selected = roster[0];
++
++                    if (selected is null && roster.Length > 0)
++                    {
++                        var selection = new CharacterSelectInfo();
++                        foreach (var character in roster)
++                        {
++                            selection.Characters.Add(new SelectableCharacter
++                            {
++                                Id = character.CharacterId,
++                                Name = character.DisplayName,
++                                Rank = -1,
++                                Funds = -1,
++                                Location = character.SystemId ?? "Unknown"
++                            });
++                        }
++                        state.Game.QueueUIThread(() =>
++                        {
++                            if (netClient != client || cancellation.IsCancellationRequested)
++                                return;
++                            pendingGatewayLogin = login;
++                            cselInfo = selection;
++                            state.ui.Event("GatewayCharacterSelection");
++                        });
++                        return;
++                    }
++
++                    var result = selected is not null
++                        ? await gateway.PlaceCharacterAsync(login, state.Game.Config.ClusterRegion,
++                            selected.CharacterId, cancellation)
++                        : await gateway.PlaceDefaultCharacterlessAsync(login,
++                            state.Game.Config.ClusterTargetSystem, state.Game.Config.ClusterRegion, cancellation);
+                     state.Game.QueueUIThread(() =>
+                     {
+                         if (netClient != client || cancellation.IsCancellationRequested)
+                             return;
+-                        if (result.RequestedExitCode is not null)
+-                        {
+-                            state.ui.Event("UpdateRequired", result.VersionDecision.MessageKey);
+-                        }
+-                        else if (result.Assigned)
+-                        {
+-                            client.ClusterGatewayUrl = state.Game.Config.ClusterGatewayUrl;
+-                            client.ClusterAccessToken = result.AccessToken ?? "";
+-                            client.ClusterRefreshToken = result.RefreshToken ?? "";
+-                            client.ClusterSessionId = result.SessionId ?? Guid.Empty;
+-                            client.ClusterInstanceId = result.InstanceId ?? "";
+-                            client.ClusterSystemId = result.SystemId ?? "";
+-                            client.ClusterEndpoint = result.GameEndpoint ?? "";
+-                            client.ConnectWithTicket(result.GameEndpoint!, result.JoinTicket!);
+-                        }
+-                        else
+-                            state.ui.Event("Disconnect", "AssignmentFailed");
++                        pendingGatewayCharacterName = selected?.DisplayName;
++                        ConnectWithAssignment(client, result);
+                     });
+                 }
+                 catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+@@ -501,13 +553,42 @@
+                 }
+             }
+ 
++            private void ConnectWithAssignment(GameNetClient client, NexusGatewayLoginResult result)
++            {
++                if (result.Assigned)
++                {
++                    client.ClusterGatewayUrl = state.Game.Config.ClusterGatewayUrl;
++                    client.ClusterAccessToken = result.AccessToken ?? "";
++                    client.ClusterRefreshToken = result.RefreshToken ?? "";
++                    client.ClusterSessionId = result.SessionId ?? Guid.Empty;
++                    client.ClusterInstanceId = result.InstanceId ?? "";
++                    client.ClusterSystemId = result.SystemId ?? "";
++                    client.ClusterEndpoint = result.GameEndpoint ?? "";
++                    pendingGatewayLogin = null;
++                    client.ConnectWithTicket(result.GameEndpoint!, result.JoinTicket!);
++                }
++                else
++                    state.ui.Event("Disconnect", "AssignmentFailed");
++            }
++
+             public void RequestNewCharacter()
+             {
++                if (GatewayCharacterSelection()) return;
+                 netSession.RpcServer.RequestCharacterDB();
+             }
+ 
+             public void LoadCharacter()
+             {
++                if (pendingGatewayLogin is not null)
++                {
++                    if (!CanLoadSelectedCharacter())
++                    {
++                        state.ui.Event("GatewayCharacterUnavailable");
++                        return;
++                    }
++                    _ = PlaceSelectedGatewayCharacterAsync(cselInfo.Characters[cselInfo.Selected]);
++                    return;
++                }
+                 netSession.RpcServer.SelectCharacter(cselInfo.Selected).ContinueWith(x => state.Game.QueueUIThread(() =>
+                 {
+                     if (x.Result)
+@@ -527,10 +608,67 @@
+ 
+             }
+ 
++            private async Task PlaceSelectedGatewayCharacterAsync(SelectableCharacter character)
++            {
++                var login = pendingGatewayLogin;
++                var client = netClient;
++                var cancellation = gatewayLoginCancellation?.Token ?? CancellationToken.None;
++                if (login is null || client is null)
++                    return;
++                try
++                {
++                    using var gateway = new NexusGatewayLogin(
++                        new Uri(state.Game.Config.ClusterGatewayUrl, UriKind.Absolute));
++                    var result = await gateway.PlaceCharacterAsync(login, state.Game.Config.ClusterRegion,
++                        character.Id, cancellation);
++                    state.Game.QueueUIThread(() =>
++                    {
++                        if (netClient != client || cancellation.IsCancellationRequested)
++                            return;
++                        pendingGatewayCharacterName = character.Name;
++                        ConnectWithAssignment(client, result);
++                    });
++                }
++                catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
++                {
++                }
++                catch (Exception exception) when (exception is HttpRequestException or
++                    UnauthorizedAccessException or InvalidDataException or ArgumentException or FormatException)
++                {
++                    FLLog.Error("Gateway", exception.Message);
++                    state.Game.QueueUIThread(() =>
++                    {
++                        if (netClient == client)
++                            state.ui.Event("GatewayCharacterUnavailable");
++                    });
++                }
++            }
++
++            public bool SelectCharacterToLoad()
++            {
++                var requestedName = pendingGatewayCharacterName ?? state.Game.DebugCharacterName;
++                if (string.IsNullOrWhiteSpace(requestedName))
++                    return false;
++                var index = cselInfo.Characters.FindIndex(character =>
++                    string.Equals(character.Name, requestedName, StringComparison.OrdinalIgnoreCase));
++                if (index < 0)
++                {
++                    FLLog.Warning("Gateway", $"Assigned character '{requestedName}' was not present in the game-server roster; showing the server roster for manual selection.");
++                    state.Game.DebugCharacterName = null;
++                    return false;
++                }
++                cselInfo.Selected = index;
++                FLLog.Info("Gateway", $"Automatically selecting assigned character '{cselInfo.Characters[index].Name}'.");
++                pendingGatewayCharacterName = null;
++                state.Game.DebugCharacterName = null;
++                return true;
++            }
++
+             private int delIndex = -1;
+ 
+             public void DeleteCharacter()
+             {
++                if (GatewayCharacterSelection()) return;
+                 delIndex = cselInfo.Selected;
+                 netSession.RpcServer.DeleteCharacter(cselInfo.Selected).ContinueWith((t) =>
+                 {
+diff --git a/src/LibreLancer/Net/NexusGatewayLogin.cs b/src/LibreLancer/Net/NexusGatewayLogin.cs
+--- a/src/LibreLancer/Net/NexusGatewayLogin.cs
++++ b/src/LibreLancer/Net/NexusGatewayLogin.cs
+@@ -84,7 +84,8 @@
+         var login = await loginResponse.Content.ReadFromJsonAsync<GatewayLoginResponse>(
+             cancellationToken: cancellationToken)
+             ?? throw new InvalidDataException("Gateway login response is empty.");
+-        if (string.IsNullOrWhiteSpace(login.AccessToken) || login.SessionId == Guid.Empty)
++        if (string.IsNullOrWhiteSpace(login.AccessToken) || login.AccountId == Guid.Empty ||
++            login.SessionId == Guid.Empty)
+             throw new InvalidDataException("Gateway login response is incomplete.");
+         return new NexusGatewayLoginResult(decision, login.AccessToken, login.RefreshToken, login.SessionId,
+             AccountId: login.AccountId);
+@@ -99,6 +100,7 @@
+         if (!login.LoggedIn)
+             return login;
+         long? characterId = null;
++        string? expectedSystemId = null;
+         if (!string.IsNullOrWhiteSpace(selectedCharacterName))
+         {
+             var roster = await ListCharactersAsync(login.AccessToken!, login.AccountId!.Value,
+@@ -110,14 +112,56 @@
+                     ? "The selected Gateway character does not exist in this account."
+                     : "The selected Gateway character name is ambiguous.");
+             characterId = matches[0].CharacterId;
+-        }
++            expectedSystemId = matches[0].SystemId;
++            if (string.IsNullOrWhiteSpace(expectedSystemId))
++                throw new InvalidDataException("The selected Gateway character has no known system assignment.");
++        }
++        var result = await RequestPlacementAsync(login, targetSystem, region, characterId, cancellationToken);
++        if (expectedSystemId is not null &&
++            !string.Equals(result.SystemId, expectedSystemId, StringComparison.OrdinalIgnoreCase))
++            throw new InvalidDataException("Gateway placement does not match the selected character's saved system.");
++        return result;
++    }
++
++    public async Task<NexusGatewayLoginResult> PlaceCharacterAsync(
++        NexusGatewayLoginResult login, string region, long characterId,
++        CancellationToken cancellationToken = default)
++    {
++        if (!login.LoggedIn || login.AccountId is not Guid accountId || accountId == Guid.Empty ||
++            login.SessionId is not Guid sessionId || sessionId == Guid.Empty || characterId <= 0)
++            throw new ArgumentException("A valid Gateway login and character are required.", nameof(login));
++        var roster = await ListCharactersAsync(login.AccessToken!, accountId, sessionId, cancellationToken);
++        var selected = roster.SingleOrDefault(character => character.CharacterId == characterId);
++        if (selected is null)
++            throw new InvalidDataException("The selected Gateway character does not exist in this account.");
++        if (string.IsNullOrWhiteSpace(selected.SystemId))
++            throw new InvalidDataException("The selected Gateway character has no known system assignment.");
++        var result = await RequestPlacementAsync(login, "", region, characterId, cancellationToken);
++        if (!string.Equals(result.SystemId, selected.SystemId, StringComparison.OrdinalIgnoreCase))
++            throw new InvalidDataException("Gateway placement does not match the selected character's saved system.");
++        return result;
++    }
++
++    public Task<NexusGatewayLoginResult> PlaceDefaultCharacterlessAsync(
++        NexusGatewayLoginResult login, string targetSystem, string region,
++        CancellationToken cancellationToken = default) =>
++        RequestPlacementAsync(login, targetSystem, region, null, cancellationToken);
++
++    private async Task<NexusGatewayLoginResult> RequestPlacementAsync(
++        NexusGatewayLoginResult login, string targetSystem, string region, long? characterId,
++        CancellationToken cancellationToken)
++    {
++        if (!login.LoggedIn || login.AccessToken is null || login.SessionId is not Guid sessionId ||
++            sessionId == Guid.Empty)
++            throw new ArgumentException("An active Gateway login is required.", nameof(login));
+         if (characterId is null && string.IsNullOrWhiteSpace(targetSystem))
+             throw new ArgumentException("Target system is required.", nameof(targetSystem));
++        var hello = LoadInstalledHello();
+         var requestId = Guid.NewGuid();
+         var placement = new PlacementRequest
+         {
+             RequestId = requestId,
+-            SessionId = login.SessionId!.Value,
++            SessionId = sessionId,
+             CharacterId = characterId,
+             TargetSystem = characterId is null ? targetSystem : "character-selection",
+             ClientBuild = hello.BuildId,
+diff --git a/src/LibreLancer/Net/Protocol/CharacterSelectInfo.cs b/src/LibreLancer/Net/Protocol/CharacterSelectInfo.cs
+--- a/src/LibreLancer/Net/Protocol/CharacterSelectInfo.cs
++++ b/src/LibreLancer/Net/Protocol/CharacterSelectInfo.cs
+@@ -29,8 +29,8 @@
+             return column.ToLowerInvariant() switch
+             {
+                 "name" => Characters[row].Name,
+-                "rank" => Characters[row].Rank.ToString(),
+-                "funds" => Characters[row].Funds.ToString(),
++                "rank" => Characters[row].Rank < 0 ? "" : Characters[row].Rank.ToString(),
++                "funds" => Characters[row].Funds < 0 ? "" : Characters[row].Funds.ToString(),
+                 "ship" => Characters[row].Ship,
+                 "location" => Characters[row].Location,
+                 _ => null
+diff --git a/src/LibreLancer.Tests/NexusGatewayLoginTests.cs b/src/LibreLancer.Tests/NexusGatewayLoginTests.cs
+--- a/src/LibreLancer.Tests/NexusGatewayLoginTests.cs
++++ b/src/LibreLancer.Tests/NexusGatewayLoginTests.cs
+@@ -99,6 +99,68 @@
+     }
+ 
+     [Fact]
++    public async Task PlacementCanWaitForNormalUiCharacterSelection()
++    {
++        var folder = CreateMetadata();
++        try
++        {
++            var handler = new FakeHandler(false);
++            using var client = new NexusGatewayLogin(new Uri("https://gateway.example.test"), folder, handler);
++            var login = await client.LoginAsync("pilot@example.net", "secret", TestContext.Current.CancellationToken);
++
++            var result = await client.PlaceCharacterAsync(login, "eu", 73,
++                TestContext.Current.CancellationToken);
++
++            Assert.True(result.Assigned);
++            Assert.Equal(4, handler.Requests.Count);
++            Assert.Equal("/api/v1/characters/list", handler.Requests[2].Path);
++            Assert.Equal("/api/v1/placement/request", handler.Requests[3].Path);
++            Assert.Contains("\"characterId\":73", handler.Requests[3].Body);
++            Assert.Contains("\"targetSystem\":\"character-selection\"", handler.Requests[3].Body);
++            Assert.Equal("Bearer access", handler.RosterAuthorization);
++            Assert.Equal("Bearer access", handler.PlacementAuthorization);
++        }
++        finally { Directory.Delete(folder, true); }
++    }
++
++    [Fact]
++    public async Task UiSelectedCharacterMustStillBelongToActiveGatewayRoster()
++    {
++        var folder = CreateMetadata();
++        try
++        {
++            var handler = new FakeHandler(false, includeRosterCharacter: false);
++            using var client = new NexusGatewayLogin(new Uri("https://gateway.example.test"), folder, handler);
++            var login = await client.LoginAsync("pilot@example.net", "secret", TestContext.Current.CancellationToken);
++
++            await Assert.ThrowsAsync<InvalidDataException>(() => client.PlaceCharacterAsync(
++                login, "eu", 73, TestContext.Current.CancellationToken));
++
++            Assert.Equal("/api/v1/characters/list", handler.Requests[^1].Path);
++            Assert.DoesNotContain(handler.Requests, request => request.Path == "/api/v1/placement/request");
++        }
++        finally { Directory.Delete(folder, true); }
++    }
++
++    [Fact]
++    public async Task UiSelectedCharacterRejectsPlacementForDifferentSavedSystem()
++    {
++        var folder = CreateMetadata();
++        try
++        {
++            var handler = new FakeHandler(false, wrongCharacterPlacementSystem: true);
++            using var client = new NexusGatewayLogin(new Uri("https://gateway.example.test"), folder, handler);
++            var login = await client.LoginAsync("pilot@example.net", "secret", TestContext.Current.CancellationToken);
++
++            await Assert.ThrowsAsync<InvalidDataException>(() => client.PlaceCharacterAsync(
++                login, "eu", 73, TestContext.Current.CancellationToken));
++
++            Assert.Equal("/api/v1/placement/request", handler.Requests[^1].Path);
++        }
++        finally { Directory.Delete(folder, true); }
++    }
++
++    [Fact]
+     public async Task PlacementDoesNotProceedWhenSelectedCharacterIsNotInRoster()
+     {
+         var folder = CreateMetadata();
+@@ -222,7 +284,7 @@
+     }
+ 
+     private sealed class FakeHandler(bool updateRequired, bool mismatchedTransferTarget = false,
+-        bool includeRosterCharacter = true) : HttpMessageHandler
++        bool includeRosterCharacter = true, bool wrongCharacterPlacementSystem = false) : HttpMessageHandler
+     {
+         public List<(string Path, string Body)> Requests { get; } = [];
+         public string? PlacementAuthorization { get; private set; }
+@@ -277,12 +339,17 @@
+         private string PlacementPayload(HttpRequestMessage request, string body)
+         {
+             PlacementAuthorization = request.Headers.Authorization?.ToString();
+-            var requestId = JsonDocument.Parse(body).RootElement.GetProperty("requestId").GetGuid();
++            var requestBody = JsonDocument.Parse(body).RootElement;
++            var requestId = requestBody.GetProperty("requestId").GetGuid();
++            var systemId = requestBody.TryGetProperty("characterId", out var characterId) &&
++                           characterId.ValueKind != JsonValueKind.Null
++                ? wrongCharacterPlacementSystem ? "li01" : "li03"
++                : "li01";
+             return JsonSerializer.Serialize(new
+             {
+                 decision = new
+                 {
+-                    requestId, accepted = true, instanceId = "instance-eu-01", systemId = "li01",
++                    requestId, accepted = true, instanceId = "instance-eu-01", systemId,
+                     endpoint = "game.example.test:2300",
+                     joinTicket = "join-ticket", expiresUtc = DateTime.UtcNow.AddMinutes(2)
+                 },
+diff --git a/src/LibreLancer.Tests/CharacterSelectInfoTests.cs b/src/LibreLancer.Tests/CharacterSelectInfoTests.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Tests/CharacterSelectInfoTests.cs
+@@ -0,0 +1,17 @@
++using LibreLancer.Net.Protocol;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class CharacterSelectInfoTests
++{
++    [Fact]
++    public void MissingGatewayPreviewValuesRenderAsEmptyCells()
++    {
++        var info = new CharacterSelectInfo();
++        info.Characters.Add(new SelectableCharacter { Name = "Pilot", Rank = -1, Funds = -1 });
++
++        Assert.Equal("", info.GetContentString(0, "rank"));
++        Assert.Equal("", info.GetContentString(0, "funds"));
++    }
++}
+diff --git a/src/LibreLancer/Interface/Default/interface.json b/src/LibreLancer/Interface/Default/interface.json
+--- a/src/LibreLancer/Interface/Default/interface.json
++++ b/src/LibreLancer/Interface/Default/interface.json
+@@ -8,7 +8,7 @@
+     "baseside.lua": "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",
+     "cargometer.lua": "G88HAGRT1WZimfCayBRF/tL0TGll8jEibOEPKkdBSf//j/niQxvZxF8tqqmO572Latwsf2JilH2DD/x1Wsx7XKKJus8o0HWgLzX+VLoqCG6FNO9OSCmhx/dPANN/3rjcO5tublxO7w62r/fR46/C/NL+zsHe/jV6nBS+Iuvvq5Dm3TRRGymFRyHbdJFkCZVbdfAOhgIAvY0eT+n57PE/VWqzG760WjPnwT/jkOf64DYPvYTXky6SXBhQlU+60GPyLjD/rf4tbhW/eGxZHL6DwZuuOfK2cquWxG6XKjLfkkYC8wmGdSzfiHEniMYGm3Vgfo8RLG4KPqHcgOR/z7cSBSXbh5ZElapmP9jK7zEOFHdZRKXQXhjn8nDIwfwePRZzsg/o8eupdxy1Rr+/EHV0n3he60n3GUYCFTkA/cO1R6q92WbmY9T0+po5qmw5pblnzUaRzDmQgn+l/rD0fIMoPtA0G+gobiDfYgdKUca1fWEJ90i3OumSzV5JpHtWCgUN3/LAzZEyCzIQgKmXV/KtmiUmavONGK20jR0CcnQ5MOWlzX+HQucri5sYvAe92KKkCW6ZEj57nUC+OB1b1sEOfahoCetO4hW/UXlHeYZ2MhX/eSzw4wPB5Ol1YJJ1FWXeJ4PWecOtnRRLGLoLV85L4QJOCle2mOSmj4QdYKRa6ij1FU2mUJ6Z2EE7cGQu4Bb0hHbCiy2WyMF44m5zZWk0uvJHeXtc2ebJm5Z16CukasFU9crWKDICylrsiF9pSFobJGBekGqn6/HGAOo9i8jF7UrYd0aQ6Upedmv6iCihUI6RQQfQqO5yshnzCdWdlZ9TqqjVJQ0sSsT+LosQiS1cwQmeceeD64NZFu0kcnAVpnbaSJ+EbMJlBY0PvaVXSdmz3gRv4UoA",
+     "characterlist.designer.lua": "G3gYAOSaavXXVDv6kFFAwS5UOKTLicFiLe08ghvgQvpz7j0PeH7OIqjZKZU0HTBIwuQVaNROAZPczbkZAXR+wky51v26P5P99NG+Mb9YMYaDnLSbfo6IeZDzm2jyQUzRU2vQwfsWABQI+fkLF1sFAPC05F/iglSLAWqYaHf6+oCe7dLa4a40DTqxMgHdRjYoTho0yIQw+CyMF2Mx04+E4Bweanj/zMZbOJutplBDpFpeJOcubRupQdhEkdNOXn3AXgC81ItbrP8A1Ihd8kEIoWrxGW12fiGEwmRjk0z3+AGrXrY4J73Xf0HYlB3K0EEN0Wr/dHY8H01m8Wr/9PggXu2NFrOT+Lk+dBMbh6gtebe2rWWhlZGgqgtS73PLPNnAa5ZIbReghnyQeXfCRkr9FDZVR+LeHHwoDeo9wQ3TJg31j2V2+kYqPpWykWk666CGyK4dMoo9ZlpeadLarshCLPIAfvp0dDqKH+nFEjD7uJPRz8+RrSnCflHiz3B2Tp7WGuHqRHR+Ttb04bjUXbvw+DEEa77OvIQa0oFyZ19BDWmWpledhFetqhYYon1+Rj2axytNAVJff4ov4YTeEGpI81yMs/MYfG466Qz105XZ2JWCGviQZ0VWVWi/NWGsybsRetYd1CAs36z9zOOVZRm2pK1U7zGX8FKd8OudWYqdK1GoMeB/yuUFLdcR/55ZIGhdj+7JpcJryhUDWq4TFu/kCYoeuZdkejSPfzGX8lLl/xPlkbkepjPsCWj80Ul6B/Evqch5EZpVFfGF0czf6YyO0Sh0ck18iE8NVyhC03pPyT9o+WpW0WQtmiUncOE9q2xbVLJcDCgULf4ZUTTsxsk98s5d2xevllM4IU0pLi8HAmp8oAUovo8KMM027aXdRBMeqGnEGH5jGeRp+9YIW3SYtZp8eOgJ2qgA4gzaMhmBUzssyf+Yk0QCtZh5nslBYdixfZ7YRxNYCFu7+y4ZnFjNK6sWGKLn+hkFfAkN9oBdMri0T1j4QqKzT+iqrJ3aZyP6fl/m8/k8SeZz+eS+pyc9UWV7xla9FpZL56wTnM6CSr4ExZnxkRmqpj3vyAhPlzyx+rE3h1vRrGhpQvB+dcVOgiMFNWQDV9GtYlMZJMM0yx61wyu2MhRIairedYiuQYhpMtDm5N08XKW0xlW7cj3k7BMdj/Z3NCM6p9lJ85/lVrZcWHdoLnk+MfLRN49Gea1dVYXEh8mWfUcP//8qS0LigyF8/Q7p2JCmeHHBbGjgHRIH/TAFxHEoR2B05+uGTTrSyqFxg4xfED5WlWpAUVMUBpXr8akseJ5OjrfnpmWRx0+lmNLs+FJRNuQMHgSRB/GiZGZAa8hs7NOLhhyOjOQnypWH86BTgTIyzvZoqWYVtRqXk1yvHdsQbH9MbRfKw/MsPqU2SSVTRRZ5lkfBF+BTEpmelNUVeYhdHjWOj1ExeUdYZimTYT4W6RQoBgZFaGEhbvMlgjKyiu2QOmkdZngTmiWGxnd6vhf/6qSl8fQ5oBV2OI2fW59b",
+-    "characterlist.lua": "G00HAORvqv4My/SS/IJSlMwuTZJLk0uddFh6djhj0AEu7e/ndp1cqF3Mkkkk/dkDT65VLERYQ7zVHQ2ydlLDpo4SjYPRTlpADq5s/6rkd0RUQM8MUlgHhfkhSYhW7BQaoHcKABoa5p3n9mIAADbc4sYIAODEDSCU4a3lc0TyKQcMtjh/UWyBtfgB/RZ3eObXSPGNxIx5ntnnBQCA/oELdUB19KfOiAzK8FOUGqKjtrqzMJvhxUEZXsfzzux1VTyPpqIvhXU3z0X8KbqQO+6tPAiYpB+C/F5R7ahYhfq4kRhIke4Z86BcAbDuvuaZGcjEjRWe019u/Fip6if4b+4NDfG8DyQ1z5aoL7ygDCU61JaEElE1h0VzYg7eXwgrNhKBxBZKSN7XLUW2Q+fHKrIpzzEcHErM1NINnu7DKEgk4BCXQysvwtWVOHAntOoEqMJBPG3qdD5E96kC2FkstOPEq2d0EU5vI0qLEOeopikqZK9sS361L39i4fKI04d8f8/iMC6A434EfXQ6ABjWNnzLvCKlJDB2Su5h/A/QSSkHWmWREuAzz/OMOywOizxxAzZV9QA5cQOphLJPAtpxhxpJtMKmiu+8BNJCGVLpL7gU2bTKhphXpESJTPRYGpTFHnGOauCloTWPGOeoBjrj8oF2tzu8OFTOXBkzn+pTePztCgzywcQV+UWfMHVGqF3T6EMnZNPZpBMmw2iZBO36pB7MoolHLdjeVLRH6T7vP57xCZ8KASzNOrGVxEC5DP/1/n/qqfjINvSfwLUahBCc2Fznx5z9fILHV9YHUTKr96LhJ7zq/avnFSkhT8+1lMSYLvjlpsmFPBpkePS276r3J1E9XCf9uNWKwqRzCXI87KGwPwSMJT3QtCTsTIN4OIyCmW0+6OiKTeQSQM6Q+Ukp",
++    "characterlist.lua": "GxILAMQvm/pn6XJ6v0MKyTlOMyXpMN+QdvJsYO1oLK8YSSntak3Hx0VIe/t/YSiyItqDoCoB+5ctuzrzcUVyslMd4rxryyBIJ/bj34joxDfbsCZE7K3vZV5yMEthD/2pAeTwJunn8G0bAHikwGddAPBCHowD/Gr5bio7lwPBMFn/olkgOaU1Z6cU+ZXeK6FHy0OSpmQ/LwDgbE1G1izPWRu9GXCA3UmqNZzLwp1v9XX8FnGAn/9vzrufR+f3uy05sybEiee2ylqOJUXi1lEAZr2CoOd0ku06jZTu+dFyYU2/SpIUB4c41Fw5GtoxwQd5IMcjlYHwa/9EPmuEBMEqMOOxuo+q5tfLTNbRsI0PA7s0sOXIR2uZQip/UWD/Yknts1sTzKNlGPWwWimFU0qO1jNA94OUUjiIaKUqRkWJCr+1UjKfdGeGJceskSr0NLIwBI5tnbqc+pUM1Io40hP8WlZvJk7FrIlZ+JJjp8SYt2qjG2uO/5NAN0l6lrV54grTVm8m5juVbWA0I0vbs3Dyk9Hkn/Qd37KAEZPqttrZ6Zqy2QPjlQz3HPnhCGNY1F8k6URrBUyOVp8w/g+iI/viXAdPtBJ82zfjQJEj026+kEfoJRi1eiGP3uKApzSFn2820UqFXtxLUZ2aRQlgQpuu1kqpI8K9IfHBW2ql1B56m92SNYNHZDDRCgBCL1aPOBBnA1PoTitBQK/o3yUoeTIhG3pOw8gSPw4gxnofL0GtrLAuMAzckxV5WadTo7zIhaPRP0cCTlqxM6t3ajogI8V4UeeuHDnOkCtHiBKj6J1WeKd8UpdVnwQoaTA5dfShgs9xm5Hl2g1kIXakIMnyy+UkeCNF9B9XnqZ1PVmM3q3HKOFNRzc+j8nuFtpudl7Oy/O2aOq6Krot/HSrn4QhE9I6mjiM/pC1HNvojSyTnz8yldZhnIEnChCHlbhXwURhjRSOWLNEOI/6YM5E7l9tyFA7LGnNMBIiSc94pYA5NrZl/CAFgCi8wDBNM7KUmml0jQui8SrCr4j8Flmif08SvyVbpgCfUnimEhCS+LYgc+0T79bnZYLbA9XV3bw4m86mRVfN0hDNp7clh2cbt2YioNMW/u8Hbv2V3yxStsHBAf651b8QysqHaQS2ELNZIxVpWaOeXlfzbnpZ1QsCbfJ3REFu2OCEjH32xilP+07Tq1k1LR/mV83paVXOzyuBI3d2aYKFxqIe3pprnKrQcqWXuCjFGop8aw0=",
+     "chathistory.designer.lua": "Gx8KAMTKXPnfz6vLr4NEBgwogDSmWVsVnbQlzQFNXA4oSmVs0UTHXDzHoLIf9BdyImNballplFd7wms1TMX0Y0R0YloHWW7j3fSEo1kcB1xuACSj9/YZmdYA4JDkj/HdzAsLNB7b8OV8x1G9MWPgN4ObONBLJxy2w8T0eWLHisjxKTE2mS5P7V4QhERoXF5fkayfBgvyGX2gz+dR+Igwq4q0EvoLMBO9MVGISALFVyPrdCKSg8WswVwR2h8Gx/ZZ8rn6bmZZodFUWdopXrBZVoFG1d3jH7pp9QEagZ3Xxs1q92DZtFlW+IqiIlPZcKmUmXxprMm660iw68mirhPBf0LjZlkVgPHyCTSS5bnFCTmW3RqsHHqOr+YTu5nDMFpwsuxP9jrwiYk7O5xjPW8vENkwCc5+62dnyBuV6gON5ywZgfeSaR2ELJZRBqlWD+d5j3xDqKJqLruQd0pae4meIcM7v9wArdmueRDJC6f11AAkqBbWYEvbAEZ7TAr+Q4UGk8gW1qNjEe+0FrVK7FsfOUnM2Q5C/OJ3n8yySmbQH9DIi/I1fkbbP8u5ZeDRg6a95GzZuCzYYgAOo83sCgh/S8v/iy7MtlBLHP6Fz+SR9dP/N5wf0CiaShfs7IAvfCafzQVryWrLdymzUmn4qV5R0z/21s6K5xwE3UuEz8QsH96qbxzETIN9aM3ijtgJNOK3qC9+xxqKD+bCOymbK2WLesNbrz760m39yxka5a2yaBqBcvmocBCuP14HOdEL9Z4jkdlTkeWfl2+oy5LtAYLyAbJOmWxgYwmU43/qWj1ejZ0DO7TjmKQJq9mtCwaMs7Q9M2ln2B5V1FfW6d07xj/DRFXyOgO7wswYuHJGuydLWUbTYLveXG8A",
+     "chathistory.lua": "GwcBAMS3n1P/GPVck9J5GJGakGUa4NMDpwIMEggkKcCisGWSnDO/3vB0KmlIPwwHBAjaXnDHEbBqRNQRBXER3sY5Ahw9+ft0LvMunfAsbwV2RdkkV+c6fUmBFQsBwNfaACAK55TF9Rky8zbHfOnKGyY5NM8RhNkmZvCwr92uKeOaWbBYyv+u6eeURVxS6hYGPdzsXRHesMApbFP7lN52RXibi/Gf/g==",
+     "childwindow.lua": "G2AJAMTvVdUZt0zfNYBbmRQotcDpo9guEp7BA554dKf1jf1a/CGFnd37aliyZJJsblFNqkn8dUIjQ6tEYsWGuVr1OzRAJ6/aY46P8akvaeED6gPm/7YYK9VoEwpfilnneiPnfpQLC3fYx/oRTOuIUm7rFI6/wOIrr4u9O8D9AdThkcyqzD8Cc49TN8vG+v2MlHjucdJzNyOz+x72Ye9xiDuHPShNRH28i4I3q5i6mds9QI8E4L8jPklU6yignwCAVaXPBtctuM594uvrf7HTFfy/cu+iscLRGMKZIyZf9Jk/clyu9Agu7575F+UvHQX5U7pa2dqOk9YOfq5MSTg86GZkjIq+825o68LWSk14k/LA1jljmcmk2O0NhcVm1Y3Nifjf6tXys8KMJyNxvxkKi1NB4aX9JutaW5j+AqclYU9dj4d7ruo1i66y/p7dkiP24SuJfa38yQKa1Xn0quscWGyDpJzwQdrNWrw4/PAq1fe/8iidfTbGRZ81ZlkMt3FYPXNkkvbu79gzPE7+3fl2XNdFf6/HydHZJRUW+6IsP0mTmSHUCc1FYepw9DcOsUlcnjPyu7XouTPL2hO/ZxGQNxFGtW1z/XUY9U2dUlO31/BoG/IChOvIw6hHr+DjYWcZyrZAjpcigSjP/bZ9jyFSiUC4MJgL2zLHTYvUrOodfNTg0bF6csCtuHOpA6hTEvLp3pFovoeGSnOWmacALZ6HECMbLMCRo2qFYaduojXMHL/IheWZsxkS8HmQUFiw4SExOaUIB3LGQl6HMVOrtkz0M+iKiuffZXKxdh3tBzhJw6sAAKM71WKv6B4itqrfmRRr6Bi8wYhxxGJr4DsDGbenHP3kPt8wlho/Z1D6mi0O/5GsucyEEezzsoa+O+sOGVSJKdcSsN9ANMY1dIEzQBrVHnqgu3d3saE1FEQIC6k5Y9+kPERZtlv/o5XK6gxTqbcH7A6baCIi",
+@@ -59,7 +59,7 @@
+     "scancargo.designer.lua": "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",
+     "scancargo.lua": "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",
+     "serverlist.designer.lua": "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",
+-    "serverlist.lua": "G9QNAGQzVd/k54Woi8rgub8sN3vITZ8+WIJtXChQJSGPy/n+x1xoy2G13v37M0+mmCfGfcE0mUSxZnWPUthSxyyReLTEoyRCi9gYqUn3AIU7wHyXfvk+It4cMqUFpcBZ4fDxZuNLyjwTSvbLGrkvcKU1X9aYCWZy5ZE1ZoEJCIawa/JLXIWlDDSWj6wx5FtkaUl6/yIXgetP50oY/pHu+0i4IFc2A+of6R83M1L/Ile5xo7kTyUfOOu8thf3L3IZ+0mgDpaP0nphrFLzrhJNE+V54Kwm9bvBlvy7iLcCJJjPKcxMTpj6YX/Lf6pOZeRLR/IUGwzLXq3PHYmmtdM559LCAk/BWfI5blBpiesrwUmgxpUlfFnjd80HZ54EgnhBGcVDi0fyxkJCWm9zT7MoXLpTjqK0aujaG2vMa8B1FXtp3K+ex21UjjLOS87zXyVIFRRulzv7vc78mXCLSu7XNKxZAk311y4MdmHg9+WdndNf5VcvIVAe1Z2wPpMuY/p0yNYdcUvJDfzg9y7wBFhLLhq5xXxJk372GGcsF4kaEmUM2ZVlVDIJTIQOQyFTwLLPnLcpj6zZWGtUMIcmatibcIfQFwG4C8sMpnFmH8SeWXDpdMAu8B/sLPxjnZuhuoP2lQAAcgze9359NAUASZ1csVKQ4igxzcSSAJBCpUpjR4CwcCK8sI1xaGHXqxWrHoB61UtHUtUk5Ip6MrGQ9W/OV2ysyUiO8rjDKDI9UFXwgGNWjTq8B6U9KsWkiGCez2QLiElaPnm+969IL1ExkrE8eR/rMMWWhiH/1JB9Qqwx1OXxStJNir1erhF7vaSsa9/fhWnpwOCLOSas1S8EcUmekjEQtoYgHMqhTqDsL0IcjAKbaqBBhuc4Dyk5HrYHzlrksQxVpBuzhgyVAbv9MWLzGTXXT/jbNajkj10RUufsCR4Rtlau5Vp8fvcFDCEMBlljci1B7vcF7qYwhLzwHxi4iVkhr63kxRGtVOnkiz4lEj0d4ndEqYVrvAgypmSCA3W2aM1Ci6VmfPUGi/FBlN/FdzKn/j+71lfMeRlT45CVWYN2QVNPxnWAueTcxQS39mYqwj8V7OELTMANDKHb5mA4hOIcRagp4ASq0fvd5fj87Pn56hIOP3TDy7vq4uX5+epiVKY12L+si13fucEucLMLRfwshtaJ8GI6HasnwnFUoSCHV1KLb8pWWALWvtP/nhM17hd2//QDrSMYU3VAl2Lb6VAjQdHCqIEocDMCpq9jqh/QKTbIxgU2+dJNs69IK00sMx+BSP5vrwiOFwQ9pI5h3MuWypmFNcacQLHXtyjrgApwhs2WIKj18XAm0FtVBs6wKeH1zZUPoTi7McgFYXZtCH6fL68sUxEpOm005J065ETbL0gWGj5Gx1hxAXtflqwYwsjUNDSoCJyh5ZxZZhATNNjijBoPozlhm0gwQZc3QbV+YIW018Zaay0=",
++    "serverlist.lua": "G4oOAGQzVd/k54Woi8rgub8sN3vITZ8+WIJtXChQJSGPy/lqrIVGDtS6e7tvnhCTxLMniGkSb1Z/KIX/1DFLJIaWGEoitIiN8Xt/rxoUjnKpb3IbEW8OmdKCUuCscPhws/ElZZ4JJftlDd0XuNKaL2vMBDO58sgas8AEBEPYNPlprsJSBrLLR9YY8i2ytCS9f5GLwPWncyUM/1C3fyRckCubAfaP9I+bGal/katcY0f0p5IPnHVe24v7F7mM/SRQB4tHab0wVua8q0TTRHkeOKtIHW6wJf9O4q8ACecjuZlNCVs/4m/5D9ex9H7pSJ5ig2HZq5m5I9G0djrnXEpYzlNwknyOG1Ra4vpKcBKocWUJX9bonfbBmSeBwF+QRtPQ4YG0caBg6V3uaBaFS3fKUZRWDV17Y415DbiuYi+N+9XzuI3KUcZ5yXn+qwSpGoXb5c5+rzN/Jtyikvs1DWuWQFP9tQuDXRj4ffr8zumv8utncJRHdSesz6TLmD4dshlH3FJyAz/4vQt2AqzZFtncYr6kST97jDOWi0QNiTKG7MrSKwUFBkKjoZDJYcVHztuUR9ZsrDUsGEOD1e1tuIPrKwfchmUG0ziLd2LPwrlMPCAX6A9ylv9jnYuhq4PyVQIAxBi87f96byEABHXBitUEhRzFpwVZAQCEUGWlsTOAknAwPHP1cWhh26sVKx+AetVLR1LVJOSKfDK4oA1ujks21kSkRHnAYVSRHqoyeMhZVvc6vAOmPSrFpIhgnI9mC4ghmj5lvHesSC9R0ZMxPfkf8zD5lsFCwakg+4RYY8jLAxWk6xR7Pa8Qez1T1DXs78K0VKDrxRwT1qoXgjgtT43RGbaGIBzSoYmgyl+EWIxCm2xgQEbGuHQprocNgbMWccyuiuZmGXeM4mNEj61+jNh8XHVPwa7SDZNIxxlYHa1ePTcO2jsqThnqhL9dg0pSuqVOfaah8JGbrZRruVIf334BQ3DeLtaYXEtoBn37t4Uh5IX/wMANaEBvrD8VI1op08kXfUokOnoKOvfS0+3PhN01tY1BU7xhVOAPtQTvlVmm3slKAP7Ztb5izsuYGoWcxOqyC5p6Eq4RzCXnxDrIrRiaSsdPBbvnAhNwA0PoNjcYDqE4RxFqCjiBavR+dzk+P3t+vrqEw3fd8PKuunh5fr66GBUXg6Iv62LXd26wC9zsQhE/iwHBYHg2ko4wBsO+T67AgwJiS25KsUQApr/T/54TNe7XjP/0A609GEO1U5di22mBZFCMMBogCt3U7aLrmPIHWBIb5KIzyE8ZddPsK9JKE8tMRzCk/GddhMfLmO5WxzDu5fOrMwtrjDmBYlt1kTYPqoEzfLIVBrZ2Hs4EeqmqgDN8AuT3zVUdQnF2baELw5zgEI8BXxTE+ACRopzZ7Z065GS2X9BYKHg/7RPFBeztWbJiCPU0Z2hQEThDyzmzzCAmaLDFGTUeRnPCP5VgWjF/6nX1wAppm4211lo=",
+     "shipdealer.designer.lua": "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",
+     "shipdealer.lua": "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",
+     "spdead.designer.lua": "GzALAORcmv338xo5yV1HBnuvk1LbiJhZGx0GCyalTVwTaK0SLTrRL3palI1nlV+1qKSiwt3MJlBAQxrPwDxnxYfmVQz7HxG/FPJgyVhcpuzaQAleRwAQovn0GQwfAwD4I/KPOHO2JQYNSz4dPw+Uxba7S7RtQkMJNwJTmpiG8KihQAIx0GNmSDZVVvyyD8Rl0PD6HnzKx8Z4wFjmv+voOTP1qFR3xknPf4BrcNtlRsQaOE9cXbsjYj3gwhqT0BD7+yaQv41RioXQdDGBhi9rWy5YsYyv+KjPnjnLHWioZRn28nVybcegQf0qUShQVe4dJ+6QgqVk7jzQcCN1KlbQjF52efDmmTfKmJpYQxn23okWWkctQsNAwxpxxLufCkopJnoavJlH34Zo+qFIeKoSC9Z+wlgH8JTQ2jFWacqksBcQQVuVvIaNsgCJmKGQyZGL98wxpP8OsbEMGgofjUVzzzGbByoAIRPnk4uROfbbNGHsQkf87Alw4GvMp+LRJRqxiQDmKxzTE4OGotynjzg5CxrkD/mLnb0XoEGVPz9/TE985F4INMgqAeyXTqnGGW05Bw1yi1iIVxWA1mrQqvDDHKEr7IRv9FEqxY9MPdkbF7CncF9EoMgN8aCjSOquUCSlYpipVDIZ8do4ZYwqRNFgnMJABFKAc+Bv2GM4remtsdpD13b7GT4aWzB2/ed+rwDgmn0DvvjAY3riRR+b/+I8yY79oAPUoh5JSlWv4zjYhELvSkmblFUO87jleON4e6WWyKP7eKxyDCxFX13nGn294FPB9MTF56I3O2PjY2zHVPlSubqahKaDQCSZd0/WRpjExiTbqZPbaMsFaPguVxhrm+oXBVMRU4VVZRX5Ow+wM8PMYIiXoacpWSSl2E0Pn7bUOW8TBZy0a7TMW58EO2yCtKB+gu+j9xE=",
+diff --git a/uixml/serverlist.lua b/uixml/serverlist.lua
+--- a/uixml/serverlist.lua
++++ b/uixml/serverlist.lua
+@@ -72,8 +72,17 @@
+ 		}
+ 		this.ExitAnimation(() => {
+ 			OpenScene("characterlist");
+-			if (Game.SelectDebugCharacter()) Game.LoadCharacter();
++			if (Game.SelectCharacterToLoad()) Game.LoadCharacter();
+ 		});
++	}
++
++	GatewayCharacterSelection()
++	{
++		if(this.connecting != nil) {
++			this.connecting.Close();
++			this.connecting = nil;
++		}
++		this.ExitAnimation(() => OpenScene("characterlist"));
+ 	}
+ 
+ 	Update()
+diff --git a/uixml/characterlist.lua b/uixml/characterlist.lua
+--- a/uixml/characterlist.lua
++++ b/uixml/characterlist.lua
+@@ -10,11 +10,15 @@
+             e.mainmenu.Text = "QUIT";
+         }
+         e.listtable.SetData(Game.CharacterList());
+-        e.listtable.OnDoubleClick(() => Game.LoadCharacter());
++        e.listtable.OnDoubleClick(() => this.LoadSelectedCharacter());
+         e.newchar.OnClick(() => Game.RequestNewCharacter());
+-        e.loadchar.OnClick(() => Game.LoadCharacter());
++        e.loadchar.OnClick(() => this.LoadSelectedCharacter());
+         e.deletechar.OnClick(() => Game.DeleteCharacter());
+         e.serverlist.Visible = false;
++		if (Game.GatewayCharacterSelection()) {
++			e.newchar.Visible = false;
++			e.deletechar.Visible = false;
++		}
+ 		this.Widget.OnEscape(() => this.GoBack());
+         e.mainmenu.OnClick(() => this.ExitAnimation(() => {
+             Game.StopNetworking();
+@@ -39,9 +43,42 @@
+     {
+         var scn = this.Elements;
+         var cl = Game.CharacterList();
+-        scn.loadchar.Enabled = cl.ValidSelection();
++		scn.loadchar.Enabled = Game.GatewayCharacterSelection()
++			? Game.CanLoadSelectedCharacter()
++			: cl.ValidSelection();
+ 	    scn.deletechar.Enabled = cl.ValidSelection();
+     }
++
++	CharacterList()
++	{
++		if (this.connecting != nil) {
++			this.connecting.Close();
++			this.connecting = nil;
++		}
++		this.Elements.newchar.Visible = true;
++		this.Elements.deletechar.Visible = true;
++		if (Game.SelectCharacterToLoad()) Game.LoadCharacter();
++	}
++
++	LoadSelectedCharacter()
++	{
++		if (Game.GatewayCharacterSelection()) {
++			this.connecting = new connecting();
++			OpenModal(this.connecting);
++		}
++		Game.LoadCharacter();
++	}
++
++	GatewayCharacterUnavailable()
++	{
++		if (this.connecting != nil) {
++			this.connecting.Close();
++			this.connecting = nil;
++		}
++		local prompt = new popup(0, STRID_DISCONNECT, "ok");
++		prompt.Elements.contents.SetString("This character has no known system assignment or could not be placed. No game instance was joined.");
++		OpenModal(prompt);
++	}
+     
+     OpenNewCharacter()
+     {
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -226,3 +226,4 @@
+ client 2225-audio-loop-final-verification.patch
+ client 2226-character-aware-placement-followup.patch
+ client 2227-character-placement-selection-payload.patch
++client 2228-gateway-character-selection-before-placement.patch

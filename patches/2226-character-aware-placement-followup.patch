@@ -1,0 +1,310 @@
+--- a/src/LibreLancer.Tests/NexusGatewayLoginTests.cs
++++ b/src/LibreLancer.Tests/NexusGatewayLoginTests.cs
+@@ -77,6 +77,46 @@
+     }
+ 
+     [Fact]
++    public async Task PlacementCarriesGatewayCharacterSelectedBeforeAssignment()
++    {
++        var folder = CreateMetadata();
++        try
++        {
++            var handler = new FakeHandler(false);
++            using var client = new NexusGatewayLogin(new Uri("https://gateway.example.test"), folder, handler);
++
++            var result = await client.LoginAndPlaceAsync("pilot@example.net", "secret",
++                "li01", "eu", TestContext.Current.CancellationToken, "Pilot");
++
++            Assert.True(result.Assigned);
++            Assert.Equal("/api/v1/characters/list", handler.Requests[2].Path);
++            Assert.Equal("Bearer access", handler.RosterAuthorization);
++            Assert.Equal("/api/v1/placement/request", handler.Requests[3].Path);
++            Assert.Contains("\"characterId\":73", handler.Requests[3].Body);
++            Assert.Contains("\"targetSystem\":\"li01\"", handler.Requests[3].Body);
++        }
++        finally { Directory.Delete(folder, true); }
++    }
++
++    [Fact]
++    public async Task PlacementDoesNotProceedWhenSelectedCharacterIsNotInRoster()
++    {
++        var folder = CreateMetadata();
++        try
++        {
++            var handler = new FakeHandler(false, includeRosterCharacter: false);
++            using var client = new NexusGatewayLogin(new Uri("https://gateway.example.test"), folder, handler);
++
++            await Assert.ThrowsAsync<InvalidDataException>(() => client.LoginAndPlaceAsync(
++                "pilot@example.net", "secret", "li01", "eu", TestContext.Current.CancellationToken, "Missing"));
++
++            Assert.Equal("/api/v1/characters/list", handler.Requests[^1].Path);
++            Assert.DoesNotContain(handler.Requests, request => request.Path == "/api/v1/placement/request");
++        }
++        finally { Directory.Delete(folder, true); }
++    }
++
++    [Fact]
+     public async Task TransferStartUsesBearerSessionAndValidatesPreparedTicket()
+     {
+         var folder = CreateMetadata();
+@@ -181,10 +221,12 @@
+         return folder;
+     }
+ 
+-    private sealed class FakeHandler(bool updateRequired, bool mismatchedTransferTarget = false) : HttpMessageHandler
++    private sealed class FakeHandler(bool updateRequired, bool mismatchedTransferTarget = false,
++        bool includeRosterCharacter = true) : HttpMessageHandler
+     {
+         public List<(string Path, string Body)> Requests { get; } = [];
+         public string? PlacementAuthorization { get; private set; }
++        public string? RosterAuthorization { get; private set; }
+         public string? TransferAuthorization { get; private set; }
+ 
+         protected override async Task<HttpResponseMessage> SendAsync(
+@@ -198,6 +240,8 @@
+                     : """{"status":"supported","sessionAllowed":true,"serverProtocolVersion":1,"messageKey":"client_version_supported","handshakeToken":"proof"}"""
+                 : request.RequestUri.AbsolutePath == "/api/v1/placement/request"
+                     ? PlacementPayload(request, body)
++                : request.RequestUri.AbsolutePath == "/api/v1/characters/list"
++                    ? RosterPayload(request, body)
+                 : request.RequestUri.AbsolutePath == "/api/v1/transfers/start"
+                     ? TransferPayload(request, body)
+                     : request.RequestUri.AbsolutePath == "/api/v1/auth/refresh"
+@@ -214,6 +258,22 @@
+             };
+         }
+ 
++        private string RosterPayload(HttpRequestMessage request, string body)
++        {
++            RosterAuthorization = request.Headers.Authorization?.ToString();
++            var correlationId = JsonDocument.Parse(body).RootElement.GetProperty("correlationId").GetGuid();
++            return JsonSerializer.Serialize(new
++            {
++                schemaVersion = 1,
++                correlationId,
++                accepted = true,
++                reasonCode = "listed",
++                characters = includeRosterCharacter
++                    ? new[] { new { characterId = 73L, displayName = "Pilot", systemId = "li03" } }
++                    : Array.Empty<object>()
++            });
++        }
++
+         private string PlacementPayload(HttpRequestMessage request, string body)
+         {
+             PlacementAuthorization = request.Headers.Authorization?.ToString();
+--- a/src/LibreLancer/GameStates/LuaMenu.cs
++++ b/src/LibreLancer/GameStates/LuaMenu.cs
+@@ -446,7 +446,7 @@
+                         new Uri(state.Game.Config.ClusterGatewayUrl, UriKind.Absolute));
+                     var result = await gateway.LoginAndPlaceAsync(email, password,
+                         state.Game.Config.ClusterTargetSystem, state.Game.Config.ClusterRegion,
+-                        cancellation);
++                        cancellation, state.Game.DebugCharacterName);
+                     state.Game.QueueUIThread(() =>
+                     {
+                         if (netClient != client || cancellation.IsCancellationRequested)
+--- a/src/LibreLancer/Net/NexusGatewayLogin.cs
++++ b/src/LibreLancer/Net/NexusGatewayLogin.cs
+@@ -1,5 +1,6 @@
+ using System;
+ using System.IO;
++using System.Linq;
+ using System.Net.Http;
+ using System.Net.Http.Json;
+ using System.Net.Http.Headers;
+@@ -17,7 +18,7 @@
+ public sealed record NexusGatewayLoginResult(
+     ClientVersionDecision VersionDecision, string? AccessToken, string? RefreshToken,
+     Guid? SessionId, string? GameEndpoint = null, string? JoinTicket = null,
+-    string? InstanceId = null, string? SystemId = null)
++    string? InstanceId = null, string? SystemId = null, Guid? AccountId = null)
+ {
+     public bool LoggedIn => AccessToken is not null && SessionId.HasValue;
+     public bool Assigned => GameEndpoint is not null && JoinTicket is not null;
+@@ -85,17 +86,31 @@
+             ?? throw new InvalidDataException("Gateway login response is empty.");
+         if (string.IsNullOrWhiteSpace(login.AccessToken) || login.SessionId == Guid.Empty)
+             throw new InvalidDataException("Gateway login response is incomplete.");
+-        return new NexusGatewayLoginResult(decision, login.AccessToken, login.RefreshToken, login.SessionId);
++        return new NexusGatewayLoginResult(decision, login.AccessToken, login.RefreshToken, login.SessionId,
++            AccountId: login.AccountId);
+     }
+ 
+     public async Task<NexusGatewayLoginResult> LoginAndPlaceAsync(
+         string email, string password, string targetSystem, string region,
+-        CancellationToken cancellationToken = default)
++        CancellationToken cancellationToken = default, string? selectedCharacterName = null)
+     {
+         var hello = LoadInstalledHello();
+         var login = await LoginWithHelloAsync(hello, email, password, cancellationToken);
+         if (!login.LoggedIn)
+             return login;
++        long? characterId = null;
++        if (!string.IsNullOrWhiteSpace(selectedCharacterName))
++        {
++            var roster = await ListCharactersAsync(login.AccessToken!, login.AccountId!.Value,
++                login.SessionId!.Value, cancellationToken);
++            var matches = roster.Where(character => string.Equals(character.DisplayName,
++                selectedCharacterName, StringComparison.OrdinalIgnoreCase)).ToArray();
++            if (matches.Length != 1)
++                throw new InvalidDataException(matches.Length == 0
++                    ? "The selected Gateway character does not exist in this account."
++                    : "The selected Gateway character name is ambiguous.");
++            characterId = matches[0].CharacterId;
++        }
+         if (string.IsNullOrWhiteSpace(targetSystem))
+             throw new ArgumentException("Target system is required.", nameof(targetSystem));
+         var requestId = Guid.NewGuid();
+@@ -103,6 +118,7 @@
+         {
+             RequestId = requestId,
+             SessionId = login.SessionId!.Value,
++            CharacterId = characterId,
+             TargetSystem = targetSystem,
+             ClientBuild = hello.BuildId,
+             Region = region,
+@@ -133,6 +149,31 @@
+         };
+     }
+ 
++    public async Task<CharacterRosterEntryV1[]> ListCharactersAsync(string accessToken, Guid accountId,
++        Guid sessionId, CancellationToken cancellationToken = default)
++    {
++        if (string.IsNullOrWhiteSpace(accessToken) || accountId == Guid.Empty || sessionId == Guid.Empty)
++            throw new ArgumentException("Gateway access token, account and session are required.");
++        var request = new CharacterRosterRequestV1
++        {
++            CorrelationId = Guid.NewGuid(), AccountId = accountId, SessionId = sessionId
++        };
++        using var message = new HttpRequestMessage(HttpMethod.Post, new Uri(gateway, "/api/v1/characters/list"));
++        message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
++        message.Content = JsonContent.Create(request);
++        using var response = await http.SendAsync(message, cancellationToken);
++        if (response.StatusCode == HttpStatusCode.Unauthorized)
++            throw new UnauthorizedAccessException("Gateway character roster rejected the active session.");
++        if (!response.IsSuccessStatusCode)
++            throw new HttpRequestException($"Gateway character roster failed with HTTP {(int)response.StatusCode}.");
++        var roster = await response.Content.ReadFromJsonAsync<CharacterRosterResultV1>(
++            cancellationToken: cancellationToken)
++            ?? throw new InvalidDataException("Gateway character roster response is empty.");
++        if (!roster.IsValid() || roster.CorrelationId != request.CorrelationId || !roster.Accepted)
++            throw new InvalidDataException("Gateway character roster response is invalid or rejected.");
++        return roster.Characters;
++    }
++
+     /// <summary>Requests a target reservation for a transfer that the source server has approved for preparation.</summary>
+     public async Task<TransferStartResult> StartTransferAsync(
+         string accessToken, TransferStartRequest request, CancellationToken cancellationToken = default)
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -1783,9 +1783,9 @@
+         }
+ 
+         public Task<long> RegisterNewCharacterAsync(Guid accountId, Guid sessionId, string displayName,
+-            byte[] initialSaveGame, CancellationToken cancellationToken = default) =>
++            byte[] initialSaveGame, string? systemId, CancellationToken cancellationToken = default) =>
+             GetGatewayCharacterLeaseClient().RegisterNewCharacterAsync(accountId, sessionId, displayName,
+-                initialSaveGame, cancellationToken);
++                initialSaveGame, systemId, cancellationToken);
+ 
+         public Task<CharacterRosterEntryV1[]> ListGatewayCharactersAsync(Guid accountId, Guid sessionId,
+             CancellationToken cancellationToken = default) =>
+@@ -1830,9 +1830,9 @@
+             GetGatewayCharacterLeaseClient().ReadSnapshotAsync(characterId, leaseToken, leaseVersion, cancellationToken);
+ 
+         public Task<long> WriteCharacterSnapshotAsync(long characterId, string leaseToken, long leaseVersion,
+-            long revision, byte[] payload, CancellationToken cancellationToken = default) =>
++            long revision, byte[] payload, string? systemId, CancellationToken cancellationToken = default) =>
+             GetGatewayCharacterLeaseClient().WriteSnapshotAsync(characterId, leaseToken, leaseVersion, revision,
+-                payload, cancellationToken);
++                payload, systemId, cancellationToken);
+ 
+         public Task<MarketTradeQuoteReadResponseV1> ReadMarketTradeQuoteAsync(
+             MarketTradeQuoteReadRequestV1 request, CancellationToken cancellationToken = default)
+--- a/src/LibreLancer/Server/GatewayCharacterLeaseClient.cs
++++ b/src/LibreLancer/Server/GatewayCharacterLeaseClient.cs
+@@ -81,7 +81,7 @@
+     }
+ 
+     public async Task<long> RegisterNewCharacterAsync(Guid accountId, Guid sessionId, string displayName,
+-        byte[] initialSaveGame, CancellationToken cancellationToken = default)
++        byte[] initialSaveGame, string? systemId, CancellationToken cancellationToken = default)
+     {
+         ArgumentNullException.ThrowIfNull(initialSaveGame);
+         var characterId = await ResolveCharacterIdentityAsync(accountId, sessionId, displayName, cancellationToken)
+@@ -89,7 +89,8 @@
+         var requestBody = new CharacterBootstrapRequestV1
+         {
+             CorrelationId = Guid.NewGuid(), AccountId = accountId, SessionId = sessionId,
+-            CharacterId = characterId, Payload = initialSaveGame
++            CharacterId = characterId, Payload = initialSaveGame,
++            SystemId = NormalizeSystemId(systemId)
+         };
+         if (!requestBody.IsValid())
+             throw new ArgumentException("Character bootstrap request is invalid.", nameof(initialSaveGame));
+@@ -282,12 +283,13 @@
+     }
+ 
+     public async Task<long> WriteSnapshotAsync(long characterId, string leaseToken, long leaseVersion,
+-        long revision, byte[] payload, CancellationToken cancellationToken = default)
++        long revision, byte[] payload, string? systemId, CancellationToken cancellationToken = default)
+     {
+         var requestBody = new CharacterSaveSnapshotWriteRequestV1
+         {
+             CorrelationId = Guid.NewGuid(), CharacterId = characterId, LeaseToken = leaseToken,
+-            LeaseVersion = leaseVersion, Revision = revision, Payload = payload
++            LeaseVersion = leaseVersion, Revision = revision, Payload = payload,
++            SystemId = NormalizeSystemId(systemId)
+         };
+         if (!requestBody.IsValid())
+             throw new ArgumentException("Character snapshot write request is invalid.");
+@@ -306,6 +308,9 @@
+         return result.Revision!.Value;
+     }
+ 
++    private static string? NormalizeSystemId(string? systemId) =>
++        string.IsNullOrWhiteSpace(systemId) ? null : systemId.Trim().ToLowerInvariant();
++
+     public async Task<MarketTradeQuoteReadResponseV1> ReadMarketTradeQuoteAsync(
+         MarketTradeQuoteReadRequestV1 request, CancellationToken cancellationToken = default)
+     {
+--- a/src/LibreLancer/Server/Player.cs
++++ b/src/LibreLancer/Server/Player.cs
+@@ -1991,7 +1991,7 @@
+                     return Volatile.Read(ref gatewaySnapshotRevision);
+                 var revision = checked(gatewaySnapshotRevision + 1);
+                 var storedRevision = await Game.WriteCharacterSnapshotAsync(characterId, token, leaseVersion,
+-                    revision, payload, cancellationToken).ConfigureAwait(false);
++                    revision, payload, save.Player.System, cancellationToken).ConfigureAwait(false);
+                 if (storedRevision != revision)
+                     throw new InvalidDataException("Gateway stored an unexpected character snapshot revision.");
+                 Interlocked.Exchange(ref gatewaySnapshotRevision, revision);
+@@ -2062,7 +2062,10 @@
+                         {
+                             CorrelationId = Guid.NewGuid(), CharacterId = GatewayCharacterId,
+                             LeaseToken = GatewayLeaseToken!, LeaseVersion = GatewayLeaseVersion,
+-                            Revision = revision, Payload = payload
++                            Revision = revision, Payload = payload,
++                            SystemId = string.IsNullOrWhiteSpace(liveSave.Player.System)
++                                ? null
++                                : liveSave.Player.System.Trim().ToLowerInvariant()
+                         }
+                     };
+                     if (!commit.IsValid())
+@@ -2225,7 +2228,7 @@
+                         IniWriter.WriteIni(initialSave, gatewayBootstrapSave.ToIni());
+                         var initialPayload = initialSave.ToArray();
+                         var gatewayId = await Game.RegisterNewCharacterAsync(playerGuid, GatewaySessionId, name,
+-                            initialPayload);
++                            initialPayload, gatewayBootstrapSave.Player.System);
+                         gatewayCharacterIds[id] = gatewayId;
+                     }
+                     catch (Exception error)
+--- a/patches/series
++++ b/patches/series
+@@ -224,3 +224,4 @@
+ client 2223-generated-interface-market-ui.patch
+ client 2224-fail-closed-unowned-character-systems.patch
+ client 2225-audio-loop-final-verification.patch
++client 2226-character-aware-placement-followup.patch
