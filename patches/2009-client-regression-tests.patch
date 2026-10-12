@@ -8914,3 +8914,48 @@ index 0000000..296754b
 +        }
 +    }
 +}
+diff --git a/src/LibreLancer.Tests/Sdl3ClipboardMimeLifetimeTests.cs b/src/LibreLancer.Tests/Sdl3ClipboardMimeLifetimeTests.cs
+new file mode 100644
+index 0000000..e7e3152
+--- /dev/null
++++ b/src/LibreLancer.Tests/Sdl3ClipboardMimeLifetimeTests.cs
+@@ -0,0 +1,39 @@
++using System;
++using System.Linq;
++using System.Reflection;
++using System.Runtime.CompilerServices;
++using System.Runtime.InteropServices;
++using System.Text;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class Sdl3ClipboardMimeLifetimeTests
++{
++    [Fact]
++    public void MimePointerTableKeepsUtf8PayloadOwnedAcrossGarbageCollection()
++    {
++        const string mime = "application/x-librelancer-array";
++        var platform = typeof(Mouse).Assembly.GetType("LibreLancer.Platforms.SDL3Game", throwOnError: true)!;
++        // The static constructor only prepares the MIME buffers: no SDL window required.
++        RuntimeHelpers.RunClassConstructor(platform.TypeHandle);
++        var table = (NativeBuffer)platform.GetField("_mimeTypes", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
++        var textPointer = Marshal.ReadIntPtr(table.Handle);
++
++        // Do not retain any prospective text owner before forcing finalizers.
++        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
++        GC.WaitForPendingFinalizers();
++        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
++
++        var owners = platform.GetFields(BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)
++            .Where(field => field.FieldType == typeof(NativeBuffer))
++            .Select(field => (NativeBuffer)field.GetValue(null)!)
++            .ToArray();
++        Assert.Contains(owners, buffer => buffer.Handle == textPointer && !buffer.IsDisposed);
++        Assert.Equal((nint)IntPtr.Size, table.Size);
++        var textOwner = Assert.Single(owners, buffer => buffer.Handle == textPointer);
++        Assert.Equal((nint)(Encoding.UTF8.GetByteCount(mime) + 1), textOwner.Size);
++        Assert.Equal(mime, Marshal.PtrToStringUTF8(textPointer));
++        Assert.False(table.IsDisposed);
++    }
++}

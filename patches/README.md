@@ -17,7 +17,7 @@ repository and are not duplicated in these bundles.
 | 2003 | Rendering, interface, materials, animation and THN |
 | 2004 | Managed builds, shader toolchain, project and CI integration |
 | 2005 | Dynamic market trades and trader routing |
-| 2006 | Gameplay and remaining upstream compatibility fixes |
+| 2006 | Gameplay, SDL3 clipboard MIME ownership and upstream compatibility fixes |
 | 2007 | NAP assets, packaging tools and editor workspace |
 | 2008 | Audio decoder integration and room playlists |
 | 2009 | Client and asset regression tests with synthetic fixtures |

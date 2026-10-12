@@ -2328,10 +2328,10 @@ index 0000000..3829e44
 +}
 diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
 new file mode 100644
-index 0000000..dcfba63
+index 0000000..48ba7ae
 --- /dev/null
 +++ b/docs/graphics-implementation-plan.md
-@@ -0,0 +1,242 @@
+@@ -0,0 +1,252 @@
 +# Grafik-Erweiterungen: Umsetzungsplan
 +
 +Stand: 2026-10-12. Dieser Plan verbindet die neu eingelesenen Dokumente
@@ -2365,7 +2365,7 @@ index 0000000..dcfba63
 +| Shader | BC5-Z wird mit `sqrt(1-dot(xy,xy))` rekonstruiert, ohne Begrenzung | NaNs durch Quantisierung/hohe Stärke verhindern; TBN-Ausrichtung prüfen |
 +| Cubes | Basic bindet Envmap auf Slot 3; PBR verwendet diesen Slot für Metallic und bindet dort keine Envmap | Reflexion und IBL mit eigenem PBR-Bindungsplan ergänzen |
 +| Surface-INI | Kein `SurfaceMaps`-Verbraucher in Schema/Engine gefunden | INIs sind vorhanden, werden aber noch nicht materialwirksam geladen |
-+| NAP-Daten | 41 Dateien in `Data/NAP/Surface`, 224.847.036 Bytes; 30 leer, 10 strukturell lesbar, eine Bibliothek mit Daten außerhalb der Dateigrenze | Vor dem Vollprofil Daten vervollständigen und Archive erneut prüfen |
++| NAP-Daten | Reparierter Bestand: 41 Surface-Dateien, 1.349.682.438 Bytes; 7.005 DDS-Texturen und INI-Knotenverweise ohne Strukturfehler; `surface.nap` mit 41 Einträgen verifiziert | Materialzuordnung und sichtbare Wirkung bleiben zu prüfen |
 +
 +Die vier kuratierten Bibliotheken enthalten bereits **55 Normalmaps** und
 +zugehörige Roughness-/Metallic-Karten; die drei `envcube_*` sind vorhanden.
@@ -2418,6 +2418,16 @@ index 0000000..dcfba63
 +| P9 | Plattform- und Releaseabnahme | P1–P8 | Linux/Windows-Matrix, signierte Datenpakete, Rückfallpfade |
 +
 +### P0 – Bestand und Referenzen
++
++**Verifizierter Fortschritt:** Die Surface-Generatoren, SDK-Synchronisierung und
++NAP-Prüfung sind im Data-Repository dokumentiert:
++[Surface-Reparatur](../../Data/docs/evidence/surface-repair-20261012.json),
++[Newsvendor-Reparatur](../../Data/docs/newsvendor-repair-20261012.md) und
++[native Menü-Navigation](../../Data/docs/native-menu-navigation-20261012.md).
++Der aktive Snapshot lädt ohne loses DATA. Die zusätzlich behobene
++[SDL3-MIME-Lebensdauer](sdl3-clipboard-mime-lifetime.md) beseitigt die bestätigte
++NativeBuffer-Startwarnung. P0 bleibt für profilbezogene Materialzuordnung,
++feste Referenzszenen und CPU-/GPU-Messungen offen.
 +
 +- [ ] SDK-INIs nach NAP synchronisieren; leere/trunkierte Karten mit den
 +  vorhandenen Data-Generatoren reproduzieren. Bereits gültige Assets
@@ -2613,3 +2623,105 @@ index bd93f7b..812f304 100644
  **Zweck:** Bestandsaufnahme der Grafikschicht, der Render-Pipeline, der Shader und der Lichtquellen als Grundlage für einen Plan zu einem Vulkan-Backend (oder einem gleichwertigen modernen Backend). Dieses Dokument enthält Befunde und offene Fragen, **keinen Plan und keinen Code**.
 
  **Stand der Untersuchung:** 2026-10-12, Checkout `Client` auf Commit `7a3518ce8` (Branch `codex/lancer-nexus-integration-2026-10-10`). Erweitert am selben Tag um die Sichtung der SDL_GPU-Dokumentation und der gebündelten SDL3-Version (Abschnitt 13).
+diff --git a/docs/sdl3-clipboard-mime-lifetime.md b/docs/sdl3-clipboard-mime-lifetime.md
+new file mode 100644
+index 0000000..7ba5aaa
+--- /dev/null
++++ b/docs/sdl3-clipboard-mime-lifetime.md
+@@ -0,0 +1,41 @@
++# SDL3-Clipboard: Lebensdauer des MIME-Texts
++
++## Ursache
++
++Die statische SDL3-Zeigertabelle `_mimeTypes` enthielt einen Zeiger auf den
++UTF-8-Text `application/x-librelancer-array`. Der zugehörige `NativeBuffer`
++war nur eine lokale Variable des statischen Konstruktors. Der Garbage
++Collector konnte ihn nach dem Konstruktor finalisieren und damit den Text
++freigeben. Die Tabelle behielt den Zeiger für spätere Clipboard-Aufrufe.
++
++Die Warnung beim Client-Start zeigt diesen verlorenen Speicherbesitzer an.
++Der Finalizer gibt die Bytes zwar frei, hinterlässt dabei aber einen ungültigen
++Zeiger. Die Korrektur hält den Textpuffer als statisches Feld gemeinsam mit
++seiner Zeigertabelle am Leben. Beide kleinen Puffer gehören zur gemeinsam
++verwendeten, prozessweiten MIME-Beschreibung.
++
++## Nachweise vom 12.10.2026
++
++- Der neue GC-Test schlägt mit dem bisherigen Code fehl: Nach erzwungenen
++  Collections besitzt kein statischer Puffer mehr den Textzeiger.
++- Mit der Korrektur besteht derselbe Test. Er prüft Besitzer, Größen,
++  Nicht-Freigabe und vollständigen nullterminierten UTF-8-Text. Der Test
++  initialisiert nur den statischen Konstruktor; er benötigt kein SDL-Fenster
++  und liest den Text erst nach Prüfung eines gültigen Besitzers.
++- Vollständiger Build von `LibreLancer.sln`: 0 Fehler, 20 Warnungen.
++- Der frisch gebaute NAP-Client erreicht Spiel-/UI-Laden ohne die bisherige
++  NativeBuffer-Warnung. Native Optionen-/Escape-/Exit-Eingaben bestehen;
++  regulärer Prozessabschluss mit Code 0, ohne Timeout.
++
++Die Änderung liegt im bestehenden Funktionspaket 2006, der Regressionstest
++in 2009 und diese Dokumentation in 2010. Die Serie enthält weiterhin 13
++Pakete. Die Rekonstruktion wird gegen die gepinnten Baselines geprüft.
++
++[Prüfbefunde und Quell-/Assembly-Hashes](evidence/sdl3-clipboard-mime-lifetime-20261012.json).
++
++## Grenzen
++
++Der fokussierte Test und der Client-Lauf sind kein Nachweis für die gesamte
++Testsuite oder alle NativeBuffer-Besitzer. Ein Schreib-/Lese-Rundlauf mit der
++Betriebssystem-Zwischenablage wurde nicht ausgeführt. Gameplay, Cluster und
++die neuen Normalmap-/Vulkan-Funktionen bleiben gesonderte Arbeitsschritte.
+diff --git a/docs/evidence/sdl3-clipboard-mime-lifetime-20261012.json b/docs/evidence/sdl3-clipboard-mime-lifetime-20261012.json
+new file mode 100644
+index 0000000..13aeea6
+--- /dev/null
++++ b/docs/evidence/sdl3-clipboard-mime-lifetime-20261012.json
+@@ -0,0 +1,49 @@
++{
++  "date": "2026-10-12",
++  "component": "SDL3Game static array-clipboard MIME pointer table",
++  "fix": "Retain UTF-8 NativeBuffer alongside the pointer table for its shared process lifetime",
++  "regression": {
++    "name": "Sdl3ClipboardMimeLifetimeTests.MimePointerTableKeepsUtf8PayloadOwnedAcrossGarbageCollection",
++    "before": {
++      "passed": 0,
++      "failed": 1,
++      "failure": "No retained NativeBuffer owns the MIME payload after forced GC"
++    },
++    "after": {
++      "passed": 1,
++      "failed": 0
++    }
++  },
++  "solutionBuild": {
++    "errors": 0,
++    "warnings": 20
++  },
++  "overlayVerification": {
++    "beforeDocumentationFiles": 373,
++    "cleanReconstruction": true,
++    "finalFiles": 375
++  },
++  "runtime": {
++    "nativeBufferWarningAbsent": true,
++    "gameDataLoaded": true,
++    "interfaceLoaded": true,
++    "nativeOptionsOpened": true,
++    "nativeEscapeReturnedToMainMenu": true,
++    "exitButtonUsed": true,
++    "exitCode": 0,
++    "timeout": false,
++    "noUnhandledException": true,
++    "noLooseDATA": true
++  },
++  "hashes": {
++    "sdl3GameSourceSha256": "730365927cf44971447ede2da5b2be06bdf2ffcbd01a14e26a11e8d61e1d3422",
++    "regressionSourceSha256": "30253fb3f41492a512c7280b911d0fe7532e4cdfbd2de7376c4c6124352b2c4e",
++    "testedBaseAssemblySha256": "dd5dee219f893645ee7c08de371c47e68636e1d9f2020e6ba6b8e22499540ae8"
++  },
++  "limits": [
++    "Focused regression only, not a green full test-suite claim",
++    "No OS clipboard write/read roundtrip in this runtime test",
++    "No global NativeBuffer ownership audit or memory-growth benchmark",
++    "No gameplay, cluster or new normalmap/Vulkan effect proof"
++  ]
++}
