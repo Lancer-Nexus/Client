@@ -113,6 +113,35 @@ class OverlayVerificationTests(unittest.TestCase):
         self.assertEqual("new\n", (self.root / "engine.cs").read_text())
         self.assertIn("Applied change.patch", result.stdout)
 
+    def test_native_target_is_applied_and_drift_is_rejected(self):
+        native = self.root / "extern/blurgtext"
+        native.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(native)], check=True)
+        (native / "renderer.c").write_text("old\n")
+        subprocess.run(["git", "-C", str(native), "add", "renderer.c"], check=True)
+        subprocess.run(
+            ["git", "-C", str(native), "-c", "user.name=Fixture", "-c",
+             "user.email=fixture@example.invalid", "commit", "-qm", "native baseline"],
+            check=True,
+        )
+        baseline = subprocess.check_output(
+            ["git", "-C", str(native), "rev-parse", "HEAD"], text=True
+        ).strip()
+        (self.root / "patches/base-blurgtext-commit").write_text(baseline + "\n")
+        (self.root / "patches/native.patch").write_text(
+            "--- a/renderer.c\n+++ b/renderer.c\n@@ -1 +1 @@\n-old\n+new\n"
+        )
+        (self.root / "patches/series").write_text(
+            "client change.patch\nblurgtext native.patch\n"
+        )
+        applier = self.copy_applier()
+        result = subprocess.run(["bash", str(applier)], capture_output=True, text=True)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("new\n", (native / "renderer.c").read_text())
+        self.assertEqual(0, self.verify())
+        (native / "renderer.c").write_text("unexpected drift\n")
+        self.assertEqual(1, self.verify())
+
 
 if __name__ == "__main__":
     unittest.main()

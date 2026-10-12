@@ -43,6 +43,7 @@ def verify(root):
             "client": root,
             "protocol": root / "Protocol",
             "lancerdecode": root / "extern" / "lancerdecode",
+            "blurgtext": root / "extern" / "blurgtext",
         }[target]
         resolved = run("git", "-C", str(repo), "rev-parse", "--verify", "--quiet", f"{reference}^{{commit}}")
         if resolved.returncode:
@@ -54,7 +55,7 @@ def verify(root):
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         target, filename = line.split()
-        if target not in ("client", "protocol", "lancerdecode"):
+        if target not in ("client", "protocol", "lancerdecode", "blurgtext"):
             raise ValueError(f"Unknown patch target: {target}")
         patch = root / "patches" / filename
         targets.setdefault(target, []).append((patch, patch_paths(patch)))
@@ -66,6 +67,7 @@ def verify(root):
             "client": root,
             "protocol": root / "Protocol",
             "lancerdecode": root / "extern" / "lancerdecode",
+            "blurgtext": root / "extern" / "blurgtext",
         }[target]
         reference = base_ref(target)
         paths = set().union(*(paths for _, paths in patches))

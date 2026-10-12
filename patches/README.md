@@ -1,6 +1,6 @@
 # Client patch groups
 
-`series` applies ordered client patches against the commit pinned in `base-client-commit`. Advance that pin when rebasing the patch stack onto a new upstream base. Shared Protocol contracts stay in the Protocol repository and are not duplicated as client patches.
+`series` applies ordered patches against the commit pinned in `base-<target>-commit`, or `HEAD` when no pin is present. Supported targets are `client`, `protocol`, `lancerdecode`, and `blurgtext`. Advance pins when rebasing the corresponding patch stack. Shared Protocol contracts stay in the Protocol repository and are not duplicated as client patches.
 Patches `2000`–`2005` establish the main functional overlays:
 
 1. `2000-gateway-player-transfer.patch` — Gateway login, character transfer,
@@ -27,3 +27,8 @@ Gateway/Coordinator transfer authorization and a reciprocal jump-gate route.
 Use `python3 scripts/verify-lancer-nexus-overlay.py` to compare the applied
 workspace with a clean reconstruction of the series. CI fetches full history so it can read
 the pinned baseline commit. The patch applier records a verified complete overlay on first use; on a baseline checkout it applies the series in order.
+
+Patch `2239-blurgtext-system-freetype-svg-compat.patch` preserves the local native
+build fix for system FreeType installations without OT-SVG renderer hooks. The
+BlurgText target is applied and verified against `base-blurgtext-commit` alongside
+the Client and audio decoder overlays. SVG hooks stay enabled when available.

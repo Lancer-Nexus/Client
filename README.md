@@ -26,7 +26,7 @@ Proposed graphics and rendering work is tracked in the [renderer roadmap](docs/r
 - `Protocol` – shared wire contracts
 - `Cluster` – shared client/server abstractions
 
-See `AGENTS.md` for contribution and integration rules.
+See `AGENTS.md` for contribution and integration rules. Native Nexus adjustments are maintained in the patch series for `lancerdecode` and `blurgtext`; the build applies and verifies their pinned overlays before compiling. BlurgText disables FreeType SVG hooks only when the system FreeType API lacks them.
 
 ## Shared Protocol
 

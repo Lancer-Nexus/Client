@@ -36,6 +36,7 @@ Maintain the Lancer Nexus client fork while preserving compatibility with upstre
 - The main solution is `LibreLancer.sln`; it contains the client, server, editor, launcher, tests and native-integrated projects. Do not invent a second solution or packaging path for MMO work.
 - The primary automated test project is `src/LibreLancer.Tests/LibreLancer.Tests.csproj`. Run the relevant test subset after client changes; use the full solution build when the change crosses shared engine or project boundaries.
 - Native components are configured through the existing `CMakeLists.txt` and dependencies checked by `scripts/depcheck_unix`; do not replace this with a service-style `dotnet restore`-only workflow.
+- Maintain native decoder and text-renderer changes as `lancerdecode` and `blurgtext` targets in `patches/series`, with `base-lancerdecode-commit` and `base-blurgtext-commit` pins. Apply and verify these overlays before building; do not commit modified native submodule sources or publish vendor pointers for local fixes.
 - The current project files target `net10.0`. Keep cluster functionality optional and isolated behind existing configuration/capability boundaries while upstream synchronization remains possible.
 - `src/LibreLancer/LibreLancer.csproj` references the shared `Protocol` submodule for the optional Gateway version handshake; initialize that submodule before building the client.
 
