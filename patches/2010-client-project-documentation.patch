@@ -1,5 +1,5 @@
 diff --git a/README.md b/README.md
-index 3c2ab9f..5e68ec6 100644
+index 3c2ab9f4a0040287b9c270b6505a0938109003ec..efaf3f54858f98cf271e56f5726d1811e7f15be1 100644
 --- a/README.md
 +++ b/README.md
 @@ -18,7 +18,9 @@ The Lancer Nexus Client is the MMO-oriented client fork of [LibreLancer](https:/
@@ -60,7 +60,7 @@ index 3c2ab9f..5e68ec6 100644
  ## NPC retirement recovery infrastructure
  
  Patch 1126 adds a durable background retirement outbox under the configured NPC
-@@ -112,3 +126,43 @@ The checker requires Python 3 and Git; it does not initialize or fetch submodule
+@@ -112,3 +126,45 @@ The checker requires Python 3 and Git; it does not initialize or fetch submodule
  before writing fingerprints. Use normal patch application for a fresh checkout;
  recording an incomplete overlay fails and preserves the previous marker. Checker
  tests run with `python3 -m unittest discover -s scripts/tests`.
@@ -84,16 +84,18 @@ index 3c2ab9f..5e68ec6 100644
 +its assembly must be included with the runtime files. `VMeshTangentBuilder`
 +creates a separate per-draw FVF3/FVF4 buffer from NORMAL+TEX1/TEX2 data and
 +preserves source assets. Authored TEX3/TEX4 data remains untouched. Tangent
-+geometry is currently an explicit preparation API, not a enabled Surface
-+rendering setting. See [the tangent validation](docs/vmesh-tangents.md).
++geometry is currently an explicit preparation API. The separate opt-in Surface
++normal-map setting supports FVF3/FVF4 meshes with authored tangents. See
++[the tangent validation](docs/vmesh-tangents.md).
 +
 +## Explicit Surface GPU uploads
 +
 +`SurfaceGpuTextureCache` shares supplemental uploads by library file and node,
 +and enforces a 256 MiB logical residency budget per resource manager across
-+active and fence-retiring entries. CPU leases must be loaded off the render
-+thread and passed to the render-thread upload. GPU leases are held through the
-+last draw use. This is a preparation API until draw materials acquire leases.
++active and fence-retiring entries. `surface_normal_maps` is opt-in and currently
++applies to FVF3/FVF4 meshes with authored tangents; each draw holds a GPU lease
++only for its execution. FVF1/FVF2 tangent generation and a retail NAP visual
++validation remain open.
 +[Upload and BC5 sampler validation](docs/surface-gpu-upload.md).
 +
 +## GPU frame retirement
@@ -2372,10 +2374,10 @@ index 0000000..3829e44
 +}
 diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
 new file mode 100644
-index 0000000..8db21a2
+index 0000000000000000000000000000000000000000..08939fdaa00e8b604bead7ccc08b6af467f5d06d
 --- /dev/null
 +++ b/docs/graphics-implementation-plan.md
-@@ -0,0 +1,484 @@
+@@ -0,0 +1,486 @@
 +# Grafik-Erweiterungen: Umsetzungsplan
 +
 +Stand: 2026-10-12. Dieser Plan verbindet die neu eingelesenen Dokumente
@@ -2493,8 +2495,10 @@ index 0000000..8db21a2
 +Aktive und hinter einem GPU-Fence wartende Texturen bleiben im Gesamtbudget.
 +CPU-Leases müssen außerhalb des Renderthreads geladen, für den Upload an den
 +Renderthread übergeben und GPU-Leases bis zum letzten Draw gehalten werden.
-+Material-Drawpfade erwerben diese Leases noch nicht automatisch; Surface-Maps
-+sind deshalb weiterhin nicht sichtbar aktiviert.
++`BasicMaterial` bindet die Normalmap jetzt bei aktivierter Option für
++tangententragende FVF3/FVF4-Meshes und gibt die GPU-Lease nach dem Draw frei.
++FVF1/FVF2-Tangenterzeugung, DFM und die Retail-NAP-Bildabnahme sind offen; die
++UI benennt diese Grenze.
 +
 +**Materialfortschritt:** Die ausgewählte Surface-Metadatenauflösung ist an
 +`Material.Initialize`/`BasicMaterial` angebunden. 39 Tests bestätigen MAT-Vorrang,
@@ -3226,13 +3230,13 @@ index 0000000..c04416c
 +}
 diff --git a/docs/evidence/surface-material-binding-20261013.json b/docs/evidence/surface-material-binding-20261013.json
 new file mode 100644
-index 0000000..a912488
+index 0000000000000000000000000000000000000000..e2da7403a733acf22a545f686de128da96299f8c
 --- /dev/null
 +++ b/docs/evidence/surface-material-binding-20261013.json
 @@ -0,0 +1,42 @@
 +{
 +  "date": "2026-10-13",
-+  "scope": "Material-level supplemental metadata binding; no active GPU sampler changes",
++  "scope": "Surface metadata resolution plus opt-in BasicMaterial GPU binding for authored FVF3/FVF4 tangent meshes; no retail visual validation",
 +  "tests": {
 +    "passed": 39,
 +    "failed": 0
@@ -3240,7 +3244,7 @@ index 0000000..a912488
 +  "build": {
 +    "solution": "LibreLancer.sln",
 +    "errors": 0,
-+    "warnings": 20
++    "warnings": 308
 +  },
 +  "runtime": {
 +    "profile": "Standard",
@@ -3250,7 +3254,8 @@ index 0000000..a912488
 +    "nativeMenuNavigation": true,
 +    "exitCode": 0,
 +    "timeout": false,
-+    "noUnhandledException": true
++    "noUnhandledException": true,
++    "scope": "Historical native menu and metadata binding probe; it did not exercise the new per-draw GPU material binding"
 +  },
 +  "priorityRules": [
 +    "existing MAT maps and their scale win",
@@ -3266,10 +3271,9 @@ index 0000000..a912488
 +    "src/LibreLancer/Render/Materials/BasicMaterial.cs": "bcac20fdccef49ddf81bc5b442ba64e5cbe66b4f9b7e441bf1bfaddc3753f955"
 +  },
 +  "limits": [
-+    "No active GPU sampler/material effect or normalmap visual claim",
-+    "No single-texture loader/residency budget/fence/eviction yet",
-+    "No full-suite-green claim",
-+    "Tangents and Vulkan remain open"
++    "No native BasicMaterial draw smoke or retail NAP visual activation proof",
++    "No FVF1/FVF2 tangent generation, DFM, or supplemental roughness/metallic maps",
++    "GPU activation is limited to authored FVF3/FVF4 tangents"
 +  ]
 +}
 diff --git a/docs/normalmap-shader-validation.md b/docs/normalmap-shader-validation.md
@@ -3391,7 +3395,7 @@ index 0000000..7f74f79
 +  ]
 +}
 diff --git a/AGENTS.md b/AGENTS.md
-index 98f5931..65b8fbf 100644
+index 98f5931d4d525a11b907eaea584316088588c189..5452f57a2250191304f5ef952527f7f620641809 100644
 --- a/AGENTS.md
 +++ b/AGENTS.md
 @@ -88,9 +88,9 @@ LLServer SystemIds defines owned worlds; SystemId is the primary fallback. Trave
@@ -3407,7 +3411,7 @@ index 98f5931..65b8fbf 100644
    propagation in the build entry point.
  - The integrity checker is read-only; preserve unrelated modifications and repair
    identified overlay drift by applying the relevant maintained patch.
-@@ -126,3 +126,69 @@ LLServer SystemIds defines owned worlds; SystemId is the primary fallback. Trave
+@@ -126,3 +126,74 @@ LLServer SystemIds defines owned worlds; SystemId is the primary fallback. Trave
  ## Restart-time ambient NPC recovery
  
  - Before publishing a world or starting population simulation, drain pending checkpoint writes and restore that system's current ambient NPC checkpoints from Coordinator. Resolve stable NPC references and preserve the serialized AI/autopilot state. Keep recovery fail-closed when the checkpoint store is unavailable or corrupt; only a Coordinator 404 after listing means ownership changed and may be skipped.
@@ -3455,7 +3459,12 @@ index 98f5931..65b8fbf 100644
 +  Surface CPU leases remain separately owned by the caller.
 +- Keep UV animation/selection uniforms initialized in sampler tests. Compare
 +  real BC5 texture sampling with a CPU reference, not only uniform-fed normals.
-+  The cache is a preparation API until draw materials acquire and hold leases.
++  BasicMaterial currently consumes the cache only for opt-in FVF3/FVF4 authored tangents.
++
++## Surface normal-map activation
++
++- `surface_normal_maps` stays opt-in. The current material path supports only supplemental maps on FVF3/FVF4 meshes that already contain authored tangents. Preserve MAT-owned `NmName`; do not activate unsupported layouts, DFM, or additional PBR channels from this path. Release the temporary GPU lease after each draw and restore texture slot 2.
++- Keep `SurfaceNormalMapsEnabled` synchronized from GameSettings at startup and at every live settings apply. Turning it off retires unused GPU cache entries through the fence queue.
 +
 +## GPU texture cache
 +
@@ -3713,10 +3722,10 @@ index 0000000..b0f375d
 +}
 diff --git a/docs/surface-gpu-upload.md b/docs/surface-gpu-upload.md
 new file mode 100644
-index 0000000..8ca1f6c
+index 0000000000000000000000000000000000000000..bb647972bcc927dabbca65a30fa72ea9ab12ddda
 --- /dev/null
 +++ b/docs/surface-gpu-upload.md
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,110 @@
 +# Surface-GPU-Upload und BC5-Sampler: 13.10.2026
 +
 +## API und Besitz
@@ -3778,6 +3787,23 @@ index 0000000..8ca1f6c
 +Options/Escape/Exit und Shader-Shutdown liefern weiter owned=0/total=0. Es gab
 +im finalen Lauf keine GLShader-NativeBuffer-Leakwarnung.
 +[Maschinenprotokoll](evidence/surface-gpu-upload-20261013.json).
++
++## Begrenzte Materialanbindung
++
++Die Option `surface_normal_maps` ist standardmäßig aus und wird in den
++Grafikeinstellungen gespeichert. Ist sie aktiv, bindet `BasicMaterial` eine
++zugeordnete Zusatz-Normalmap nur für FVF3/FVF4-Meshes mit autorisierten
++Tangenten. Die CPU-Textur wird asynchron außerhalb des Renderthreads geladen.
++Der Draw pinnt anschließend nur eine residente CPU-Lease für den GPU-Upload;
++nachfolgende Draws erwerben nur die residente GPU-Lease. Diese wird nach jedem Draw
++freigegeben und der vorherige Texturslot wiederhergestellt. Fehlende oder
++ungültige Karten lassen das Originalmaterial weiterlaufen. Das Abschalten der
++Option räumt ungenutzte GPU-Einträge über die Fence-Queue ab.
++
++Meshes mit FVF1/FVF2 erhalten noch keine automatisch erzeugten Tangenten; DFM,
++Roughness-/Metallic-Zusatzkarten und eine visuelle Retail-NAP-Abnahme fehlen.
++Der Schalter ist deshalb ausdrücklich für tangententragende FVF3/FVF4-Meshes
++beschrieben.
 +
 +## Gemeinsamer GPU-Cache
 +
@@ -3950,10 +3976,10 @@ index 0000000..f681d6b
 +}
 diff --git a/docs/evidence/surface-gpu-cache-20261013.json b/docs/evidence/surface-gpu-cache-20261013.json
 new file mode 100644
-index 0000000..c9cb3c8
+index 0000000000000000000000000000000000000000..850a640dcf9022d1777bf988b7c4e28d5a703612
 --- /dev/null
 +++ b/docs/evidence/surface-gpu-cache-20261013.json
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,42 @@
 +{
 +  "date": "2026-10-13",
 +  "implementation": {
@@ -3963,7 +3989,7 @@ index 0000000..c9cb3c8
 +    "accounting": "logical DDS payload bytes; active and fence-retiring textures remain charged until post-fence disposal succeeds",
 +    "key": "normalized library path plus case-insensitive UTF node",
 +    "ownership": "render-thread GPU leases; caller-owned CPU lease loaded before upload",
-+    "draw_integration": "not implemented; surface-map options remain disabled"
++    "draw_integration": "opt-in BasicMaterial path for authored FVF3/FVF4 tangents; CPU payload preloaded asynchronously and GPU lease held through draw"
 +  },
 +  "verification": {
 +    "focused_tests": {
@@ -3973,7 +3999,7 @@ index 0000000..c9cb3c8
 +    },
 +    "solution_build": {
 +      "errors": 0,
-+      "warnings": 20
++      "warnings": 308
 +    },
 +    "native_sdl3_opengl": {
 +      "renderer": "Mesa Intel(R) HD Graphics 4600 (HSW GT2), OpenGL 4.6",
@@ -3986,12 +4012,13 @@ index 0000000..c9cb3c8
 +      "shutdown_callbacks_drained": 2,
 +      "shutdown_resident_bytes": 0,
 +      "owned_shaders_after_shutdown": 0
-+    }
++    },
++    "basic_material_draw_integration": "compiled in LibreLancer.sln; native draw smoke not run"
 +  },
 +  "limits": [
 +    "The budget tracks logical compressed payload size, not driver VRAM overhead.",
-+    "No automatic material draw acquisition or CPU loader queue is present.",
-+    "ClearUnused and off-thread disposal guard are covered by unit tests; native probe covered fence and shutdown retirement." ,
-+    "The native probe used a synthetic BC5 DDS, not a full NAP/gameplay launch."
++    "CPU image payloads are loaded asynchronously; render thread only pins resident CPU data for upload.",
++    "No native draw-level BasicMaterial smoke or retail NAP visual activation proof.",
++    "The native probe used a synthetic BC5 DDS for cache/fence behavior, not a full NAP/gameplay launch."
 +  ]
 +}
