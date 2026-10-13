@@ -3524,10 +3524,15 @@ index 72a7ece..11095d1 100644
                  <Checkbox id="ppl" X="18" Y="92" Width="200" Text="PER-PIXEL LIGHTING"/>
              </Panel>
 diff --git a/src/LibreLancer/Resources/ResourceManager.cs b/src/LibreLancer/Resources/ResourceManager.cs
-index abf0a1f..daf4f9a 100644
+index abf0a1f..9fb330b 100644
 --- a/src/LibreLancer/Resources/ResourceManager.cs
 +++ b/src/LibreLancer/Resources/ResourceManager.cs
-@@ -7,6 +7,7 @@ using System.Collections.Generic;
+@@ -3,10 +3,12 @@
+ // LICENSE, which is part of this source code package
+ 
+ using System;
++using System.IO;
+ using System.Collections.Generic;
  using System.Diagnostics.CodeAnalysis;
  using LibreLancer.Data;
  using LibreLancer.Data.IO;
@@ -3535,17 +3540,40 @@ index abf0a1f..daf4f9a 100644
  using LibreLancer.Fx;
  using LibreLancer.Graphics;
  using LibreLancer.Graphics.Primitives;
-@@ -21,6 +22,8 @@ namespace LibreLancer.Resources;
+@@ -21,6 +23,23 @@ namespace LibreLancer.Resources;
  // TODO: Allow for disposing and all that Jazz
  public abstract class ResourceManager
  {
 +    public SurfaceMapsIni SurfaceMaps { get; set; } = new();
 +
++    public SurfaceImageCache SurfaceImages { get; }
++
++    /// <summary>Demand-driven CPU acquisition; unavailable maps preserve the original MAT.</summary>
++    public SurfaceMaterialImages? TryAcquireSurfaceImages(Material material)
++    {
++        ArgumentNullException.ThrowIfNull(material);
++        if (material.SurfaceBinding == null) return null;
++        try {
++            return SurfaceMaterialImages.TryAcquire(SurfaceImages, material.SurfaceBinding);
++        } catch (Exception ex) when (ex is IOException or InvalidDataException or KeyNotFoundException or NotSupportedException) {
++            FLLog.Warning("Surface", $"Unable to load supplemental textures for {material.Name}: {ex.Message}");
++            return null;
++        }
++    }
++
      private Dictionary<string, RuntimeSurFile> surs = new(StringComparer.OrdinalIgnoreCase);
  
      public abstract VertexResource AllocateVertices(FVFVertex format, byte[] vertices, ushort[] indices);
+@@ -54,6 +73,7 @@ public abstract class ResourceManager
+     protected ResourceManager(FileSystem vfs)
+     {
+         VFS = vfs;
++        SurfaceImages = new SurfaceImageCache(vfs);
+     }
+ 
+     protected RuntimeSurFile GetSur(string filename)
 diff --git a/src/LibreLancer/Resources/GameResourceManager.cs b/src/LibreLancer/Resources/GameResourceManager.cs
-index a657c82..4f20e75 100644
+index a657c82..058b210 100644
 --- a/src/LibreLancer/Resources/GameResourceManager.cs
 +++ b/src/LibreLancer/Resources/GameResourceManager.cs
 @@ -107,6 +107,7 @@ public class GameResourceManager : ResourceManager, IDisposable
@@ -3556,6 +3584,22 @@ index a657c82..4f20e75 100644
          texturefiles = new Dictionary<string, string>(src.texturefiles, StringComparer.OrdinalIgnoreCase);
          shapes = new Dictionary<string, TextureShape?>(src.shapes, StringComparer.OrdinalIgnoreCase);
          materialfiles = new Dictionary<uint, string>(src.materialfiles);
+@@ -178,6 +179,7 @@ public class GameResourceManager : ResourceManager, IDisposable
+ 
+     public void ClearTextures()
+     {
++        SurfaceImages.ClearUnused();
+         loadedResFiles = [];
+         var keys = new string[textures.Count];
+         textures.Keys.CopyTo(keys, 0);
+@@ -647,6 +649,7 @@ public class GameResourceManager : ResourceManager, IDisposable
+     {
+         if (isDisposed) return;
+         isDisposed = true;
++        SurfaceImages.Dispose();
+ 
+         // Textures
+         foreach (var v in textures.Values)
 diff --git a/src/LibreLancer/Render/Materials/BasicMaterial.cs b/src/LibreLancer/Render/Materials/BasicMaterial.cs
 index fc3399a..9173c7d 100644
 --- a/src/LibreLancer/Render/Materials/BasicMaterial.cs
@@ -3800,4 +3844,201 @@ index 0000000..8439b9e
 +        if (expected != data.Length) throw new InvalidDataException("Surface DDS mip payload length mismatch");
 +    }
 +
++}
+diff --git a/src/LibreLancer/Resources/SurfaceImageCache.cs b/src/LibreLancer/Resources/SurfaceImageCache.cs
+new file mode 100644
+index 0000000..55c7d99
+--- /dev/null
++++ b/src/LibreLancer/Resources/SurfaceImageCache.cs
+@@ -0,0 +1,139 @@
++using System;
++using System.Collections.Generic;
++using System.IO;
++using System.Threading;
++using LibreLancer.Data.IO;
++
++namespace LibreLancer.Resources;
++
++public sealed record SurfaceImageCacheStats(long ResidentBytes, long PinnedBytes, int Entries, int ActiveLeases);
++
++/// <summary>CPU DDS payload cache. GPU residency/fences are owned by the future renderer path.</summary>
++public sealed class SurfaceImageCache : IDisposable
++{
++    public const long DefaultBudgetBytes = 64 * 1024 * 1024;
++    private sealed class Entry(ImageResource image)
++    {
++        public readonly ImageResource Image = image;
++        public int References;
++        public LinkedListNode<string> Node = null!;
++    }
++    private readonly object sync = new();
++    private readonly Dictionary<string, Entry> entries = new(StringComparer.OrdinalIgnoreCase);
++    private readonly LinkedList<string> order = new();
++    private readonly Func<SurfaceTextureReference, int, ImageResource> loader;
++    private readonly long budget;
++    private long bytes;
++    private bool disposed;
++
++    public SurfaceImageCache(FileSystem vfs, long budgetBytes = DefaultBudgetBytes)
++        : this(budgetBytes, (reference, limit) => SurfaceTextureReader.Read(vfs, reference, limit))
++    {
++        ArgumentNullException.ThrowIfNull(vfs);
++    }
++
++    /// <summary>The loader must respect its payload limit; calls are serialized by this cache.</summary>
++    public SurfaceImageCache(long budgetBytes, Func<SurfaceTextureReference, int, ImageResource> loader)
++    {
++        if (budgetBytes < 128 || budgetBytes > int.MaxValue) throw new ArgumentOutOfRangeException(nameof(budgetBytes));
++        this.loader = loader ?? throw new ArgumentNullException(nameof(loader));
++        budget = budgetBytes;
++    }
++
++    public SurfaceImageCacheStats Stats
++    {
++        get {
++            lock (sync) {
++                long pinned = 0; int leases = 0;
++                foreach (var entry in entries.Values) {
++                    leases += entry.References;
++                    if (entry.References > 0) pinned += entry.Image.Data.LongLength;
++                }
++                return new(bytes, pinned, entries.Count, leases);
++            }
++        }
++    }
++
++    /// <summary>Null means pinned entries leave insufficient space. Loading errors propagate.</summary>
++    public SurfaceImageLease? TryAcquire(SurfaceTextureReference reference)
++    {
++        ArgumentNullException.ThrowIfNull(reference);
++        ArgumentException.ThrowIfNullOrWhiteSpace(reference.File);
++        ArgumentException.ThrowIfNullOrWhiteSpace(reference.Node);
++        // Library aliases share storage; identical node names in different files do not.
++        if (reference.File.Contains('\0') || reference.Node.Contains('\0')) throw new ArgumentException("Invalid Surface key");
++        var key = reference.File.Replace('\\', '/') + "\0" + reference.Node;
++        lock (sync) {
++            ObjectDisposedException.ThrowIf(disposed, this);
++            if (entries.TryGetValue(key, out var existing)) return Pin(existing);
++            long pinned = 0;
++            foreach (var entry in entries.Values)
++                if (entry.References > 0) pinned += entry.Image.Data.LongLength;
++            var available = budget - pinned;
++            if (available < 128) return null;
++            var limit = (int)Math.Min(SurfaceTextureReader.DefaultMaxTextureBytes, available);
++            var image = loader(reference, limit);
++            if (image == null || image.Type != ImageType.DDS || image.Data == null || image.Data.Length < 128)
++                throw new InvalidDataException("Invalid Surface image returned by loader");
++            if (image.Data.LongLength > limit) return null;
++            while (bytes + image.Data.LongLength > budget) {
++                var node = order.First;
++                while (node != null && entries[node.Value].References != 0) node = node.Next;
++                if (node == null) return null;
++                Remove(entries[node.Value]);
++            }
++            var added = new Entry(image) { Node = order.AddLast(key) };
++            entries.Add(key, added); bytes += image.Data.LongLength;
++            return Pin(added);
++        }
++    }
++
++    private SurfaceImageLease Pin(Entry entry)
++    {
++        entry.References++;
++        order.Remove(entry.Node); order.AddLast(entry.Node);
++        return new(entry.Image, () => {
++            lock (sync) {
++                entry.References--;
++                if (disposed && entry.References == 0) Remove(entry);
++            }
++        });
++    }
++
++    private void Remove(Entry entry)
++    {
++        entries.Remove(entry.Node.Value); order.Remove(entry.Node);
++        bytes -= entry.Image.Data.LongLength;
++    }
++
++    public void ClearUnused()
++    {
++        lock (sync) {
++            var node = order.First;
++            while (node != null) {
++                var next = node.Next;
++                if (entries[node.Value].References == 0) Remove(entries[node.Value]);
++                node = next;
++            }
++        }
++    }
++
++    public void Dispose()
++    {
++        lock (sync) {
++            if (disposed) return;
++            disposed = true;
++            ClearUnused(); // Active leases stay valid and charged until their last release.
++        }
++    }
++}
++
++/// <summary>Borrowed DDS data; callers must not modify it or retain it beyond the lease.</summary>
++public sealed class SurfaceImageLease : IDisposable
++{
++    private ImageResource? image;
++    private readonly Action release;
++    internal SurfaceImageLease(ImageResource image, Action release) { this.image = image; this.release = release; }
++    public ImageResource Image => Volatile.Read(ref image) ?? throw new ObjectDisposedException(nameof(SurfaceImageLease));
++    public void Dispose() { if (Interlocked.Exchange(ref image, null) != null) release(); }
++}
+diff --git a/src/LibreLancer/Resources/SurfaceMaterialImages.cs b/src/LibreLancer/Resources/SurfaceMaterialImages.cs
+new file mode 100644
+index 0000000..141629f
+--- /dev/null
++++ b/src/LibreLancer/Resources/SurfaceMaterialImages.cs
+@@ -0,0 +1,46 @@
++using System;
++using System.IO;
++using System.Collections.Generic;
++using System.Threading;
++
++namespace LibreLancer.Resources;
++
++/// <summary>One material's CPU texture leases; no GPU resources or MAT replacement.</summary>
++public sealed class SurfaceMaterialImages : IDisposable
++{
++    private int disposed;
++    public SurfaceImageLease? Normal { get; }
++    public SurfaceImageLease? Roughness { get; }
++    public SurfaceImageLease? Metallic { get; }
++    private SurfaceMaterialImages(SurfaceImageLease? normal, SurfaceImageLease? roughness, SurfaceImageLease? metallic)
++    { Normal = normal; Roughness = roughness; Metallic = metallic; }
++
++    public static SurfaceMaterialImages? TryAcquire(SurfaceImageCache cache, SurfaceMaterialBinding binding)
++    {
++        ArgumentNullException.ThrowIfNull(cache);
++        ArgumentNullException.ThrowIfNull(binding);
++        var acquired = new List<SurfaceImageLease>();
++        SurfaceImageLease? Get(SurfaceTextureReference? reference) {
++            if (reference == null) return null;
++            var lease = cache.TryAcquire(reference);
++            if (lease == null) throw new BudgetUnavailableException();
++            acquired.Add(lease);
++            return lease;
++        }
++        try {
++            return new(Get(binding.Normal), Get(binding.RoughnessMap), Get(binding.MetallicMap));
++        } catch (BudgetUnavailableException) {
++            foreach (var lease in acquired) lease.Dispose();
++            return null;
++        } catch {
++            foreach (var lease in acquired) lease.Dispose();
++            throw;
++        }
++    }
++    private sealed class BudgetUnavailableException : Exception;
++    public void Dispose()
++    {
++        if (Interlocked.Exchange(ref disposed, 1) != 0) return;
++        Normal?.Dispose(); Roughness?.Dispose(); Metallic?.Dispose();
++    }
 +}

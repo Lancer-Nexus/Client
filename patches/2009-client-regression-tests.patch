@@ -9486,3 +9486,131 @@ index 0000000..dcd987e
 +        } finally { Directory.Delete(temporary,true); }
 +    }
 +}
+diff --git a/src/LibreLancer.Tests/SurfaceImageCacheTests.cs b/src/LibreLancer.Tests/SurfaceImageCacheTests.cs
+new file mode 100644
+index 0000000..c3c4b7b
+--- /dev/null
++++ b/src/LibreLancer.Tests/SurfaceImageCacheTests.cs
+@@ -0,0 +1,122 @@
++using System;
++using System.IO;
++using System.Threading.Tasks;
++using LibreLancer.Resources;
++using Xunit;
++namespace LibreLancer.Tests;
++public class SurfaceImageCacheTests
++{
++    static SurfaceTextureReference Ref(string node,string file="fx/maps.txm",string library="ships")=>new(library,file,node);
++    static ImageResource Image(int size=256)=>new(ImageType.DDS,new byte[size]);
++    static SurfaceMaterialBinding Binding(SurfaceTextureReference? normal,SurfaceTextureReference? rough=null,SurfaceTextureReference? metal=null)=>new(normal,1,rough,null,metal,null);
++    [Fact]
++    public void AliasesShareButDifferentFilesDoNot()
++    {
++        int loads=0;using var cache=new SurfaceImageCache(1024,(_,_)=>{loads++;return Image();});
++        using var a=cache.TryAcquire(Ref("normal"))!;
++        using var b=cache.TryAcquire(Ref("NORMAL","FX\\MAPS.TXM","alias"))!;
++        using var c=cache.TryAcquire(Ref("normal","fx/other.txm"))!;
++        Assert.Same(a.Image,b.Image);Assert.NotSame(a.Image,c.Image);Assert.Equal(2,loads);
++        Assert.Equal(new SurfaceImageCacheStats(512,512,2,3),cache.Stats);
++    }
++    [Fact]
++    public void EvictsOldestUnpinnedEntry()
++    {
++        int loads=0;using var cache=new SurfaceImageCache(512,(_,_)=>{loads++;return Image();});
++        foreach(var node in new[]{"a","b","a","c","a"})cache.TryAcquire(Ref(node))!.Dispose();
++        Assert.Equal(3,loads);cache.TryAcquire(Ref("b"))!.Dispose();Assert.Equal(4,loads);Assert.Equal(512,cache.Stats.ResidentBytes);
++    }
++    [Fact]
++    public void PinnedImagesSurviveClearAndEviction()
++    {
++        using var cache=new SurfaceImageCache(512,(_,_)=>Image());using var a=cache.TryAcquire(Ref("a"))!;
++        cache.TryAcquire(Ref("b"))!.Dispose();cache.TryAcquire(Ref("c"))!.Dispose();cache.ClearUnused();
++        Assert.Equal(new SurfaceImageCacheStats(256,256,1,1),cache.Stats);
++        using var again=cache.TryAcquire(Ref("a"))!;Assert.Same(a.Image,again.Image);
++    }
++    [Fact]
++    public void FullPinnedBudgetAvoidsAnotherRead()
++    {
++        int loads=0;using var cache=new SurfaceImageCache(256,(_,_)=>{loads++;return Image();});
++        using var a=cache.TryAcquire(Ref("a"))!;Assert.Null(cache.TryAcquire(Ref("b")));Assert.Equal(1,loads);
++        a.Dispose();using var b=cache.TryAcquire(Ref("b"))!;Assert.Equal(256,cache.Stats.ResidentBytes);
++    }
++    [Fact]
++    public void OversizedResultDoesNotEvictExistingEntry()
++    {
++        using var cache=new SurfaceImageCache(256,(r,_)=>Image(r.Node=="a"?256:512));cache.TryAcquire(Ref("a"))!.Dispose();
++        Assert.Null(cache.TryAcquire(Ref("b")));Assert.Equal(new SurfaceImageCacheStats(256,0,1,0),cache.Stats);
++    }
++    [Fact]
++    public void FailedLoadCanBeRetried()
++    {
++        int loads=0;using var cache=new SurfaceImageCache(512,(_,_)=>{if(++loads==1)throw new InvalidDataException();return Image();});
++        Assert.Throws<InvalidDataException>(()=>cache.TryAcquire(Ref("a")));Assert.Equal(0,cache.Stats.ResidentBytes);
++        using var retry=cache.TryAcquire(Ref("a"))!;Assert.Equal(2,loads);
++    }
++    [Fact]
++    public void DisposeKeepsLeasesValidUntilFinalRelease()
++    {
++        var cache=new SurfaceImageCache(512,(_,_)=>Image());var a=cache.TryAcquire(Ref("a"))!;var b=cache.TryAcquire(Ref("a"))!;
++        cache.TryAcquire(Ref("b"))!.Dispose();cache.Dispose();Assert.Equal(new SurfaceImageCacheStats(256,256,1,2),cache.Stats);
++        Assert.Equal(256,a.Image.Data.Length);Assert.Throws<ObjectDisposedException>(()=>cache.TryAcquire(Ref("c")));
++        a.Dispose();a.Dispose();Assert.Equal(1,cache.Stats.ActiveLeases);Assert.Throws<ObjectDisposedException>(()=>a.Image);
++        b.Dispose();Assert.Equal(new SurfaceImageCacheStats(0,0,0,0),cache.Stats);cache.Dispose();
++    }
++    [Fact]
++    public void MaterialBudgetFailureRollsBackLeases()
++    {
++        using var cache=new SurfaceImageCache(256,(_,_)=>Image());Assert.Null(SurfaceMaterialImages.TryAcquire(cache,Binding(Ref("a"),Ref("b"))));
++        Assert.Equal(0,cache.Stats.ActiveLeases);Assert.Equal(0,cache.Stats.PinnedBytes);
++    }
++    [Fact]
++    public void MissingMaterialChannelRollsBackLeases()
++    {
++        using var cache=new SurfaceImageCache(512,(r,_)=>r.Node=="missing"?throw new FileNotFoundException():Image());
++        Assert.Throws<FileNotFoundException>(()=>SurfaceMaterialImages.TryAcquire(cache,Binding(Ref("a"),Ref("missing"))));Assert.Equal(0,cache.Stats.ActiveLeases);
++    }
++    [Fact]
++    public void MaterialChannelsDeduplicateAndReleaseAllReferences()
++    {
++        int loads=0;using var cache=new SurfaceImageCache(256,(_,_)=>{loads++;return Image();});
++        var images=SurfaceMaterialImages.TryAcquire(cache,Binding(Ref("a"),Ref("a"),Ref("a")))!;
++        Assert.Same(images.Normal!.Image,images.Roughness!.Image);Assert.Equal(1,loads);Assert.Equal(3,cache.Stats.ActiveLeases);
++        images.Dispose();images.Dispose();Assert.Equal(0,cache.Stats.ActiveLeases);
++    }
++    [Fact]
++    public void FactorOnlyBindingDoesNotRead()
++    {
++        using var cache=new SurfaceImageCache(256,(_,_)=>throw new Exception("Unexpected read"));
++        using var images=SurfaceMaterialImages.TryAcquire(cache,Binding(null))!;Assert.Null(images.Normal);Assert.Equal(0,cache.Stats.ResidentBytes);
++    }
++    [Fact]
++    public void ParallelAcquisitionsDeduplicate()
++    {
++        int loads=0;using var cache=new SurfaceImageCache(256,(_,_)=>{loads++;return Image();});
++        Parallel.For(0,32,_=>{using var lease=cache.TryAcquire(Ref("a"))!;Assert.Equal(256,lease.Image.Data.Length);});
++        Assert.Equal(1,loads);Assert.Equal(0,cache.Stats.ActiveLeases);
++    }
++    [Theory]
++    [InlineData(0)] [InlineData(127)] [InlineData(2147483648L)]
++    public void RejectsInvalidBudget(long bytes)=>Assert.Throws<ArgumentOutOfRangeException>(()=>new SurfaceImageCache(bytes,(_,_)=>Image()));
++    [Theory]
++    [InlineData(false)] [InlineData(true)]
++    public void ResourceManagerPreservesOriginalMaterialWhenAssetIsMissingOrCorrupt(bool corrupt)
++    {
++        var temporary=Path.Combine(Path.GetTempPath(),"surface-cache-fallback-"+Guid.NewGuid().ToString("N"));
++        Directory.CreateDirectory(temporary);
++        try {
++            if(corrupt)File.WriteAllText(Path.Combine(temporary,"bad.txm"),"not a valid UTF");
++            var res=new ServerResourceManager(null,LibreLancer.Data.IO.FileSystem.FromPath(temporary));
++            using var config=new MemoryStream(System.Text.Encoding.UTF8.GetBytes("[Texture]\nname = maps\nfile = bad.txm\n[NormalMap]\ntexture = hull\nlibrary = maps\nmap = normal\n"));
++            res.SurfaceMaps.AddSections(LibreLancer.Data.Ini.IniFile.ParseFile("surface.ini",config));
++            var material=new LibreLancer.Utf.Mat.Material(res){DtName="hull"};material.Initialize(res);
++            Assert.NotNull(material.SurfaceBinding);
++            Assert.Null(res.TryAcquireSurfaceImages(material));
++            Assert.Equal("hull",Assert.IsType<LibreLancer.Render.Materials.BasicMaterial>(material.Render).DtSampler);
++            Assert.Equal(new SurfaceImageCacheStats(0,0,0,0),res.SurfaceImages.Stats);
++            res.SurfaceImages.Dispose();
++        } finally { Directory.Delete(temporary,true); }
++    }
++
++}

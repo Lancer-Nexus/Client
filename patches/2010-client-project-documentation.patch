@@ -2328,10 +2328,10 @@ index 0000000..3829e44
 +}
 diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
 new file mode 100644
-index 0000000..f99776b
+index 0000000..a373a29
 --- /dev/null
 +++ b/docs/graphics-implementation-plan.md
-@@ -0,0 +1,332 @@
+@@ -0,0 +1,369 @@
 +# Grafik-Erweiterungen: Umsetzungsplan
 +
 +Stand: 2026-10-12. Dieser Plan verbindet die neu eingelesenen Dokumente
@@ -2664,6 +2664,43 @@ index 0000000..f99776b
 +mit dem bisherigen vollständigen UTF-Loader verglichen. CountingStream-Tests
 +belegen zusätzlich, dass die neue Methode nur Index plus angeforderten Payload
 +liest und einen 1-MiB-Nachbarpayload auslässt. Keine GPU-/Bildqualitätsaussage.
++
++## Surface-CPU-Cache und Materialzugriff (2026-10-13)
++
++Jeder Ressourcenmanager besitzt einen unabhängigen `SurfaceImageCache` mit
++64 MiB DDS-Payloadbudget. Erst ein expliziter
++`TryAcquireSurfaceImages(Material)`-Aufruf liest dessen aufgelöste Zusatzkarten
++über den selektiven VFS-Leser. Normal-/Roughness-/Metallic-Kanäle teilen identische
++Datei-/Node-Payloads, nicht bloß gleichnamige Nodes verschiedener Bibliotheken.
++Library-Aliase, Groß-/Kleinschreibung und Pfadseparatoren werden beim Cache-Key
++normalisiert. MAT-Priorität stammt weiterhin aus dem Materialresolver.
++
++Leases pinnen die Payloads. LRU-Eviction und `ClearTextures` entfernen nur
++unbenutzte Einträge; fehlende Karten und ein erschöpftes Budget führen zum
++ursprünglichen Material zurück. Mehrkanalzugriffe geben bereits erhaltene
++Leases bei Fehlern wieder frei. Dispose sperrt neue Zugriffe, lässt aktive
++Leases gültig und gibt deren Daten nach der letzten Freigabe frei. Statistik
++trennt residente Bytes, gepinnte Bytes, Einträge und aktive Leases. Ladezugriffe
++sind synchron und im Cache serialisiert; vor Nutzung im Renderpfad gehört die
++I/O-Arbeit auf einen Loader-Worker.
++
++Das Budget begrenzt residente DDS-Payloads, keine Index-/Objektkosten,
++vorübergehenden Ladepuffer oder den separat begrenzten NAP-Chunkcache. Der
++Renderer ruft diesen CPU-Pfad noch nicht für aktive Drawcalls auf. GPU-Budget,
++Upload, Referenzen bis zum Frame-Ende/GPU-Fence, Shader-/Tangentenaktivierung und
++sichtbare Normalmaps bleiben offen. Die vorbereiteten Optionsschalter bleiben
++entsprechend deaktiviert.
++
++Verifiziert: 82 Surface-/Settings-Tests bestanden, darunter 17 Cache-/
++Materialzugriffstests für LRU, Pinnen, Alias-Dedup, parallele Zugriffe,
++Budgetgrenzen, Dispose und Fehler-Rollback. Der Ressourcenmanager fällt bei
++fehlenden und korrupten Assets auf das ursprüngliche Material zurück. Der
++finale Solution-Build hat null Fehler. Im NAP-only-Testclient fordern zwei
++explizite Zugriffe auf ein reales Liberty-Material drei Payloads an:
++1.748.000 residente/gepinnte Bytes, drei Einträge, sechs aktive Leases.
++Nach Dispose beider Materialzugriffe und ClearUnused sind Bytes und Leases
++null. Native Optionsnavigation, Escape und reguläres Exit bleiben erfolgreich.
++395 Overlaydateien wurden vollständig aus der Patchserie rekonstruiert.
 diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
 index 8667cc2..dabccc5 100644
 --- a/docs/renderer-roadmap.md
