@@ -9315,3 +9315,174 @@ index 0000000..712c28b
 +        Assert.Null(SurfaceMaterialResolver.Resolve(new Material(res) { DtName = "hull" }, res.SurfaceMaps));
 +    }
 +}
+diff --git a/src/LibreLancer.Tests/SurfaceTextureReaderTests.cs b/src/LibreLancer.Tests/SurfaceTextureReaderTests.cs
+new file mode 100644
+index 0000000..dcd987e
+--- /dev/null
++++ b/src/LibreLancer.Tests/SurfaceTextureReaderTests.cs
+@@ -0,0 +1,165 @@
++using System;
++using System.Buffers.Binary;
++using System.Collections.Generic;
++using System.IO;
++using System.Text;
++using LibreLancer.Data.IO;
++using LibreLancer.Resources;
++using Nexus.Assets;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class SurfaceTextureReaderTests
++{
++    static void Set(byte[] data, int offset, int value) => BinaryPrimitives.WriteInt32LittleEndian(data.AsSpan(offset), value);
++    static byte[] Dds(bool cube = false)
++    {
++        var data = new byte[128 + 16 * (cube ? 6 : 1)];
++        "DDS "u8.CopyTo(data);
++        Set(data, 4, 124); Set(data, 12, 4); Set(data, 16, 4); Set(data, 28, 1);
++        Set(data, 76, 32); Set(data, 80, 4); Set(data, 84, 0x32495441);
++        Set(data, 112, cube ? 0xfe00 : 0);
++        return data;
++    }
++
++    // Includes a large unrelated leaf to detect accidental whole-library reads.
++    static byte[] Utf(byte[]? payload = null, bool namesFirst = false, bool cube = false)
++    {
++        payload ??= Dds(cube);
++        var names = Encoding.Latin1.GetBytes("root\0Texture library\0wanted\0MIPS\0CUBE\0unused\0");
++        var treeOffset = namesFirst ? 40 + names.Length : 40;
++        var namesOffset = namesFirst ? 40 : 40 + 6 * 44;
++        var dataOffset = 40 + names.Length + 6 * 44;
++        var data = new byte[dataOffset + payload.Length + 1024 * 1024];
++        "UTF "u8.CopyTo(data); Set(data,4,257);Set(data,8,treeOffset);Set(data,12,6*44);
++        Set(data,20,44);Set(data,24,namesOffset);Set(data,28,names.Length);Set(data,32,names.Length);Set(data,36,dataOffset);
++        names.CopyTo(data,namesOffset);
++        void Node(int index, string name, int flags, int child, int length, int peer=0) {
++            var at=treeOffset+index*44;
++            Set(data,at,peer*44);
++            Set(data,at+4,Encoding.Latin1.GetString(names).IndexOf(name+"\0",StringComparison.Ordinal));
++            Set(data,at+8,flags);Set(data,at+16,child);Set(data,at+20,length);Set(data,at+24,length);
++        }
++        Node(0,"root",0x10,44,0);
++        Node(1,"Texture library",0x10,88,0);
++        Node(2,"wanted",0x10,132,0,4);
++        Node(3,cube?"CUBE":"MIPS",0x80,0,payload.Length);
++        Node(4,"unused",0x10,220,0);
++        Node(5,"MIPS",0x80,payload.Length,1024*1024);
++        payload.CopyTo(data,dataOffset);
++        return data;
++    }
++
++    sealed class CountingStream(byte[] data) : MemoryStream(data, writable:false)
++    {
++        public long BytesRead;
++        public override int Read(Span<byte> buffer) { var n=base.Read(buffer);BytesRead+=n;return n; }
++    }
++
++    [Theory]
++    [InlineData(false)]
++    [InlineData(true)]
++    public void ReadsOnePayloadAndKeepsCallerStreamOpen(bool namesFirst)
++    {
++        var data=Utf(namesFirst:namesFirst);
++        using var stream=new CountingStream(data);
++        var image=SurfaceTextureReader.Read(stream,"WANTED");
++        Assert.Equal(ImageType.DDS,image.Type);Assert.Equal(Dds(),image.Data);
++        Assert.Equal(40+6*44+Encoding.Latin1.GetByteCount("root\0Texture library\0wanted\0MIPS\0CUBE\0unused\0")+Dds().Length,stream.BytesRead);
++        Assert.True(stream.CanRead);
++    }
++
++    [Fact]
++    public void MissingNodeDoesNotReadPayloads()
++    {
++        using var stream=new CountingStream(Utf());
++        Assert.Throws<KeyNotFoundException>(()=>SurfaceTextureReader.Read(stream,"missing"));
++        Assert.True(stream.BytesRead<1024);
++    }
++
++    [Theory]
++    [InlineData(12,-44)]
++    [InlineData(32,int.MaxValue)]
++    [InlineData(36,int.MaxValue)]
++    [InlineData(20,28)]
++    [InlineData(40+2*44,88)] // self peer cycle
++    [InlineData(40+3*44+24,int.MaxValue)] // leaf outside data
++    [InlineData(40+44+16,45)] // unaligned child
++    [InlineData(24,40)] // overlapping index blocks
++    public void RejectsCorruptUtfBeforeReadingPayload(int offset,int value)
++    {
++        var data=Utf();Set(data,offset,value);
++        using var stream=new CountingStream(data);
++        Assert.Throws<InvalidDataException>(()=>SurfaceTextureReader.Read(stream,"wanted"));
++        Assert.True(stream.BytesRead<1024);
++    }
++
++    [Theory]
++    [InlineData(4,0)]
++    [InlineData(12,0)]
++    [InlineData(16,int.MaxValue)]
++    [InlineData(28,100)]
++    [InlineData(28,-1)]
++    [InlineData(76,0)]
++    [InlineData(84,0x30315844)] // DX10 is not supported by engine
++    [InlineData(112,0xfe00)] // cube hidden under MIPS
++    public void RejectsInvalidDds(int offset,int value)
++    {
++        var dds=Dds();Set(dds,offset,value);
++        using var stream=new MemoryStream(Utf(dds));
++        Assert.Throws<InvalidDataException>(()=>SurfaceTextureReader.Read(stream,"wanted"));
++    }
++
++    [Fact]
++    public void RejectsTruncatedMipsAndPayloadBudget()
++    {
++        using var truncated=new MemoryStream(Utf(Dds()[..^1]));
++        Assert.Throws<InvalidDataException>(()=>SurfaceTextureReader.Read(truncated,"wanted"));
++        using var stream=new CountingStream(Utf());
++        Assert.Throws<InvalidDataException>(()=>SurfaceTextureReader.Read(stream,"wanted",128));
++        Assert.True(stream.BytesRead<1024);
++        Assert.Throws<ArgumentOutOfRangeException>(()=>SurfaceTextureReader.Read(stream,"wanted",127));
++    }
++
++    [Fact]
++    public void CubeRequiresSixFacesAndSquareDimensions()
++    {
++        using var stream=new MemoryStream(Utf(cube:true));
++        Assert.Equal(Dds(true),SurfaceTextureReader.Read(stream,"wanted").Data);
++        var dds=Dds(true);Set(dds,112,0x200);
++        using var partial=new MemoryStream(Utf(dds,cube:true));
++        Assert.Throws<InvalidDataException>(()=>SurfaceTextureReader.Read(partial,"wanted"));
++    }
++
++    [Theory]
++    [InlineData(24)]
++    [InlineData(32)]
++    public void ReadsUncompressedCubemapsAndRejectsTruncatedFaces(int bits)
++    {
++        var dds = new byte[128 + 4 * 4 * (bits / 8) * 6];
++        Dds(true).AsSpan(0,128).CopyTo(dds);
++        Set(dds,80,bits == 32 ? 0x41 : 0x40);Set(dds,84,0);Set(dds,88,bits);
++        Set(dds,92,0xff0000);Set(dds,96,0xff00);Set(dds,100,0xff);
++        Set(dds,104,bits == 32 ? unchecked((int)0xff000000) : 0);
++        using var stream=new MemoryStream(Utf(dds,cube:true));
++        Assert.Equal(dds,SurfaceTextureReader.Read(stream,"wanted").Data);
++        using var truncated=new MemoryStream(Utf(dds[..^1],cube:true));
++        Assert.Throws<InvalidDataException>(()=>SurfaceTextureReader.Read(truncated,"wanted"));
++    }
++
++    [Fact]
++    public void ReadsFromNapVfsWithoutLooseAssets()
++    {
++        var temporary=Path.Combine(Path.GetTempPath(),"surface-texture-"+Guid.NewGuid().ToString("N"));
++        Directory.CreateDirectory(Path.Combine(temporary,"source","fx"));
++        try {
++            var source=Path.Combine(temporary,"source");
++            File.WriteAllBytes(Path.Combine(source,"fx","surface.txm"),Utf());
++            var archive=Path.Combine(temporary,"surface.nap");NapWriter.PackDirectory(source,archive);
++            var provider=new NexusPackageFileProvider([new NexusPackageMount("surface",NapArchive.Open(archive),100,1,[])]);
++            var image=SurfaceTextureReader.Read(new FileSystem(provider),new SurfaceTextureReference("surface","fx/surface.txm","wanted"));
++            Assert.Equal(Dds(),image.Data);
++        } finally { Directory.Delete(temporary,true); }
++    }
++}

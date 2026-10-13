@@ -3621,3 +3621,183 @@ index 0000000..324f351
 +            roughMap, roughness, metalMap, metallic);
 +    }
 +}
+diff --git a/src/LibreLancer/Resources/SurfaceTextureReader.cs b/src/LibreLancer/Resources/SurfaceTextureReader.cs
+new file mode 100644
+index 0000000..8439b9e
+--- /dev/null
++++ b/src/LibreLancer/Resources/SurfaceTextureReader.cs
+@@ -0,0 +1,174 @@
++using System;
++using System.Buffers.Binary;
++using System.Collections.Generic;
++using System.IO;
++using System.Text;
++using LibreLancer.Data.IO;
++
++namespace LibreLancer.Resources;
++
++/// <summary>Reads one DDS payload from a Surface UTF without materializing its whole data block.</summary>
++public static class SurfaceTextureReader
++{
++    public const int DefaultMaxTextureBytes = 32 * 1024 * 1024;
++    public const int MaxIndexBytes = 8 * 1024 * 1024;
++    private const int EntrySize = 44;
++    private const int MaxNodes = 16384;
++
++    public static ImageResource Read(FileSystem vfs, SurfaceTextureReference texture,
++        int maxTextureBytes = DefaultMaxTextureBytes)
++    {
++        using var stream = vfs.Open(texture.File);
++        return Read(stream, texture.Node, maxTextureBytes);
++    }
++
++    /// <summary>The caller retains ownership of the seekable stream.</summary>
++    public static ImageResource Read(Stream stream, string textureNode,
++        int maxTextureBytes = DefaultMaxTextureBytes)
++    {
++        ArgumentNullException.ThrowIfNull(stream);
++        ArgumentException.ThrowIfNullOrWhiteSpace(textureNode);
++        if (maxTextureBytes < 128 || maxTextureBytes > DefaultMaxTextureBytes)
++            throw new ArgumentOutOfRangeException(nameof(maxTextureBytes));
++        if (!stream.CanRead || !stream.CanSeek)
++            throw new NotSupportedException("Selective Surface reads require a readable, seekable stream");
++        var fileLength = stream.Length;
++        if (fileLength < 40) throw new InvalidDataException("Truncated UTF header");
++        Span<byte> header = stackalloc byte[40];
++        stream.Position = 0;
++        stream.ReadExactly(header);
++        int Int(Span<byte> bytes, int offset) => BinaryPrimitives.ReadInt32LittleEndian(bytes[offset..]);
++        if (!header[..4].SequenceEqual("UTF "u8) || Int(header, 4) != 257 || Int(header, 20) != EntrySize)
++            throw new InvalidDataException("Unsupported Surface UTF header");
++        var treeOffset = Int(header, 8);
++        var treeSize = Int(header, 12);
++        var namesOffset = Int(header, 24);
++        var namesSize = Int(header, 32); // used bytes, not reserved capacity
++        var dataOffset = Int(header, 36);
++        void Range(long offset, long size)
++        {
++            if (offset < 40 || size < 0 || offset > fileLength || size > fileLength - offset)
++                throw new InvalidDataException("UTF block or payload exceeds file bounds");
++        }
++        Range(treeOffset, treeSize);
++        Range(namesOffset, namesSize);
++        Range(dataOffset, 0);
++        if (treeSize == 0 || treeSize % EntrySize != 0 || treeSize / EntrySize > MaxNodes ||
++            namesSize == 0 || (long)treeSize + namesSize > MaxIndexBytes)
++            throw new InvalidDataException("Invalid or oversized UTF index");
++        if (dataOffset < (long)treeOffset + treeSize || dataOffset < (long)namesOffset + namesSize ||
++            ((long)treeOffset < (long)namesOffset + namesSize && (long)namesOffset < (long)treeOffset + treeSize))
++            throw new InvalidDataException("Overlapping UTF index/data blocks");
++        var tree = new byte[treeSize];
++        var names = new byte[namesSize];
++        stream.Position = treeOffset; stream.ReadExactly(tree);
++        stream.Position = namesOffset; stream.ReadExactly(names);
++        var visited = new HashSet<int>();
++        var nameCache = new Dictionary<int, string>();
++        (long Offset, int Length, string Kind)? selected = null;
++        string Name(int offset)
++        {
++            if (offset < 0 || offset >= names.Length) throw new InvalidDataException("Invalid UTF name offset");
++            if (nameCache.TryGetValue(offset, out var cached)) return cached;
++            var length = Math.Min(1025, names.Length - offset);
++            var end = Array.IndexOf(names, (byte)0, offset, length);
++            if (end < 0) throw new InvalidDataException("Unterminated or oversized UTF name");
++            return nameCache[offset] = Encoding.Latin1.GetString(names, offset, end - offset);
++        }
++        void Chain(int offset, bool inLibrary, string? node, int depth)
++        {
++            if (depth > 64) throw new InvalidDataException("UTF nesting limit exceeded");
++            while (true)
++            {
++                if (offset < 0 || offset % EntrySize != 0 || offset > tree.Length - EntrySize || !visited.Add(offset))
++                    throw new InvalidDataException("Invalid, cyclic or repeated UTF node");
++                var entry = tree.AsSpan(offset, EntrySize);
++                var peer = Int(entry, 0);
++                var name = Name(Int(entry, 4));
++                var flags = Int(entry, 8);
++                var child = Int(entry, 16);
++                var size = Int(entry, 24);
++                if ((flags & 0x10) != 0)
++                {
++                    var library = inLibrary || (depth == 1 && name.Equals("Texture library", StringComparison.OrdinalIgnoreCase));
++                    var texture = inLibrary && node == null ? name : node;
++                    if (child != 0) Chain(child, library, texture, depth + 1);
++                }
++                else
++                {
++                    if (depth == 0) throw new InvalidDataException("UTF root is not a directory");
++                    if (child < 0 || size < 0) throw new InvalidDataException("Negative UTF payload range");
++                    var absolute = (long)dataOffset + child;
++                    Range(absolute, size);
++                    if (inLibrary && string.Equals(node, textureNode, StringComparison.OrdinalIgnoreCase) &&
++                        (name.Equals("MIPS", StringComparison.OrdinalIgnoreCase) || name.Equals("CUBE", StringComparison.OrdinalIgnoreCase)))
++                    {
++                        if (selected != null) throw new InvalidDataException("Ambiguous Surface texture payload");
++                        if (size < 128 || size > maxTextureBytes) throw new InvalidDataException("Surface texture exceeds payload limit or has no DDS header");
++                        selected = (absolute, size, name);
++                    }
++                }
++                if (peer == 0) break;
++                offset = peer;
++            }
++        }
++        Chain(0, false, null, 0);
++        if (selected == null) throw new KeyNotFoundException($"Surface texture node not found: {textureNode}");
++        var payload = selected.Value;
++        var data = new byte[payload.Length];
++        stream.Position = payload.Offset; stream.ReadExactly(data);
++        if (!data.AsSpan(0, 4).SequenceEqual("DDS "u8) || Int(data, 4) != 124 || Int(data, 76) != 32)
++            throw new InvalidDataException("Invalid Surface DDS header");
++        var caps2 = Int(data, 112);
++        if (payload.Kind.Equals("CUBE", StringComparison.OrdinalIgnoreCase) && (caps2 & 0xfe00) != 0xfe00)
++            throw new InvalidDataException("Surface cube is missing DDS cube faces");
++        ValidateDds(data, payload.Kind.Equals("CUBE", StringComparison.OrdinalIgnoreCase));
++        return new ImageResource(ImageType.DDS, data);
++    }
++    // Match the classic block formats supported by the engine's DDS loader.
++    // Surface libraries contain 2D BC4/BC5 maps and compressed or RGB(A) six-face cubes.
++    private static void ValidateDds(byte[] data, bool cube)
++    {
++        int Value(int offset) => BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(offset));
++        var height = Value(12);
++        var width = Value(16);
++        var mipCount = Value(28);
++        var caps2 = Value(112);
++        if (width < 1 || height < 1 || width > 16384 || height > 16384 || Value(24) < 0 || Value(24) > 1 || (caps2 & 0x200000) != 0)
++            throw new InvalidDataException("Invalid or unsupported Surface DDS dimensions");
++        if (mipCount == 0) mipCount = 1;
++        var maxMips = 1;
++        for (var dimension = Math.Max(width, height); dimension > 1; dimension >>= 1) maxMips++;
++        if (mipCount < 1 || mipCount > maxMips)
++            throw new InvalidDataException("Invalid Surface DDS mip count or pixel format");
++        var pixelBytes = 0;
++        var blockBytes = 0;
++        if ((Value(80) & 4) != 0) blockBytes = Value(84) switch {
++            0x31545844 or 0x31495441 => 8, // DXT1, ATI1 (BC4)
++            0x33545844 or 0x35545844 or 0x32495441 => 16, // DXT3, DXT5, ATI2 (BC5)
++            _ => throw new InvalidDataException("Unsupported Surface DDS compression")
++        };
++        else {
++            var bits = Value(88);
++            var red = Value(92); var green = Value(96); var blue = Value(100); var alpha = Value(104);
++            if (Value(84) != 0 || (Value(80) != 0x40 && Value(80) != 0x41) ||
++                (bits != 24 && bits != 32) || green != 0xff00 ||
++                !((red == 0xff0000 && blue == 0xff) || (red == 0xff && blue == 0xff0000)) ||
++                (alpha != 0 && (bits != 32 || alpha != unchecked((int)0xff000000))))
++                throw new InvalidDataException("Unsupported Surface DDS pixel layout");
++            pixelBytes = bits / 8;
++        }
++        if (cube ? (caps2 & 0xfe00) != 0xfe00 || width != height : (caps2 & 0xfe00) != 0)
++            throw new InvalidDataException("Surface DDS cube layout does not match UTF leaf");
++        long expected = 128;
++        for (var mip = 0; mip < mipCount; mip++) {
++            expected += (blockBytes > 0
++                ? (long)((width + 3) / 4) * ((height + 3) / 4) * blockBytes
++                : (long)width * height * pixelBytes) * (cube ? 6 : 1);
++            width = Math.Max(1, width / 2);
++            height = Math.Max(1, height / 2);
++        }
++        if (expected != data.Length) throw new InvalidDataException("Surface DDS mip payload length mismatch");
++    }
++
++}
