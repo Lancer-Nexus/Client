@@ -2375,10 +2375,10 @@ index 0000000..3829e44
 +}
 diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..6d62af0cf01f02632ce64921e9041abc658fb813
+index 0000000000000000000000000000000000000000..5d3e3a4303d5338930f20084ded2c6a49b88ffd9
 --- /dev/null
 +++ b/docs/graphics-implementation-plan.md
-@@ -0,0 +1,510 @@
+@@ -0,0 +1,509 @@
 +# Grafik-Erweiterungen: Umsetzungsplan
 +
 +Stand: 2026-10-13. Dieser Plan verbindet die neu eingelesenen Dokumente
@@ -2406,8 +2406,7 @@ index 0000000000000000000000000000000000000000..6d62af0cf01f02632ce64921e9041abc
 +bleiben innerhalb der 13 aktiven Pakete. Dieser Build ist keine Bildabnahme.
 +
 +Nächste Arbeiten: native Materialdraw-Abnahme mit einer echten NAP-Normalmap,
-+Referenzbilder für Schiff/Basis/Planet; Stabilitäts- und Leistungsprüfung des asynchronen VMesh-Tangenten-Caches
-+sowie ein Residencybudget für erzeugte Vertexdaten; danach DFM/Skinning und
++Referenzbilder für Schiff/Basis/Planet; Stabilitäts- und Leistungsprüfung des asynchronen VMesh-Tangenten-Caches; danach DFM/Skinning und
 +negative Skalierungen. Cubemap-/IBL-, Roughness-/Metallic-Sampler und
 +LancerEdit-Herkunftsanzeige bleiben eigene nachfolgende Pakete. Die Optionen
 +für nicht implementierte Effekte bleiben gesperrt.
@@ -2432,7 +2431,7 @@ index 0000000000000000000000000000000000000000..6d62af0cf01f02632ce64921e9041abc
 +|---|---|---|
 +| Renderer | `OpenGL` und `Null`; keine SDL_GPU-Implementierung im Client | Vulkan als vollständiges zusätzliches Backend entwickeln |
 +| Material | MAT-Normalmaps bleiben erhalten; Surface-Normalmaps sind opt-in für authored FVF3/FVF4 und generierte VMesh-Tangenten aus NORMAL+TEX1/TEX2 | Native Draw-/Retail-Abnahme sowie weitere PBR-Kanäle ergänzen |
-+| Tangenten | `VMeshTangentBuilder` erzeugt asynchron FVF3/FVF4 aus VMesh NORMAL+TEX1/TEX2; DFM ist nicht angebunden | Residencybudget, DFM und visuelle Abnahme ergänzen |
++| Tangenten | `VMeshTangentBuilder` erzeugt asynchron FVF3/FVF4 aus VMesh NORMAL+TEX1/TEX2; GPU-Payloadbudget 64 MiB | DFM und visuelle Abnahme ergänzen; Budget deckt logische Payload, nicht Treiberreservierungen |
 +| Shader | BC5-Z wird mit `sqrt(1-dot(xy,xy))` rekonstruiert, ohne Begrenzung | NaNs durch Quantisierung/hohe Stärke verhindern; TBN-Ausrichtung prüfen |
 +| Cubes | Basic bindet Envmap auf Slot 3; PBR verwendet diesen Slot für Metallic und bindet dort keine Envmap | Reflexion und IBL mit eigenem PBR-Bindungsplan ergänzen |
 +| Surface-INI | `SurfaceMapsIni` liest die konfigurierte `[Data] surface_maps`-Liste über das VFS; voller NAP-Katalog im Client geladen | Materialanwendung und Residency noch implementieren |
@@ -3624,10 +3623,10 @@ index 0000000..07e523a
 +}
 diff --git a/docs/vmesh-tangents.md b/docs/vmesh-tangents.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..856585d0372aec96c3506e0c726f21ff538cbb4f
+index 0000000000000000000000000000000000000000..cc46e2dab7cbf79319d106e8f64a585cb6cb27bf
 --- /dev/null
 +++ b/docs/vmesh-tangents.md
-@@ -0,0 +1,77 @@
+@@ -0,0 +1,84 @@
 +# Retail-VMesh-Tangenten: Prüfung vom 13.10.2026
 +
 +## Datenpfad
@@ -3696,13 +3695,20 @@ index 0000000000000000000000000000000000000000..856585d0372aec96c3506e0c726f21ff
 +Renderthread einen separaten FVF3/FVF4-Vertex-/Index-Upload; bis dahin läuft das
 +Originalmaterial ohne Zusatz-Normalmap. Meshbereiche mit ergänzenden Karten
 +werden nicht zusammenoptimiert, damit Meshindex und VMeshRef-Offset eindeutig
-+bleiben. Die GPU-Ressourcen werden mit dem VMeshResource freigegeben. Für die erzeugten
-+Vertexdaten gibt es noch kein separates Residencybudget oder LRU-Eviction. Die
-+Option `surface_generated_tangents` ist separat gespeichert und lässt sich im
++bleiben. Die GPU-Ressourcen werden mit dem VMeshResource freigegeben. Der
++GameResourceManager begrenzt die logische Vertex- plus Index-Payload auf 64 MiB.
++Bei vollem Budget bleibt das Originalmesh aktiv; ein Upload wird höchstens einmal
++pro Sekunde erneut versucht. Das Budget misst keine Treiberreservierungen.
++Es gibt keine LRU-Eviction: Ressourcen bleiben bis zum Dispose des VMeshResource
++gebucht. Die Option `surface_generated_tangents` ist separat gespeichert und lässt sich im
 +Performance-Menü umschalten; ausgeschaltet werden erzeugte VMesh-Tangenten für
 +neue Draws nicht verwendet. Authored Tangenten bleiben davon unberührt.
 +
-+Der vollständige Solution-Build ist erfolgreich, aber der neue Tangenten-Draw
++Die Budgetintegration wurde mit dem `LibreLancer.csproj`-Build verifiziert: 21
++Projekte, 0 Fehler, 180 Warnungen. Der Patchoverlay-Rekonstruktor bestätigte 440
++Dateien. Es wurden keine budgetbezogenen Unit- oder Laufzeittests ausgeführt;
++Budgetgrenze, Retry, `ClearMeshes`-Freigabe und Shutdown-Fall bleiben explizite
++Testpunkte. Der neue Tangenten-Draw
 +wurde noch nicht nativ gerendert. Retail-Referenzbilder, Cache-/Leistungsprüfung,
 +DFM/Skinning und negative World-/MaterialAnim-Skalierungen bleiben offen.
 diff --git a/docs/evidence/vmesh-tangents-20261013.json b/docs/evidence/vmesh-tangents-20261013.json
@@ -3768,10 +3774,10 @@ index 0000000000000000000000000000000000000000..4b786cb4fe5f5652282591a9fc4c263e
 +}
 diff --git a/docs/surface-gpu-upload.md b/docs/surface-gpu-upload.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..64039fa93bdca2ed8a4681be2ec0d7745a7170a6
+index 0000000000000000000000000000000000000000..c1c2e6b119b637a62b613381223ca9b33f51698d
 --- /dev/null
 +++ b/docs/surface-gpu-upload.md
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,111 @@
 +# Surface-GPU-Upload und BC5-Sampler: 13.10.2026
 +
 +## API und Besitz
@@ -3880,8 +3886,9 @@ index 0000000000000000000000000000000000000000..64039fa93bdca2ed8a4681be2ec0d774
 +authored FVF3/FVF4-Tangenten oder asynchron generierten VMesh-Tangenten aus
 +NORMAL+TEX1/TEX2. CPU-DDS und Tangentengeometrie werden außerhalb des
 +Renderthreads vorgewärmt. Native Draw-Smokes und Retail-Szenenmatrix,
-+Ein Residencybudget für Tangentenvertexdaten, DFM/Skinning, reflektierte
-+World-Skalierung und Geräte-/Plattformgrenzen bleiben offen. Cubemap- und weitere Effektschalter bleiben bis zur Integration gesperrt.
++DFM/Skinning, reflektierte World-Skalierung und Geräte-/Plattformgrenzen
++bleiben offen. Für generierte Tangenten gilt ein separates 64-MiB-Limit auf
++logische Vertex- und Index-Payload; es gibt keine LRU-Eviction. Cubemap- und weitere Effektschalter bleiben bis zur Integration gesperrt.
 diff --git a/docs/evidence/surface-gpu-upload-20261013.json b/docs/evidence/surface-gpu-upload-20261013.json
 new file mode 100644
 index 0000000..04c70f5

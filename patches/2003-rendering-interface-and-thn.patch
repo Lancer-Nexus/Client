@@ -3606,7 +3606,7 @@ index 72a7ecec30826c2be1b371e846258f57d788af6a..ef3569b89eada7c51a09f1cf71a89bc6
                  <Checkbox id="ppl" X="18" Y="92" Width="200" Text="PER-PIXEL LIGHTING"/>
              </Panel>
 diff --git a/src/LibreLancer/Resources/ResourceManager.cs b/src/LibreLancer/Resources/ResourceManager.cs
-index abf0a1f1902ecbe3d5d5b679c1882132d07d27aa..b8a2a3782b64972ee01c6053b87e6cb2ef7ce368 100644
+index abf0a1f1902ecbe3d5d5b679c1882132d07d27aa..e331347d808d09a59e77cab634bc2bfa1f868f7b 100644
 --- a/src/LibreLancer/Resources/ResourceManager.cs
 +++ b/src/LibreLancer/Resources/ResourceManager.cs
 @@ -3,10 +3,12 @@
@@ -3622,13 +3622,20 @@ index abf0a1f1902ecbe3d5d5b679c1882132d07d27aa..b8a2a3782b64972ee01c6053b87e6cb2
  using LibreLancer.Fx;
  using LibreLancer.Graphics;
  using LibreLancer.Graphics.Primitives;
-@@ -21,6 +23,26 @@ namespace LibreLancer.Resources;
+@@ -21,6 +23,33 @@ namespace LibreLancer.Resources;
  // TODO: Allow for disposing and all that Jazz
  public abstract class ResourceManager
  {
 +    public SurfaceMapsIni SurfaceMaps { get; set; } = new();
 +    public bool SurfaceNormalMapsEnabled { get; set; }
 +    public bool SurfaceGeneratedTangentsEnabled { get; set; } = true;
++
++    /// <summary>Allocates supplementary runtime tangent geometry, or returns null when its budget is full.</summary>
++    public virtual VertexResource? TryAllocateGeneratedTangentVertices(FVFVertex format, byte[] vertices, ushort[] indices) =>
++        AllocateVertices(format, vertices, indices);
++
++    /// <summary>Releases runtime tangent geometry allocated through TryAllocateGeneratedTangentVertices.</summary>
++    public virtual void ReleaseGeneratedTangentVertices(VertexResource resource) => resource.Dispose();
 +
 +    public SurfaceImageCache SurfaceImages { get; }
 +    public SurfaceGpuTextureCache? SurfaceGpuTextures { get; protected set; }
@@ -3649,7 +3656,7 @@ index abf0a1f1902ecbe3d5d5b679c1882132d07d27aa..b8a2a3782b64972ee01c6053b87e6cb2
      private Dictionary<string, RuntimeSurFile> surs = new(StringComparer.OrdinalIgnoreCase);
  
      public abstract VertexResource AllocateVertices(FVFVertex format, byte[] vertices, ushort[] indices);
-@@ -54,6 +76,7 @@ public abstract class ResourceManager
+@@ -54,6 +83,7 @@ public abstract class ResourceManager
      protected ResourceManager(FileSystem vfs)
      {
          VFS = vfs;
@@ -3658,10 +3665,49 @@ index abf0a1f1902ecbe3d5d5b679c1882132d07d27aa..b8a2a3782b64972ee01c6053b87e6cb2
  
      protected RuntimeSurFile GetSur(string filename)
 diff --git a/src/LibreLancer/Resources/GameResourceManager.cs b/src/LibreLancer/Resources/GameResourceManager.cs
-index a657c820a0ee8aab89cd2059353ed80457fbf3a3..44704b5488e40b207c49969817b568c878c3f292 100644
+index a657c820a0ee8aab89cd2059353ed80457fbf3a3..ac760a6fa793ca601289db85a0cec6258ec4477d 100644
 --- a/src/LibreLancer/Resources/GameResourceManager.cs
 +++ b/src/LibreLancer/Resources/GameResourceManager.cs
-@@ -86,6 +86,7 @@ public class GameResourceManager : ResourceManager, IDisposable
+@@ -45,6 +45,10 @@ public class GameResourceManager : ResourceManager, IDisposable
+ 
+     private VertexResourceAllocator vertexResourceAllocator;
+ 
++    public const long GeneratedTangentGpuBudgetBytes = 64L * 1024 * 1024;
++    public long GeneratedTangentGpuBytes { get; private set; }
++    private readonly Dictionary<VertexResource, long> generatedTangentAllocations = new();
++
+     public override VertexResource AllocateVertices(FVFVertex format, byte[] vertices, ushort[] indices)
+     {
+         if (!GLWindow.IsUiThread()) throw new InvalidOperationException();
+@@ -52,6 +56,27 @@ public class GameResourceManager : ResourceManager, IDisposable
+         return vertexResourceAllocator.Allocate(format, vertices, indices);
+     }
+ 
++    public override VertexResource? TryAllocateGeneratedTangentVertices(FVFVertex format, byte[] vertices, ushort[] indices)
++    {
++        if (!GLWindow.IsUiThread()) throw new InvalidOperationException();
++        if (isDisposed) throw new ObjectDisposedException(nameof(GameResourceManager));
++        var requestedBytes = checked((long)vertices.LongLength + (long)indices.LongLength * sizeof(ushort));
++        if (requestedBytes > GeneratedTangentGpuBudgetBytes - GeneratedTangentGpuBytes) return null;
++        var resource = AllocateVertices(format, vertices, indices);
++        generatedTangentAllocations.Add(resource, requestedBytes);
++        GeneratedTangentGpuBytes += requestedBytes;
++        return resource;
++    }
++
++    public override void ReleaseGeneratedTangentVertices(VertexResource resource)
++    {
++        if (isDisposed) return;
++        if (!GLWindow.IsUiThread()) throw new InvalidOperationException();
++        if (generatedTangentAllocations.Remove(resource, out var releasedBytes))
++            GeneratedTangentGpuBytes -= releasedBytes;
++        resource.Dispose();
++    }
++
+     public override QuadSphere GetQuadSphere(int slices)
+     {
+         if (quadSpheres.TryGetValue(slices, out var sph))
+@@ -86,6 +111,7 @@ public class GameResourceManager : ResourceManager, IDisposable
      public GameResourceManager(IGLWindow g, FileSystem vfs) : base(vfs)
      {
          GLWindow = g;
@@ -3669,7 +3715,7 @@ index a657c820a0ee8aab89cd2059353ed80457fbf3a3..44704b5488e40b207c49969817b568c8
          vertexResourceAllocator = new VertexResourceAllocator(g.RenderContext);
          DefaultMaterial = new Material(this)
          {
-@@ -107,6 +108,9 @@ public class GameResourceManager : ResourceManager, IDisposable
+@@ -107,6 +133,9 @@ public class GameResourceManager : ResourceManager, IDisposable
  
      public GameResourceManager(GameResourceManager src) : this(src.GLWindow, src.VFS)
      {
@@ -3679,7 +3725,7 @@ index a657c820a0ee8aab89cd2059353ed80457fbf3a3..44704b5488e40b207c49969817b568c8
          texturefiles = new Dictionary<string, string>(src.texturefiles, StringComparer.OrdinalIgnoreCase);
          shapes = new Dictionary<string, TextureShape?>(src.shapes, StringComparer.OrdinalIgnoreCase);
          materialfiles = new Dictionary<uint, string>(src.materialfiles);
-@@ -178,6 +182,8 @@ public class GameResourceManager : ResourceManager, IDisposable
+@@ -178,6 +207,8 @@ public class GameResourceManager : ResourceManager, IDisposable
  
      public void ClearTextures()
      {
@@ -3688,7 +3734,7 @@ index a657c820a0ee8aab89cd2059353ed80457fbf3a3..44704b5488e40b207c49969817b568c8
          loadedResFiles = [];
          var keys = new string[textures.Count];
          textures.Keys.CopyTo(keys, 0);
-@@ -646,7 +652,10 @@ public class GameResourceManager : ResourceManager, IDisposable
+@@ -646,7 +677,11 @@ public class GameResourceManager : ResourceManager, IDisposable
      public void Dispose()
      {
          if (isDisposed) return;
@@ -3696,9 +3742,19 @@ index a657c820a0ee8aab89cd2059353ed80457fbf3a3..44704b5488e40b207c49969817b568c8
          isDisposed = true;
 +        SurfaceGpuTextures?.Dispose();
 +        SurfaceImages.Dispose();
++        ClearMeshes();
  
          // Textures
          foreach (var v in textures.Values)
+@@ -659,6 +694,8 @@ public class GameResourceManager : ResourceManager, IDisposable
+         WhiteTexture.Dispose();
+         GreyTexture.Dispose();
+         // Vertex buffers
++        generatedTangentAllocations.Clear();
++        GeneratedTangentGpuBytes = 0;
+         vertexResourceAllocator.Dispose();
+         ConvexCollection.Dispose();
+     }
 diff --git a/src/LibreLancer/Render/Materials/BasicMaterial.cs b/src/LibreLancer/Render/Materials/BasicMaterial.cs
 index fc3399a8cc2816fc80b8763677a101add5ac9bed..000213d3eba53f5b3c599db2a8a194e98b0ad777 100644
 --- a/src/LibreLancer/Render/Materials/BasicMaterial.cs
@@ -5484,7 +5540,7 @@ index afabccd19f7cd4b6b014d6fd18745b22ea906e3c..7b34a103f58fbb7a5c08823a5849d273
  
          public virtual bool DisableCull
 diff --git a/src/LibreLancer/Render/VMeshResource.cs b/src/LibreLancer/Render/VMeshResource.cs
-index 6201013819f25bd9aae127eb97195c02546f7073..c0cb6e10cf28ae612c19f5aaf8c6c4e1cf5d2c61 100644
+index 6201013819f25bd9aae127eb97195c02546f7073..bc354a927f42da09b7f11c9b0415e31e875536e4 100644
 --- a/src/LibreLancer/Render/VMeshResource.cs
 +++ b/src/LibreLancer/Render/VMeshResource.cs
 @@ -1,7 +1,9 @@
@@ -5497,7 +5553,7 @@ index 6201013819f25bd9aae127eb97195c02546f7073..c0cb6e10cf28ae612c19f5aaf8c6c4e1
  using LibreLancer.Resources;
  using LibreLancer.Utf.Vms;
  
-@@ -52,16 +54,68 @@ public class VMeshResource
+@@ -52,16 +54,77 @@ public class VMeshResource
      public VertexResource? VertexResource;
      public TMeshHeader[] Meshes = null!;
      public ushort[]? Indices;
@@ -5513,6 +5569,8 @@ index 6201013819f25bd9aae127eb97195c02546f7073..c0cb6e10cf28ae612c19f5aaf8c6c4e1
 +    {
 +        public Task<TangentMeshGeometry> BuildTask = buildTask;
 +        public VertexResource? Resource;
++        public ResourceManager? Owner;
++        public long NextUploadAttemptMs;
 +        public bool Failed;
 +    }
 +
@@ -5531,10 +5589,17 @@ index 6201013819f25bd9aae127eb97195c02546f7073..c0cb6e10cf28ae612c19f5aaf8c6c4e1
 +            if (entry.Failed) return null;
 +            if (entry.Resource is { IsDisposed: false }) return entry.Resource;
 +            if (!entry.BuildTask.IsCompleted) return null;
++            if (Environment.TickCount64 < entry.NextUploadAttemptMs) return null;
 +            try
 +            {
 +                var geometry = entry.BuildTask.GetAwaiter().GetResult();
-+                entry.Resource = resources.AllocateVertices(geometry.VertexFormat, geometry.VertexBuffer, geometry.Indices);
++                entry.Resource = resources.TryAllocateGeneratedTangentVertices(geometry.VertexFormat, geometry.VertexBuffer, geometry.Indices);
++                if (entry.Resource == null)
++                {
++                    entry.NextUploadAttemptMs = Environment.TickCount64 + 1000;
++                    return null;
++                }
++                entry.Owner = resources;
 +                return entry.Resource;
 +            }
 +            catch (Exception ex)
@@ -5567,13 +5632,20 @@ index 6201013819f25bd9aae127eb97195c02546f7073..c0cb6e10cf28ae612c19f5aaf8c6c4e1
  
          if (optimized != null && optimized.TryGetValue(vmo, out var v))
          {
-@@ -200,5 +254,10 @@ public class VMeshResource
+@@ -200,5 +263,17 @@ public class VMeshResource
          }
  
          optimized = null;
 +        lock (tangentSync)
 +        {
-+            foreach (var entry in tangentEntries.Values) entry.Resource?.Dispose();
++            foreach (var entry in tangentEntries.Values)
++            {
++                if (entry.Resource != null)
++                {
++                    if (entry.Owner != null) entry.Owner.ReleaseGeneratedTangentVertices(entry.Resource);
++                    else entry.Resource.Dispose();
++                }
++            }
 +            tangentEntries.Clear();
 +        }
      }
