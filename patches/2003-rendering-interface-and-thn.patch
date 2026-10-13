@@ -3190,3 +3190,150 @@ index 9024281..aa39e75 100644
  	Update()
  	{
  		if (Game.GatewayEnabled()) return;
+diff --git a/src/LibreLancer.Data/Schema/SurfaceMapsIni.cs b/src/LibreLancer.Data/Schema/SurfaceMapsIni.cs
+new file mode 100644
+index 0000000..0a5c8b7
+--- /dev/null
++++ b/src/LibreLancer.Data/Schema/SurfaceMapsIni.cs
+@@ -0,0 +1,141 @@
++using System;
++using System.Collections.Generic;
++using System.Collections.ObjectModel;
++using System.Globalization;
++using System.IO;
++using LibreLancer.Data.Ini;
++using LibreLancer.Data.IO;
++
++namespace LibreLancer.Data.Schema;
++
++public sealed record SurfaceTextureLibrary(string Name, string File);
++public sealed record SurfaceNormalMap(string Texture, string Library, string Map, float Strength,
++    string? RoughnessMap, float? Roughness, string? MetallicMap, float? Metallic);
++public sealed record SurfaceCubeMap(string Nickname, string File, string? Kind, float Strength);
++public sealed record SurfaceNormalMapBinding(SurfaceNormalMap Map, SurfaceTextureLibrary Library);
++
++/// <summary>Surface metadata only. Texture-library contents are loaded by material consumers later.</summary>
++public sealed class SurfaceMapsIni
++{
++    private readonly Dictionary<string, SurfaceTextureLibrary> libraries = new(StringComparer.OrdinalIgnoreCase);
++    private readonly Dictionary<string, SurfaceNormalMap> normalMaps = new(StringComparer.OrdinalIgnoreCase);
++    private readonly Dictionary<string, SurfaceCubeMap> cubeMaps = new(StringComparer.OrdinalIgnoreCase);
++    private readonly List<string> diagnostics = [];
++    public IReadOnlyDictionary<string, SurfaceTextureLibrary> Libraries { get; }
++    public IReadOnlyDictionary<string, SurfaceNormalMap> NormalMaps { get; }
++    public IReadOnlyDictionary<string, SurfaceCubeMap> CubeMaps { get; }
++    public IReadOnlyList<string> Diagnostics { get; }
++
++    public SurfaceMapsIni()
++    {
++        Libraries = new ReadOnlyDictionary<string, SurfaceTextureLibrary>(libraries);
++        NormalMaps = new ReadOnlyDictionary<string, SurfaceNormalMap>(normalMaps);
++        CubeMaps = new ReadOnlyDictionary<string, SurfaceCubeMap>(cubeMaps);
++        Diagnostics = diagnostics.AsReadOnly();
++    }
++
++    public void Load(IEnumerable<string> paths, FileSystem vfs, string dataPath, IniStringPool? pool = null)
++    {
++        foreach (var path in paths)
++        {
++            if (!vfs.FileExists(path)) { Warn(path, "Optional Surface INI missing"); continue; }
++            AddSections(IniFile.ParseFile(path, vfs, stringPool: pool), dataPath);
++        }
++        foreach (var map in normalMaps.Values)
++            if (!libraries.ContainsKey(map.Library))
++                Warn(map.Texture, $"Unknown Surface library {map.Library}; mapping cannot resolve");
++    }
++
++    public bool TryResolveNormalMap(string diffuseTexture, out SurfaceNormalMapBinding? binding)
++    {
++        binding = null;
++        if (!normalMaps.TryGetValue(diffuseTexture, out var map) || !libraries.TryGetValue(map.Library, out var library))
++            return false;
++        binding = new SurfaceNormalMapBinding(map, library);
++        return true;
++    }
++
++    internal static bool IsRelativeAssetPath(string value)
++    {
++        if (string.IsNullOrWhiteSpace(value) || value.Contains(':') || value.Contains('\0') ||
++            value.StartsWith('/') || value.StartsWith('\\')) return false;
++        foreach (var part in value.Replace('\\', '/').Split('/'))
++            if (part is "" or "." or "..") return false;
++        return true;
++    }
++
++    public void AddSections(IEnumerable<Section> sections, string dataPath = "")
++    {
++        foreach (var section in sections)
++        {
++            var name = section.Name.ToLowerInvariant();
++            var allowed = name switch
++            {
++                "texture" => "file name",
++                "normalmap" => "texture library map strength roughness_map roughness metallic_map metallic",
++                "cubemap" => "nickname file kind strength",
++                _ => null
++            };
++            if (allowed == null) { Warn(section.File ?? "Surface", $"Unknown section {section.Name}"); continue; }
++            var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
++            var allowedKeys = allowed.Split(' ');
++            var invalid = false;
++            foreach (var entry in section)
++            {
++                if (Array.IndexOf(allowedKeys, entry.Name.ToLowerInvariant()) < 0)
++                { Warn(section.File ?? "Surface", $"Unknown {section.Name} key {entry.Name}"); continue; }
++                if (entry.Count != 1 || !fields.TryAdd(entry.Name, entry[0].ToString().Trim()))
++                { Warn(section.File ?? "Surface", $"Duplicate or non-scalar {entry.Name}"); invalid = true; }
++            }
++            if (invalid) continue;
++            try
++            {
++                string Required(string key) => fields.TryGetValue(key, out var value) && value.Length > 0
++                    ? value : throw new FormatException($"Missing {key}");
++                string? Optional(string key) => fields.TryGetValue(key, out var value) && value.Length > 0 ? value : null;
++                string FilePath()
++                {
++                    var value = Required("file");
++                    if (!IsRelativeAssetPath(value)) throw new FormatException("Invalid relative asset path");
++                    return dataPath + value;
++                }
++                float? Factor(string key, float maximum)
++                {
++                    if (!fields.TryGetValue(key, out var value)) return null;
++                    if (!float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var result) ||
++                        !float.IsFinite(result) || result < 0 || result > maximum)
++                        throw new FormatException($"Invalid {key}, expected finite 0..{maximum}");
++                    return result;
++                }
++                if (name == "texture")
++                {
++                    var library = new SurfaceTextureLibrary(Required("name"), FilePath());
++                    if (libraries.TryGetValue(library.Name, out var old) && !old.File.Equals(library.File, StringComparison.OrdinalIgnoreCase))
++                        Warn(section.File ?? "Surface", $"Duplicate library {library.Name}; last definition wins");
++                    libraries[library.Name] = library;
++                }
++                else if (name == "normalmap")
++                {
++                    var map = new SurfaceNormalMap(Required("texture"), Required("library"), Required("map"),
++                        Factor("strength", 16) ?? 1, Optional("roughness_map"), Factor("roughness", 1),
++                        Optional("metallic_map"), Factor("metallic", 1));
++                    if (normalMaps.ContainsKey(map.Texture)) Warn(section.File ?? "Surface", $"Duplicate texture {map.Texture}; last mapping wins");
++                    normalMaps[map.Texture] = map;
++                }
++                else
++                {
++                    var cube = new SurfaceCubeMap(Required("nickname"), FilePath(), Optional("kind"), Factor("strength", 1) ?? 1);
++                    if (cubeMaps.ContainsKey(cube.Nickname)) Warn(section.File ?? "Surface", $"Duplicate cube {cube.Nickname}; last definition wins");
++                    cubeMaps[cube.Nickname] = cube;
++                }
++            }
++            catch (FormatException error) { Warn(section.File ?? "Surface", $"Skipped {section.Name}: {error.Message}"); }
++        }
++    }
++
++    private void Warn(string source, string message)
++    {
++        diagnostics.Add($"{source}: {message}");
++        FLLog.Warning("Surface", $"{source}: {message}");
++    }
++}

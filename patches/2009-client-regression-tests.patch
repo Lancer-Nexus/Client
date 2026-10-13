@@ -8959,3 +8959,152 @@ index 0000000..e7e3152
 +        Assert.False(table.IsDisposed);
 +    }
 +}
+diff --git a/src/LibreLancer.Tests/SurfaceMapsIniTests.cs b/src/LibreLancer.Tests/SurfaceMapsIniTests.cs
+new file mode 100644
+index 0000000..9848bbd
+--- /dev/null
++++ b/src/LibreLancer.Tests/SurfaceMapsIniTests.cs
+@@ -0,0 +1,143 @@
++using System;
++using System.IO;
++using System.Text;
++using LibreLancer.Data.Ini;
++using LibreLancer.Data.IO;
++using LibreLancer.Data.Schema;
++using Nexus.Assets;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class SurfaceMapsIniTests
++{
++    private static SurfaceMapsIni Parse(string text)
++    {
++        using var stream = new MemoryStream(Encoding.UTF8.GetBytes(text));
++        var maps = new SurfaceMapsIni();
++        maps.AddSections(IniFile.ParseFile("surface.ini", stream), "DATA/");
++        return maps;
++    }
++
++    [Fact]
++    public void ParsesAllSectionsAndResolvesNamesCaseInsensitively()
++    {
++        var maps = Parse("""
++            [NormalMap]
++            texture = Hull.tga
++            library = SHIPS
++            map = nm_hull
++            strength = 6
++            roughness_map = rt_hull
++            roughness = 0.8
++            metallic = 0
++            [Texture]
++            name = ships
++            file = fx/ships.txm
++            [CubeMap]
++            nickname = sky
++            file = fx/sky.mat
++            kind = nebula
++            strength = 0.35
++            """);
++        Assert.True(maps.TryResolveNormalMap("HULL.TGA", out var binding));
++        Assert.Equal("DATA/fx/ships.txm", binding!.Library.File);
++        Assert.Equal(6, binding.Map.Strength);
++        Assert.Equal(0.8f, binding.Map.Roughness);
++        Assert.Equal(0, binding.Map.Metallic);
++        Assert.Equal(0.35f, maps.CubeMaps["SKY"].Strength);
++        Assert.Empty(maps.Diagnostics);
++    }
++
++    [Theory]
++    [InlineData("NaN")]
++    [InlineData("Infinity")]
++    [InlineData("-1")]
++    [InlineData("17")]
++    [InlineData("1e50")]
++    public void RejectsNonFiniteOrOutOfRangeNormalStrength(string value)
++    {
++        var maps = Parse($"[NormalMap]\ntexture = hull\nlibrary = ships\nmap = nm\nstrength = {value}\n");
++        Assert.Empty(maps.NormalMaps);
++        Assert.NotEmpty(maps.Diagnostics);
++    }
++
++    [Fact]
++    public void DefaultsPreserveAbsentPbrFactorsAndLastMappingWins()
++    {
++        var maps = Parse("[NormalMap]\ntexture = Hull\nlibrary = ships\nmap = old\n[NormalMap]\ntexture = HULL\nlibrary = ships\nmap = new\n");
++        var map = Assert.Single(maps.NormalMaps).Value;
++        Assert.Equal("new", map.Map);
++        Assert.Equal(1, map.Strength);
++        Assert.Null(map.Roughness);
++        Assert.Null(map.Metallic);
++        Assert.False(maps.TryResolveNormalMap("hull", out _));
++        Assert.NotEmpty(maps.Diagnostics);
++    }
++
++    [Theory]
++    [InlineData("../outside.txm")]
++    [InlineData("/outside.txm")]
++    [InlineData("C:/outside.txm")]
++    [InlineData("fx/./outside.txm")]
++    public void RejectsNonRelativeLibraryPaths(string path)
++    {
++        var maps = Parse($"[Texture]\nname = ships\nfile = {path}\n");
++        Assert.Empty(maps.Libraries);
++    }
++
++    [Fact]
++    public void DuplicateKeysAndMultipleValuesSkipOnlyTheirSection()
++    {
++        var maps = Parse("[Texture]\nname = ships\nfile = first\nfile = second\n[NormalMap]\ntexture = hull, other\nlibrary = ships\nmap = nm\n[CubeMap]\nnickname = sky\nfile = fx/sky.mat\n");
++        Assert.Empty(maps.Libraries);
++        Assert.Empty(maps.NormalMaps);
++        Assert.Single(maps.CubeMaps);
++    }
++
++    [Theory]
++    [InlineData("roughness", "1.01")]
++    [InlineData("metallic", "NaN")]
++    [InlineData("metallic", "-0.1")]
++    public void InvalidPbrFactorsSkipMapping(string key, string value)
++    {
++        var maps = Parse($"[NormalMap]\ntexture = hull\nlibrary = ships\nmap = nm\n{key} = {value}\n");
++        Assert.Empty(maps.NormalMaps);
++        Assert.NotEmpty(maps.Diagnostics);
++    }
++
++    [Fact]
++    public void CubeRangeAndUnknownKeysHaveExplicitDiagnostics()
++    {
++        var maps = Parse("[CubeMap]\nnickname = bad\nfile = fx/sky.mat\nstrength = 1.01\n[Texture]\nname = good\nfile = fx/good.txm\nfuture_hint = supported_later\n[FutureSection]\nkey = ignored\n");
++        Assert.Empty(maps.CubeMaps);
++        Assert.Single(maps.Libraries);
++        Assert.Equal(3, maps.Diagnostics.Count);
++    }
++
++    [Fact]
++    public void ReadsConfiguredListFromNapWithoutOpeningTextureLibraries()
++    {
++        var temporary = Path.Combine(Path.GetTempPath(), "surface-ini-" + Guid.NewGuid().ToString("N"));
++        Directory.CreateDirectory(Path.Combine(temporary, "source", "fx"));
++        try
++        {
++            var source = Path.Combine(temporary, "source");
++            File.WriteAllText(Path.Combine(source, "librelancer.ini"), "[Freelancer]\ndata path = DATA\n[Data]\nsurface_maps = fx/SurfaceMaps.ini\n");
++            File.WriteAllText(Path.Combine(source, "fx", "SurfaceMaps.ini"), "[Texture]\nname = ships\nfile = fx/ships.txm\n[NormalMap]\ntexture = hull\nlibrary = ships\nmap = nm\n");
++            File.WriteAllText(Path.Combine(source, "fx", "ships.txm"), "Not a UTF: metadata loading must not parse this");
++            var archivePath = Path.Combine(temporary, "surface.nap");
++            NapWriter.PackDirectory(source, archivePath);
++            var provider = new NexusPackageFileProvider([new NexusPackageMount("surface", NapArchive.Open(archivePath), 100, 1, [])]);
++            var fs = new FileSystem(provider);
++            var config = new FreelancerIni(fs);
++            Assert.Single(config.SurfaceMapPaths);
++            var maps = new SurfaceMapsIni();
++            maps.Load(config.SurfaceMapPaths, fs, config.DataPath);
++            Assert.True(maps.TryResolveNormalMap("HULL", out var binding));
++            Assert.EndsWith("fx/ships.txm", binding!.Library.File);
++            Assert.Empty(maps.Diagnostics);
++        }
++        finally { Directory.Delete(temporary, recursive: true); }
++    }
++}

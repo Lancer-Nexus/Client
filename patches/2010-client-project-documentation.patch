@@ -2328,10 +2328,10 @@ index 0000000..3829e44
 +}
 diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
 new file mode 100644
-index 0000000..48ba7ae
+index 0000000..4c6f34d
 --- /dev/null
 +++ b/docs/graphics-implementation-plan.md
-@@ -0,0 +1,252 @@
+@@ -0,0 +1,259 @@
 +# Grafik-Erweiterungen: Umsetzungsplan
 +
 +Stand: 2026-10-12. Dieser Plan verbindet die neu eingelesenen Dokumente
@@ -2364,7 +2364,7 @@ index 0000000..48ba7ae
 +| Tangenten | Basic-FVF erwartet Tangenten in zusätzlichen UV-Slots; normale Retail-Layouts werden dadurch nicht automatisch erweitert | Tangenten aus Geometrie und der gewählten UV-Menge erzeugen |
 +| Shader | BC5-Z wird mit `sqrt(1-dot(xy,xy))` rekonstruiert, ohne Begrenzung | NaNs durch Quantisierung/hohe Stärke verhindern; TBN-Ausrichtung prüfen |
 +| Cubes | Basic bindet Envmap auf Slot 3; PBR verwendet diesen Slot für Metallic und bindet dort keine Envmap | Reflexion und IBL mit eigenem PBR-Bindungsplan ergänzen |
-+| Surface-INI | Kein `SurfaceMaps`-Verbraucher in Schema/Engine gefunden | INIs sind vorhanden, werden aber noch nicht materialwirksam geladen |
++| Surface-INI | `SurfaceMapsIni` liest die konfigurierte `[Data] surface_maps`-Liste über das VFS; voller NAP-Katalog im Client geladen | Materialanwendung, benannte Profilwahl und Residency noch implementieren |
 +| NAP-Daten | Reparierter Bestand: 41 Surface-Dateien, 1.349.682.438 Bytes; 7.005 DDS-Texturen und INI-Knotenverweise ohne Strukturfehler; `surface.nap` mit 41 Einträgen verifiziert | Materialzuordnung und sichtbare Wirkung bleiben zu prüfen |
 +
 +Die vier kuratierten Bibliotheken enthalten bereits **55 Normalmaps** und
@@ -2443,6 +2443,13 @@ index 0000000..48ba7ae
 +  Leistungsbudgets daraus ableiten; keine ungemessenen FPS-Zusagen.
 +
 +### P1 – Daten und Residency
++
++**Fortschritt vom 13.10.2026:** Der Parser, die konfigurierte Ladeliste und
++case-insensitive Metadatenauflösung sind implementiert. 17 Tests prüfen auch
++NAN/Infinity, Wertebereiche, Pfade, Mehrfachdefinitionen und NAP-Zugriff ohne
++Bibliotheksöffnung. Der Client lädt den vollen Katalog mit 2.807 Normalmap-
++Zuordnungen. Die folgenden P1-Punkte bleiben für benannte Profilwahl,
++Materialintegration und Speicher-/GPU-Lebensdauer offen.
 +
 +- [ ] `SurfaceMapsIni` mit `[Texture]`, `[NormalMap]`, `[CubeMap]` sowie
 +  `[Data] surface_maps`-Ladeliste implementieren. Profilabhängig nur die
@@ -2598,18 +2605,61 @@ index 8667cc2..dabccc5 100644
 
  ## Bereits vorhanden
 diff --git a/docs/surface-maps.md b/docs/surface-maps.md
-index 95f1ac2..4840e28 100644
+index 95f1ac2..2c205ed 100644
 --- a/docs/surface-maps.md
 +++ b/docs/surface-maps.md
-@@ -1,5 +1,8 @@
+@@ -1,9 +1,50 @@
  # Surface Maps: Normal Maps und Cube Maps per INI
-
+ 
+-**Status:** Beschreibung und Aufgabenliste, noch nichts im Client umgesetzt. **Stand:** 2026-10-12.
 +Die aktuelle Umsetzungsreihenfolge und Abnahme stehen im
 +[Grafik-Umsetzungsplan](graphics-implementation-plan.md).
 +
- **Status:** Beschreibung und Aufgabenliste, noch nichts im Client umgesetzt. **Stand:** 2026-10-12.
++**Status:** Surface-Metadatenparser und `[Data] surface_maps` sind angebunden; Material-/Shader-Anwendung und Residency sind noch offen. **Stand:** 2026-10-13.
  **Datenseite:** Repository `LN-Data` (`tools/make_surface_maps.py`, `SDK/fx/SurfaceMaps.ini`, `TODO-surface-maps.md`).
  Engine-Änderungen bleiben gemäß `AGENTS.md` patch-only unter `patches/series`.
+ 
++## Aktuell implementierte Metadaten-Anbindung
++
++```ini
++[Data]
++surface_maps = fx\SurfaceMaps.ini
++surface_maps = fx\SurfaceMapsShips.ini
++surface_maps = fx\SurfaceMapsSolar.ini
++; Für den vollständigen Datenbestand zusätzlich:
++surface_maps = fx\SurfaceMapsBases.ini
++```
++
++`FreelancerIni.SurfaceMapPaths` erhält die ausdrücklich konfigurierte Liste.
++`FreelancerData.LoadData` lädt sie über das bestehende VFS nach
++`FreelancerData.SurfaceMaps`. Ohne diese Einträge bleibt der Katalog leer.
++Die gewählte Dateiliste bestimmt derzeit den Umfang; eine benannte
++Original-/Minimal-/Standard-/Full-Auswahl in den Spieleinstellungen steht aus.
++
++`SurfaceMapsIni` liest Bibliotheken, Normalmap-Zuordnungen und den Cube-Katalog,
++validiert relative Assetpfade und skalare Felder und löst Namen ohne Beachtung
++der Schreibweise auf. Bei mehrfachen Definitionen gewinnt der letzte gültige
++Eintrag; unbekannte Schlüssel, fehlende INIs und ungültige Abschnitte erzeugen
++Diagnosen. `TryResolveNormalMap` liefert nur eine Metadatenbindung und meldet
++fehlende Bibliotheksdeklarationen als nicht auflösbar.
++
++Implementierte Zahlenbereiche: `strength` für Normalmaps 0–16, Cube-Stärke 0–1,
++Roughness-/Metallic-Faktoren 0–1, jeweils endlich. Nicht angegebene PBR-Faktoren
++bleiben ausdrücklich ungesetzt; sie aktivieren dadurch noch keinen PBR-Pfad.
++Normalmap- und Cube-Stärke haben den Metadatenstandard 1. Bibliotheksdateien
++und Texturknoten werden beim Metadatenladen nicht geöffnet oder auf die GPU
++übertragen. Materialvorrang, Tangenten, tatsächliche Texturauflösung,
++Residency und sichtbare Wirkung sind folgende Implementierungsschritte.
++
++Nachweise: 17 Parser-/VFS-Tests sowie ein Client-Lauf mit der vollen Liste aus
++NAP (34 Bibliotheken, 2.807 Normalmap-Zuordnungen, 3 Cubes, keine Diagnosen).
++Die alten Auto-Kartenzahlen weiter unten sind ein historischer Datenstand;
++aktueller Reparaturstand im [Grafikplan](graphics-implementation-plan.md).
++[Prüfbefunde und Assembly-Hashes](evidence/surface-metadata-20261013.json).
++
+ ## 1. Ziel
+ 
+ Zu vorhandenen Texturen sollen zusätzliche Normal Maps und Cube Maps (Umgebungsspiegelung) in einer INI eingetragen werden können, ohne die binären `.mat`-Dateien zu ändern. Gilt für Schiffe, Stationen/Basen sowie Planeten und Solar-Objekte. Die Daten stehen als kleiner Beispielsatz bereit (55 Normal Maps, 3 Cube Maps). Die Stärken sind so abgestimmt, dass 95 % der Pixel höchstens 28° neigen (Bericht `LN-Data/surface-maps-bewertung.md`); das ist eine Festlegung der Datenseite, kein Wert aus der Engine.
 diff --git a/docs/vulkan-backend-untersuchung.md b/docs/vulkan-backend-untersuchung.md
 index bd93f7b..812f304 100644
 --- a/docs/vulkan-backend-untersuchung.md
@@ -2723,5 +2773,59 @@ index 0000000..13aeea6
 +    "No OS clipboard write/read roundtrip in this runtime test",
 +    "No global NativeBuffer ownership audit or memory-growth benchmark",
 +    "No gameplay, cluster or new normalmap/Vulkan effect proof"
++  ]
++}
+diff --git a/docs/evidence/surface-metadata-20261013.json b/docs/evidence/surface-metadata-20261013.json
+new file mode 100644
+index 0000000..403bef0
+--- /dev/null
++++ b/docs/evidence/surface-metadata-20261013.json
+@@ -0,0 +1,48 @@
++{
++  "date": "2026-10-13",
++  "scope": "Configured Surface INI metadata loading and name index, no renderer/material application",
++  "tests": {
++    "passed": 17,
++    "failed": 0,
++    "cases": [
++      "three section kinds",
++      "case-insensitive names",
++      "last mapping wins",
++      "unresolved library fallback",
++      "finite and bounded factors",
++      "relative paths",
++      "duplicate keys and scalar counts",
++      "unknown key/section diagnostics",
++      "NAP loading without texture-library decoding"
++    ]
++  },
++  "build": {
++    "solution": "LibreLancer.sln",
++    "errors": 0,
++    "warnings": 0
++  },
++  "runtime": {
++    "fullConfiguredSurfaceListFromNap": true,
++    "libraries": 34,
++    "normalMapMappings": 2807,
++    "cubeMappings": 3,
++    "diagnostics": 0,
++    "nativeMenuNavigation": true,
++    "exitCode": 0,
++    "timeout": false,
++    "noLooseDATA": true
++  },
++  "hashes": {
++    "src/LibreLancer.Data/Schema/SurfaceMapsIni.cs": "71264872418ea02638f1ac64cc7a9f622e8eb8e0692a221e923f3047e188bbfe",
++    "src/LibreLancer.Data/Schema/FreelancerIni.cs": "eb2c5f6edcb74dd56f0ba9c5715426154be2aeb1a4d29a5196679c5fa11c29a2",
++    "src/LibreLancer.Data/Schema/FreelancerData.cs": "e363d3f26b343bde3fef70523fbfd46ea64612acf698f4ecd57979c9cc3ebb37",
++    "src/LibreLancer.Tests/SurfaceMapsIniTests.cs": "9597e5f8a2d5e2bc262e9e113e54e815835dd142affa834a803ab1d54597149b"
++  },
++  "testedDataAssemblySha256": "6ca140c53ce8287c99e4ea31df1267ce75a9f9310f3305dac38fba8d9a99f4b4",
++  "limits": [
++    "Named Original/Minimal/Standard/Full settings selector not implemented; explicit INI list controls scope",
++    "No material override application, lazy texture loader or residency/eviction yet",
++    "No tangent generation, shader/normalmap visual proof or Vulkan backend",
++    "No claim that the complete test suite is green"
 +  ]
 +}
