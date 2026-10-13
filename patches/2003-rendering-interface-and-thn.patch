@@ -4217,3 +4217,379 @@ index 0000000..1793dd2
 +{
 +    return NormalMapNormalize(mul(tangentNormal, basis), float3(0.0, 0.0, 1.0));
 +}
+diff --git a/src/LibreLancer.Base/Graphics/Shader.cs b/src/LibreLancer.Base/Graphics/Shader.cs
+index d6d16ab..2ced248 100644
+--- a/src/LibreLancer.Base/Graphics/Shader.cs
++++ b/src/LibreLancer.Base/Graphics/Shader.cs
+@@ -10,16 +10,22 @@ using LibreLancer.Graphics.Backends;
+ 
+ namespace LibreLancer.Graphics;
+ 
+-public class Shader
++public class Shader : IDisposable
+ {
+     private static int _shaderCount = 0;
+ 
+     public static int TotalShaders => _shaderCount;
+ 
+     internal readonly IShader Backing = null!;
++    private readonly RenderContext owner = null!;
++    public bool IsDisposed { get; private set; }
++    internal void ThrowIfDisposed() { ObjectDisposedException.ThrowIf(IsDisposed, this); owner.CheckShaderThread(); }
+     public Shader(RenderContext context, ReadOnlySpan<byte> program)
+     {
++        context.CheckShaderCreation();
++        owner = context;
+         Backing = context.Backend.CreateShader(program);
++        context.RegisterShader(this);
+         Interlocked.Increment(ref _shaderCount);
+     }
+ 
+@@ -27,12 +33,23 @@ public class Shader
+     {
+     }
+ 
+-    public bool HasUniformBlock(int index) => Backing.HasUniformBlock(index);
++    public void Dispose()
++    {
++        if (IsDisposed) return;
++        owner.CheckShaderThread();
++        Backing.Dispose();
++        IsDisposed = true;
++        owner.UnregisterShader(this);
++        Interlocked.Decrement(ref _shaderCount);
++    }
++
++    public bool HasUniformBlock(int index) { ThrowIfDisposed(); return Backing.HasUniformBlock(index); }
+ 
+     public ref ulong UniformBlockTag(int index)
+     {
++        ThrowIfDisposed();
+         return ref Backing.UniformBlockTag(index);
+     }
+ 
+-    public void SetUniformBlock<T>(int index, ref T data, bool forceUpdate = false, int forceSize = -1) where T : unmanaged => Backing.SetUniformBlock(index, ref data, forceUpdate, forceSize);
++    public void SetUniformBlock<T>(int index, ref T data, bool forceUpdate = false, int forceSize = -1) where T : unmanaged { ThrowIfDisposed(); Backing.SetUniformBlock(index, ref data, forceUpdate, forceSize); }
+ }
+diff --git a/src/LibreLancer.Base/Graphics/ShaderBundle.cs b/src/LibreLancer.Base/Graphics/ShaderBundle.cs
+index c1237bd..814a485 100644
+--- a/src/LibreLancer.Base/Graphics/ShaderBundle.cs
++++ b/src/LibreLancer.Base/Graphics/ShaderBundle.cs
+@@ -1,28 +1,53 @@
+ using System;
++using System.Collections.Generic;
+ using System.IO;
+ using System.Numerics;
+ using System.Runtime.CompilerServices;
+ 
+ namespace LibreLancer.Graphics;
+ 
+-public sealed class ShaderBundle
++public sealed class ShaderBundle : IDisposable
+ {
+     public uint FeatureMask { get; private set; }
+ 
+     private Shader[] shaders;
++    private readonly List<Shader> owned = new();
++    private bool disposed;
+ 
+     public Shader Get<T>(T flags) where T : unmanaged, Enum =>
+         Get(Unsafe.As<T, uint>(ref flags));
+ 
+-    public Shader Get(uint flags) => shaders[(int)(flags & FeatureMask)];
++    public Shader Get(uint flags)
++    {
++        ObjectDisposedException.ThrowIf(disposed, this);
++        var shader = shaders[(int)(flags & FeatureMask)];
++        shader.ThrowIfDisposed();
++        return shader;
++    }
++
++    public void Dispose()
++    {
++        if (disposed) return;
++        foreach (var shader in owned) shader.Dispose();
++        disposed = true;
++    }
+ 
+     private ShaderBundle(RenderContext context, BytecodesBundle bundle)
+     {
+         shaders = new Shader[bundle.FeatureMask == 0 ? 1 : (bundle.FeatureMask + 1)];
+         FeatureMask = bundle.FeatureMask;
+-        for (int i = 0; i < bundle.ShaderCount; i++)
+-        {
+-            shaders[(int)bundle.GetFeatures(i)] = new Shader(context, bundle.GetShader(i));
++        try {
++            for (int i = 0; i < bundle.ShaderCount; i++) {
++                var index = (int)bundle.GetFeatures(i);
++                if (index < 0 || index >= shaders.Length || shaders[index] != null)
++                    throw new InvalidDataException("Invalid or duplicate shader features");
++                var shader = new Shader(context, bundle.GetShader(i));
++                owned.Add(shader);
++                shaders[index] = shader;
++            }
++        } catch {
++            foreach (var shader in owned) shader.Dispose();
++            throw;
+         }
+     }
+ 
+diff --git a/src/LibreLancer.Base/Graphics/RenderContext.cs b/src/LibreLancer.Base/Graphics/RenderContext.cs
+index 13681c2..3f37864 100644
+--- a/src/LibreLancer.Base/Graphics/RenderContext.cs
++++ b/src/LibreLancer.Base/Graphics/RenderContext.cs
+@@ -21,6 +21,36 @@ public enum DepthFunction
+ //OpenGL Render States
+ public class RenderContext
+ {
++    private readonly int shaderThread = Environment.CurrentManagedThreadId;
++    private readonly HashSet<Shader> ownedShaders = new();
++    private bool shaderScopeClosed;
++    public int OwnedShaderCount => ownedShaders.Count;
++
++    internal void CheckShaderThread()
++    {
++        if (Environment.CurrentManagedThreadId != shaderThread)
++            throw new InvalidOperationException("Shader lifetime operations require the render thread");
++    }
++    internal void CheckShaderCreation()
++    {
++        CheckShaderThread();
++        ObjectDisposedException.ThrowIf(shaderScopeClosed, this);
++    }
++    internal void RegisterShader(Shader shader) => ownedShaders.Add(shader);
++    internal void UnregisterShader(Shader shader)
++    {
++        if (ReferenceEquals(requestedShader, shader)) Shader = null;
++        ownedShaders.Remove(shader);
++    }
++    /// <summary>Call on the render thread before destroying the native context.</summary>
++    public void DisposeShaders()
++    {
++        CheckShaderThread();
++        if (shaderScopeClosed) return;
++        shaderScopeClosed = true;
++        foreach (var shader in new List<Shader>(ownedShaders)) shader.Dispose();
++    }
++
+     public long FrameNumber => frameNumber;
+     private long frameNumber = 0;
+     private Shader tintShader;
+@@ -159,6 +189,7 @@ public class RenderContext
+         get => requestedShader;
+         set
+         {
++            value?.ThrowIfDisposed();
+             requestedShader = value;
+             requested.Shader = value?.Backing;
+         }
+@@ -200,6 +231,7 @@ public class RenderContext
+     internal RenderContext (IRenderContext impl)
+     {
+         this.impl = impl;
++        try {
+         Instance = this;
+         PreferredFilterLevel = TextureFiltering.Trilinear;
+         impl.Init(ref requested);
+@@ -227,6 +259,10 @@ public class RenderContext
+             new(new(-1f, 3f, 0f), new(0f, 2f)),
+             new(new(3f, -1f, 0f), new(2f, 0f))
+         });
++        } catch {
++            DisposeShaders();
++            throw;
++        }
+     }
+ 
+     public Rectangle CurrentViewport => requested.Viewport;
+diff --git a/src/LibreLancer.Base/Graphics/Backends/IShader.cs b/src/LibreLancer.Base/Graphics/Backends/IShader.cs
+index 3c47aa2..3c81007 100644
+--- a/src/LibreLancer.Base/Graphics/Backends/IShader.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/IShader.cs
+@@ -3,7 +3,7 @@ using System.Numerics;
+ 
+ namespace LibreLancer.Graphics.Backends;
+ 
+-internal interface IShader
++internal interface IShader : IDisposable
+ {
+     void SetUniformBlock<T>(int index, ref T data, bool forceUpdate = false, int forceSize = -1) where T : unmanaged;
+     bool HasUniformBlock(int index);
+diff --git a/src/LibreLancer.Base/Graphics/Backends/Null/NullShader.cs b/src/LibreLancer.Base/Graphics/Backends/Null/NullShader.cs
+index 2fed0c8..a5ff3bb 100644
+--- a/src/LibreLancer.Base/Graphics/Backends/Null/NullShader.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/Null/NullShader.cs
+@@ -5,6 +5,7 @@ namespace LibreLancer.Graphics.Backends.Null;
+ 
+ internal class NullShader : IShader
+ {
++    public void Dispose() { }
+     public void SetUniformBlock<T>(int index, ref T data,  bool forceUpdate = false, int forceSize = -1) where T : unmanaged
+     {
+     }
+diff --git a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLShader.cs b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLShader.cs
+index 29791cd..97ac488 100644
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLShader.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLShader.cs
+@@ -37,7 +37,8 @@ internal class GLShader : IShader
+         public bool ForceUpdate;
+     }
+ 
+-    private NativeBuffer uniformMemoryBuffer;
++    private NativeBuffer? uniformMemoryBuffer;
++    private bool disposed;
+ 
+     private int blocksSet = 0;
+     private int blocksInteger = 0;
+@@ -99,8 +100,10 @@ internal class GLShader : IShader
+             : context.SSBO ? SSBO_ENABLED_VERSION : "#version 140\n#define USE_SSBO 0\n";
+ 
+         //compile shaders
+-        var vertexHandle = GL.CreateShader (GL.GL_VERTEX_SHADER);
+-        var fragmentHandle = GL.CreateShader (GL.GL_FRAGMENT_SHADER);
++        uint vertexHandle = 0, fragmentHandle = 0;
++        try {
++        vertexHandle = GL.CreateShader (GL.GL_VERTEX_SHADER);
++        fragmentHandle = GL.CreateShader (GL.GL_FRAGMENT_SHADER);
+         GL.ShaderSource(vertexHandle, version + vertexSource);
+         GL.ShaderSource(fragmentHandle, version + fragmentSource);
+         GL.CompileShader(vertexHandle);
+@@ -141,6 +144,7 @@ internal class GLShader : IShader
+         GL.DetachShader(programID, fragmentHandle);
+         GL.DeleteShader(vertexHandle);
+         GL.DeleteShader(fragmentHandle);
++        vertexHandle = fragmentHandle = 0;
+         // Set up uniforms
+         int totalSz = 0;
+         int blockMax = 0;
+@@ -231,11 +235,30 @@ internal class GLShader : IShader
+                 }
+             }
+         }
++        } catch {
++            Dispose();
++            throw;
++        } finally {
++            if (vertexHandle != 0) GL.DeleteShader(vertexHandle);
++            if (fragmentHandle != 0) GL.DeleteShader(fragmentHandle);
++        }
+     }
+ 
+ 
++    public void Dispose()
++    {
++        if (disposed) return;
++        disposed = true;
++        context.ForgetShader(this);
++        if (programID != 0) { GLBind.DeleteProgram(programID); programID = 0; }
++        uniformMemoryBuffer?.Dispose();
++        uniformMemoryBuffer = null;
++        blocksSet = 0;
++    }
++
+     public unsafe void SetUniformBlock<T>(int index, ref T data, bool forceUpdate = false, int forceSize = -1) where T : unmanaged
+     {
++        ObjectDisposedException.ThrowIf(disposed, this);
+         if ((blocksSet & 1 << index) == 0)
+             return;
+         var dst = new Span<byte>((void*)blocks[index].BlockCurrent, blocks[index].SizeInBytes);
+@@ -270,6 +293,7 @@ internal class GLShader : IShader
+ 
+     public unsafe void UseProgram()
+     {
++        ObjectDisposedException.ThrowIf(disposed, this);
+         GLBind.UseProgram(programID);
+         for (int i = 0; i < blocks.Length; i++)
+         {
+diff --git a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderContext.cs b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderContext.cs
+index ddafdb7..9d03f0e 100644
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderContext.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderContext.cs
+@@ -339,6 +339,11 @@ internal class GLRenderContext : IRenderContext
+         matrices.CameraPosition = Vector3.Zero;
+     }
+ 
++    internal void ForgetShader(GLShader shader)
++    {
++        if (ReferenceEquals(applied.Shader, shader)) applied.Shader = null;
++    }
++
+     public void ApplyShader(IShader shader)
+     {
+         if(shader.HasUniformBlock(1) && shader.UniformBlockTag(1) != cameraTag)
+diff --git a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLBind.cs b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLBind.cs
+index 63c1a30..16d680b 100644
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLBind.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLBind.cs
+@@ -18,6 +18,16 @@ internal static class GLBind
+         programBound = prg;
+     }
+ 
++    public static void DeleteProgram(uint program)
++    {
++        // Native renderers can change GL state independently of this cache.
++        const int CurrentProgram = 0x8B8D;
++        GL.GetIntegerv(CurrentProgram, out var current);
++        programBound = (uint)current;
++        if (programBound == program) UseProgram(0);
++        GL.DeleteProgram(program);
++    }
++
+     public static void Trash()
+     {
+         programBound = 0;
+diff --git a/src/LibreLancer.Base/Platforms/SDL2Game.cs b/src/LibreLancer.Base/Platforms/SDL2Game.cs
+index b4381c2..7ef2c6a 100644
+--- a/src/LibreLancer.Base/Platforms/SDL2Game.cs
++++ b/src/LibreLancer.Base/Platforms/SDL2Game.cs
+@@ -628,7 +628,8 @@ internal class SDL2Game : IGame
+                 FLLog.Warning("Timing", "Stopwatch returned negative time!");
+             }
+         }
+-        loop.OnCleanup();
++        try { loop.OnCleanup(); }
++        finally { RenderContext.DisposeShaders(); }
+         Platform.Shutdown();
+         NFD.NFD_Quit();
+         SDL2.SDL_Quit();
+diff --git a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Generated.cs b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Generated.cs
+index 1eaf69a..683abef 100644
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Generated.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Generated.cs
+@@ -50,6 +50,8 @@ namespace LibreLancer.Graphics.Backends.OpenGL
+         private static delegate* unmanaged<uint,int,int*,IntPtr,void> _glGetShaderInfoLog;
+         private static delegate* unmanaged<uint,int,int*,IntPtr,void> _glGetProgramInfoLog;
+         private static delegate* unmanaged<uint> _glCreateProgram;
++        private static delegate* unmanaged<uint,void> _glDeleteProgram;
++        private static delegate* unmanaged<uint,byte> _glIsProgram;
+         private static delegate* unmanaged<uint,uint,void> _glAttachShader;
+         private static delegate* unmanaged<uint,uint,void> _glDetachShader;
+         private static delegate* unmanaged<uint,void> _glDeleteShader;
+@@ -165,6 +167,8 @@ namespace LibreLancer.Graphics.Backends.OpenGL
+             _glGetShaderInfoLog = (delegate* unmanaged<uint,int,int*,IntPtr,void>)getProcAddress("glGetShaderInfoLog");
+             _glGetProgramInfoLog = (delegate* unmanaged<uint,int,int*,IntPtr,void>)getProcAddress("glGetProgramInfoLog");
+             _glCreateProgram = (delegate* unmanaged<uint>)getProcAddress("glCreateProgram");
++            _glDeleteProgram = (delegate* unmanaged<uint,void>)getProcAddress("glDeleteProgram");
++            _glIsProgram = (delegate* unmanaged<uint,byte>)getProcAddress("glIsProgram");
+             _glAttachShader = (delegate* unmanaged<uint,uint,void>)getProcAddress("glAttachShader");
+             _glDetachShader = (delegate* unmanaged<uint,uint,void>)getProcAddress("glDetachShader");
+             _glDeleteShader = (delegate* unmanaged<uint,void>)getProcAddress("glDeleteShader");
+@@ -457,6 +461,18 @@ namespace LibreLancer.Graphics.Backends.OpenGL
+             ErrorCheck();
+             return retval;
+         }
++        public static void DeleteProgram(uint program)
++        {
++            _glDeleteProgram(program);
++            ErrorCheck();
++        }
++        public static byte IsProgram(uint program)
++        {
++            byte retval;
++            retval = _glIsProgram(program);
++            ErrorCheck();
++            return retval;
++        }
+         public static void AttachShader(uint program, uint shader)
+         {
+             _glAttachShader(program, shader);

@@ -9653,3 +9653,87 @@ index 0000000..868d739
 +        Assert.Equal(strengthOffset,Marshal.OffsetOf(type,"NormalStrength").ToInt32());
 +    }
 +}
+diff --git a/src/LibreLancer.Tests/ShaderLifetimeTests.cs b/src/LibreLancer.Tests/ShaderLifetimeTests.cs
+new file mode 100644
+index 0000000..f20e33d
+--- /dev/null
++++ b/src/LibreLancer.Tests/ShaderLifetimeTests.cs
+@@ -0,0 +1,78 @@
++using System;
++using System.IO;
++using System.Threading;
++using LibreLancer.Graphics;
++using Xunit;
++namespace LibreLancer.Tests;
++public class ShaderLifetimeTests
++{
++    sealed class Headless : Game { public Headless():base(64,64,false,GameConfiguration.HeadlessTest()){} }
++    [Fact]
++    public void ShaderDisposeUnregistersAndRejectsFurtherUse()
++    {
++        var context=new Headless().RenderContext;
++        try {
++            var count=context.OwnedShaderCount;
++            var shader=new Shader(context,ReadOnlySpan<byte>.Empty);
++            Assert.Equal(count+1,context.OwnedShaderCount);context.Shader=shader;
++            shader.Dispose();shader.Dispose();Assert.Equal(count,context.OwnedShaderCount);Assert.Null(context.Shader);
++            Assert.True(shader.IsDisposed);Assert.Throws<ObjectDisposedException>(()=>shader.HasUniformBlock(0));
++            Assert.Throws<ObjectDisposedException>(()=>context.Shader=shader);
++            Assert.Throws<ObjectDisposedException>(()=>{var value=1f;shader.SetUniformBlock(0,ref value);});
++        } finally {context.DisposeShaders();}
++    }
++    [Fact]
++    public void BundleDisposeReleasesAllOwnedShaders()
++    {
++        var context=new Headless().RenderContext;
++        try {
++            var count=context.OwnedShaderCount;
++            var bundle=ShaderBundle.FromResource<RenderContext>(context,"FSTint.bin");
++            var shader=bundle.Get(0);Assert.True(context.OwnedShaderCount>count);
++            bundle.Dispose();bundle.Dispose();Assert.True(shader.IsDisposed);Assert.Equal(count,context.OwnedShaderCount);
++            Assert.Throws<ObjectDisposedException>(()=>bundle.Get(0));
++        } finally {context.DisposeShaders();}
++    }
++    [Fact]
++    public void ContextShutdownClosesRegistryAndOutstandingBundles()
++    {
++        var context=new Headless().RenderContext;
++        var bundle=ShaderBundle.FromResource<RenderContext>(context,"FSTint.bin");
++        var shader=bundle.Get(0);context.Shader=shader;context.DisposeShaders();context.DisposeShaders();
++        Assert.Equal(0,context.OwnedShaderCount);Assert.True(shader.IsDisposed);Assert.Null(context.Shader);
++        Assert.Throws<ObjectDisposedException>(()=>new Shader(context,ReadOnlySpan<byte>.Empty));
++        Assert.Throws<ObjectDisposedException>(()=>bundle.Get(0));bundle.Dispose();
++    }
++    [Fact]
++    public void WorkerCannotDisposeOrCreateShaders()
++    {
++        var context=new Headless().RenderContext;
++        try {
++            var shader=new Shader(context,ReadOnlySpan<byte>.Empty);
++            Exception? disposeError=null,createError=null;
++            var worker=new Thread(()=>{
++                try{shader.Dispose();}catch(Exception ex){disposeError=ex;}
++                try{_ = new Shader(context,ReadOnlySpan<byte>.Empty);}catch(Exception ex){createError=ex;}
++            });worker.Start();worker.Join();
++            Assert.IsType<InvalidOperationException>(disposeError);Assert.IsType<InvalidOperationException>(createError);
++            Assert.False(shader.IsDisposed);shader.Dispose();
++        } finally {context.DisposeShaders();}
++    }
++    [Fact]
++    public void DuplicateBundleFeaturesRollBackPartialCreation()
++    {
++        var context=new Headless().RenderContext;
++        try {
++            var count=context.OwnedShaderCount;
++            using var stream=new MemoryStream();
++            using(var compressor=new ZstdSharp.CompressionStream(stream,leaveOpen:true))
++            using(var writer=new BinaryWriter(compressor)) {
++                writer.Write(0x524448534C4C0008UL);writer.Write(1u);writer.Write(0u);writer.Write(2);
++                for(var i=0;i<2;i++){writer.Write(0u);writer.Write(44);writer.Write(0);}
++            }
++            stream.Position=0;
++            Assert.Throws<InvalidDataException>(()=>ShaderBundle.FromStream(context,stream));
++            Assert.Equal(count,context.OwnedShaderCount);
++        } finally {context.DisposeShaders();}
++    }
++}
