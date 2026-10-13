@@ -1,5 +1,5 @@
 diff --git a/README.md b/README.md
-index 3c2ab9f..e072058 100644
+index 3c2ab9f..5e68ec6 100644
 --- a/README.md
 +++ b/README.md
 @@ -18,7 +18,9 @@ The Lancer Nexus Client is the MMO-oriented client fork of [LibreLancer](https:/
@@ -89,12 +89,12 @@ index 3c2ab9f..e072058 100644
 +
 +## Explicit Surface GPU uploads
 +
-+`SurfaceGpuTexture.TryUpload` validates DDS payloads and a per-upload byte budget
-+before allocating a texture. The CPU lease remains owned by the caller; the
-+returned GPU texture must be disposed on the render thread before native context
-+shutdown. Compressed uploads require support in the existing DDS backend path.
-+This helper does not provide a global residency cache or activate normalmap
-+options. [Upload and BC5 sampler validation](docs/surface-gpu-upload.md).
++`SurfaceGpuTextureCache` shares supplemental uploads by library file and node,
++and enforces a 256 MiB logical residency budget per resource manager across
++active and fence-retiring entries. CPU leases must be loaded off the render
++thread and passed to the render-thread upload. GPU leases are held through the
++last draw use. This is a preparation API until draw materials acquire leases.
++[Upload and BC5 sampler validation](docs/surface-gpu-upload.md).
 +
 +## GPU frame retirement
 +
@@ -2372,10 +2372,10 @@ index 0000000..3829e44
 +}
 diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
 new file mode 100644
-index 0000000..2df5809
+index 0000000..8db21a2
 --- /dev/null
 +++ b/docs/graphics-implementation-plan.md
-@@ -0,0 +1,476 @@
+@@ -0,0 +1,484 @@
 +# Grafik-Erweiterungen: Umsetzungsplan
 +
 +Stand: 2026-10-12. Dieser Plan verbindet die neu eingelesenen Dokumente
@@ -2487,6 +2487,14 @@ index 0000000..2df5809
 +  Leistungsbudgets daraus ableiten; keine ungemessenen FPS-Zusagen.
 +
 +### P1 – Daten und Residency
++
++**GPU-Cache-Fortschritt:** `SurfaceGpuTextureCache` teilt Uploads nach Datei und
++UTF-Knoten und begrenzt logische Payloadbytes je ResourceManager auf 256 MiB.
++Aktive und hinter einem GPU-Fence wartende Texturen bleiben im Gesamtbudget.
++CPU-Leases müssen außerhalb des Renderthreads geladen, für den Upload an den
++Renderthread übergeben und GPU-Leases bis zum letzten Draw gehalten werden.
++Material-Drawpfade erwerben diese Leases noch nicht automatisch; Surface-Maps
++sind deshalb weiterhin nicht sichtbar aktiviert.
 +
 +**Materialfortschritt:** Die ausgewählte Surface-Metadatenauflösung ist an
 +`Material.Initialize`/`BasicMaterial` angebunden. 39 Tests bestätigen MAT-Vorrang,
@@ -3383,7 +3391,7 @@ index 0000000..7f74f79
 +  ]
 +}
 diff --git a/AGENTS.md b/AGENTS.md
-index 98f5931..c28bca3 100644
+index 98f5931..65b8fbf 100644
 --- a/AGENTS.md
 +++ b/AGENTS.md
 @@ -88,9 +88,9 @@ LLServer SystemIds defines owned worlds; SystemId is the primary fallback. Trave
@@ -3399,7 +3407,7 @@ index 98f5931..c28bca3 100644
    propagation in the build entry point.
  - The integrity checker is read-only; preserve unrelated modifications and repair
    identified overlay drift by applying the relevant maintained patch.
-@@ -126,3 +126,58 @@ LLServer SystemIds defines owned worlds; SystemId is the primary fallback. Trave
+@@ -126,3 +126,69 @@ LLServer SystemIds defines owned worlds; SystemId is the primary fallback. Trave
  ## Restart-time ambient NPC recovery
  
  - Before publishing a world or starting population simulation, drain pending checkpoint writes and restore that system's current ambient NPC checkpoints from Coordinator. Resolve stable NPC references and preserve the serialized AI/autopilot state. Keep recovery fail-closed when the checkpoint store is unavailable or corrupt; only a Coordinator 404 after listing means ownership changed and may be skipped.
@@ -3441,12 +3449,23 @@ index 98f5931..c28bca3 100644
 +
 +- SurfaceGpuTexture owns one explicit upload. Keep its CPU lease separate and
 +  dispose the GPU resource on the owning render thread before context shutdown.
-+- Apply the caller's upload budget before allocation and preserve DDS validation
-+  and compressed-backend admission. Logical payload bytes exclude driver overhead;
-+  a per-upload check is not a global residency budget or a GPU-fence guarantee.
++- Apply both per-upload and aggregate residency budgets before allocation. Keep
++  bytes charged while a texture retires behind a GPU fence; subtract them only
++  after successful post-fence disposal. GPU leases are render-thread-only.
++  Surface CPU leases remain separately owned by the caller.
 +- Keep UV animation/selection uniforms initialized in sampler tests. Compare
 +  real BC5 texture sampling with a CPU reference, not only uniform-fed normals.
-+  Material cache integration and GPU retirement still need their own validation.
++  The cache is a preparation API until draw materials acquire and hold leases.
++
++## GPU texture cache
++
++- Use `SurfaceGpuTextureCache` for shared supplemental uploads and dispose each
++  `SurfaceGpuTextureLease` after its last draw use. Load CPU images outside the
++  render thread and pass the lease to the render-thread upload. Active and
++  fence-retiring entries both count against the per-resource-manager 256 MiB
++  logical payload budget. A budget miss while fences are pending can be retried.
++- Cache shutdown queues active resources for retirement before native context
++  shutdown; outstanding leases must not be used after manager shutdown.
 +
 +## GPU retirement queue
 +
@@ -3694,10 +3713,10 @@ index 0000000..b0f375d
 +}
 diff --git a/docs/surface-gpu-upload.md b/docs/surface-gpu-upload.md
 new file mode 100644
-index 0000000..e6abfff
+index 0000000..ca1e883
 --- /dev/null
 +++ b/docs/surface-gpu-upload.md
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,91 @@
 +# Surface-GPU-Upload und BC5-Sampler: 13.10.2026
 +
 +## API und Besitz
@@ -3760,14 +3779,35 @@ index 0000000..e6abfff
 +im finalen Lauf keine GLShader-NativeBuffer-Leakwarnung.
 +[Maschinenprotokoll](evidence/surface-gpu-upload-20261013.json).
 +
++## Gemeinsamer GPU-Cache
++
++`SurfaceGpuTextureCache` teilt Texturen innerhalb eines GameResourceManager nach
++normalisiertem Bibliothekspfad und UTF-Knotennamen. Sein Standardbudget beträgt
++256 MiB logische Payloadbytes. Die Prüfung erfolgt vor dem Upload; aktive
++Texturen und bereits aus dem Lookup entfernte, aber noch auf ein Fence wartende
++Texturen zählen weiter. Erst nach erfolgreichem Dispose im Fence-Callback sinkt
++der Zähler. Bei knapper Residency wird eine ungenutzte LRU-Textur zum Retire
++vorgemerkt; bis zum Fence-Signal liefert ein konkurrierender Upload `null` und
++kann später erneut versuchen. Der Aufrufer hält pro Materialnutzung eine
++`SurfaceGpuTextureLease` und gibt sie nach dem letzten Draw frei. Der Manager
++leitet beim Shutdown aktive Cacheeinträge in die Frame-Retirement-Queue.
++
++Drei Unit-Tests prüfen Sharing, Renderthreadgrenze und Budgetbuchung vor/nach
++einem kontrolliert verzögerten Retirement-Callback. Ein SDL3/OpenGL-Lauf auf
++Intel HD 4600 lädt eine echte BC5-Textur über den Cache, erwirbt sie zweimal
++unter verschiedenen Schreibweisen, rendert sie und bestätigt 16 Bytes Residency
++bis zum Fence-Signal. Manager-Shutdown mit zwei aktiven Einträgen drainiert beide
++Callbacks vor dem SDL-Kontextabbau. Siehe
++[Cache-Protokoll](evidence/surface-gpu-cache-20261013.json).
++
 +## Weiter erforderlich
 +
-+Die Rendereranbindung muss Material-/UV-Identität, CPU-Loaderqueue, Mesh- und
-+Texturcache, ein globales Residencybudget, Ressourcen bis zum Frameende/Fence
-+und Ersatzmaterial bei fehlenden Karten zusammenführen. Das Sampling hier ist
-+LOD0; die visuelle Mip-/Atlas-/Retail-Szenenmatrix, DFM/Skinning, reflektierte
-+World-Skalierung und Geräte-/Plattformgrenzen sind nicht erledigt. Die neuen
-+Grafikoptionen bleiben bis zur tatsächlichen Integration deaktiviert.
++Material-Drawpfade erwerben und halten GPU-Leases noch nicht automatisch; damit
++bleibt die sichtbare Nutzung der Surface-Maps deaktiviert. Außerdem fehlen
++CPU-Loaderqueue, VMesh-/Tangentencache, Ersatzmaterial bei fehlenden Karten,
++LOD-/Mip-/Atlas-/Retail-Szenenmatrix, DFM/Skinning, reflektierte World-Skalierung
++und Geräte-/Plattformgrenzen. Die Optionen für neue Effekte bleiben bis zur
++jeweiligen tatsächlichen Integration ausgeschaltet.
 diff --git a/docs/evidence/surface-gpu-upload-20261013.json b/docs/evidence/surface-gpu-upload-20261013.json
 new file mode 100644
 index 0000000..04c70f5
@@ -3904,5 +3944,51 @@ index 0000000..f681d6b
 +    "device loss and crash recovery",
 +    "native wait/OOM fault injection",
 +    "Windows/GLES and sync-less hardware performance"
++  ]
++}
+diff --git a/docs/evidence/surface-gpu-cache-20261013.json b/docs/evidence/surface-gpu-cache-20261013.json
+new file mode 100644
+index 0000000..1b51681
+--- /dev/null
++++ b/docs/evidence/surface-gpu-cache-20261013.json
+@@ -0,0 +1,40 @@
++{
++  "date": "2026-10-13",
++  "implementation": {
++    "cache": "SurfaceGpuTextureCache",
++    "scope": "one GameResourceManager",
++    "default_budget_bytes": 268435456,
++    "accounting": "logical DDS payload bytes; active and fence-retiring textures remain charged until post-fence disposal succeeds",
++    "key": "normalized library path plus case-insensitive UTF node",
++    "ownership": "render-thread GPU leases; caller-owned CPU lease loaded before upload",
++    "draw_integration": "not implemented; surface-map options remain disabled"
++  },
++  "verification": {
++    "focused_tests": {
++      "command_filter": "SurfaceGpuTextureCacheTests|SurfaceGpuTextureTests|GpuFrameRetirementTests|SurfaceImageCacheTests",
++      "passed": 40,
++      "failed": 0
++    },
++    "solution_build": {
++      "errors": 0,
++      "warnings": 20
++    },
++    "native_sdl3_opengl": {
++      "renderer": "Mesa Intel(R) HD Graphics 4600 (HSW GT2), OpenGL 4.6",
++      "bc5_cache_upload": true,
++      "case_and_slash_alias_shared_entry": true,
++      "resident_bytes_before_fence": 16,
++      "retiring_bytes_before_fence": 16,
++      "pending_fences_before_signal": 1,
++      "resident_bytes_after_signal": 0,
++      "shutdown_callbacks_drained": 2,
++      "shutdown_resident_bytes": 0,
++      "owned_shaders_after_shutdown": 0
++    }
++  },
++  "limits": [
++    "The budget tracks logical compressed payload size, not driver VRAM overhead.",
++    "No automatic material draw acquisition or CPU loader queue is present.",
++    "The native probe used a synthetic BC5 DDS, not a full NAP/gameplay launch."
 +  ]
 +}

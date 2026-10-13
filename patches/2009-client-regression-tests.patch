@@ -9984,3 +9984,82 @@ index 0000000..74902bd
 +        queue.Defer(()=>Assert.Throws<ObjectDisposedException>(()=>queue.Defer(()=>{})));queue.Close();Assert.True(queue.IsClosed);
 +    }
 +}
+diff --git a/src/LibreLancer.Tests/SurfaceGpuTextureCacheTests.cs b/src/LibreLancer.Tests/SurfaceGpuTextureCacheTests.cs
+new file mode 100644
+index 0000000..843bfd7
+--- /dev/null
++++ b/src/LibreLancer.Tests/SurfaceGpuTextureCacheTests.cs
+@@ -0,0 +1,73 @@
++using System;
++using System.Buffers.Binary;
++using LibreLancer.Graphics;
++using LibreLancer.Resources;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class SurfaceGpuTextureCacheTests
++{
++    private sealed class FakeTexture(long bytes, Action<Action> retire) : ISurfaceGpuTexture
++    {
++        private bool disposed;
++        public Texture Texture => throw new NotSupportedException();
++        public long GpuPayloadBytes => bytes;
++        public void Dispose() => disposed = true;
++        public void RetireAfterFrame(Action afterRelease) => retire(() => { Dispose(); afterRelease(); });
++        public bool IsDisposed => disposed;
++    }
++
++    private static ImageResource Dds()
++    {
++        var d = new byte[144]; "DDS "u8.CopyTo(d);
++        static void Set(byte[] x, int o, int v) => BinaryPrimitives.WriteInt32LittleEndian(x.AsSpan(o), v);
++        Set(d, 4, 124); Set(d, 12, 4); Set(d, 16, 4); Set(d, 28, 1); Set(d, 76, 32); Set(d, 80, 4); Set(d, 84, 0x32495441);
++        return new(ImageType.DDS, d);
++    }
++
++    [Fact]
++    public void SharesEntryAndKeepsRetiringBytesUntilFenceCallback()
++    {
++        Action? signal = null; int uploads = 0; FakeTexture? resource = null;
++        var cpu = new SurfaceImageCache(1024, (_, _) => Dds());
++        using var image = cpu.TryAcquire(new("library", "LIBRARY.TXM", "normal"))!;
++        using var cache = new SurfaceGpuTextureCache(144,
++            (_, _, _) => { uploads++; return resource = new FakeTexture(144, callback => signal = callback); }, () => true);
++        var first = cache.TryAcquire(new("alias", "foo/library.txm", "normal"), image)!;
++        var second = cache.TryAcquire(new("alias", "FOO\\library.txm", "NORMAL"), image)!;
++        Assert.Equal(1, uploads); Assert.Equal(144, cache.Stats.ResidentBytes); Assert.Equal(2, cache.Stats.ActiveLeases);
++        first.Dispose(); second.Dispose();
++        cache.Dispose();
++        Assert.Equal(144, cache.Stats.ResidentBytes); Assert.Equal(144, cache.Stats.RetiringBytes);
++        Assert.False(resource!.IsDisposed);
++        signal!();
++        Assert.Equal(0, cache.Stats.ResidentBytes); Assert.Equal(0, cache.Stats.Entries);
++        Assert.True(resource.IsDisposed);
++    }
++
++    [Fact]
++    public void BudgetDoesNotReuseBytesUntilRetirementCompletes()
++    {
++        var pending = new System.Collections.Generic.Queue<Action>(); var creates = 0;
++        var cpu = new SurfaceImageCache(1024, (_, _) => Dds());
++        using var image = cpu.TryAcquire(new("library", "foo.txm", "normal"))!;
++        using var cache = new SurfaceGpuTextureCache(144, (_, _, _) => { creates++; return new FakeTexture(144, pending.Enqueue); }, () => true);
++        var lease = cache.TryAcquire(new("alias", "foo.txm", "normal"), image)!; lease.Dispose();
++        Assert.Null(cache.TryAcquire(new("alias", "bar.txm", "normal"), image));
++        Assert.Equal(1, creates); Assert.Equal(144, cache.Stats.RetiringBytes); Assert.Equal(144, cache.Stats.ResidentBytes);
++        pending.Dequeue()();
++        var next = cache.TryAcquire(new("alias", "bar.txm", "normal"), image)!;
++        Assert.NotNull(next); Assert.Equal(2, creates); next.Dispose();
++    }
++
++    [Fact]
++    public void RejectsWorkerAccessAndLeavesCpuLeaseOwnedByCaller()
++    {
++        var cpu = new SurfaceImageCache(1024, (_, _) => Dds());
++        using var image = cpu.TryAcquire(new("library", "foo.txm", "normal"))!;
++        using var cache = new SurfaceGpuTextureCache(144, (_, _, _) => throw new Exception("must not upload"), () => false);
++        Assert.Throws<InvalidOperationException>(() => cache.TryAcquire(new("alias", "foo.txm", "normal"), image));
++        Assert.Equal(1, cpu.Stats.ActiveLeases);
++    }
++}

@@ -3579,7 +3579,7 @@ index 72a7ece..11095d1 100644
                  <Checkbox id="ppl" X="18" Y="92" Width="200" Text="PER-PIXEL LIGHTING"/>
              </Panel>
 diff --git a/src/LibreLancer/Resources/ResourceManager.cs b/src/LibreLancer/Resources/ResourceManager.cs
-index abf0a1f..9fb330b 100644
+index abf0a1f..44b0830 100644
 --- a/src/LibreLancer/Resources/ResourceManager.cs
 +++ b/src/LibreLancer/Resources/ResourceManager.cs
 @@ -3,10 +3,12 @@
@@ -3595,13 +3595,14 @@ index abf0a1f..9fb330b 100644
  using LibreLancer.Fx;
  using LibreLancer.Graphics;
  using LibreLancer.Graphics.Primitives;
-@@ -21,6 +23,23 @@ namespace LibreLancer.Resources;
+@@ -21,6 +23,24 @@ namespace LibreLancer.Resources;
  // TODO: Allow for disposing and all that Jazz
  public abstract class ResourceManager
  {
 +    public SurfaceMapsIni SurfaceMaps { get; set; } = new();
 +
 +    public SurfaceImageCache SurfaceImages { get; }
++    public SurfaceGpuTextureCache? SurfaceGpuTextures { get; protected set; }
 +
 +    /// <summary>Demand-driven CPU acquisition; unavailable maps preserve the original MAT.</summary>
 +    public SurfaceMaterialImages? TryAcquireSurfaceImages(Material material)
@@ -3619,7 +3620,7 @@ index abf0a1f..9fb330b 100644
      private Dictionary<string, RuntimeSurFile> surs = new(StringComparer.OrdinalIgnoreCase);
  
      public abstract VertexResource AllocateVertices(FVFVertex format, byte[] vertices, ushort[] indices);
-@@ -54,6 +73,7 @@ public abstract class ResourceManager
+@@ -54,6 +74,7 @@ public abstract class ResourceManager
      protected ResourceManager(FileSystem vfs)
      {
          VFS = vfs;
@@ -3628,10 +3629,18 @@ index abf0a1f..9fb330b 100644
  
      protected RuntimeSurFile GetSur(string filename)
 diff --git a/src/LibreLancer/Resources/GameResourceManager.cs b/src/LibreLancer/Resources/GameResourceManager.cs
-index a657c82..058b210 100644
+index a657c82..35c6715 100644
 --- a/src/LibreLancer/Resources/GameResourceManager.cs
 +++ b/src/LibreLancer/Resources/GameResourceManager.cs
-@@ -107,6 +107,7 @@ public class GameResourceManager : ResourceManager, IDisposable
+@@ -86,6 +86,7 @@ public class GameResourceManager : ResourceManager, IDisposable
+     public GameResourceManager(IGLWindow g, FileSystem vfs) : base(vfs)
+     {
+         GLWindow = g;
++        SurfaceGpuTextures = new SurfaceGpuTextureCache(g);
+         vertexResourceAllocator = new VertexResourceAllocator(g.RenderContext);
+         DefaultMaterial = new Material(this)
+         {
+@@ -107,6 +108,7 @@ public class GameResourceManager : ResourceManager, IDisposable
  
      public GameResourceManager(GameResourceManager src) : this(src.GLWindow, src.VFS)
      {
@@ -3639,7 +3648,7 @@ index a657c82..058b210 100644
          texturefiles = new Dictionary<string, string>(src.texturefiles, StringComparer.OrdinalIgnoreCase);
          shapes = new Dictionary<string, TextureShape?>(src.shapes, StringComparer.OrdinalIgnoreCase);
          materialfiles = new Dictionary<uint, string>(src.materialfiles);
-@@ -178,6 +179,7 @@ public class GameResourceManager : ResourceManager, IDisposable
+@@ -178,6 +180,7 @@ public class GameResourceManager : ResourceManager, IDisposable
  
      public void ClearTextures()
      {
@@ -3647,10 +3656,11 @@ index a657c82..058b210 100644
          loadedResFiles = [];
          var keys = new string[textures.Count];
          textures.Keys.CopyTo(keys, 0);
-@@ -647,6 +649,7 @@ public class GameResourceManager : ResourceManager, IDisposable
+@@ -647,6 +650,8 @@ public class GameResourceManager : ResourceManager, IDisposable
      {
          if (isDisposed) return;
          isDisposed = true;
++        SurfaceGpuTextures?.Dispose();
 +        SurfaceImages.Dispose();
  
          // Textures
@@ -4805,10 +4815,10 @@ index 77df528..d0aad67 100644
              if (VertexFormat.Normal) offset += 12;
 diff --git a/src/LibreLancer/Resources/SurfaceGpuTexture.cs b/src/LibreLancer/Resources/SurfaceGpuTexture.cs
 new file mode 100644
-index 0000000..4a957dc
+index 0000000..d5c1ae0
 --- /dev/null
 +++ b/src/LibreLancer/Resources/SurfaceGpuTexture.cs
-@@ -0,0 +1,87 @@
+@@ -0,0 +1,92 @@
 +using System;
 +using System.Buffers.Binary;
 +using System.IO;
@@ -4817,7 +4827,7 @@ index 0000000..4a957dc
 +namespace LibreLancer.Resources;
 +
 +/// <summary>One explicitly owned GPU upload. Dispose on the render thread before native context shutdown.</summary>
-+public sealed class SurfaceGpuTexture : IDisposable
++public sealed class SurfaceGpuTexture : IDisposable, ISurfaceGpuTexture
 +{
 +    private readonly IGLWindow window;
 +    private readonly Texture texture;
@@ -4876,11 +4886,16 @@ index 0000000..4a957dc
 +    {
 +        if (!window.IsUiThread()) throw new InvalidOperationException("Surface GPU uploads and release require the render thread");
 +    }
-+    public void RetireAfterFrame()
++    public void RetireAfterFrame() => RetireAfterFrame(static () => { });
++
++    void ISurfaceGpuTexture.RetireAfterFrame(Action afterRelease) => RetireAfterFrame(afterRelease);
++
++    private void RetireAfterFrame(Action afterRelease)
 +    {
-+        if (disposed || retired) return;
++        ArgumentNullException.ThrowIfNull(afterRelease);
++        if (disposed || retired) { if (disposed) afterRelease(); return; }
 +        CheckThread(window);
-+        window.RenderContext.RetireAfterFrame(ReleaseTexture);
++        window.RenderContext.RetireAfterFrame(() => { ReleaseTexture(); afterRelease(); });
 +        retired = true;
 +    }
 +    public void Dispose()
@@ -5061,3 +5076,137 @@ index 7bcd3e0..5be2e2f 100644
      public void QueryFences()
      {
      }
+diff --git a/src/LibreLancer/Resources/SurfaceGpuTextureCache.cs b/src/LibreLancer/Resources/SurfaceGpuTextureCache.cs
+new file mode 100644
+index 0000000..9d52335
+--- /dev/null
++++ b/src/LibreLancer/Resources/SurfaceGpuTextureCache.cs
+@@ -0,0 +1,128 @@
++using System;
++using System.Collections.Generic;
++using LibreLancer.Graphics;
++
++namespace LibreLancer.Resources;
++
++public sealed record SurfaceGpuTextureCacheStats(long ResidentBytes, long RetiringBytes, int Entries, int ActiveLeases);
++
++/// <summary>A shared logical GPU residency budget. Acquisitions and texture access are render-thread-only.</summary>
++public sealed class SurfaceGpuTextureCache : IDisposable
++{
++    public const long DefaultBudgetBytes = 256L * 1024 * 1024;
++    private sealed class Entry(SurfaceTextureReference reference, ISurfaceGpuTexture texture, string key)
++    {
++        public readonly SurfaceTextureReference Reference = reference;
++        public readonly ISurfaceGpuTexture Texture = texture;
++        public readonly string Key = key;
++        public int Leases;
++        public bool Retiring;
++        public long Bytes => Texture.GpuPayloadBytes;
++    }
++    private readonly object sync = new();
++    private readonly Dictionary<string, Entry> entries = new(StringComparer.OrdinalIgnoreCase);
++    private readonly LinkedList<Entry> lru = new();
++    private readonly Dictionary<Entry, LinkedListNode<Entry>> nodes = new();
++    private readonly Func<SurfaceTextureReference, SurfaceImageLease, long, ISurfaceGpuTexture?> upload;
++    private readonly Func<bool> isRenderThread;
++    private readonly long budget;
++    private long residentBytes;
++    private bool disposed;
++
++    public SurfaceGpuTextureCache(IGLWindow window, long budgetBytes = DefaultBudgetBytes)
++    {
++        ArgumentNullException.ThrowIfNull(window);
++        if (budgetBytes < 128) throw new ArgumentOutOfRangeException(nameof(budgetBytes));
++        budget = budgetBytes; isRenderThread = () => window.IsUiThread();
++        upload = (_, image, remaining) => SurfaceGpuTexture.TryUpload(window, image, remaining);
++    }
++
++    internal SurfaceGpuTextureCache(long budgetBytes, Func<SurfaceTextureReference, SurfaceImageLease, long, ISurfaceGpuTexture?> upload, Func<bool> isRenderThread)
++    {
++        if (budgetBytes < 128) throw new ArgumentOutOfRangeException(nameof(budgetBytes));
++        budget = budgetBytes; this.upload = upload ?? throw new ArgumentNullException(nameof(upload));
++        this.isRenderThread = isRenderThread ?? throw new ArgumentNullException(nameof(isRenderThread));
++    }
++
++    public SurfaceGpuTextureCacheStats Stats
++    {
++        get { lock (sync) { int leases = 0; long retiring = 0; foreach (var e in nodes.Keys) { leases += e.Leases; if (e.Retiring) retiring += e.Bytes; } return new(residentBytes, retiring, nodes.Count, leases); } }
++    }
++
++    /// <summary>Uploads a previously CPU-loaded lease. The caller retains ownership of the CPU lease.</summary>
++    public SurfaceGpuTextureLease? TryAcquire(SurfaceTextureReference reference, SurfaceImageLease cpuImage)
++    {
++        ArgumentNullException.ThrowIfNull(reference); ArgumentNullException.ThrowIfNull(cpuImage);
++        if (!isRenderThread()) throw new InvalidOperationException("Surface GPU cache access requires the render thread");
++        var key = CanonicalKey(reference);
++        lock (sync) {
++            ObjectDisposedException.ThrowIf(disposed, this);
++            if (entries.TryGetValue(key, out var found)) return Pin(found);
++            var estimate = SurfaceGpuTexture.EstimateGpuPayloadBytes(cpuImage.Image);
++            if (estimate > budget) return null;
++            while (residentBytes > budget - estimate) {
++                var victim = FindUnused();
++                if (victim == null) return null;
++                Retire(victim);
++            }
++            var texture = upload(reference, cpuImage, budget - residentBytes);
++            if (texture == null) return null;
++            if (texture.GpuPayloadBytes <= 0 || texture.GpuPayloadBytes > budget - residentBytes) { texture.Dispose(); return null; }
++            var entry = new Entry(reference, texture, key);
++            entries.Add(key, entry); residentBytes += entry.Bytes;
++            nodes.Add(entry, lru.AddLast(entry));
++            return Pin(entry);
++        }
++    }
++
++    private Entry? FindUnused()
++    {
++        for (var n = lru.First; n != null; n = n.Next) if (!n.Value.Retiring && n.Value.Leases == 0) return n.Value;
++        return null;
++    }
++
++    private SurfaceGpuTextureLease Pin(Entry entry)
++    {
++        entry.Leases++; var node = nodes[entry]; lru.Remove(node); lru.AddLast(node);
++        return new SurfaceGpuTextureLease(entry.Texture, () => Release(entry));
++    }
++
++    private void Release(Entry entry)
++    {
++        lock (sync) { if (entry.Leases <= 0) throw new InvalidOperationException("GPU texture lease underflow"); entry.Leases--; }
++    }
++
++    private void Retire(Entry entry)
++    {
++        if (entry.Retiring) return;
++        entry.Retiring = true; entries.Remove(entry.Key);
++        try { entry.Texture.RetireAfterFrame(() => { lock (sync) { if (!nodes.Remove(entry, out var node)) return; lru.Remove(node); residentBytes -= entry.Bytes; } }); }
++        catch { entry.Retiring = false; if (!entries.TryAdd(entry.Key, entry)) throw; throw; }
++    }
++
++    private static string CanonicalKey(SurfaceTextureReference reference)
++    {
++        if (string.IsNullOrWhiteSpace(reference.File) || string.IsNullOrWhiteSpace(reference.Node) || reference.File.Contains('\0') || reference.Node.Contains('\0')) throw new ArgumentException("Invalid Surface texture reference", nameof(reference));
++        return reference.File.Replace('\\', '/') + "\0" + reference.Node;
++    }
++
++    public void Dispose()
++    {
++        lock (sync) { if (disposed) return; disposed = true; foreach (var entry in new List<Entry>(entries.Values)) Retire(entry); entries.Clear(); }
++    }
++}
++
++internal interface ISurfaceGpuTexture : IDisposable
++{
++    Texture Texture { get; }
++    long GpuPayloadBytes { get; }
++    void RetireAfterFrame(Action afterRelease);
++}
++
++public sealed class SurfaceGpuTextureLease : IDisposable
++{
++    private ISurfaceGpuTexture? texture; private Action? release;
++    internal SurfaceGpuTextureLease(ISurfaceGpuTexture texture, Action release) { this.texture = texture; this.release = release; }
++    public Texture Texture => texture?.Texture ?? throw new ObjectDisposedException(nameof(SurfaceGpuTextureLease));
++    public void Dispose() { var old = System.Threading.Interlocked.Exchange(ref texture, null); if (old == null) return; System.Threading.Interlocked.Exchange(ref release, null)?.Invoke(); }
++}
