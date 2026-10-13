@@ -9108,3 +9108,73 @@ index 0000000..9848bbd
 +        finally { Directory.Delete(temporary, recursive: true); }
 +    }
 +}
+diff --git a/src/LibreLancer.Tests/SurfaceMapProfileTests.cs b/src/LibreLancer.Tests/SurfaceMapProfileTests.cs
+new file mode 100644
+index 0000000..f3f2527
+--- /dev/null
++++ b/src/LibreLancer.Tests/SurfaceMapProfileTests.cs
+@@ -0,0 +1,64 @@
++using System;
++using System.IO;
++using System.Linq;
++using System.Text;
++using LibreLancer.Data.Ini;
++using LibreLancer.Data.Schema;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class SurfaceMapProfileTests
++{
++    [Theory]
++    [InlineData(SurfaceMapProfile.Original, 0)]
++    [InlineData(SurfaceMapProfile.Minimal, 1)]
++    [InlineData(SurfaceMapProfile.Standard, 3)]
++    [InlineData(SurfaceMapProfile.Full, 4)]
++    public void ChoosesCanonicalIniSet(SurfaceMapProfile profile, int count)
++    {
++        var paths = new[] { @"DATA\fx\SurfaceMaps.ini", "fx/SURFACEMAPSSHIPS.INI", "fx/SurfaceMapsSolar.ini", "fx/SurfaceMapsBases.ini" };
++        Assert.Equal(count, paths.Count(path => SurfaceMapsIni.IncludesPath(path, profile)));
++    }
++
++    [Fact]
++    public void ExplicitCustomIniIsSharedByEnabledProfiles()
++    {
++        Assert.False(SurfaceMapsIni.IncludesPath("fx/custom.ini", SurfaceMapProfile.Original));
++        foreach (var profile in new[] { SurfaceMapProfile.Minimal, SurfaceMapProfile.Standard, SurfaceMapProfile.Full })
++            Assert.True(SurfaceMapsIni.IncludesPath("fx/custom.ini", profile));
++        Assert.Throws<ArgumentOutOfRangeException>(() => SurfaceMapsIni.IncludesPath("fx/custom.ini", (SurfaceMapProfile)99));
++    }
++
++    [Theory]
++    [InlineData("minimal", SurfaceMapProfile.Minimal)]
++    [InlineData("STANDARD", SurfaceMapProfile.Standard)]
++    [InlineData("Full", SurfaceMapProfile.Full)]
++    [InlineData("original", SurfaceMapProfile.Original)]
++    [InlineData("garbage", SurfaceMapProfile.Original)]
++    [InlineData("42", SurfaceMapProfile.Original)]
++    [InlineData("3", SurfaceMapProfile.Original)]
++    public void SettingsParseNamesAndFailToOriginal(string text, SurfaceMapProfile expected)
++    {
++        using var stream = new MemoryStream(Encoding.UTF8.GetBytes("[Settings]\nsurface_profile = " + text + "\n"));
++        Assert.True(GameSettings.TryParse(Assert.Single(IniFile.ParseFile("settings.ini", stream)), out var settings));
++        Assert.Equal(expected, settings!.SurfaceProfile);
++    }
++
++    [Fact]
++    public void CopyApplyAndWritePreserveProfile()
++    {
++        Assert.Equal(SurfaceMapProfile.Original, new GameSettings().SurfaceProfile);
++        var source = new GameSettings();
++        source.SetSurfaceProfileIndex((int)SurfaceMapProfile.Standard);
++        var copy = source.MakeCopy();
++        Assert.Equal(source.SurfaceProfile, copy.SurfaceProfile);
++        var target = new GameSettings(); target.Apply(copy);
++        Assert.Equal(2, target.GetSurfaceProfileIndex());
++        Assert.Throws<ArgumentOutOfRangeException>(() => target.SetSurfaceProfileIndex(4));
++        using var writer = new StringWriter(); target.Write(writer);
++        using var stream = new MemoryStream(Encoding.UTF8.GetBytes(writer.ToString()));
++        GameSettings.TryParse(Assert.Single(IniFile.ParseFile("settings.ini", stream)), out var roundTrip);
++        Assert.Equal(SurfaceMapProfile.Standard, roundTrip!.SurfaceProfile);
++    }
++}

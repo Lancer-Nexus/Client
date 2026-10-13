@@ -2328,10 +2328,10 @@ index 0000000..3829e44
 +}
 diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
 new file mode 100644
-index 0000000..4c6f34d
+index 0000000..0d71177
 --- /dev/null
 +++ b/docs/graphics-implementation-plan.md
-@@ -0,0 +1,259 @@
+@@ -0,0 +1,262 @@
 +# Grafik-Erweiterungen: Umsetzungsplan
 +
 +Stand: 2026-10-12. Dieser Plan verbindet die neu eingelesenen Dokumente
@@ -2364,7 +2364,7 @@ index 0000000..4c6f34d
 +| Tangenten | Basic-FVF erwartet Tangenten in zusätzlichen UV-Slots; normale Retail-Layouts werden dadurch nicht automatisch erweitert | Tangenten aus Geometrie und der gewählten UV-Menge erzeugen |
 +| Shader | BC5-Z wird mit `sqrt(1-dot(xy,xy))` rekonstruiert, ohne Begrenzung | NaNs durch Quantisierung/hohe Stärke verhindern; TBN-Ausrichtung prüfen |
 +| Cubes | Basic bindet Envmap auf Slot 3; PBR verwendet diesen Slot für Metallic und bindet dort keine Envmap | Reflexion und IBL mit eigenem PBR-Bindungsplan ergänzen |
-+| Surface-INI | `SurfaceMapsIni` liest die konfigurierte `[Data] surface_maps`-Liste über das VFS; voller NAP-Katalog im Client geladen | Materialanwendung, benannte Profilwahl und Residency noch implementieren |
++| Surface-INI | `SurfaceMapsIni` liest die konfigurierte `[Data] surface_maps`-Liste über das VFS; voller NAP-Katalog im Client geladen | Materialanwendung und Residency noch implementieren |
 +| NAP-Daten | Reparierter Bestand: 41 Surface-Dateien, 1.349.682.438 Bytes; 7.005 DDS-Texturen und INI-Knotenverweise ohne Strukturfehler; `surface.nap` mit 41 Einträgen verifiziert | Materialzuordnung und sichtbare Wirkung bleiben zu prüfen |
 +
 +Die vier kuratierten Bibliotheken enthalten bereits **55 Normalmaps** und
@@ -2448,8 +2448,11 @@ index 0000000..4c6f34d
 +case-insensitive Metadatenauflösung sind implementiert. 17 Tests prüfen auch
 +NAN/Infinity, Wertebereiche, Pfade, Mehrfachdefinitionen und NAP-Zugriff ohne
 +Bibliotheksöffnung. Der Client lädt den vollen Katalog mit 2.807 Normalmap-
-+Zuordnungen. Die folgenden P1-Punkte bleiben für benannte Profilwahl,
-+Materialintegration und Speicher-/GPU-Lebensdauer offen.
++Zuordnungen. Die benannte Profilwahl ist nun in den Performance-Optionen und der
++Konfiguration implementiert (Original als Standard, Neustart erforderlich).
++30 Profil-/Parsertests und ein nativer UI-/Neustarttest bestätigen Auswahl,
++Speichern und Katalogumfang. P1 bleibt für Materialintegration und
++Speicher-/GPU-Lebensdauer offen.
 +
 +- [ ] `SurfaceMapsIni` mit `[Texture]`, `[NormalMap]`, `[CubeMap]` sowie
 +  `[Data] surface_maps`-Ladeliste implementieren. Profilabhängig nur die
@@ -2605,17 +2608,17 @@ index 8667cc2..dabccc5 100644
 
  ## Bereits vorhanden
 diff --git a/docs/surface-maps.md b/docs/surface-maps.md
-index 95f1ac2..2c205ed 100644
+index 95f1ac2..23c7a2f 100644
 --- a/docs/surface-maps.md
 +++ b/docs/surface-maps.md
-@@ -1,9 +1,50 @@
+@@ -1,9 +1,77 @@
  # Surface Maps: Normal Maps und Cube Maps per INI
  
 -**Status:** Beschreibung und Aufgabenliste, noch nichts im Client umgesetzt. **Stand:** 2026-10-12.
 +Die aktuelle Umsetzungsreihenfolge und Abnahme stehen im
 +[Grafik-Umsetzungsplan](graphics-implementation-plan.md).
 +
-+**Status:** Surface-Metadatenparser und `[Data] surface_maps` sind angebunden; Material-/Shader-Anwendung und Residency sind noch offen. **Stand:** 2026-10-13.
++**Status:** Surface-Metadatenparser, `[Data] surface_maps` und die persistente Profilwahl sind angebunden; Material-/Shader-Anwendung und Residency sind noch offen. **Stand:** 2026-10-13.
  **Datenseite:** Repository `LN-Data` (`tools/make_surface_maps.py`, `SDK/fx/SurfaceMaps.ini`, `TODO-surface-maps.md`).
  Engine-Änderungen bleiben gemäß `AGENTS.md` patch-only unter `patches/series`.
  
@@ -2633,8 +2636,9 @@ index 95f1ac2..2c205ed 100644
 +`FreelancerIni.SurfaceMapPaths` erhält die ausdrücklich konfigurierte Liste.
 +`FreelancerData.LoadData` lädt sie über das bestehende VFS nach
 +`FreelancerData.SurfaceMaps`. Ohne diese Einträge bleibt der Katalog leer.
-+Die gewählte Dateiliste bestimmt derzeit den Umfang; eine benannte
-+Original-/Minimal-/Standard-/Full-Auswahl in den Spieleinstellungen steht aus.
++Die gewählte Dateiliste bestimmt derzeit den Umfang; die benannte Profilwahl erfolgt in den Performance-Optionen oder über
++`[Settings] surface_profile = original|minimal|standard|full`. Original ist
++der Standard. Änderungen werden gespeichert und gelten nach einem Neustart.
 +
 +`SurfaceMapsIni` liest Bibliotheken, Normalmap-Zuordnungen und den Cube-Katalog,
 +validiert relative Assetpfade und skalare Felder und löst Namen ohne Beachtung
@@ -2656,6 +2660,32 @@ index 95f1ac2..2c205ed 100644
 +Die alten Auto-Kartenzahlen weiter unten sind ein historischer Datenstand;
 +aktueller Reparaturstand im [Grafikplan](graphics-implementation-plan.md).
 +[Prüfbefunde und Assembly-Hashes](evidence/surface-metadata-20261013.json).
++
++### Profilumfang und Konfiguration
++
++| Profil | Gewählte kanonische INIs | Bibliotheken | Normalmaps | Cubes |
++|---|---|---:|---:|---:|
++| Original | keine | 0 | 0 | 0 |
++| Minimal | SurfaceMaps.ini | 4 | 55 | 3 |
++| Standard | zusätzlich Ships und Solar | 8 | 186 | 3 |
++| Full | zusätzlich Bases | 34 | 2807 | 3 |
++
++Die Tabelle wurde mit dem reparierten NAP-Bestand geprüft. Die konfigurierte
++`surface_maps`-Liste bleibt maßgeblich: Das Profil ergänzt keine nicht
++aufgeführten Dateien. Explizite benutzerdefinierte INIs mit anderen Dateinamen
++sind gemeinsame Metadaten jedes aktivierten Profils. Original überspringt alle
++Quellen. Unbekannte oder numerische Konfigurationswerte fallen auf Original
++zurück. Die schema-interne API behält Full als Standard für bestehende
++Metadaten-Werkzeuge; der Spiel-Client setzt ausdrücklich sein Benutzerprofil.
++
++Der Optionsselektor zeigt Original/Minimal/Standard/Full und einen Neustart-
++Hinweis. Er ändert die gespeicherte Auswahl, ohne laufende Welt- oder
++Materialdaten neu aufzubauen. Native UI-Prüfung: Original → Standard,
++gespeichert; nach Neustart 186 Normalmaps. Beide Client-Läufe endeten über
++Exit mit Code 0. 30 Profil-/Parsertests bestehen. Materialwirkung und GPU-
++Residency sind dadurch noch nicht umgesetzt.
++
++[Profil-Prüfbefunde](evidence/surface-profiles-20261013.json).
 +
  ## 1. Ziel
  
@@ -2827,5 +2857,76 @@ index 0000000..403bef0
 +    "No material override application, lazy texture loader or residency/eviction yet",
 +    "No tangent generation, shader/normalmap visual proof or Vulkan backend",
 +    "No claim that the complete test suite is green"
++  ]
++}
+diff --git a/docs/evidence/surface-profiles-20261013.json b/docs/evidence/surface-profiles-20261013.json
+new file mode 100644
+index 0000000..c04416c
+--- /dev/null
++++ b/docs/evidence/surface-profiles-20261013.json
+@@ -0,0 +1,65 @@
++{
++  "date": "2026-10-13",
++  "scope": "Persistent startup Surface metadata profile and Performance options selector",
++  "defaults": {
++    "client": "Original",
++    "schemaApi": "Full"
++  },
++  "profiles": {
++    "Original": [
++      0,
++      0,
++      0
++    ],
++    "Minimal": [
++      4,
++      55,
++      3
++    ],
++    "Standard": [
++      8,
++      186,
++      3
++    ],
++    "Full": [
++      34,
++      2807,
++      3
++    ]
++  },
++  "countOrder": [
++    "libraries",
++    "normalMapMappings",
++    "cubes"
++  ],
++  "tests": {
++    "passed": 30,
++    "failed": 0
++  },
++  "build": {
++    "errors": 0,
++    "warnings": 150
++  },
++  "compiledInterfaceChangedResources": [
++    "options.lua",
++    "options.designer.lua"
++  ],
++  "runtime": {
++    "nativeSelectorOriginalToStandard": true,
++    "savedProfile": "Standard",
++    "activeBeforeRestart": "Original",
++    "afterRestart": "Standard",
++    "normalMapMappingsAfterRestart": 186,
++    "originalExitCode": 0,
++    "restartExitCode": 0,
++    "allProfileCatalogsVerifiedThroughNap": true,
++    "profileDiagnostics": 0
++  },
++  "screenshotSha256": "ae21481476015a76b706993e46ae47fca9352274a77e996684a5496e9dbb5c81",
++  "limits": [
++    "No material application/tangents/shader normalmap visibility proof",
++    "GPU residency and lazy library loading still open",
++    "Profile switch applies after restart; no hot reload",
++    "No full-suite-green claim"
 +  ]
 +}
