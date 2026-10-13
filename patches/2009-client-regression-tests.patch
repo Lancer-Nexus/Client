@@ -9737,3 +9737,99 @@ index 0000000..f20e33d
 +        } finally {context.DisposeShaders();}
 +    }
 +}
+diff --git a/src/LibreLancer.Tests/VMeshTangentBuilderTests.cs b/src/LibreLancer.Tests/VMeshTangentBuilderTests.cs
+new file mode 100644
+index 0000000..0b7dccf
+--- /dev/null
++++ b/src/LibreLancer.Tests/VMeshTangentBuilderTests.cs
+@@ -0,0 +1,90 @@
++using System;
++using System.IO;
++using System.Linq;
++using System.Numerics;
++using System.Runtime.InteropServices;
++using LibreLancer.Utf.Vms;
++using Xunit;
++namespace LibreLancer.Tests;
++public class VMeshTangentBuilderTests
++{
++    static void Vector(BinaryWriter writer,Vector3 v){writer.Write(v.X);writer.Write(v.Y);writer.Write(v.Z);}
++    static void Uv(BinaryWriter writer,Vector2 v){writer.Write(v.X);writer.Write(v.Y);}
++    public static VMeshData Mesh(bool twoUv=false,bool diffuse=false,bool mirrored=false,int meshBase=0,int referenceBase=0,bool degenerate=false)
++    {
++        using var stream=new MemoryStream();using var writer=new BinaryWriter(stream);
++        var format=D3DFVF.XYZ|D3DFVF.NORMAL|(twoUv?D3DFVF.TEX2:D3DFVF.TEX1)|(diffuse?D3DFVF.DIFFUSE:0);
++        var count=mirrored?6:3;var padding=meshBase+referenceBase;
++        writer.Write(1u);writer.Write(4u);writer.Write((ushort)1);writer.Write((ushort)count);writer.Write((ushort)format);writer.Write((ushort)(padding+(mirrored?4:3)));
++        writer.Write(123u);writer.Write((ushort)meshBase);writer.Write((ushort)(meshBase+(mirrored?3:2)));writer.Write((ushort)count);writer.Write((ushort)0xcc);
++        foreach(var index in mirrored?new ushort[]{0,1,2,0,2,3}:new ushort[]{0,1,2})writer.Write(index);
++        for(var i=0;i<padding+(mirrored?4:3);i++){
++            var j=i-padding;
++            var position=j switch{0=>Vector3.Zero,1=>Vector3.UnitX,2=>Vector3.UnitY,3=>-Vector3.UnitX,_=>new Vector3(99,99,99)};
++            Vector(writer,position);Vector(writer,Vector3.UnitZ);if(diffuse)writer.Write(0xaabbccddu);
++            var uv=j switch{1=>Vector2.UnitX,2=>Vector2.UnitY,3=>Vector2.UnitX,_=>Vector2.Zero};if(degenerate)uv=Vector2.Zero;
++            Uv(writer,uv);if(twoUv)Uv(writer,new Vector2(-uv.X,uv.Y));
++        }
++        writer.Flush();return new VMeshData(new ArraySegment<byte>(stream.ToArray()),"synthetic");
++    }
++    [Theory]
++    [InlineData(false,false)] [InlineData(false,true)] [InlineData(true,false)] [InlineData(true,true)]
++    public void PreservesAllOriginalAttributesAndAddsPackedTangent(bool twoUv,bool diffuse)
++    {
++        var mesh=Mesh(twoUv,diffuse);var original=(byte[])mesh.VertexBuffer.Clone();var indices=(ushort[])mesh.Indices.Clone();
++        var result=VMeshTangentBuilder.Build(mesh,0);
++        Assert.Equal(twoUv?4:3,result.VertexFormat.TexCoords);Assert.Equal(mesh.VertexFormat.Stride+16,result.VertexFormat.Stride);
++        Assert.Equal(123u,result.MaterialCrc);Assert.Equal(3,result.VertexCount);
++        for(var i=0;i<3;i++){
++            Assert.Equal(original.AsSpan(i*mesh.VertexFormat.Stride,mesh.VertexFormat.Stride).ToArray(),result.VertexBuffer.AsSpan(i*result.VertexFormat.Stride,mesh.VertexFormat.Stride).ToArray());
++            var tangent=result.GetTangent(i);Assert.True(Vector3.Distance(new(tangent.X,tangent.Y,tangent.Z),Vector3.UnitX)<1e-5f);Assert.Equal(1,tangent.W);
++        }
++        Assert.Equal(original,mesh.VertexBuffer);Assert.Equal(indices,mesh.Indices);
++    }
++    [Fact]
++    public void SharedVertexAtMirroredUvSeamHasSeparateCornerTangents()
++    {
++        var result=VMeshTangentBuilder.Build(Mesh(mirrored:true),0);Assert.Equal(6,result.VertexCount);
++        Assert.Equal(1,result.GetTangent(0).W);Assert.Equal(-1,result.GetTangent(3).W);
++        Assert.True(result.GetTangent(0).X>.99f);Assert.True(result.GetTangent(3).X<-.99f);
++        Assert.Equal(Enumerable.Range(0,6).Select(x=>(ushort)x).ToArray(),result.Indices);
++    }
++    [Fact]
++    public void SelectedSecondUvChangesTangentAndHandedness()
++    {
++        var mesh=Mesh(twoUv:true);var first=VMeshTangentBuilder.Build(mesh,0);var second=VMeshTangentBuilder.Build(mesh,0,uvChannel:1);
++        Assert.True(first.GetTangent(0).X>.99f);Assert.True(second.GetTangent(0).X<-.99f);Assert.Equal(-1,second.GetTangent(0).W);
++    }
++    [Fact]
++    public void AppliesBothMeshAndReferenceBaseOffsets()
++    {
++        var mesh=Mesh(meshBase:2,referenceBase:3);var result=VMeshTangentBuilder.Build(mesh,0,3);
++        Assert.Equal(Vector3.Zero,MemoryMarshal.Read<Vector3>(result.VertexBuffer));Assert.True(result.GetTangent(0).X>.99f);
++    }
++    [Fact]
++    public void DegenerateUvStillProducesFiniteOrthogonalUnitTangent()
++    {
++        var result=VMeshTangentBuilder.Build(Mesh(degenerate:true),0);
++        foreach(var i in Enumerable.Range(0,3)){
++            var t=result.GetTangent(i);Assert.True(float.IsFinite(t.X)&&float.IsFinite(t.Y)&&float.IsFinite(t.Z)&&float.IsFinite(t.W));
++            Assert.True(MathF.Abs(new Vector3(t.X,t.Y,t.Z).Length()-1)<1e-5f);Assert.True(MathF.Abs(t.Z)<1e-5f);
++        }
++    }
++    [Fact]
++    public void InvalidIndicesTruncationAndNonFiniteInputsAreRejected()
++    {
++        var bad=Mesh();bad.Indices[0]=99;Assert.Throws<InvalidDataException>(()=>VMeshTangentBuilder.Build(bad,0));
++        bad=Mesh();bad.VertexBuffer=bad.VertexBuffer[..^1];Assert.Throws<InvalidDataException>(()=>VMeshTangentBuilder.Build(bad,0));
++        bad=Mesh();var nan=float.NaN;MemoryMarshal.Write(bad.VertexBuffer.AsSpan(),in nan);Assert.Throws<InvalidDataException>(()=>VMeshTangentBuilder.Build(bad,0));
++    }
++    [Fact]
++    public void InvalidSelectionsAndTexCoordBoundsAreRejected()
++    {
++        var mesh=Mesh();Assert.Throws<ArgumentOutOfRangeException>(()=>VMeshTangentBuilder.Build(mesh,-1));
++        Assert.Throws<ArgumentOutOfRangeException>(()=>VMeshTangentBuilder.Build(mesh,0,-1));
++        Assert.Throws<ArgumentOutOfRangeException>(()=>VMeshTangentBuilder.Build(mesh,0,uvChannel:1));
++        Assert.Throws<InvalidOperationException>(()=>mesh.GetTexCoord(0,-1));Assert.Throws<InvalidOperationException>(()=>mesh.GetTexCoord(0,1));
++        Assert.False(VMeshTangentBuilder.Supports(new FVFVertex(D3DFVF.XYZ|D3DFVF.NORMAL|D3DFVF.TEX3)));
++        Assert.False(VMeshTangentBuilder.Supports(new FVFVertex(D3DFVF.XYZ|D3DFVF.TEX1)));
++    }
++}

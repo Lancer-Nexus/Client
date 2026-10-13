@@ -4593,3 +4593,126 @@ index 1eaf69a..683abef 100644
          public static void AttachShader(uint program, uint shader)
          {
              _glAttachShader(program, shader);
+diff --git a/src/LibreLancer/Utf/Vms/VMeshTangentBuilder.cs b/src/LibreLancer/Utf/Vms/VMeshTangentBuilder.cs
+new file mode 100644
+index 0000000..9debdf1
+--- /dev/null
++++ b/src/LibreLancer/Utf/Vms/VMeshTangentBuilder.cs
+@@ -0,0 +1,104 @@
++using System;
++using System.IO;
++using System.Numerics;
++using System.Runtime.InteropServices;
++using SimpleMesh;
++
++namespace LibreLancer.Utf.Vms;
++
++/// <summary>A separate per-draw tangent mesh. The source VMeshData is never rewritten.</summary>
++public sealed record TangentMeshGeometry(FVFVertex VertexFormat, byte[] VertexBuffer, ushort[] Indices,
++    uint MaterialCrc, int UvChannel)
++{
++    public int VertexCount => Indices.Length;
++    public int PrimitiveCount => Indices.Length / 3;
++    public Vector4 GetTangent(int vertex)
++    {
++        if (vertex < 0 || vertex >= VertexCount) throw new ArgumentOutOfRangeException(nameof(vertex));
++        return MemoryMarshal.Read<Vector4>(VertexBuffer.AsSpan(vertex * VertexFormat.Stride + VertexFormat.Stride - 16, 16));
++    }
++}
++
++public static class VMeshTangentBuilder
++{
++    public static bool Supports(FVFVertex format) => format.Normal && format.TexCoords is 1 or 2;
++
++    /// <summary>Build one material draw with VMeshRef base vertex and selected real UV channel.</summary>
++    public static TangentMeshGeometry Build(VMeshData data, int meshIndex, int baseVertex = 0, int uvChannel = 0)
++    {
++        ArgumentNullException.ThrowIfNull(data);
++        if (meshIndex < 0 || meshIndex >= data.Meshes.Length) throw new ArgumentOutOfRangeException(nameof(meshIndex));
++        if (baseVertex < 0 || baseVertex > ushort.MaxValue) throw new ArgumentOutOfRangeException(nameof(baseVertex));
++        var format = data.VertexFormat;
++        if (!Supports(format)) throw new NotSupportedException("Runtime tangent generation requires NORMAL and TEX1/TEX2; authored TEX3/TEX4 tangents are retained");
++        if (uvChannel < 0 || uvChannel >= format.TexCoords) throw new ArgumentOutOfRangeException(nameof(uvChannel));
++        if (data.VertexBuffer.Length != data.VertexCount * format.Stride)
++            throw new InvalidDataException("Truncated VMesh vertex buffer");
++        var header = data.Meshes[meshIndex];
++        var corners = (int)header.NumRefVertices;
++        if (corners % 3 != 0 || header.TriangleStart < 0 || header.TriangleStart > data.Indices.Length - corners)
++            throw new InvalidDataException("Invalid VMesh triangle range");
++        var outputFvf = (format.FVF & ~(D3DFVF)0xf00) |
++                        (format.TexCoords == 1 ? D3DFVF.TEX3 : D3DFVF.TEX4);
++        var outputFormat = new FVFVertex(outputFvf);
++        var vertices = new byte[corners * outputFormat.Stride];
++        var indices = new ushort[corners];
++        var positions = new Vector3[corners];
++        var normals = new Vector3[corners];
++        var uvs = new Vector2[corners];
++        var tangents = new Vector4[corners];
++        for (var corner = 0; corner < corners; corner++) {
++            var absolute = baseVertex + header.StartVertex + data.Indices[header.TriangleStart + corner];
++            if (absolute >= data.VertexCount) throw new InvalidDataException("VMesh index exceeds the referenced vertex range");
++            var position = data.GetPosition(absolute);
++            var normal = data.GetNormal(absolute);
++            if (!Finite(position) || !Finite(normal)) throw new InvalidDataException("Non-finite VMesh position or normal");
++            for (var uv = 0; uv < format.TexCoords; uv++) {
++                var value = data.GetTexCoord(absolute, uv);
++                if (!float.IsFinite(value.X) || !float.IsFinite(value.Y)) throw new InvalidDataException("Non-finite VMesh UV");
++                if (uv == uvChannel) uvs[corner] = value;
++            }
++            positions[corner] = position;
++            normals[corner] = Normalize(normal, Vector3.UnitZ);
++            data.VertexBuffer.AsSpan(absolute * format.Stride, format.Stride)
++                .CopyTo(vertices.AsSpan(corner * outputFormat.Stride, format.Stride));
++            indices[corner] = (ushort)corner;
++        }
++        if (corners != 0)
++            TangentGeneration.GenerateMikkTSpace(new Geometry(positions, normals, uvs, tangents));
++        for (var corner = 0; corner < corners; corner++) {
++            var n = normals[corner];
++            var axis = MathF.Abs(n.Z) < 0.999f ? Vector3.UnitZ : Vector3.UnitY;
++            var fallback = Normalize(Vector3.Cross(axis, n), Vector3.UnitX);
++            var generated = tangents[corner];
++            var tangent = Normalize(new Vector3(generated.X, generated.Y, generated.Z), fallback);
++            tangent = Normalize(tangent - n * Vector3.Dot(n, tangent), fallback);
++            // SimpleMesh's adapter flips Mikk's sign for its exporter convention.
++            // The runtime basis is cross(N,T)*handedness, so restore canonical sign.
++            var packed = new Vector4(tangent, generated.W > 0 ? -1 : 1);
++            MemoryMarshal.Write(vertices.AsSpan(corner * outputFormat.Stride + format.Stride, 16), in packed);
++        }
++        return new(outputFormat, vertices, indices, header.MaterialCrc, uvChannel);
++    }
++
++    private static bool Finite(Vector3 v) => float.IsFinite(v.X) && float.IsFinite(v.Y) && float.IsFinite(v.Z);
++    private static Vector3 Normalize(Vector3 value, Vector3 fallback)
++    {
++        if (!Finite(value)) return fallback;
++        var scale = MathF.Max(MathF.Abs(value.X), MathF.Max(MathF.Abs(value.Y), MathF.Abs(value.Z)));
++        if (scale < 1e-20f) return fallback;
++        var scaled = value / scale;
++        return scaled / MathF.Sqrt(Vector3.Dot(scaled, scaled));
++    }
++
++    private sealed class Geometry(Vector3[] positions, Vector3[] normals, Vector2[] uv, Vector4[] output) : ITangentGeometry
++    {
++        public int GetNumFaces() => positions.Length / 3;
++        public int GetNumVerticesOfFace(int index) => 3;
++        private static int Index(int face, int corner) => face * 3 + corner;
++        public Vector3 GetPosition(int face, int corner) => positions[Index(face, corner)];
++        public Vector3 GetNormal(int face, int corner) => normals[Index(face, corner)];
++        public Vector2 GetTexCoord(int face, int corner) => uv[Index(face, corner)];
++        public void SetTangent(Vector4 tangent, int face, int corner) => output[Index(face, corner)] = tangent;
++    }
++}
+diff --git a/src/LibreLancer/Utf/Vms/VMeshData.cs b/src/LibreLancer/Utf/Vms/VMeshData.cs
+index 77df528..d0aad67 100644
+--- a/src/LibreLancer/Utf/Vms/VMeshData.cs
++++ b/src/LibreLancer/Utf/Vms/VMeshData.cs
+@@ -58,7 +58,7 @@ namespace LibreLancer.Utf.Vms
+ 
+         public Vector2 GetTexCoord(int index, int coordinate)
+         {
+-            if (coordinate > VertexFormat.TexCoords) throw new InvalidOperationException();
++            if (coordinate < 0 || coordinate >= VertexFormat.TexCoords) throw new InvalidOperationException();
+ 
+             int offset = (coordinate * 8) + 12;
+             if (VertexFormat.Normal) offset += 12;
