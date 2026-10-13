@@ -9986,10 +9986,10 @@ index 0000000..74902bd
 +}
 diff --git a/src/LibreLancer.Tests/SurfaceGpuTextureCacheTests.cs b/src/LibreLancer.Tests/SurfaceGpuTextureCacheTests.cs
 new file mode 100644
-index 0000000..843bfd7
+index 0000000..654b39f
 --- /dev/null
 +++ b/src/LibreLancer.Tests/SurfaceGpuTextureCacheTests.cs
-@@ -0,0 +1,73 @@
+@@ -0,0 +1,109 @@
 +using System;
 +using System.Buffers.Binary;
 +using LibreLancer.Graphics;
@@ -10054,12 +10054,48 @@ index 0000000..843bfd7
 +    }
 +
 +    [Fact]
++    public void ClearUnusedRetiresOnlyUnleasedEntriesAndKeepsPendingBytesCharged()
++    {
++        var pending = new System.Collections.Generic.Queue<Action>();
++        var cpu = new SurfaceImageCache(1024, (_, _) => Dds());
++        using var image = cpu.TryAcquire(new("library", "foo.txm", "normal"))!;
++        using var cache = new SurfaceGpuTextureCache(144, (_, _, _) => new FakeTexture(144, pending.Enqueue), () => true);
++        var lease = cache.TryAcquire(new("alias", "foo.txm", "normal"), image)!;
++        cache.ClearUnused();
++        Assert.Empty(pending);
++        lease.Dispose();
++        cache.ClearUnused();
++        Assert.Single(pending);
++        Assert.Equal(144, cache.Stats.ResidentBytes);
++        Assert.Equal(144, cache.Stats.RetiringBytes);
++        pending.Dequeue()();
++        Assert.Equal(0, cache.Stats.ResidentBytes);
++    }
++
++    [Fact]
++    public void WrongThreadDisposeDoesNotCloseTheCache()
++    {
++        var onRenderThread = false; var callbacks = new System.Collections.Generic.Queue<Action>();
++        var cpu = new SurfaceImageCache(1024, (_, _) => Dds());
++        using var image = cpu.TryAcquire(new("library", "foo.txm", "normal"))!;
++        var cache = new SurfaceGpuTextureCache(144, (_, _, _) => new FakeTexture(144, callbacks.Enqueue), () => onRenderThread);
++        Assert.Throws<InvalidOperationException>(() => cache.Dispose());
++        Assert.Equal(0, cache.Stats.Entries);
++        onRenderThread = true;
++        var lease = cache.TryAcquire(new("alias", "foo.txm", "normal"), image)!;
++        lease.Dispose(); cache.Dispose(); callbacks.Dequeue()();
++        Assert.Equal(0, cache.Stats.ResidentBytes);
++    }
++
++    [Fact]
 +    public void RejectsWorkerAccessAndLeavesCpuLeaseOwnedByCaller()
 +    {
 +        var cpu = new SurfaceImageCache(1024, (_, _) => Dds());
 +        using var image = cpu.TryAcquire(new("library", "foo.txm", "normal"))!;
-+        using var cache = new SurfaceGpuTextureCache(144, (_, _, _) => throw new Exception("must not upload"), () => false);
++        var onRenderThread = false;
++        using var cache = new SurfaceGpuTextureCache(144, (_, _, _) => throw new Exception("must not upload"), () => onRenderThread);
 +        Assert.Throws<InvalidOperationException>(() => cache.TryAcquire(new("alias", "foo.txm", "normal"), image));
 +        Assert.Equal(1, cpu.Stats.ActiveLeases);
++        onRenderThread = true;
 +    }
 +}

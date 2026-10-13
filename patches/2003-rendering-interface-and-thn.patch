@@ -3629,7 +3629,7 @@ index abf0a1f..44b0830 100644
  
      protected RuntimeSurFile GetSur(string filename)
 diff --git a/src/LibreLancer/Resources/GameResourceManager.cs b/src/LibreLancer/Resources/GameResourceManager.cs
-index a657c82..35c6715 100644
+index a657c82..5eef63b 100644
 --- a/src/LibreLancer/Resources/GameResourceManager.cs
 +++ b/src/LibreLancer/Resources/GameResourceManager.cs
 @@ -86,6 +86,7 @@ public class GameResourceManager : ResourceManager, IDisposable
@@ -3648,17 +3648,20 @@ index a657c82..35c6715 100644
          texturefiles = new Dictionary<string, string>(src.texturefiles, StringComparer.OrdinalIgnoreCase);
          shapes = new Dictionary<string, TextureShape?>(src.shapes, StringComparer.OrdinalIgnoreCase);
          materialfiles = new Dictionary<uint, string>(src.materialfiles);
-@@ -178,6 +180,7 @@ public class GameResourceManager : ResourceManager, IDisposable
+@@ -178,6 +180,8 @@ public class GameResourceManager : ResourceManager, IDisposable
  
      public void ClearTextures()
      {
++        SurfaceGpuTextures?.ClearUnused();
 +        SurfaceImages.ClearUnused();
          loadedResFiles = [];
          var keys = new string[textures.Count];
          textures.Keys.CopyTo(keys, 0);
-@@ -647,6 +650,8 @@ public class GameResourceManager : ResourceManager, IDisposable
+@@ -646,7 +650,10 @@ public class GameResourceManager : ResourceManager, IDisposable
+     public void Dispose()
      {
          if (isDisposed) return;
++        if (!GLWindow.IsUiThread()) throw new InvalidOperationException("GPU resource manager disposal requires the render thread");
          isDisposed = true;
 +        SurfaceGpuTextures?.Dispose();
 +        SurfaceImages.Dispose();
@@ -5078,10 +5081,10 @@ index 7bcd3e0..5be2e2f 100644
      }
 diff --git a/src/LibreLancer/Resources/SurfaceGpuTextureCache.cs b/src/LibreLancer/Resources/SurfaceGpuTextureCache.cs
 new file mode 100644
-index 0000000..9d52335
+index 0000000..6f72401
 --- /dev/null
 +++ b/src/LibreLancer/Resources/SurfaceGpuTextureCache.cs
-@@ -0,0 +1,128 @@
+@@ -0,0 +1,145 @@
 +using System;
 +using System.Collections.Generic;
 +using LibreLancer.Graphics;
@@ -5159,6 +5162,17 @@ index 0000000..9d52335
 +        }
 +    }
 +
++    /// <summary>Retires every currently unleased entry. Residency remains charged until each fence completes.</summary>
++    public void ClearUnused()
++    {
++        if (!isRenderThread()) throw new InvalidOperationException("Surface GPU cache access requires the render thread");
++        lock (sync) {
++            ObjectDisposedException.ThrowIf(disposed, this);
++            foreach (var entry in new List<Entry>(entries.Values))
++                if (entry.Leases == 0) Retire(entry);
++        }
++    }
++
 +    private Entry? FindUnused()
 +    {
 +        for (var n = lru.First; n != null; n = n.Next) if (!n.Value.Retiring && n.Value.Leases == 0) return n.Value;
@@ -5192,7 +5206,13 @@ index 0000000..9d52335
 +
 +    public void Dispose()
 +    {
-+        lock (sync) { if (disposed) return; disposed = true; foreach (var entry in new List<Entry>(entries.Values)) Retire(entry); entries.Clear(); }
++        lock (sync) {
++            if (disposed) return;
++            if (!isRenderThread()) throw new InvalidOperationException("Surface GPU cache disposal requires the render thread");
++            disposed = true;
++            foreach (var entry in new List<Entry>(entries.Values)) Retire(entry);
++            entries.Clear();
++        }
 +    }
 +}
 +
