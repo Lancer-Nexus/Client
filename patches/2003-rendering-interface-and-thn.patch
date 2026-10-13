@@ -3773,10 +3773,10 @@ index 0000000..324f351
 +}
 diff --git a/src/LibreLancer/Resources/SurfaceTextureReader.cs b/src/LibreLancer/Resources/SurfaceTextureReader.cs
 new file mode 100644
-index 0000000..8439b9e
+index 0000000..50929d5
 --- /dev/null
 +++ b/src/LibreLancer/Resources/SurfaceTextureReader.cs
-@@ -0,0 +1,174 @@
+@@ -0,0 +1,179 @@
 +using System;
 +using System.Buffers.Binary;
 +using System.Collections.Generic;
@@ -3906,8 +3906,13 @@ index 0000000..8439b9e
 +    }
 +    // Match the classic block formats supported by the engine's DDS loader.
 +    // Surface libraries contain 2D BC4/BC5 maps and compressed or RGB(A) six-face cubes.
-+    private static void ValidateDds(byte[] data, bool cube)
++    internal static void ValidateDds(byte[] data, bool cube)
 +    {
++        if (data.Length < 128 || data.Length > DefaultMaxTextureBytes ||
++            !data.AsSpan(0, 4).SequenceEqual("DDS "u8) ||
++            BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(4)) != 124 ||
++            BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(76)) != 32)
++            throw new InvalidDataException("Invalid Surface DDS header or payload limit");
 +        int Value(int offset) => BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(offset));
 +        var height = Value(12);
 +        var width = Value(16);
@@ -4716,3 +4721,137 @@ index 77df528..d0aad67 100644
  
              int offset = (coordinate * 8) + 12;
              if (VertexFormat.Normal) offset += 12;
+diff --git a/src/LibreLancer/Resources/SurfaceGpuTexture.cs b/src/LibreLancer/Resources/SurfaceGpuTexture.cs
+new file mode 100644
+index 0000000..7bd2cf3
+--- /dev/null
++++ b/src/LibreLancer/Resources/SurfaceGpuTexture.cs
+@@ -0,0 +1,72 @@
++using System;
++using System.Buffers.Binary;
++using System.IO;
++using LibreLancer.Graphics;
++
++namespace LibreLancer.Resources;
++
++/// <summary>One explicitly owned GPU upload. Dispose on the render thread before native context shutdown.</summary>
++public sealed class SurfaceGpuTexture : IDisposable
++{
++    private readonly IGLWindow window;
++    private readonly Texture texture;
++    private bool disposed;
++    public long GpuPayloadBytes { get; }
++    public Texture Texture
++    {
++        get {
++            ObjectDisposedException.ThrowIf(disposed, this);
++            CheckThread(window);
++            return texture;
++        }
++    }
++    private SurfaceGpuTexture(IGLWindow window, Texture texture, long bytes)
++    { this.window = window; this.texture = texture; GpuPayloadBytes = bytes; }
++
++    /// <summary>Logical GPU payload bytes, including BC blocks and RGB24 expansion; excludes driver overhead.</summary>
++    public static long EstimateGpuPayloadBytes(ImageResource image)
++    {
++        ArgumentNullException.ThrowIfNull(image);
++        if (image.Type != ImageType.DDS || image.Data == null || image.Data.Length < 128)
++            throw new InvalidDataException("Surface upload requires a DDS image");
++        var data = image.Data;
++        int Value(int offset) => BinaryPrimitives.ReadInt32LittleEndian(data.AsSpan(offset));
++        SurfaceTextureReader.ValidateDds(data, (Value(112) & 0x200) != 0);
++        var declaredMips = Math.Max(1, Value(28));
++        var loaderUsesMips = (Value(8) & 0x20000) != 0 || (Value(108) & 0x400000) != 0;
++        if ((loaderUsesMips && Value(28) < 1) || (!loaderUsesMips && declaredMips > 1))
++            throw new InvalidDataException("Surface DDS mip flags do not match the declared chain");
++        var bytes = (long)data.Length - 128;
++        return (Value(80) & 4) == 0 && Value(88) == 24 ? bytes / 3 * 4 : bytes;
++    }
++
++    /// <summary>Null means insufficient per-upload budget or unsupported compressed upload. The caller retains the CPU lease.</summary>
++    public static SurfaceGpuTexture? TryUpload(IGLWindow window, SurfaceImageLease image, long maxGpuBytes)
++    {
++        ArgumentNullException.ThrowIfNull(window);
++        ArgumentNullException.ThrowIfNull(image);
++        if (maxGpuBytes < 0) throw new ArgumentOutOfRangeException(nameof(maxGpuBytes));
++        CheckThread(window);
++        var resource = image.Image;
++        var bytes = EstimateGpuPayloadBytes(resource);
++        if (bytes > maxGpuBytes) return null;
++        using var stream = new MemoryStream(resource.Data, writable: false);
++        var context = window.RenderContext;
++        if ((BinaryPrimitives.ReadInt32LittleEndian(resource.Data.AsSpan(80)) & 4) != 0 && !context.HasFeature(GraphicsFeature.S3TC))
++            return null; // The existing DDS path otherwise expands compressed textures or fails.
++        var texture = ImageLib.DDS.FromStream(context, stream);
++        return new(window, texture, bytes);
++    }
++
++    private static void CheckThread(IGLWindow window)
++    {
++        if (!window.IsUiThread()) throw new InvalidOperationException("Surface GPU uploads and release require the render thread");
++    }
++    public void Dispose()
++    {
++        if (disposed) return;
++        CheckThread(window);
++        texture.Dispose();
++        disposed = true;
++    }
++}
+diff --git a/src/LibreLancer.Base/ImageLib/DDS.cs b/src/LibreLancer.Base/ImageLib/DDS.cs
+index 1a72400..e227c2d 100644
+--- a/src/LibreLancer.Base/ImageLib/DDS.cs
++++ b/src/LibreLancer.Base/ImageLib/DDS.cs
+@@ -151,9 +151,11 @@ public static class DDS
+         int w, h;
+         var surface = LoadSurface(ref header, reader, out fmt, out w, out h);
+         var tex = new Texture2D(context, w, h, surface.Length > 1, fmt);
++        try {
+         for (var i = 0; i < surface.Length; i++)
+             tex.SetData(i, null, surface[i], 0, surface[i].Length);
+         return tex;
++        } catch { tex.Dispose(); throw; }
+     }
+ 
+     private static TextureCube GetTextureCube(RenderContext context, ref DDS_HEADER header, BinaryReader reader)
+@@ -162,6 +164,7 @@ public static class DDS
+         int w, h;
+         var sfc = LoadSurface(ref header, reader, out fmt, out w, out h);
+         var tex = new TextureCube(context, w, sfc.Length > 1, fmt);
++        try {
+         //Positive X
+         for (var i = 0; i < sfc.Length; i++)
+             tex.SetData(CubeMapFace.PositiveX, i, null, sfc[i], 0, sfc[i].Length);
+@@ -186,6 +189,7 @@ public static class DDS
+         for (var i = 0; i < sfc.Length; i++)
+             tex.SetData(CubeMapFace.NegativeZ, i, null, sfc[i], 0, sfc[i].Length);
+         return tex;
++        } catch { tex.Dispose(); throw; }
+     }
+ 
+     private static int GetSurfaceBytes(ref DDS_HEADER header, int width, int height)
+@@ -311,19 +315,12 @@ public static class DDS
+                     data[px + 3] = 255;
+                 }
+             }
+-            //Swap channels if needed
+-            // Bgra8 format should have dwRBitMask == 0xff0000. Implement other swaps
+-            // if found.
+-            /*if (fmt == SurfaceFormat.Bgra8 && header.ddspf.dwRBitMask == 0xff0000)
++            // Normalize standard RGBA/RGB source masks to the BGRA upload format.
++            if (fmt == SurfaceFormat.Bgra8 && header.ddspf.dwRBitMask == 0xff && header.ddspf.dwBBitMask == 0xff0000)
+             {
+                 for (var px = 0; px < bytes; px += 4)
+-                {
+-                    var g = data[px];
+-                    var b = data[px + 2];
+-                    data[px] = b;
+-                    data[px + 2] = g;
+-                }
+-            }*/
++                    (data[px], data[px + 2]) = (data[px + 2], data[px]);
++            }
+             sfc.Add(data);
+ 
+             w /= 2;

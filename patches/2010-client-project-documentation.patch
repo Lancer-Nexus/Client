@@ -1,5 +1,5 @@
 diff --git a/README.md b/README.md
-index 3c2ab9f..0f42576 100644
+index 3c2ab9f..158f292 100644
 --- a/README.md
 +++ b/README.md
 @@ -18,7 +18,9 @@ The Lancer Nexus Client is the MMO-oriented client fork of [LibreLancer](https:/
@@ -60,7 +60,7 @@ index 3c2ab9f..0f42576 100644
  ## NPC retirement recovery infrastructure
  
  Patch 1126 adds a durable background retirement outbox under the configured NPC
-@@ -112,3 +126,25 @@ The checker requires Python 3 and Git; it does not initialize or fetch submodule
+@@ -112,3 +126,34 @@ The checker requires Python 3 and Git; it does not initialize or fetch submodule
  before writing fingerprints. Use normal patch application for a fresh checkout;
  recording an incomplete overlay fails and preserves the previous marker. Checker
  tests run with `python3 -m unittest discover -s scripts/tests`.
@@ -86,6 +86,15 @@ index 3c2ab9f..0f42576 100644
 +preserves source assets. Authored TEX3/TEX4 data remains untouched. Tangent
 +geometry is currently an explicit preparation API, not a enabled Surface
 +rendering setting. See [the tangent validation](docs/vmesh-tangents.md).
++
++## Explicit Surface GPU uploads
++
++`SurfaceGpuTexture.TryUpload` validates DDS payloads and a per-upload byte budget
++before allocating a texture. The CPU lease remains owned by the caller; the
++returned GPU texture must be disposed on the render thread before native context
++shutdown. Compressed uploads require support in the existing DDS backend path.
++This helper does not provide a global residency cache or activate normalmap
++options. [Upload and BC5 sampler validation](docs/surface-gpu-upload.md).
 diff --git a/docs/NEXUS-ASSET-PACKAGES.md b/docs/NEXUS-ASSET-PACKAGES.md
 new file mode 100644
 index 0000000..f85eb06
@@ -2354,10 +2363,10 @@ index 0000000..3829e44
 +}
 diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
 new file mode 100644
-index 0000000..1879d44
+index 0000000..c257cc4
 --- /dev/null
 +++ b/docs/graphics-implementation-plan.md
-@@ -0,0 +1,435 @@
+@@ -0,0 +1,459 @@
 +# Grafik-Erweiterungen: Umsetzungsplan
 +
 +Stand: 2026-10-12. Dieser Plan verbindet die neu eingelesenen Dokumente
@@ -2793,6 +2802,30 @@ index 0000000..1879d44
 +DFM/Skinning und negative World-/MaterialAnim-Skalierungen bleiben offen.
 +Die Grafikschalter für Zusatzkarten bleiben bis zur fertigen Rendereranbindung
 +weiterhin gesperrt. Die aktive Patchserie bleibt bei 13 funktionalen Bundles.
++
++## Surface-GPU-Upload und BC5-Sampler (2026-10-13)
++
++Ein expliziter `SurfaceGpuTexture`-Upload validiert DDS und logische GPU-Payload-
++Bytes einschließlich RGB24-Expansion vor Allokation, prüft den Renderthread und
++verwendet den vorhandenen DDS-Backendpfad. CPU-Leases werden nicht übernommen.
++Budgetmangel bzw. fehlende Kompressionsunterstützung liefern null. Mipflags
++müssen mit der DDS-Loaderinterpretation übereinstimmen; kaputte Header/Payloads
++werden abgewiesen. DDS-Uploads geben nach bereits erfolgter Texturerzeugung bei
++folgenden Fehlern die Textur frei; Standard-RGB/RGBA-Masken werden korrekt in
++BGRA konvertiert.
++
++115 Tests, fehlerfreier Solution-Build und neun echte BC5-Sampler-Readbacks
++bestanden: acht bekannte Testblöcke für FVF3/FVF4 sowie eine NAP-Normalmap mit
++1.398.096 GPU-Payloadbytes. Der Echttexturpixel stimmt mit einer unabhängigen
++CPU-BC4-Palette/Bilinear-/Normalenreferenz überein. [Prüfbericht](surface-gpu-upload.md).
++Der erste Echttexturvergleich hatte im separaten Probehost einen nicht gesetzten
++MaterialAnim-Skalierungsuniform und schlug korrekt fehl; nach Initialisierung
++wie im normalen BasicMaterial-Pfad wurde der ganze Lauf erfolgreich wiederholt.
++
++Dies ist der explizite Upload-/Samplerpfad, kein globales GPU-Residencybudget und
++keine aktive Supplemental-Materialanbindung. Mesh-/Texturcache, Loaderqueue,
++Frame-/Fence-Retirement, Geräteverlust und visuelle Referenzszenen bleiben offen.
++Die neuen Optionsschalter bleiben bis zur vollständigen Integration gesperrt.
 diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
 index 8667cc2..dabccc5 100644
 --- a/docs/renderer-roadmap.md
@@ -3324,7 +3357,7 @@ index 0000000..7f74f79
 +  ]
 +}
 diff --git a/AGENTS.md b/AGENTS.md
-index 98f5931..f7f75fc 100644
+index 98f5931..4b90cc2 100644
 --- a/AGENTS.md
 +++ b/AGENTS.md
 @@ -88,9 +88,9 @@ LLServer SystemIds defines owned worlds; SystemId is the primary fallback. Trave
@@ -3340,7 +3373,7 @@ index 98f5931..f7f75fc 100644
    propagation in the build entry point.
  - The integrity checker is read-only; preserve unrelated modifications and repair
    identified overlay drift by applying the relevant maintained patch.
-@@ -126,3 +126,36 @@ LLServer SystemIds defines owned worlds; SystemId is the primary fallback. Trave
+@@ -126,3 +126,47 @@ LLServer SystemIds defines owned worlds; SystemId is the primary fallback. Trave
  ## Restart-time ambient NPC recovery
  
  - Before publishing a world or starting population simulation, drain pending checkpoint writes and restore that system's current ambient NPC checkpoints from Coordinator. Resolve stable NPC references and preserve the serialized AI/autopilot state. Keep recovery fail-closed when the checkpoint store is unavailable or corrupt; only a Coordinator 404 after listing means ownership changed and may be skipped.
@@ -3377,6 +3410,17 @@ index 98f5931..f7f75fc 100644
 +- Keep authored TEX3/TEX4 tangents unchanged and preserve both real UV sets,
 +  normals, positions and diffuse bytes. Building CPU geometry does not activate
 +  Surface samplers or supply GPU-cache/fence ownership.
++
++## Surface GPU upload ownership
++
++- SurfaceGpuTexture owns one explicit upload. Keep its CPU lease separate and
++  dispose the GPU resource on the owning render thread before context shutdown.
++- Apply the caller's upload budget before allocation and preserve DDS validation
++  and compressed-backend admission. Logical payload bytes exclude driver overhead;
++  a per-upload check is not a global residency budget or a GPU-fence guarantee.
++- Keep UV animation/selection uniforms initialized in sampler tests. Compare
++  real BC5 texture sampling with a CPU reference, not only uniform-fed normals.
++  Material cache integration and GPU retirement still need their own validation.
 diff --git a/docs/shader-lifecycle.md b/docs/shader-lifecycle.md
 new file mode 100644
 index 0000000..d63fe45
@@ -3609,5 +3653,124 @@ index 0000000..b0f375d
 +    "DFM/skinning",
 +    "negative world and animated UV scale",
 +    "platform/performance matrix"
++  ]
++}
+diff --git a/docs/surface-gpu-upload.md b/docs/surface-gpu-upload.md
+new file mode 100644
+index 0000000..e6abfff
+--- /dev/null
++++ b/docs/surface-gpu-upload.md
+@@ -0,0 +1,70 @@
++# Surface-GPU-Upload und BC5-Sampler: 13.10.2026
++
++## API und Besitz
++
++`SurfaceGpuTexture.TryUpload(window, cpuLease, maxGpuBytes)` verlangt den
++Renderthread. Der Aufrufer behält seine CPU-Lease. Die GPU-Ressource wird vom
++Rückgabewert bis zu dessen explizitem Dispose besessen und muss vor dem nativen
++Context-Shutdown freigegeben werden. Dispose ist idempotent; neue Zugriffe nach
++Dispose werden abgewiesen. Dieser Helfer registriert keine Texturen in einer
++globalen Residencyverwaltung und liefert keine Fence-/Async-Upload-Garantie.
++
++EstimateGpuPayloadBytes prüft dieselben DDS-Längen-/Format-/Cubegrenzen wie der
++Surface-Leser. BC-Blöcke und alle deklarierten Mips/Faces werden gezählt; RGB24
++wird auf die BGRA32-Uploadgröße erweitert. Die Mipflags müssen mit dem bestehenden
++DDS-Loader übereinstimmen. Das ist logische Payloadgröße, keine Messung von
++Treiberallokationen oder globalem VRAM. Zu kleines Budget wird vor Allokation
++abgewiesen. Der vorhandene DDS-Kompressionspfad ist durch S3TC-Backendfähigkeit
++gegated; ohne sie wird der Zusatzupload abgelehnt, anstatt eine ungeplante
++Dekompressionsallokation vorzunehmen.
++
++Der generische DDS-Loader normalisiert nun Standard-RGB/RGBA-Kanalmasken in
++BGRA, ohne Alpha zu verändern. Für 24-Bit-Daten wird Alpha weiterhin 255.
++Fehler nach erfolgreicher Texture2D-/TextureCube-Erstellung geben die bereits
++erzeugte Textur frei. Native Fehler in Backend-Konstruktoren/Pins, Geräteverlust
++und vollständige Fehler-Injektion bleiben zusätzliche Prüfaufgaben.
++
++## Tests und echter Sampler
++
++115 relevante Tests bestanden, davon elf Upload-/DDS-Prüfungen für BC-Blöcke,
++Cubegrößen, RGB24-Expansion, Kanalmasken/Alpha, Mipflags, defekte Formate sowie
++Worker-/Budgetabweisung ohne GPU-Allokation und Erhalt der CPU-Lease. Der
++Solution-Build hat null Fehler und 20 Warnungen.
++
++Der SDL3/OpenGL-NAP-Test lädt erzeugte FVF3/FVF4-Vertices und reale BC5-Texturen
++über den Upload-Helfer. Eine bytegleiche Kopie des Basic_FVF-Vertexshaders samt
++NormalMap-Helper erzeugt die TBN-Matrix. Der Testfragmentshader benutzt
++NtTexture.SampleLevel(NtSampler, selectedUV, 0), rekonstruiert BC5 mit Stärke und
++liefert die Weltnormale als BGRA8-Farbe zurück. Shader, Uniformpuffer, Targets,
++Vertices, Indizes und Scope-Uploads werden explizit freigegeben.
++
++Acht konstante 4x4-ATI2-Blöcke prüfen X/Y, außerhalb der Unit Disk liegende XY
++und Stärke null jeweils mit UV0/FVF3 bzw. gespiegeltem UV1/FVF4. Die neunte
++Prüfung nimmt eine echte Normalmap aus dem aktiven NAP über den CPU-Cache. Sie
++bleibt Rgtc2/BC5 und benötigt 1.398.096 logische GPU-Payloadbytes.
++Eine unabhängige CPU-Referenz liest die beiden BC4-Paletten und 3-Bit-Indizes der
++vier Texel um UV=(0.25,0.25), interpoliert bilinear und rekonstruiert die Normale:
++
++- CPU: (0.18795526, -0.15266109, 0.9702409)
++- GPU: (0.18431377, -0.15294117, 0.96862745)
++- Vektordistanz unter 0,025 einschließlich BGRA8-Quantisierung.
++
++Budget=size-1 wird abgewiesen; Budget=size erlaubt denselben Upload. Der erste
++Echttexturtest scheiterte, weil der separate Probehost MaterialAnim=(0,0,0,0)
++stehen ließ. Der produktive BasicMaterial-Pfad setzt diesen Uniform bereits.
++Nach MaterialAnim=(0,0,1,1) wurde der komplette Lauf grün wiederholt. Dies war
++kein grüner Erstlauf und erforderte keine Produktionsshaderänderung.
++
++Die sieben früheren Basis- und acht FVF-Readbacks bleiben erfolgreich. Native
++Options/Escape/Exit und Shader-Shutdown liefern weiter owned=0/total=0. Es gab
++im finalen Lauf keine GLShader-NativeBuffer-Leakwarnung.
++[Maschinenprotokoll](evidence/surface-gpu-upload-20261013.json).
++
++## Weiter erforderlich
++
++Die Rendereranbindung muss Material-/UV-Identität, CPU-Loaderqueue, Mesh- und
++Texturcache, ein globales Residencybudget, Ressourcen bis zum Frameende/Fence
++und Ersatzmaterial bei fehlenden Karten zusammenführen. Das Sampling hier ist
++LOD0; die visuelle Mip-/Atlas-/Retail-Szenenmatrix, DFM/Skinning, reflektierte
++World-Skalierung und Geräte-/Plattformgrenzen sind nicht erledigt. Die neuen
++Grafikoptionen bleiben bis zur tatsächlichen Integration deaktiviert.
+diff --git a/docs/evidence/surface-gpu-upload-20261013.json b/docs/evidence/surface-gpu-upload-20261013.json
+new file mode 100644
+index 0000000..04c70f5
+--- /dev/null
++++ b/docs/evidence/surface-gpu-upload-20261013.json
+@@ -0,0 +1,37 @@
++{
++  "schemaVersion": 1,
++  "scope": "explicit GPU upload and actual BC5 sampling; no active material cache or global residency",
++  "tests": {
++    "passed": 115,
++    "failed": 0
++  },
++  "build": {
++    "errors": 0,
++    "warnings": 20
++  },
++  "samplerReadbacks": [
++    "BC5_GPU_SAMPLER synthetic_x texCoords=3 strength=1 bytes=16 normal=<1, 0.003921628, 0.003921628> expected=<0.9999924, 0.003921598, 0>",
++    "BC5_GPU_SAMPLER synthetic_y texCoords=3 strength=1 bytes=16 normal=<0.003921628, 1, 0.003921628> expected=<0.003921598, 0.9999924, 0>",
++    "BC5_GPU_SAMPLER outside_disk texCoords=3 strength=1 bytes=16 normal=<0.70980394, 0.70980394, 0.003921628> expected=<0.70710677, 0.70710677, 0>",
++    "BC5_GPU_SAMPLER zero_strength texCoords=3 strength=0 bytes=16 normal=<0.003921628, 0.003921628, 1> expected=<0, 0, 1>",
++    "BC5_GPU_SAMPLER synthetic_x texCoords=4 strength=1 bytes=16 normal=<-1, 0.003921628, 0.003921628> expected=<-0.9999924, 0.003921598, 0>",
++    "BC5_GPU_SAMPLER synthetic_y texCoords=4 strength=1 bytes=16 normal=<-0.0039215684, 1, 0.003921628> expected=<-0.003921598, 0.9999924, 0>",
++    "BC5_GPU_SAMPLER outside_disk texCoords=4 strength=1 bytes=16 normal=<-0.70980394, 0.70980394, 0.003921628> expected=<-0.70710677, 0.70710677, 0>",
++    "BC5_GPU_SAMPLER zero_strength texCoords=4 strength=0 bytes=16 normal=<0.003921628, 0.003921628, 1> expected=<-0, 0, 1>",
++    "BC5_GPU_SAMPLER NAP_REAL_NORMALMAP texCoords=3 strength=1 bytes=1398096 normal=<0.18431377, -0.15294117, 0.96862745> expected=<0.18795526, -0.15266109, 0.9702409>"
++  ],
++  "lifetimeAndNavigation": [
++    "SHADER_PROBE_DISPOSED nativeBefore=13309656 nativeAfter=13309656 ownedBefore=378 ownedAfter=378",
++    "SHADER_CONTEXT_SHUTDOWN owned=0 total=0",
++    "INPUT_PROBE RESULT options=True returned=True exit=True timeout=False"
++  ],
++  "initialProbeFailure": "MaterialAnim scale uniform omitted, real texture sampled wrong UV; initialized as in BasicMaterial and complete run repeated",
++  "open": [
++    "active material/mesh GPU cache",
++    "loader queue and global residency budget",
++    "frame/fence retirement",
++    "native constructor/pin failure injection",
++    "device loss and platform matrix",
++    "LOD/mip and retail visual references"
 +  ]
 +}

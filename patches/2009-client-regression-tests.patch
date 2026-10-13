@@ -9833,3 +9833,76 @@ index 0000000..0b7dccf
 +        Assert.False(VMeshTangentBuilder.Supports(new FVFVertex(D3DFVF.XYZ|D3DFVF.TEX1)));
 +    }
 +}
+diff --git a/src/LibreLancer.Tests/SurfaceGpuTextureTests.cs b/src/LibreLancer.Tests/SurfaceGpuTextureTests.cs
+new file mode 100644
+index 0000000..f6aea94
+--- /dev/null
++++ b/src/LibreLancer.Tests/SurfaceGpuTextureTests.cs
+@@ -0,0 +1,67 @@
++using System;
++using System.Buffers.Binary;
++using System.IO;
++using LibreLancer.Graphics;
++using LibreLancer.Resources;
++using Xunit;
++namespace LibreLancer.Tests;
++public class SurfaceGpuTextureTests
++{
++    static void Set(byte[] data,int at,int value)=>BinaryPrimitives.WriteInt32LittleEndian(data.AsSpan(at),value);
++    static ImageResource Dds(int bits=0,bool cube=false)
++    {
++        var data=new byte[128+(bits==0?16:16*bits/8)*(cube?6:1)];"DDS "u8.CopyTo(data);
++        Set(data,4,124);Set(data,12,4);Set(data,16,4);Set(data,28,1);Set(data,76,32);Set(data,112,cube?0xfe00:0);
++        if(bits==0){Set(data,80,4);Set(data,84,0x32495441);}
++        else{Set(data,80,bits==24?0x40:0x41);Set(data,88,bits);Set(data,92,0xff0000);Set(data,96,0xff00);Set(data,100,0xff);Set(data,104,bits==32?unchecked((int)0xff000000):0);}
++        return new(ImageType.DDS,data);
++    }
++    [Theory]
++    [InlineData(0,false,16)] [InlineData(0,true,96)]
++    [InlineData(24,false,64)] [InlineData(24,true,384)]
++    [InlineData(32,false,64)] [InlineData(32,true,384)]
++    public void AccountsCompressedBlocksAndExpandedRgb24(int bits,bool cube,long expected)
++        =>Assert.Equal(expected,SurfaceGpuTexture.EstimateGpuPayloadBytes(Dds(bits,cube)));
++    [Fact]
++    public void RejectsMalformedAndUnsupportedImages()
++    {
++        Assert.Throws<InvalidDataException>(()=>SurfaceGpuTexture.EstimateGpuPayloadBytes(new(ImageType.TGA,new byte[144])));
++        var data=Dds().Data;Set(data,4,0);Assert.Throws<InvalidDataException>(()=>SurfaceGpuTexture.EstimateGpuPayloadBytes(new(ImageType.DDS,data)));
++        Assert.Throws<InvalidDataException>(()=>SurfaceGpuTexture.EstimateGpuPayloadBytes(new(ImageType.DDS,Dds().Data[..^1])));
++        data=Dds().Data;Set(data,84,0x30315844);Assert.Throws<InvalidDataException>(()=>SurfaceGpuTexture.EstimateGpuPayloadBytes(new(ImageType.DDS,data)));
++    }
++    sealed class Window(bool ui) : IGLWindow
++    {
++        public RenderContext RenderContext=>throw new Exception("GPU context must not be touched before admission");
++        public bool IsUiThread()=>ui;
++    }
++    [Fact]
++    public void RejectsWorkerAndBudgetBeforeGpuAllocationAndKeepsCpuLease()
++    {
++        using var cache=new SurfaceImageCache(256,(_,_)=>Dds());using var lease=cache.TryAcquire(new("library","library.txm","normal"))!;
++        Assert.Throws<InvalidOperationException>(()=>SurfaceGpuTexture.TryUpload(new Window(false),lease,16));
++        Assert.Null(SurfaceGpuTexture.TryUpload(new Window(true),lease,15));
++        Assert.Throws<ArgumentOutOfRangeException>(()=>SurfaceGpuTexture.TryUpload(new Window(true),lease,-1));
++        Assert.Equal(144,lease.Image.Data.Length);Assert.Equal(1,cache.Stats.ActiveLeases);
++    }
++    [Theory]
++    [InlineData(24)] [InlineData(32)]
++    public void RgbaSourceMasksDecodeToBgraWithoutChangingAlpha(int bits)
++    {
++        var image=Dds(bits);Set(image.Data,92,0xff);Set(image.Data,100,0xff0000);
++        for(var pixel=128;pixel<image.Data.Length;pixel+=bits/8){image.Data[pixel]=10;image.Data[pixel+1]=20;image.Data[pixel+2]=30;if(bits==32)image.Data[pixel+3]=40;}
++        using var stream=new MemoryStream(image.Data);
++        var decoded=Assert.Single(LibreLancer.ImageLib.DDS.ImageFromStream(stream)!);
++        Assert.Equal(new byte[]{30,20,10,(byte)(bits==32?40:255)},decoded.Data.AsSpan(0,4).ToArray());
++    }
++
++    [Fact]
++    public void RejectsMipFlagsThatDoNotMatchLoaderBehavior()
++    {
++        var zero=Dds().Data;Set(zero,8,0x20000);Set(zero,28,0);
++        Assert.Throws<InvalidDataException>(()=>SurfaceGpuTexture.EstimateGpuPayloadBytes(new(ImageType.DDS,zero)));
++        var multiple=new byte[160];Dds().Data.CopyTo(multiple,0);Set(multiple,28,2);
++        Assert.Throws<InvalidDataException>(()=>SurfaceGpuTexture.EstimateGpuPayloadBytes(new(ImageType.DDS,multiple)));
++    }
++
++}
