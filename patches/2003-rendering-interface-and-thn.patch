@@ -1,5 +1,5 @@
 diff --git a/src/LibreLancer/GameStates/LuaMenu.cs b/src/LibreLancer/GameStates/LuaMenu.cs
-index 6e701292fbae8762e43fb8cd391bd8ce2f2fc0e8..57e6b26aa9370265b0ef611470d4bd142f2b4ea3 100644
+index 6e701292fbae8762e43fb8cd391bd8ce2f2fc0e8..44aa1d18919f7c16a67f0f2d94a9a410eee68624 100644
 --- a/src/LibreLancer/GameStates/LuaMenu.cs
 +++ b/src/LibreLancer/GameStates/LuaMenu.cs
 @@ -6,9 +6,15 @@ using System;
@@ -39,15 +39,17 @@ index 6e701292fbae8762e43fb8cd391bd8ce2f2fc0e8..57e6b26aa9370265b0ef611470d4bd14
          }
  
          private void TryRunScript(List<ResolvedThn> thnScripts)
-@@ -227,35 +240,92 @@ namespace LibreLancer
+@@ -227,35 +240,94 @@ namespace LibreLancer
  
              public void ApplySettings(GameSettings settings)
              {
-+                var disableSurfaceNormals = state.Game.Config.Settings.SurfaceNormalMapsEnabled && !settings.SurfaceNormalMapsEnabled;
++                var disableSurfaceNormalMaps = state.Game.Config.Settings.SurfaceNormalMapsEnabled && !settings.SurfaceNormalMapsEnabled;
++                var disableGeneratedTangents = state.Game.Config.Settings.SurfaceGeneratedTangentsEnabled && !settings.SurfaceGeneratedTangentsEnabled;
                  state.Game.Config.Settings.Apply(settings);
 +                state.Game.ResourceManager.SurfaceNormalMapsEnabled = settings.SurfaceNormalMapsEnabled;
 +                state.Game.ResourceManager.SurfaceGeneratedTangentsEnabled = settings.SurfaceGeneratedTangentsEnabled;
-+                if (disableSurfaceNormals) state.Game.ResourceManager.SurfaceGpuTextures?.ClearUnused();
++                if (disableSurfaceNormalMaps || disableGeneratedTangents) state.Game.ResourceManager.ClearGeneratedTangentResources();
++                if (disableSurfaceNormalMaps) state.Game.ResourceManager.SurfaceGpuTextures?.ClearUnused();
                  state.Game.Config.Save();
              }
  
@@ -136,7 +138,7 @@ index 6e701292fbae8762e43fb8cd391bd8ce2f2fc0e8..57e6b26aa9370265b0ef611470d4bd14
                      state.Game.ChangeState(new NetWaitState(session, state.Game));
                  });
              }
-@@ -327,9 +397,17 @@ namespace LibreLancer
+@@ -327,9 +399,17 @@ namespace LibreLancer
              }
  
              private GameNetClient? netClient;
@@ -155,7 +157,7 @@ index 6e701292fbae8762e43fb8cd391bd8ce2f2fc0e8..57e6b26aa9370265b0ef611470d4bd14
  
              public CharacterSelectInfo CharacterList() => cselInfo;
              public ServerList ServerList() => serverList;
-@@ -337,6 +415,9 @@ namespace LibreLancer
+@@ -337,6 +417,9 @@ namespace LibreLancer
              public void StartNetworking()
              {
                  StopNetworking();
@@ -165,7 +167,7 @@ index 6e701292fbae8762e43fb8cd391bd8ce2f2fc0e8..57e6b26aa9370265b0ef611470d4bd14
                  netClient = new GameNetClient(state.Game);
                  netSession = new CGameSession(state.Game, netClient);
                  netClient.UUID = state.Game.Config.UUID;
-@@ -344,7 +425,8 @@ namespace LibreLancer
+@@ -344,7 +427,8 @@ namespace LibreLancer
                  netClient.Disconnected += NetClientOnDisconnected;
                  netClient.AuthenticationRequired += NetClientOnAuthenticationRequired;
                  netClient.Start();
@@ -175,7 +177,7 @@ index 6e701292fbae8762e43fb8cd391bd8ce2f2fc0e8..57e6b26aa9370265b0ef611470d4bd14
              }
  
              private void NetClientOnAuthenticationRequired(bool retry)
-@@ -355,16 +437,161 @@ namespace LibreLancer
+@@ -355,16 +439,161 @@ namespace LibreLancer
  
              public void Login(string username, string password)
              {
@@ -338,7 +340,7 @@ index 6e701292fbae8762e43fb8cd391bd8ce2f2fc0e8..57e6b26aa9370265b0ef611470d4bd14
                  netSession.RpcServer.SelectCharacter(cselInfo.Selected).ContinueWith(x => state.Game.QueueUIThread(() =>
                  {
                      if (x.Result)
-@@ -384,10 +611,74 @@ namespace LibreLancer
+@@ -384,10 +613,74 @@ namespace LibreLancer
  
              }
  
@@ -413,7 +415,7 @@ index 6e701292fbae8762e43fb8cd391bd8ce2f2fc0e8..57e6b26aa9370265b0ef611470d4bd14
                  delIndex = cselInfo.Selected;
                  netSession.RpcServer.DeleteCharacter(cselInfo.Selected).ContinueWith((t) =>
                  {
-@@ -411,19 +702,37 @@ namespace LibreLancer
+@@ -411,19 +704,37 @@ namespace LibreLancer
  
              public void RefreshServers()
              {
@@ -452,7 +454,7 @@ index 6e701292fbae8762e43fb8cd391bd8ce2f2fc0e8..57e6b26aa9370265b0ef611470d4bd14
  
              public void NewCharacter(string name, int index, Closure onError)
              {
-@@ -436,6 +745,9 @@ namespace LibreLancer
+@@ -436,6 +747,9 @@ namespace LibreLancer
  
              public void StopNetworking()
              {
@@ -3606,7 +3608,7 @@ index 72a7ecec30826c2be1b371e846258f57d788af6a..ef3569b89eada7c51a09f1cf71a89bc6
                  <Checkbox id="ppl" X="18" Y="92" Width="200" Text="PER-PIXEL LIGHTING"/>
              </Panel>
 diff --git a/src/LibreLancer/Resources/ResourceManager.cs b/src/LibreLancer/Resources/ResourceManager.cs
-index abf0a1f1902ecbe3d5d5b679c1882132d07d27aa..e331347d808d09a59e77cab634bc2bfa1f868f7b 100644
+index abf0a1f1902ecbe3d5d5b679c1882132d07d27aa..86e9afb9594092548a40b857d87feeffb4168bca 100644
 --- a/src/LibreLancer/Resources/ResourceManager.cs
 +++ b/src/LibreLancer/Resources/ResourceManager.cs
 @@ -3,10 +3,12 @@
@@ -3622,7 +3624,7 @@ index abf0a1f1902ecbe3d5d5b679c1882132d07d27aa..e331347d808d09a59e77cab634bc2bfa
  using LibreLancer.Fx;
  using LibreLancer.Graphics;
  using LibreLancer.Graphics.Primitives;
-@@ -21,6 +23,33 @@ namespace LibreLancer.Resources;
+@@ -21,6 +23,36 @@ namespace LibreLancer.Resources;
  // TODO: Allow for disposing and all that Jazz
  public abstract class ResourceManager
  {
@@ -3636,6 +3638,9 @@ index abf0a1f1902ecbe3d5d5b679c1882132d07d27aa..e331347d808d09a59e77cab634bc2bfa
 +
 +    /// <summary>Releases runtime tangent geometry allocated through TryAllocateGeneratedTangentVertices.</summary>
 +    public virtual void ReleaseGeneratedTangentVertices(VertexResource resource) => resource.Dispose();
++
++    /// <summary>Releases resident generated tangent meshes after their renderer feature is disabled.</summary>
++    public virtual void ClearGeneratedTangentResources() { }
 +
 +    public SurfaceImageCache SurfaceImages { get; }
 +    public SurfaceGpuTextureCache? SurfaceGpuTextures { get; protected set; }
@@ -3656,7 +3661,7 @@ index abf0a1f1902ecbe3d5d5b679c1882132d07d27aa..e331347d808d09a59e77cab634bc2bfa
      private Dictionary<string, RuntimeSurFile> surs = new(StringComparer.OrdinalIgnoreCase);
  
      public abstract VertexResource AllocateVertices(FVFVertex format, byte[] vertices, ushort[] indices);
-@@ -54,6 +83,7 @@ public abstract class ResourceManager
+@@ -54,6 +86,7 @@ public abstract class ResourceManager
      protected ResourceManager(FileSystem vfs)
      {
          VFS = vfs;
@@ -3665,7 +3670,7 @@ index abf0a1f1902ecbe3d5d5b679c1882132d07d27aa..e331347d808d09a59e77cab634bc2bfa
  
      protected RuntimeSurFile GetSur(string filename)
 diff --git a/src/LibreLancer/Resources/GameResourceManager.cs b/src/LibreLancer/Resources/GameResourceManager.cs
-index a657c820a0ee8aab89cd2059353ed80457fbf3a3..ac760a6fa793ca601289db85a0cec6258ec4477d 100644
+index a657c820a0ee8aab89cd2059353ed80457fbf3a3..535a62b6003119eeb9d5790fddd70da4e3e24259 100644
 --- a/src/LibreLancer/Resources/GameResourceManager.cs
 +++ b/src/LibreLancer/Resources/GameResourceManager.cs
 @@ -45,6 +45,10 @@ public class GameResourceManager : ResourceManager, IDisposable
@@ -3679,7 +3684,7 @@ index a657c820a0ee8aab89cd2059353ed80457fbf3a3..ac760a6fa793ca601289db85a0cec625
      public override VertexResource AllocateVertices(FVFVertex format, byte[] vertices, ushort[] indices)
      {
          if (!GLWindow.IsUiThread()) throw new InvalidOperationException();
-@@ -52,6 +56,27 @@ public class GameResourceManager : ResourceManager, IDisposable
+@@ -52,6 +56,35 @@ public class GameResourceManager : ResourceManager, IDisposable
          return vertexResourceAllocator.Allocate(format, vertices, indices);
      }
  
@@ -3704,10 +3709,18 @@ index a657c820a0ee8aab89cd2059353ed80457fbf3a3..ac760a6fa793ca601289db85a0cec625
 +        resource.Dispose();
 +    }
 +
++    public override void ClearGeneratedTangentResources()
++    {
++        if (isDisposed) return;
++        if (!GLWindow.IsUiThread()) throw new InvalidOperationException();
++        foreach (var mesh in meshes.Values)
++            mesh?.ClearGeneratedTangentResources();
++    }
++
      public override QuadSphere GetQuadSphere(int slices)
      {
          if (quadSpheres.TryGetValue(slices, out var sph))
-@@ -86,6 +111,7 @@ public class GameResourceManager : ResourceManager, IDisposable
+@@ -86,6 +119,7 @@ public class GameResourceManager : ResourceManager, IDisposable
      public GameResourceManager(IGLWindow g, FileSystem vfs) : base(vfs)
      {
          GLWindow = g;
@@ -3715,7 +3728,7 @@ index a657c820a0ee8aab89cd2059353ed80457fbf3a3..ac760a6fa793ca601289db85a0cec625
          vertexResourceAllocator = new VertexResourceAllocator(g.RenderContext);
          DefaultMaterial = new Material(this)
          {
-@@ -107,6 +133,9 @@ public class GameResourceManager : ResourceManager, IDisposable
+@@ -107,6 +141,9 @@ public class GameResourceManager : ResourceManager, IDisposable
  
      public GameResourceManager(GameResourceManager src) : this(src.GLWindow, src.VFS)
      {
@@ -3725,7 +3738,7 @@ index a657c820a0ee8aab89cd2059353ed80457fbf3a3..ac760a6fa793ca601289db85a0cec625
          texturefiles = new Dictionary<string, string>(src.texturefiles, StringComparer.OrdinalIgnoreCase);
          shapes = new Dictionary<string, TextureShape?>(src.shapes, StringComparer.OrdinalIgnoreCase);
          materialfiles = new Dictionary<uint, string>(src.materialfiles);
-@@ -178,6 +207,8 @@ public class GameResourceManager : ResourceManager, IDisposable
+@@ -178,6 +215,8 @@ public class GameResourceManager : ResourceManager, IDisposable
  
      public void ClearTextures()
      {
@@ -3734,7 +3747,7 @@ index a657c820a0ee8aab89cd2059353ed80457fbf3a3..ac760a6fa793ca601289db85a0cec625
          loadedResFiles = [];
          var keys = new string[textures.Count];
          textures.Keys.CopyTo(keys, 0);
-@@ -646,7 +677,11 @@ public class GameResourceManager : ResourceManager, IDisposable
+@@ -646,7 +685,11 @@ public class GameResourceManager : ResourceManager, IDisposable
      public void Dispose()
      {
          if (isDisposed) return;
@@ -3746,7 +3759,7 @@ index a657c820a0ee8aab89cd2059353ed80457fbf3a3..ac760a6fa793ca601289db85a0cec625
  
          // Textures
          foreach (var v in textures.Values)
-@@ -659,6 +694,8 @@ public class GameResourceManager : ResourceManager, IDisposable
+@@ -659,6 +702,8 @@ public class GameResourceManager : ResourceManager, IDisposable
          WhiteTexture.Dispose();
          GreyTexture.Dispose();
          // Vertex buffers
@@ -5540,7 +5553,7 @@ index afabccd19f7cd4b6b014d6fd18745b22ea906e3c..7b34a103f58fbb7a5c08823a5849d273
  
          public virtual bool DisableCull
 diff --git a/src/LibreLancer/Render/VMeshResource.cs b/src/LibreLancer/Render/VMeshResource.cs
-index 6201013819f25bd9aae127eb97195c02546f7073..bc354a927f42da09b7f11c9b0415e31e875536e4 100644
+index 6201013819f25bd9aae127eb97195c02546f7073..0ba604869fd4077f61d68a511eafe06ec8b31c1d 100644
 --- a/src/LibreLancer/Render/VMeshResource.cs
 +++ b/src/LibreLancer/Render/VMeshResource.cs
 @@ -1,7 +1,9 @@
@@ -5553,7 +5566,7 @@ index 6201013819f25bd9aae127eb97195c02546f7073..bc354a927f42da09b7f11c9b0415e31e
  using LibreLancer.Resources;
  using LibreLancer.Utf.Vms;
  
-@@ -52,16 +54,77 @@ public class VMeshResource
+@@ -52,16 +54,93 @@ public class VMeshResource
      public VertexResource? VertexResource;
      public TMeshHeader[] Meshes = null!;
      public ushort[]? Indices;
@@ -5621,6 +5634,22 @@ index 6201013819f25bd9aae127eb97195c02546f7073..bc354a927f42da09b7f11c9b0415e31e
 +        }
 +        return false;
 +    }
++
++    public void ClearGeneratedTangentResources()
++    {
++        lock (tangentSync)
++        {
++            foreach (var entry in tangentEntries.Values)
++            {
++                if (entry.Resource == null) continue;
++                if (entry.Owner != null) entry.Owner.ReleaseGeneratedTangentVertices(entry.Resource);
++                else entry.Resource.Dispose();
++                entry.Resource = null;
++                entry.Owner = null;
++                entry.NextUploadAttemptMs = 0;
++            }
++        }
++    }
  
      public (VMeshOptimizeInfo, MeshDrawcall[]?) Optimize(ushort startMesh, ushort endMesh, ushort startVertex,
          ResourceManager resources)
@@ -5632,22 +5661,13 @@ index 6201013819f25bd9aae127eb97195c02546f7073..bc354a927f42da09b7f11c9b0415e31e
  
          if (optimized != null && optimized.TryGetValue(vmo, out var v))
          {
-@@ -200,5 +263,17 @@ public class VMeshResource
+@@ -200,5 +279,8 @@ public class VMeshResource
          }
  
          optimized = null;
++        ClearGeneratedTangentResources();
 +        lock (tangentSync)
-+        {
-+            foreach (var entry in tangentEntries.Values)
-+            {
-+                if (entry.Resource != null)
-+                {
-+                    if (entry.Owner != null) entry.Owner.ReleaseGeneratedTangentVertices(entry.Resource);
-+                    else entry.Resource.Dispose();
-+                }
-+            }
 +            tangentEntries.Clear();
-+        }
      }
  }
 diff --git a/src/LibreLancer/RigidModel.cs b/src/LibreLancer/RigidModel.cs
