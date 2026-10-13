@@ -9178,3 +9178,122 @@ index 0000000..f3f2527
 +        Assert.Equal(SurfaceMapProfile.Standard, roundTrip!.SurfaceProfile);
 +    }
 +}
+diff --git a/src/LibreLancer.Tests/SurfaceMaterialResolverTests.cs b/src/LibreLancer.Tests/SurfaceMaterialResolverTests.cs
+new file mode 100644
+index 0000000..712c28b
+--- /dev/null
++++ b/src/LibreLancer.Tests/SurfaceMaterialResolverTests.cs
+@@ -0,0 +1,113 @@
++using System;
++using System.IO;
++using System.Text;
++using LibreLancer.Data.Ini;
++using LibreLancer.Data.IO;
++using LibreLancer.Data.Schema;
++using LibreLancer.Render.Materials;
++using LibreLancer.Resources;
++using LibreLancer.Utf.Mat;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class SurfaceMaterialResolverTests
++{
++    private static ServerResourceManager Resources(string extra = "")
++    {
++        var res = new ServerResourceManager(null, new FileSystem());
++        using var stream = new MemoryStream(Encoding.UTF8.GetBytes("""
++            [Texture]
++            name = ships
++            file = fx/ships.txm
++            [NormalMap]
++            texture = hull
++            library = ships
++            map = nm_hull
++            strength = 2.5
++            roughness_map = rt_hull
++            roughness = 0.8
++            metallic_map = mt_hull
++            metallic = 0.6
++            """ + "\n" + extra));
++        res.SurfaceMaps.AddSections(IniFile.ParseFile("surface.ini", stream), "DATA/");
++        return res;
++    }
++
++    [Fact]
++    public void MaterialInitializationAttachesBindingWithoutReplacingMatSamplers()
++    {
++        var res = Resources();
++        var material = new Material(res) { DtName = "HULL" };
++        material.Initialize(res);
++        var binding = Assert.IsType<SurfaceMaterialBinding>(material.SurfaceBinding);
++        Assert.Equal("DATA/fx/ships.txm", binding.Normal!.File);
++        Assert.Equal("nm_hull", binding.Normal.Node);
++        Assert.Equal(2.5f, binding.NormalStrength);
++        Assert.Equal("rt_hull", binding.RoughnessMap!.Node);
++        Assert.Equal("mt_hull", binding.MetallicMap!.Node);
++        var render = Assert.IsType<BasicMaterial>(material.Render);
++        Assert.Same(binding, render.SurfaceBinding);
++        Assert.Null(render.NmSampler);
++        Assert.Null(render.RtSampler);
++        Assert.Null(render.MtSampler);
++    }
++
++    [Fact]
++    public void ExistingMatMapsOwnTheirNamesAndFactors()
++    {
++        var res = Resources();
++        var material = new Material(res) { DtName = "hull", NmName = "mat_nm", RtName = "mat_rt", MtName = "mat_mt" };
++        Assert.Null(SurfaceMaterialResolver.Resolve(material, res.SurfaceMaps));
++        material.Initialize(res);
++        var render = Assert.IsType<BasicMaterial>(material.Render);
++        Assert.Equal("mat_nm", render.NmSampler);
++        Assert.Equal("mat_rt", render.RtSampler);
++        Assert.Equal("mat_mt", render.MtSampler);
++        Assert.Null(material.SurfaceBinding);
++    }
++
++    [Fact]
++    public void PartialMatOnlyReceivesMissingOverrides()
++    {
++        var res = Resources();
++        var material = new Material(res) { DtName = "hull", NmName = "mat_nm", RFactor = 0.2f };
++        var binding = SurfaceMaterialResolver.Resolve(material, res.SurfaceMaps)!;
++        Assert.Null(binding.Normal);
++        Assert.Equal(1, binding.NormalStrength);
++        Assert.NotNull(binding.RoughnessMap);
++        Assert.Null(binding.Roughness);
++        Assert.Equal(0.6f, binding.Metallic);
++        Assert.Equal(0.2f, material.RFactor);
++    }
++
++    [Theory]
++    [InlineData("GlassMaterial")]
++    [InlineData("HighGlassMaterial")]
++    [InlineData("HUDIconMaterial")]
++    [InlineData("HUDAnimMaterial")]
++    public void GlassAndHudDoNotReceiveSurfaceOverrides(string type)
++    {
++        var res = Resources();
++        var material = new Material(res) { DtName = "hull", Type = type };
++        material.Initialize(res);
++        Assert.Null(material.SurfaceBinding);
++    }
++
++    [Fact]
++    public void UnknownDiffuseOrLibraryIsNoBinding()
++    {
++        var res = Resources();
++        Assert.Null(SurfaceMaterialResolver.Resolve(new Material(res) { DtName = "unknown" }, res.SurfaceMaps));
++        using var stream = new MemoryStream(Encoding.UTF8.GetBytes("[NormalMap]\ntexture = absent\nlibrary = missing\nmap = nm\n"));
++        res.SurfaceMaps.AddSections(IniFile.ParseFile("surface.ini", stream));
++        Assert.Null(SurfaceMaterialResolver.Resolve(new Material(res) { DtName = "absent" }, res.SurfaceMaps));
++    }
++
++    [Fact]
++    public void ZeroStrengthDoesNotBindNormalAndAbsentPbrFactorsStayAbsent()
++    {
++        var res = Resources("[NormalMap]\ntexture = hull\nlibrary = ships\nmap = disabled\nstrength = 0\n");
++        Assert.Null(SurfaceMaterialResolver.Resolve(new Material(res) { DtName = "hull" }, res.SurfaceMaps));
++    }
++}

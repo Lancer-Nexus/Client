@@ -1996,10 +1996,10 @@ index f981cc2..93c64a7 100644
      // FLAleCrc constants
      AirField_Approach = 0x10423CEB,
 diff --git a/src/LibreLancer/Utf/Mat/Material.cs b/src/LibreLancer/Utf/Mat/Material.cs
-index 7dbc933..a1e15e6 100644
+index 7dbc933..3511fd9 100644
 --- a/src/LibreLancer/Utf/Mat/Material.cs
 +++ b/src/LibreLancer/Utf/Mat/Material.cs
-@@ -1,549 +1,550 @@
+@@ -1,549 +1,554 @@
 -﻿// MIT License - Copyright (c) Malte Rupprecht
 -// This file is subject to the terms and conditions defined in
 -// LICENSE, which is part of this source code package
@@ -2566,6 +2566,7 @@ index 7dbc933..a1e15e6 100644
 +{
 +    public class Material
 +    {
++        public SurfaceMaterialBinding? SurfaceBinding { get; private set; }
 +        public bool Loaded = true;
 +
 +        private string type;
@@ -2939,11 +2940,14 @@ index 7dbc933..a1e15e6 100644
 +                           type == "GlassMaterial";
 +            bool isHudMaterial = type == "HUDIconMaterial" ||
 +                                 type == "HUDAnimMaterial";
++            SurfaceBinding = isBasic && !isGlass && !isHudMaterial
++                ? SurfaceMaterialResolver.Resolve(this, res.SurfaceMaps) : null;
 +            if (isBasic || isGlass || isHudMaterial)
 +            {
 +                var bm = new BasicMaterial(type, res);
 +                _rmat = bm;
 +                // set up material
++                bm.SurfaceBinding = SurfaceBinding;
 +                bm.Dc = Dc;
 +                bm.OcEnabled = Oc.HasValue;
 +                if (Oc.HasValue)
@@ -3459,3 +3463,101 @@ index 72a7ece..ebc4d69 100644
                  <!-- Toggles -->
                  <Checkbox id="ppl" X="18" Y="92" Width="200" Text="PER-PIXEL LIGHTING"/>
              </Panel>
+diff --git a/src/LibreLancer/Resources/ResourceManager.cs b/src/LibreLancer/Resources/ResourceManager.cs
+index abf0a1f..daf4f9a 100644
+--- a/src/LibreLancer/Resources/ResourceManager.cs
++++ b/src/LibreLancer/Resources/ResourceManager.cs
+@@ -7,6 +7,7 @@ using System.Collections.Generic;
+ using System.Diagnostics.CodeAnalysis;
+ using LibreLancer.Data;
+ using LibreLancer.Data.IO;
++using LibreLancer.Data.Schema;
+ using LibreLancer.Fx;
+ using LibreLancer.Graphics;
+ using LibreLancer.Graphics.Primitives;
+@@ -21,6 +22,8 @@ namespace LibreLancer.Resources;
+ // TODO: Allow for disposing and all that Jazz
+ public abstract class ResourceManager
+ {
++    public SurfaceMapsIni SurfaceMaps { get; set; } = new();
++
+     private Dictionary<string, RuntimeSurFile> surs = new(StringComparer.OrdinalIgnoreCase);
+ 
+     public abstract VertexResource AllocateVertices(FVFVertex format, byte[] vertices, ushort[] indices);
+diff --git a/src/LibreLancer/Resources/GameResourceManager.cs b/src/LibreLancer/Resources/GameResourceManager.cs
+index a657c82..4f20e75 100644
+--- a/src/LibreLancer/Resources/GameResourceManager.cs
++++ b/src/LibreLancer/Resources/GameResourceManager.cs
+@@ -107,6 +107,7 @@ public class GameResourceManager : ResourceManager, IDisposable
+ 
+     public GameResourceManager(GameResourceManager src) : this(src.GLWindow, src.VFS)
+     {
++        SurfaceMaps = src.SurfaceMaps;
+         texturefiles = new Dictionary<string, string>(src.texturefiles, StringComparer.OrdinalIgnoreCase);
+         shapes = new Dictionary<string, TextureShape?>(src.shapes, StringComparer.OrdinalIgnoreCase);
+         materialfiles = new Dictionary<uint, string>(src.materialfiles);
+diff --git a/src/LibreLancer/Render/Materials/BasicMaterial.cs b/src/LibreLancer/Render/Materials/BasicMaterial.cs
+index fc3399a..9173c7d 100644
+--- a/src/LibreLancer/Render/Materials/BasicMaterial.cs
++++ b/src/LibreLancer/Render/Materials/BasicMaterial.cs
+@@ -27,6 +27,8 @@ namespace LibreLancer.Render.Materials
+             return (int) x.Pixel;
+         }
+ 
++        // Supplemental metadata only; GPU activation requires a tangent-capable mesh and residency.
++        public SurfaceMaterialBinding? SurfaceBinding;
+         public string Type;
+ 
+         public Color4 Dc = Color4.White;
+diff --git a/src/LibreLancer/GameDataManager.cs b/src/LibreLancer/GameDataManager.cs
+index a2a3c2e..2691264 100644
+--- a/src/LibreLancer/GameDataManager.cs
++++ b/src/LibreLancer/GameDataManager.cs
+@@ -35,6 +35,7 @@ public class GameDataManager
+     {
+         Items.LoadData(() =>
+         {
++            Resources.SurfaceMaps = Items.Ini.SurfaceMaps;
+             if (glResource != null && ui != null)
+             {
+                 glResource.AddPreload(
+diff --git a/src/LibreLancer/Resources/SurfaceMaterialResolver.cs b/src/LibreLancer/Resources/SurfaceMaterialResolver.cs
+new file mode 100644
+index 0000000..324f351
+--- /dev/null
++++ b/src/LibreLancer/Resources/SurfaceMaterialResolver.cs
+@@ -0,0 +1,34 @@
++using System;
++using LibreLancer.Data.Schema;
++using LibreLancer.Utf.Mat;
++
++namespace LibreLancer.Resources;
++
++public sealed record SurfaceTextureReference(string Library, string File, string Node);
++public sealed record SurfaceMaterialBinding(SurfaceTextureReference? Normal, float NormalStrength,
++    SurfaceTextureReference? RoughnessMap, float? Roughness,
++    SurfaceTextureReference? MetallicMap, float? Metallic);
++
++/// <summary>Resolves supplemental metadata without loading textures or changing MAT-owned values.</summary>
++public static class SurfaceMaterialResolver
++{
++    public static SurfaceMaterialBinding? Resolve(Material material, SurfaceMapsIni maps)
++    {
++        if (string.IsNullOrEmpty(material.DtName) || !maps.TryResolveNormalMap(material.DtName, out var binding))
++            return null;
++        var map = binding!.Map;
++        SurfaceTextureReference Reference(string name) => new(binding.Library.Name, binding.Library.File, name);
++        var normal = string.IsNullOrWhiteSpace(material.NmName) && map.Strength > 0 ? Reference(map.Map) : null;
++        var roughMap = string.IsNullOrWhiteSpace(material.RtName) && !string.IsNullOrWhiteSpace(map.RoughnessMap)
++            ? Reference(map.RoughnessMap) : null;
++        var metalMap = string.IsNullOrWhiteSpace(material.MtName) && !string.IsNullOrWhiteSpace(map.MetallicMap)
++            ? Reference(map.MetallicMap) : null;
++        // A MAT texture owns its scale too, even if its explicit factor is absent.
++        var roughness = material.RFactor == null && string.IsNullOrWhiteSpace(material.RtName) ? map.Roughness : null;
++        var metallic = material.MFactor == null && string.IsNullOrWhiteSpace(material.MtName) ? map.Metallic : null;
++        if (normal == null && roughMap == null && metalMap == null && roughness == null && metallic == null)
++            return null;
++        return new SurfaceMaterialBinding(normal, normal != null ? map.Strength : 1,
++            roughMap, roughness, metalMap, metallic);
++    }
++}
