@@ -4959,7 +4959,7 @@ index 0000000..9debdf1
 +    }
 +}
 diff --git a/src/LibreLancer/Utf/Vms/VMeshData.cs b/src/LibreLancer/Utf/Vms/VMeshData.cs
-index 77df528..d0aad67 100644
+index 77df528c388989ffe9163d2237bf57ddf073e9af..51b6282f8add016d1b896cd28e2c856bd319dc6e 100644
 --- a/src/LibreLancer/Utf/Vms/VMeshData.cs
 +++ b/src/LibreLancer/Utf/Vms/VMeshData.cs
 @@ -58,7 +58,7 @@ namespace LibreLancer.Utf.Vms
@@ -4971,6 +4971,14 @@ index 77df528..d0aad67 100644
  
              int offset = (coordinate * 8) + 12;
              if (VertexFormat.Normal) offset += 12;
+@@ -117,6 +117,7 @@ namespace LibreLancer.Utf.Vms
+             Resource = new VMeshResource()
+             {
+                 VertexResource = res,
++                SourceData = this,
+                 Meshes = Meshes,
+                 Indices = Indices,
+             };
 diff --git a/src/LibreLancer/Resources/SurfaceGpuTexture.cs b/src/LibreLancer/Resources/SurfaceGpuTexture.cs
 new file mode 100644
 index 0000000..d5c1ae0
@@ -5462,3 +5470,173 @@ index afabccd19f7cd4b6b014d6fd18745b22ea906e3c..7b34a103f58fbb7a5c08823a5849d273
          public abstract bool IsTransparent { get; }
  
          public virtual bool DisableCull
+diff --git a/src/LibreLancer/Render/VMeshResource.cs b/src/LibreLancer/Render/VMeshResource.cs
+index 6201013819f25bd9aae127eb97195c02546f7073..c0cb6e10cf28ae612c19f5aaf8c6c4e1cf5d2c61 100644
+--- a/src/LibreLancer/Render/VMeshResource.cs
++++ b/src/LibreLancer/Render/VMeshResource.cs
+@@ -1,7 +1,9 @@
+ using System;
+ using System.Collections.Generic;
+ using System.Linq;
++using System.Threading.Tasks;
+ using LibreLancer.Render;
++using LibreLancer.Render.Materials;
+ using LibreLancer.Resources;
+ using LibreLancer.Utf.Vms;
+ 
+@@ -52,16 +54,68 @@ public class VMeshResource
+     public VertexResource? VertexResource;
+     public TMeshHeader[] Meshes = null!;
+     public ushort[]? Indices;
++    public VMeshData? SourceData;
+ 
+     public bool IsDisposed => VertexResource?.IsDisposed ?? true;
+ 
+     private Dictionary<VMeshOptimizeInfo, (IndexResource, MeshDrawcall[])?>? optimized;
++    private readonly object tangentSync = new();
++    private readonly Dictionary<(int MeshIndex, int BaseVertex, int UvChannel), TangentEntry> tangentEntries = new();
++
++    private sealed class TangentEntry(Task<TangentMeshGeometry> buildTask)
++    {
++        public Task<TangentMeshGeometry> BuildTask = buildTask;
++        public VertexResource? Resource;
++        public bool Failed;
++    }
++
++    public VertexResource? TryGetTangentResource(int meshIndex, int baseVertex, int uvChannel, ResourceManager resources)
++    {
++        var source = SourceData;
++        if (source == null || !VMeshTangentBuilder.Supports(source.VertexFormat)) return null;
++        var key = (meshIndex, baseVertex, uvChannel);
++        lock (tangentSync)
++        {
++            if (!tangentEntries.TryGetValue(key, out var entry))
++            {
++                tangentEntries.Add(key, new TangentEntry(Task.Run(() => VMeshTangentBuilder.Build(source, meshIndex, baseVertex, uvChannel))));
++                return null;
++            }
++            if (entry.Failed) return null;
++            if (entry.Resource is { IsDisposed: false }) return entry.Resource;
++            if (!entry.BuildTask.IsCompleted) return null;
++            try
++            {
++                var geometry = entry.BuildTask.GetAwaiter().GetResult();
++                entry.Resource = resources.AllocateVertices(geometry.VertexFormat, geometry.VertexBuffer, geometry.Indices);
++                return entry.Resource;
++            }
++            catch (Exception ex)
++            {
++                entry.Failed = true;
++                FLLog.Warning("VMesh", $"Unable to prepare tangent mesh {meshIndex}: {ex.GetBaseException().Message}");
++                return null;
++            }
++        }
++    }
++
++    private bool HasGeneratedTangentMaterial(ushort startMesh, ushort endMesh, ResourceManager resources)
++    {
++        if (SourceData == null || !VMeshTangentBuilder.Supports(SourceData.VertexFormat)) return false;
++        for (var i = startMesh; i < endMesh; i++)
++        {
++            var material = resources.FindMaterial(Meshes[i].MaterialCrc);
++            if (material?.Render is BasicMaterial { SurfaceBinding.Normal: not null, NmSampler: null or "" }) return true;
++        }
++        return false;
++    }
+ 
+     public (VMeshOptimizeInfo, MeshDrawcall[]?) Optimize(ushort startMesh, ushort endMesh, ushort startVertex,
+         ResourceManager resources)
+     {
+         var vmo = new VMeshOptimizeInfo(true, startMesh, endMesh, startVertex);
+-        if (endMesh - startMesh <= 3) return (new VMeshOptimizeInfo(), null);
++        if (endMesh - startMesh <= 3 || HasGeneratedTangentMaterial(startMesh, endMesh, resources))
++            return (new VMeshOptimizeInfo(), null);
+ 
+         if (optimized != null && optimized.TryGetValue(vmo, out var v))
+         {
+@@ -200,5 +254,10 @@ public class VMeshResource
+         }
+ 
+         optimized = null;
++        lock (tangentSync)
++        {
++            foreach (var entry in tangentEntries.Values) entry.Resource?.Dispose();
++            tangentEntries.Clear();
++        }
+     }
+ }
+diff --git a/src/LibreLancer/RigidModel.cs b/src/LibreLancer/RigidModel.cs
+index cd45db93b121187beecfb0ea1726938ef6eae22f..5e77e8d30c68cd1b70198b023be6e51ab9d329a3 100644
+--- a/src/LibreLancer/RigidModel.cs
++++ b/src/LibreLancer/RigidModel.cs
+@@ -9,11 +9,13 @@ using System.Runtime.InteropServices;
+ using System.Numerics;
+ using LibreLancer.Graphics;
+ using LibreLancer.Render;
++using LibreLancer.Render.Materials;
+ using LibreLancer.Resources;
+ using LibreLancer.Utf;
+ using LibreLancer.Utf.Anm;
+ using LibreLancer.Utf.Mat;
+ using LibreLancer.Utf.Cmp;
++using LibreLancer.Utf.Vms;
+ using LibreLancer.World;
+ 
+ namespace LibreLancer
+@@ -24,6 +26,7 @@ namespace LibreLancer
+         public int PrimitiveCount;
+         public int BaseVertex;
+         public uint MaterialCrc;
++        public int MeshIndex;
+ 
+         private Material? cached;
+         private MaterialAnim? cachedAnim;
+@@ -151,15 +154,33 @@ namespace LibreLancer
+                     z = RenderHelpers.GetZ(world, buffer.Camera!.Position, Center);
+                 }
+ 
++                var drawVertexResource = l.Resource.VertexResource!;
++                var drawBaseVertex = drawVertexResource.BaseVertex + dc.BaseVertex;
++                var drawStartIndex = drawVertexResource.StartIndex + dc.StartIndex;
++                if (res.SurfaceNormalMapsEnabled &&
++                    mat.Render is BasicMaterial { SurfaceBinding.Normal: not null, NmSampler: null or "" } &&
++                    l.Resource.SourceData is { } sourceData && VMeshTangentBuilder.Supports(sourceData.VertexFormat) &&
++                    dc.MeshIndex >= 0 && dc.MeshIndex < sourceData.Meshes.Length)
++                {
++                    var tangentBaseVertex = dc.BaseVertex - sourceData.Meshes[dc.MeshIndex].StartVertex;
++                    var tangentResource = l.Resource.TryGetTangentResource(dc.MeshIndex, tangentBaseVertex, 0, res);
++                    if (tangentResource is { IsDisposed: false })
++                    {
++                        drawVertexResource = tangentResource;
++                        drawBaseVertex = tangentResource.BaseVertex;
++                        drawStartIndex = tangentResource.StartIndex;
++                    }
++                }
++
+                 buffer.AddCommand(mat.Render,
+                     ma,
+                     wm,
+                     lights,
+-                    l.Resource.VertexResource!.VertexBuffer!,
++                    drawVertexResource.VertexBuffer!,
+                     opacity,
+                     PrimitiveTypes.TriangleList,
+-                    l.Resource.VertexResource.BaseVertex + dc.BaseVertex,
+-                    l.Resource.VertexResource.StartIndex + dc.StartIndex,
++                    drawBaseVertex,
++                    drawStartIndex,
+                     dc.PrimitiveCount,
+                     SortLayers.OBJECT,
+                     z, null, 0, userData, envMap
+diff --git a/src/LibreLancer/Utf/Cmp/VMeshRef.cs b/src/LibreLancer/Utf/Cmp/VMeshRef.cs
+index dd0288ea3e5a2a4a8ee76fd557dff4f023635069..7457e0eae9ef0cfc2296bce082ce30ec26aaa073 100644
+--- a/src/LibreLancer/Utf/Cmp/VMeshRef.cs
++++ b/src/LibreLancer/Utf/Cmp/VMeshRef.cs
+@@ -101,6 +101,7 @@ namespace LibreLancer.Utf.Cmp
+                     MaterialCrc = t.MaterialCrc,
+                     BaseVertex = StartVertex + t.StartVertex,
+                     StartIndex = t.TriangleStart,
++                    MeshIndex = i + StartMesh,
+                     PrimitiveCount = t.NumRefVertices / 3,
+                 };
+             }
