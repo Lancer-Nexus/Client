@@ -9906,3 +9906,81 @@ index 0000000..f6aea94
 +    }
 +
 +}
+diff --git a/src/LibreLancer.Tests/GpuFrameRetirementTests.cs b/src/LibreLancer.Tests/GpuFrameRetirementTests.cs
+new file mode 100644
+index 0000000..74902bd
+--- /dev/null
++++ b/src/LibreLancer.Tests/GpuFrameRetirementTests.cs
+@@ -0,0 +1,72 @@
++using System;
++using System.Collections.Generic;
++using System.Threading;
++using LibreLancer.Graphics;
++using Xunit;
++namespace LibreLancer.Tests;
++public class GpuFrameRetirementTests
++{
++    [Fact]
++    public void FrameEndSchedulesAndGpuSignalReleasesOnlyOnce()
++    {
++        Action? signal=null;int calls=0;var queue=new GpuFrameRetirement(cb=>signal=cb,()=>signal!());
++        queue.Defer(()=>calls++);Assert.Equal(0,calls);queue.EndFrame();Assert.Equal(0,calls);Assert.Equal(1,queue.PendingCount);
++        signal!();signal();Assert.Equal(1,calls);Assert.Equal(0,queue.PendingCount);queue.Close();
++    }
++    [Fact]
++    public void OneFenceBatchContainsAllReleasesOfFrame()
++    {
++        int schedules=0;Action? signal=null;int calls=0;var queue=new GpuFrameRetirement(cb=>{schedules++;signal=cb;},()=>signal!());
++        queue.Defer(()=>calls++);queue.Defer(()=>calls++);queue.EndFrame();Assert.Equal(1,schedules);Assert.Equal(2,queue.PendingCount);
++        signal!();Assert.Equal(2,calls);queue.Close();
++    }
++    [Fact]
++    public void ShutdownSubmitsCurrentFrameAndWaits()
++    {
++        var signals=new Queue<Action>();int calls=0;var queue=new GpuFrameRetirement(signals.Enqueue,()=>{while(signals.TryDequeue(out var cb))cb();});
++        queue.Defer(()=>calls++);queue.Close();Assert.Equal(1,calls);Assert.True(queue.IsClosed);Assert.Equal(0,queue.PendingCount);queue.Close();
++        Assert.Throws<ObjectDisposedException>(()=>queue.Defer(()=>{}));Assert.Throws<ObjectDisposedException>(()=>queue.EndFrame());
++    }
++    [Fact]
++    public void FailedSubmissionPreservesReleasesForRetry()
++    {
++        bool fail=true;Action? signal=null;int calls=0;
++        var queue=new GpuFrameRetirement(cb=>{if(fail)throw new InvalidOperationException();signal=cb;},()=>signal!());
++        queue.Defer(()=>calls++);Assert.Throws<InvalidOperationException>(()=>queue.EndFrame());Assert.Equal(1,queue.PendingCount);Assert.Equal(0,calls);
++        fail=false;queue.Close();Assert.Equal(1,calls);Assert.True(queue.IsClosed);
++    }
++    [Fact]
++    public void FailedReleaseDoesNotSkipOthersOrRepeatCompletedBatch()
++    {
++        Action? signal=null;int other=0;var queue=new GpuFrameRetirement(cb=>signal=cb,()=>signal!());
++        queue.Defer(()=>throw new Exception("release failed"));queue.Defer(()=>other++);queue.EndFrame();
++        Assert.Throws<AggregateException>(()=>signal!());Assert.Equal(1,other);Assert.Equal(0,queue.PendingCount);
++        signal!();Assert.Equal(1,other);queue.Close();
++    }
++    [Fact]
++    public void ImmediateCompletionFailureDoesNotRestoreReleasedActions()
++    {
++        int calls=0;var queue=new GpuFrameRetirement(cb=>cb(),()=>{});queue.Defer(()=>{calls++;throw new Exception();});
++        Assert.Throws<AggregateException>(()=>queue.EndFrame());Assert.Equal(1,calls);Assert.Equal(0,queue.PendingCount);queue.Close();
++    }
++    [Fact]
++    public void CompletionThatDidNotSignalKeepsPendingForRetry()
++    {
++        Action? signal=null;bool finish=false;int calls=0;var queue=new GpuFrameRetirement(cb=>signal=cb,()=>{if(finish)signal!();});
++        queue.Defer(()=>calls++);Assert.Throws<InvalidOperationException>(()=>queue.Close());Assert.False(queue.IsClosed);Assert.Equal(1,queue.PendingCount);
++        finish=true;queue.Close();Assert.True(queue.IsClosed);Assert.Equal(1,calls);
++    }
++    [Fact]
++    public void WrongThreadCannotEnqueueOrComplete()
++    {
++        var queue=new GpuFrameRetirement(cb=>cb(),()=>{});Exception? error=null;
++        var worker=new Thread(()=>{try{queue.Defer(()=>{});}catch(Exception ex){error=ex;}});worker.Start();worker.Join();
++        Assert.IsType<InvalidOperationException>(error);Assert.Equal(0,queue.PendingCount);queue.Close();
++    }
++    [Fact]
++    public void ShutdownRejectsReentrantResourceAdmission()
++    {
++        var queue=new GpuFrameRetirement(cb=>cb(),()=>{});
++        queue.Defer(()=>Assert.Throws<ObjectDisposedException>(()=>queue.Defer(()=>{})));queue.Close();Assert.True(queue.IsClosed);
++    }
++}

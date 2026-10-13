@@ -1,5 +1,5 @@
 diff --git a/README.md b/README.md
-index 3c2ab9f..158f292 100644
+index 3c2ab9f..e072058 100644
 --- a/README.md
 +++ b/README.md
 @@ -18,7 +18,9 @@ The Lancer Nexus Client is the MMO-oriented client fork of [LibreLancer](https:/
@@ -60,7 +60,7 @@ index 3c2ab9f..158f292 100644
  ## NPC retirement recovery infrastructure
  
  Patch 1126 adds a durable background retirement outbox under the configured NPC
-@@ -112,3 +126,34 @@ The checker requires Python 3 and Git; it does not initialize or fetch submodule
+@@ -112,3 +126,43 @@ The checker requires Python 3 and Git; it does not initialize or fetch submodule
  before writing fingerprints. Use normal patch application for a fresh checkout;
  recording an incomplete overlay fails and preserves the previous marker. Checker
  tests run with `python3 -m unittest discover -s scripts/tests`.
@@ -95,6 +95,15 @@ index 3c2ab9f..158f292 100644
 +shutdown. Compressed uploads require support in the existing DDS backend path.
 +This helper does not provide a global residency cache or activate normalmap
 +options. [Upload and BC5 sampler validation](docs/surface-gpu-upload.md).
++
++## GPU frame retirement
++
++`RenderContext.RetireAfterFrame` batches release callbacks after the current
++frame's last commands. OpenGL waits for a fence, or uses a synchronous fallback
++without sync support. Normal shutdown drains pending releases before shaders
++and native context shutdown. `SurfaceGpuTexture.RetireAfterFrame` marks its scope
++unavailable immediately and delays physical Dispose; later Dispose cannot bypass
++the fence. [Validation and limits](docs/gpu-frame-retirement.md).
 diff --git a/docs/NEXUS-ASSET-PACKAGES.md b/docs/NEXUS-ASSET-PACKAGES.md
 new file mode 100644
 index 0000000..f85eb06
@@ -2363,10 +2372,10 @@ index 0000000..3829e44
 +}
 diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
 new file mode 100644
-index 0000000..c257cc4
+index 0000000..2df5809
 --- /dev/null
 +++ b/docs/graphics-implementation-plan.md
-@@ -0,0 +1,459 @@
+@@ -0,0 +1,476 @@
 +# Grafik-Erweiterungen: Umsetzungsplan
 +
 +Stand: 2026-10-12. Dieser Plan verbindet die neu eingelesenen Dokumente
@@ -2826,6 +2835,23 @@ index 0000000..c257cc4
 +keine aktive Supplemental-Materialanbindung. Mesh-/Texturcache, Loaderqueue,
 +Frame-/Fence-Retirement, Geräteverlust und visuelle Referenzszenen bleiben offen.
 +Die neuen Optionsschalter bleiben bis zur vollständigen Integration gesperrt.
++
++## GPU-Freigabe am Frame-Ende (2026-10-13)
++
++Eine renderthreadgebundene GpuFrameRetirement-Queue sammelt Freigaben bis EndFrame.
++OpenGL setzt einen Fence hinter die Frame-Kommandos und flusht ihn; QueryFences
++führt Freigaben nur nach Signal aus. Ohne Sync wird synchron auf GPU-Abschluss
++gewartet. Der normale Shader-Shutdown schließt/entleert die Freigabequeue zuerst.
++SurfaceGpuTexture.RetireAfterFrame sperrt neue Scope-Zugriffe; folgendes Dispose
++umgeht die verzögerte Freigabe nicht. Retry-/Callback-Fehler bleiben sichtbar.
++
++124 Tests, ein fehlerfreier Solution-Build und eine aktuelle SDL3/OpenGL-Prüfung
++mit einer tatsächlich gezeichneten BC5-Textur bestätigen die verzögerte Freigabe
++und den Drain einer im Cleanup neu erzeugten Textur. [Prüfbericht](gpu-frame-retirement.md).
++Die frühere temporäre NAP-Testumgebung war vor diesem Schritt entfernt worden;
++dieser Lauf ist deshalb ausdrücklich ein nativer Einzeltest ohne NAP-Spielstart.
++Gemeinsamer Mesh-/Texturcache, Residencybudget, Loaderqueue und aktive Material-
++Anbindung bleiben nächste P1/P2-Aufgaben. Geräteverlust und Recovery sind offen.
 diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
 index 8667cc2..dabccc5 100644
 --- a/docs/renderer-roadmap.md
@@ -3357,7 +3383,7 @@ index 0000000..7f74f79
 +  ]
 +}
 diff --git a/AGENTS.md b/AGENTS.md
-index 98f5931..4b90cc2 100644
+index 98f5931..c28bca3 100644
 --- a/AGENTS.md
 +++ b/AGENTS.md
 @@ -88,9 +88,9 @@ LLServer SystemIds defines owned worlds; SystemId is the primary fallback. Trave
@@ -3373,7 +3399,7 @@ index 98f5931..4b90cc2 100644
    propagation in the build entry point.
  - The integrity checker is read-only; preserve unrelated modifications and repair
    identified overlay drift by applying the relevant maintained patch.
-@@ -126,3 +126,47 @@ LLServer SystemIds defines owned worlds; SystemId is the primary fallback. Trave
+@@ -126,3 +126,58 @@ LLServer SystemIds defines owned worlds; SystemId is the primary fallback. Trave
  ## Restart-time ambient NPC recovery
  
  - Before publishing a world or starting population simulation, drain pending checkpoint writes and restore that system's current ambient NPC checkpoints from Coordinator. Resolve stable NPC references and preserve the serialized AI/autopilot state. Keep recovery fail-closed when the checkpoint store is unavailable or corrupt; only a Coordinator 404 after listing means ownership changed and may be skipped.
@@ -3421,6 +3447,17 @@ index 98f5931..4b90cc2 100644
 +- Keep UV animation/selection uniforms initialized in sampler tests. Compare
 +  real BC5 texture sampling with a CPU reference, not only uniform-fed normals.
 +  Material cache integration and GPU retirement still need their own validation.
++
++## GPU retirement queue
++
++- Queue GPU releases through RetireAfterFrame after the last intended resource
++  use. Keep scopes alive until completion; Dispose of an already retired
++  SurfaceGpuTexture must not bypass its scheduled GPU release.
++- Preserve EndFrame submission and shutdown drain before shader/context teardown.
++  Submission or wait failures must not cause early release. Callback failures
++  are surfaced after attempting the remaining callbacks, not silently swallowed.
++- Fence lifecycle is not a global GPU residency cache. Device-loss recovery,
++  unsupported-sync platform runtime and budgets require their own evidence.
 diff --git a/docs/shader-lifecycle.md b/docs/shader-lifecycle.md
 new file mode 100644
 index 0000000..d63fe45
@@ -3772,5 +3809,100 @@ index 0000000..04c70f5
 +    "native constructor/pin failure injection",
 +    "device loss and platform matrix",
 +    "LOD/mip and retail visual references"
++  ]
++}
+diff --git a/docs/gpu-frame-retirement.md b/docs/gpu-frame-retirement.md
+new file mode 100644
+index 0000000..1f02e1a
+--- /dev/null
++++ b/docs/gpu-frame-retirement.md
+@@ -0,0 +1,57 @@
++# GPU-Freigabequeue: Prüfung vom 13.10.2026
++
++GpuFrameRetirement sammelt Callback-Aktionen auf dem Renderthread bis EndFrame.
++Ein Frame erzeugt einen Batch; seine Aktionen werden erst vom Completioncallback
++versucht. Fehlgeschlagene Submission stellt unaufgerufene Aktionen wieder her.
++Doppelte Completion führt keine Aktion zweimal aus. Callbackfehler werden nach
++Versuch aller Aktionen als AggregateException gemeldet; ein leerer Zähler ist
++im Fehlerfall kein Nachweis, dass jede Ressourcenfreigabe erfolgreich war.
++
++OpenGL stellt einen [Fence](https://wikis.khronos.org/opengl/GLAPI/glFenceSync)
++hinter die vorherigen GPU-Kommandos und flusht den Stream im selben Context.
++QueryFences prüft ohne Wartezeit und ruft nach Signal die Aktionen auf. WAIT_FAILED
++löst einen Fehler aus und lässt Ressourcen pending. Ohne Sync wartet der
++synchron arbeitende glFinish-Fallback; seine Laufzeit ist hier nicht auf einer
++solchen Plattform gemessen. CompleteGpuWork wartet beim normalen Shutdown und
++verarbeitet offene Fences. Der neue Finish-Bindingeintrag und GL.Generated.cs
++wurden mit dem bestehenden Generator erstellt.
++
++RenderContext integriert die Queue in EndFrame und schließt sie vor seiner
++Shaderfreigabe. Neuer Zutritt während des Drain wird abgewiesen. Unvollständige
++Completion hält den Scope offen und pending, statt eine Freigabe zu behaupten.
++SurfaceGpuTexture.RetireAfterFrame sperrt seinen Texture-Getter sofort, hält
++aber die native Textur bis zum Callback. Dispose nach Retire ist absichtlich
++kein sofortiges Delete. Vor Retire bleibt explizites Dispose für bekannte
++ungefährdete/synchron geprüfte Scopes verfügbar.
++
++## Aktuelle Evidenz
++
++- 124 fokussierte Tests bestanden, davon neun Queueprüfungen: Signal/Batch,
++  Shutdown-Drain, Submissionretry, vollständige Callbackversuche, synchrone
++  Callbackfehler ohne doppelte Freigabe, unvollständige Completion/Retry,
++  falscher Thread und reentrante Zutrittsabwehr.
++- Vollständiger Solution-Build: null Fehler und 20 Warnungen.
++- Nativer Test mit SDL3, Mesa Intel HD Graphics 4600, OpenGL 4.6:
++  Eine hochgeladene BC5-Textur wird mit Renderer2D tatsächlich gezeichnet und
++  danach retired. Vor EndFrame: disposed=false, retired=true, pending=1.
++  Nach GPU-Signal: disposed=true, pending=0. Der Test sah das Signal bei frame=2.
++- Das Anwendungscleanup erzeugt und retired eine weitere Textur. Vor dem Drain
++  bleibt sie gültig. Nach Game.Run: pending=0, shaders=0, cleanupTextureDisposed=true.
++  Prozessende ist regulär mit Exitcode 0.
++
++Die alte /tmp-Build-/NAP-Testumgebung war nicht mehr vorhanden. Der tatsächliche
++Checkout mit initialisierten Submodulen wurde deshalb gebaut und seine Native-
++Bibliotheken genutzt. Die Prüfung ist ein aktueller nativer Einzeltest, kein
++neuer NAP-only-Gameplay- oder Menü-Nachweis. Historische NAP-Protokolle bleiben
++in den früheren Dokumenten; sie beweisen diesen neuen Fencepfad nicht.
++[Maschinenprotokoll](evidence/gpu-frame-retirement-20261013.json).
++
++## Weiter offen
++
++Dies liefert Ressourcenretirement, keinen gemeinsamen GPU-Cache, kein globales
++Residencybudget und keine aktive Supplemental-Materialintegration. Crash- und
++Geräteverlustpfade, native WAIT_FAILED-/GL-OOM-Fehlerinjektion, Windows/GLES und
++Sync-freie Hardware bleiben ungetestet. Der synchrone Shutdown/Fallback kann
++blockieren; daraus wird keine Performancezusage abgeleitet. Freigabeaktionen
++müssen ihre Ressourcen selbst korrekt besitzen und dürfen nicht vorzeitig
++außerhalb der Queue ein zweites Delete ausführen.
+diff --git a/docs/evidence/gpu-frame-retirement-20261013.json b/docs/evidence/gpu-frame-retirement-20261013.json
+new file mode 100644
+index 0000000..f681d6b
+--- /dev/null
++++ b/docs/evidence/gpu-frame-retirement-20261013.json
+@@ -0,0 +1,26 @@
++{
++  "schemaVersion": 1,
++  "scope": "native frame-end GPU retirement and normal shutdown; not NAP gameplay",
++  "tests": {
++    "passed": 124,
++    "failed": 0
++  },
++  "build": {
++    "errors": 0,
++    "warnings": 20
++  },
++  "observations": [
++    "GPU_RETIRE_BEFORE_FRAME disposed=False retired=True pending=1",
++    "GPU_RETIRE_SIGNALED frame=2 disposed=True pending=0",
++    "GPU_RETIRE_CLEANUP_QUEUED pending=1",
++    "GPU_RETIRE_SHUTDOWN pending=0 shaders=0 cleanupTextureDisposed=True"
++  ],
++  "environmentChange": "previous temporary migration/NAP test directories absent; built verified current checkout and used bin/natives",
++  "open": [
++    "shared mesh/texture cache and residency budget",
++    "active material integration",
++    "device loss and crash recovery",
++    "native wait/OOM fault injection",
++    "Windows/GLES and sync-less hardware performance"
 +  ]
 +}
