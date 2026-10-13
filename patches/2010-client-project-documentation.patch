@@ -2328,10 +2328,10 @@ index 0000000..3829e44
 +}
 diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
 new file mode 100644
-index 0000000..a373a29
+index 0000000..00ed5aa
 --- /dev/null
 +++ b/docs/graphics-implementation-plan.md
-@@ -0,0 +1,369 @@
+@@ -0,0 +1,396 @@
 +# Grafik-Erweiterungen: Umsetzungsplan
 +
 +Stand: 2026-10-12. Dieser Plan verbindet die neu eingelesenen Dokumente
@@ -2701,6 +2701,33 @@ index 0000000..a373a29
 +Nach Dispose beider Materialzugriffe und ClearUnused sind Bytes und Leases
 +null. Native Optionsnavigation, Escape und reguläres Exit bleiben erfolgreich.
 +395 Overlaydateien wurden vollständig aus der Patchserie rekonstruiert.
++
++## BC5-/TBN-Shadergrundlage (2026-10-13)
++
++Basic und PBR verwenden jetzt denselben `NormalMap.hlsl`-Helper: XY wird auf
++signed normalisiert, Z mit sqrt(saturate(1-dot(XY,XY))) rekonstruiert. Eine
++abschließende sichere Normalisierung verhindert NaNs an komprimierungsbedingten
++Unit-Disk-Überschreitungen und bei Stärke null. `BasicMaterial.NormalStrength`
++ist endlich und auf 0..16 begrenzt, Default 1; beide Materialuniforms übertragen
++sie mit geprüftem C#/HLSL-Layout. Die Surface-Stärke wird noch nicht automatisch
++in diesen Wert übernommen, solange GPU-Residency und Mesh-Tangenten fehlen.
++
++Der Basic-FVF-Featurebezeichner wurde von NORMAL_MAP auf NORMALMAP korrigiert,
++damit die bestehende Bitmaske 16 tatsächlich die #ifdef-Pfade aktiviert. TBN
++enthält nun Tangente, Bitangente, Normale als Zeilen; der Fragmentpfad multipliziert
++die Tangentennormale als Zeilenvektor damit. Welt-Tangenten verwenden World
++anstelle der inversen Normalmatrix und werden zur Normalen orthogonalisiert.
++Eine stabile Ersatzbasis behandelt degenerierte Tangenten; UV-Handedness bleibt
++berücksichtigt. Negative World-Skalierung, UV-Seams, DFM/Skinning und neue
++Retail-FVF-Tangenten müssen im weiteren P2-Paket gesondert geprüft werden.
++
++[Shaderprüfung und Grenzen](normalmap-shader-validation.md): 89 relevante Tests,
++Solution-Build ohne Fehler und sieben echte OpenGL-Readback-Fälle mit denselben
++HLSL-Helpern. Dies ist kein Bildqualitätsbeleg auf Retail-Schiffen und aktiviert
++keine Supplemental-Surface-Sampler. Die vorbereiteten Optionsschalter bleiben
++gesperrt. Eine NativeBuffer-Warnung beim kurzlebigen Testshader zeigt zusätzlich
++die noch fehlende explizite Shader-Dispose-Schnittstelle; die Shader-Lebensdauer
++gehört in das GPU-Ressourcenpaket.
 diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
 index 8667cc2..dabccc5 100644
 --- a/docs/renderer-roadmap.md
@@ -3111,5 +3138,114 @@ index 0000000..a912488
 +    "No single-texture loader/residency budget/fence/eviction yet",
 +    "No full-suite-green claim",
 +    "Tangents and Vulkan remain open"
++  ]
++}
+diff --git a/docs/normalmap-shader-validation.md b/docs/normalmap-shader-validation.md
+new file mode 100644
+index 0000000..95df2c2
+--- /dev/null
++++ b/docs/normalmap-shader-validation.md
+@@ -0,0 +1,58 @@
++# BC5 und TBN: Shaderprüfung vom 13.10.2026
++
++## Geänderter Pfad
++
++`Shaders/includes/NormalMap.hlsl` wird direkt von Basic/PBR und dem FVF-Vertexshader
++eingebunden. Stärke 0 liefert eine flache Normalenkarte, 1 ist der Standard und
++16 die obere Grenze. Die CPU lehnt NaN, Infinity und Werte außerhalb des Bereichs
++ab. BasicParameters sind 64 Bytes (Stärkeoffset 48), PBRParameters 48 Bytes
++(Stärkeoffset 44). Sieben Unit-Tests bestätigen Werte und Layout; zusammen mit
++den Surface-Tests sind 89 Tests erfolgreich.
++
++Die vorhandene FVF-Normalmap-Variante hat weiterhin Bit 16, ihr Name lautet nun
++wie in den #ifdef-Blöcken NORMALMAP. Die Basis benutzt normalisierte, orthogonale
++Tangenten und signed Handedness. Der bisherige Basisaufbau/Multiply-Pfad war
++inkonsistent; nun gilt `worldNormal = mul(tangentNormal, basis)` mit den Zeilen
++Tangente, Bitangente, Normale. Welt-Tangenten werden über World transformiert,
++Normale weiterhin über NormalMatrix.
++
++## OpenGL-Readback
++
++Auf Mesa Intel HD Graphics 4600 / OpenGL 4.6 wurde ein separates Testprogramm
++mit dem bestehenden LLShaderCompiler erzeugt. Es bindet eine bytegleiche Kopie
++des geänderten NormalMap.hlsl ein. Ein Dreieck füllt ein 1x1-RenderTarget2D;
++Fragmentuniforms liefern SampleXY, Stärke, Normale, Tangente und Handedness.
++Der Fragmentshader gibt `(normal * 0.5 + 0.5, 1)` aus. Der BGRA8-Pixel wird
++über Texture2D.GetData zurückgelesen und mit der analytischen Normale verglichen
++(maximale Vektordistanz 0,025 für die 8-Bit-Quantisierung).
++
++| Fall | SampleXY / Stärke | Erwartete Weltnormale |
++| --- | --- | --- |
++| Flach | (0.5,0.5) / 1 | (0,0,1) |
++| Außerhalb der Unit Disk | (1,1) / 1 | normalize(1,1,0) |
++| Stärke null am Rand | (1,1) / 0 | (0,0,1) |
++| Gedrehte Basis | (0.5,0.5) / 1, N=(1,0,0), T=(0,0,-1) | (1,0,0) |
++| Gespiegelte UV-Basis | (0.5,1) / 1, Handedness=-1 | (0,-1,0) |
++| Degenerierte Tangente | (0.5,0.5) / 1, T=(0,0,0) | (0,0,1) |
++| Stärke zwei | (0.7,0.5) / 2 | normalize(0.8,0,sqrt(0.84)) |
++
++Alle sieben Readbacks bestanden. Der Solution-Build mitsamt den betroffenen
++Shaderpermutationen hat null Fehler; bestehende Warnungen bleiben vorhanden.
++Der NAP-only-Client erreicht das Hauptmenü und bestätigt native Navigation durch
++Anzeige/Effekte/Performance, Escape und reguläres Exit. Die früheren CPU-Cache-
++Leases bleiben korrekt. Messwerte stehen im [Prüfprotokoll](evidence/normalmap-shader-20261013.json).
++
++## Grenzen und offene Arbeit
++
++Der Readback prüft die gemeinsame GPU-Mathematik mit uniform gelieferten
++BC5-Samples, keine komprimierte GPU-Textur und keinen vollständigen beleuchteten
++Retail-Materialpfad. Supplemental-Sampler, Upload/Residency/Fences, UV-Seams,
++Tangenten für die übrigen Retail-FVFs/DFM, reflektierte World-Skalierung und die
++Bild-/Performance-Szenenmatrix bleiben offen. Deshalb werden die vorbereiteten
++Grafikschalter nicht freigeschaltet.
++
++Beim Freigeben des separaten kurzlebigen ShaderBundle wurde ein NativeBuffer-
++Finalizerhinweis aus GLShader beobachtet. Shader/IShader besitzen derzeit keine
++Dispose-Schnittstelle für den Uniformpuffer. Produktionsbundles werden länger
++gehalten; deren Freigabe am Context-Ende ist damit noch nicht nachgewiesen und
++muss im GPU-Lifecycle-Paket umgesetzt werden. Der Testprozess beendete regulär.
+diff --git a/docs/evidence/normalmap-shader-20261013.json b/docs/evidence/normalmap-shader-20261013.json
+new file mode 100644
+index 0000000..7f74f79
+--- /dev/null
++++ b/docs/evidence/normalmap-shader-20261013.json
+@@ -0,0 +1,39 @@
++{
++  "schemaVersion": 1,
++  "scope": "shared HLSL math readback; no retail normalmap activation or compressed GPU texture proof",
++  "tests": {
++    "passed": 89,
++    "failed": 0
++  },
++  "build": {
++    "errors": 0,
++    "warnings": 308
++  },
++  "gpu": "Mesa Intel HD Graphics 4600, OpenGL 4.6",
++  "uniforms": {
++    "BasicParameters": {
++      "bytes": 64,
++      "normalStrengthOffset": 48
++    },
++    "PBRParameters": {
++      "bytes": 48,
++      "normalStrengthOffset": 44
++    }
++  },
++  "helperSha256": "6d366f2b09fa1797bdd59c248f29674c91b39146d1dcb62e7727163c934d7f60",
++  "readbackCases": [
++    "NORMAL_GPU_READBACK flat passed normal=<0.003921628, 0.003921628, 1>",
++    "NORMAL_GPU_READBACK outside_disk passed normal=<0.70980394, 0.70980394, 0.003921628>",
++    "NORMAL_GPU_READBACK zero_strength_corner passed normal=<0.003921628, 0.003921628, 1>",
++    "NORMAL_GPU_READBACK rotated_flat passed normal=<1, 0.003921628, 0.003921628>",
++    "NORMAL_GPU_READBACK mirrored passed normal=<0.003921628, -1, 0.003921628>",
++    "NORMAL_GPU_READBACK degenerate_tangent passed normal=<0.003921628, 0.003921628, 1>",
++    "NORMAL_GPU_READBACK strength_two passed normal=<0.654902, 0.003921628, 0.75686276>"
++  ],
++  "nativeMenuResult": [
++    "INPUT_PROBE RESULT options=True returned=True exit=True timeout=False"
++  ],
++  "openDiagnostics": [
++    "NativeBuffer finalizer warning for short-lived GLShader uniformMemoryBuffer; Shader/IShader have no disposal API"
 +  ]
 +}
