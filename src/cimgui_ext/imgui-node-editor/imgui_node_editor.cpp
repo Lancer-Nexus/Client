@@ -3743,6 +3743,7 @@ ed::EditorAction::AcceptResult ed::SizeAction::Accept(const Control& control)
             m_StartGroupBounds = control.ActiveNode->m_GroupBounds;
             m_LastSize         = control.ActiveNode->m_Bounds.GetSize();
             m_MinimumSize      = ImVec2(0, 0);
+            m_LastDragOffset   = ImVec2(0, 0);
             m_Pivot            = pivot;
             m_Cursor           = ChooseCursor(m_Pivot);
             m_SizedNode        = control.ActiveNode;
@@ -3801,12 +3802,11 @@ bool ed::SizeAction::Process(const Control& control)
     if (!m_IsActive)
         return false;
 
-    if (ImGui::IsMouseDown(Editor->GetConfig().DragButtonIndex))
+    if (control.ActiveNode == m_SizedNode)
     {
-        // Keep the resize action captured until the initiating button is released.
-        // ActiveNode can briefly become null while dragging a group border; ending
-        // here lets DragAction take over and turns a resize into a move.
-        const auto dragOffset = ImGui::GetMouseDragDelta(Editor->GetConfig().DragButtonIndex, 0.0f);
+        const auto dragOffset = (control.ActiveNode == m_SizedNode) ? ImGui::GetMouseDragDelta(0, 0.0f) : m_LastDragOffset;
+        m_LastDragOffset = dragOffset;
+
         if (m_MinimumSize.x == 0.0f && m_LastSize.x != m_SizedNode->m_Bounds.GetWidth())
             m_MinimumSize.x = m_SizedNode->m_Bounds.GetWidth();
         if (m_MinimumSize.y == 0.0f && m_LastSize.y != m_SizedNode->m_Bounds.GetHeight())
@@ -3837,7 +3837,7 @@ bool ed::SizeAction::Process(const Control& control)
         m_SizedNode->m_GroupBounds.Max.x -= m_StartBounds.Max.x - m_StartGroupBounds.Max.x;
         m_SizedNode->m_GroupBounds.Max.y -= m_StartBounds.Max.y - m_StartGroupBounds.Max.y;
     }
-    else
+    else if (!control.ActiveNode)
     {
         m_Clean = true;
         m_IsActive = false;

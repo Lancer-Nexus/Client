@@ -53,21 +53,4 @@ public class SNPCCargoComponent : AbstractCargoComponent
         var slot = Cargo.FirstOrDefault(x => x.Item is T);
         return (T) slot.Item;
     }
-
-    internal List<BasicCargo> TakeLootableCargoForFuse()
-    {
-        var result = new List<BasicCargo>();
-        for (var i = Cargo.Count - 1; i >= 0; i--)
-        {
-            if (Cargo[i].Item.LootAppearance == null)
-            {
-                continue;
-            }
-
-            result.Add(Cargo[i]);
-            Cargo.RemoveAt(i);
-        }
-
-        return result;
-    }
 }

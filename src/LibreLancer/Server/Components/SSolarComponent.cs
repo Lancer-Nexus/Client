@@ -7,7 +7,6 @@ namespace LibreLancer.Server.Components
     {
         public bool SendSolarUpdate = false;
         public bool SendPartsUpdate = false;
-        public bool SendAutoTurretUpdate = false;
         private int stopUpdateTimer = 0;
         private int stopPartsUpdateTimer = 0;
         private const int UPDATE_TIMEOUT_TICKS = 8 * 60;
@@ -36,9 +35,10 @@ namespace LibreLancer.Server.Components
                     }
 
                 }
-                if (Parent.TryGetFirstChildComponent<SShieldComponent>(out var shield))
+                var shield = Parent.CoreEquipment.Shield;
+                if (shield != null)
                 {
-                    if (shield.Health < shield.Equip.Def.MaxCapacity) {
+                    if (shield.ShieldHealth < shield.Equipment.Def.MaxCapacity) {
                         SendSolarUpdate = true;
                         stopUpdateTimer = UPDATE_TIMEOUT_TICKS;
                     }

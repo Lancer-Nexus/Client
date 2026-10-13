@@ -926,6 +926,7 @@ private:
     ImRect           m_StartGroupBounds;
     ImVec2           m_LastSize;
     ImVec2           m_MinimumSize;
+    ImVec2           m_LastDragOffset;
     ed::NodeRegion   m_Pivot;
     ImGuiMouseCursor m_Cursor;
 };

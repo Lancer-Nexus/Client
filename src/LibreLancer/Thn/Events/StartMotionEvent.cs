@@ -54,7 +54,6 @@ namespace LibreLancer.Thn.Events
             {
                 bool loop = (Flags == 2);
                 obj.Object.AnimationComponent.StartAnimation(Animation, loop, StartTime, TimeScale, Duration);
-                instance.AddSkipMotionTarget(obj, Animation);
             }
             else
             {

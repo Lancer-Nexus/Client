@@ -115,10 +115,10 @@ namespace LibreLancer.Server.Components
             }
 
             var rad = obj.PhysicsComponent?.Body.Collider.Radius ?? 15;
-            var pos = obj.WorldTransform.Position;
+            var pos = obj.Transform.Position;
             var hp = Action.Kind == DockKinds.Tradelane && tradelaneHardpoint != null
                 ? Parent.GetHardpoint(tradelaneHardpoint)
-                : hardpoints.GetDockHardpoints(Parent, i, obj.WorldTransform.Position, false).FirstOrDefault();
+                : hardpoints.GetDockHardpoints(Parent, i, obj.Transform.Position, false).FirstOrDefault();
             if (hp == null)
             {
                 return;
@@ -126,7 +126,7 @@ namespace LibreLancer.Server.Components
 
             var targetPos = (Action.Kind == DockKinds.Tradelane
                     ? hp.TransformNoRotate
-                    : hp.Transform) * Parent.WorldTransform;
+                    : hp.Transform) * Parent.Transform;
             var dist = (targetPos.Position - pos).Length();
 
             var forceAnimation = HasDockAnimation(i) &&
@@ -185,7 +185,7 @@ namespace LibreLancer.Server.Components
         private bool CanDock(int i, GameObject obj, GameWorld world, string? tlHP = null)
         {
             var rad = obj.PhysicsComponent?.Body.Collider.Radius ?? 15;
-            var pos = obj.PhysicsComponent?.Body.Position ?? obj.WorldTransform.Position;
+            var pos = obj.PhysicsComponent?.Body.Position ?? obj.Transform.Position;
 
             var hp = Parent.GetHardpoint(tlHP ?? DockPoints[i].DockSphere.Hardpoint);
             if (hp == null)
@@ -195,7 +195,7 @@ namespace LibreLancer.Server.Components
 
             var targetPos = ((Action.Kind == DockKinds.Tradelane
                     ? hp.TransformNoRotate
-                    : hp.Transform) * Parent.WorldTransform).Position;
+                    : hp.Transform) * Parent.Transform).Position;
 
             if (Action.Kind == DockKinds.Tradelane && tlHP != null)
             {
@@ -209,7 +209,7 @@ namespace LibreLancer.Server.Components
                 if (nextRing != null && nextHardpoint != null)
                 {
                     var nextPosition =
-                        (nextHardpoint.TransformNoRotate * nextRing.WorldTransform).Position;
+                        (nextHardpoint.TransformNoRotate * nextRing.Transform).Position;
                     return TradelaneMotion.HasCrossedEntryPlane(
                         pos,
                         targetPos,
@@ -235,8 +235,8 @@ namespace LibreLancer.Server.Components
                 return float.MaxValue;
             }
 
-            var targetPos = (hp.Transform * Parent.WorldTransform).Position;
-            return (targetPos - obj.WorldTransform.Position).Length();
+            var targetPos = (hp.Transform * Parent.Transform).Position;
+            return (targetPos - obj.Transform.Position).Length();
         }
 
         private float GetRingFlyThroughRange(int i, GameObject obj)
@@ -379,7 +379,7 @@ namespace LibreLancer.Server.Components
             GameWorld? world,
             string? requestedTradelaneHardpoint = null)
         {
-            var pos = obj.WorldTransform.Position;
+            var pos = obj.Transform.Position;
             string? tradelaneHardpoint = null;
 
             if (Action.Kind == DockKinds.Tradelane)
@@ -532,14 +532,14 @@ namespace LibreLancer.Server.Components
 
         private static Vector3 TradelanePoint(GameObject ring, string hardpoint, GameObject ship)
         {
-            var transform = ring.GetHardpoint(hardpoint)!.TransformNoRotate * ring.WorldTransform;
+            var transform = ring.GetHardpoint(hardpoint)!.TransformNoRotate * ring.Transform;
             return transform.Transform(FormationOffset(ship));
         }
 
         private void StartTradelane(GameObject ship, string tlHardpoint, GameWorld world)
         {
             var entryHardpoint = Parent.GetHardpoint(tlHardpoint)!;
-            var entryTransform = entryHardpoint.TransformNoRotate * Parent.WorldTransform;
+            var entryTransform = entryHardpoint.TransformNoRotate * Parent.Transform;
             var entryPosition = TradelanePoint(Parent, tlHardpoint, ship);
             var nextNickname = tlHardpoint.Equals(
                 "HpRightLane",
@@ -583,7 +583,6 @@ namespace LibreLancer.Server.Components
                 orientation,
                 enteredAtPenultimate);
             ship.AddComponent(movement);
-            movement.StartShipTravelEffect(world);
 
             if (ship.TryGetComponent<ShipPhysicsComponent>(out var component))
             {
@@ -622,8 +621,8 @@ namespace LibreLancer.Server.Components
             if (hps.Length < 2)
                 return false;
 
-            var tr = (hps[^1].Transform * Parent.WorldTransform);
-            var tr2 = (hps[^2].Transform * Parent.WorldTransform);
+            var tr = (hps[^1].Transform * Parent.Transform);
+            var tr2 = (hps[^2].Transform * Parent.Transform);
             spawnPoint = new Transform3D(tr.Position, QuaternionEx.LookAt(tr.Position, tr2.Position));
             return true;
         }
@@ -733,8 +732,8 @@ namespace LibreLancer.Server.Components
                 }
 
                 var totaldistance = Vector3.Distance(hps[^1].Transform.Position, hps[0].Transform.Position);
-                var hp0World = hps[0].Transform * Parent.WorldTransform;
-                var pDistance = Vector3.Distance(undock.Ship.WorldTransform.Position, hp0World.Position);
+                var hp0World = hps[0].Transform * Parent.Transform;
+                var pDistance = Vector3.Distance(undock.Ship.Transform.Position, hp0World.Position);
 
                 if (pDistance + 20 >= totaldistance)
                 {
@@ -871,14 +870,11 @@ namespace LibreLancer.Server.Components
                 {
                     if (dock.Ship.TryGetComponent<SPlayerComponent>(out var player))
                     {
-                        player.Player.JumpTo(Action.Target!, Action.Exit!,
-                            world.Server!.GatherJumpers(player.Player.MissionRuntime));
+                        player.Player.JumpTo(Action.Target!, Action.Exit!, world.Server!.GatherJumpers());
                     }
                     else if (dock.Ship.TryGetComponent<SNPCComponent>(out var npc))
                     {
-                        if (world.Server?.Server.BeginPopulationNpcTransfer(dock.Ship, Action.Target!, Action.Exit!,
-                                Parent.Nickname!, world.Server) != true)
-                            npc.Docked();
+                        npc.Docked();
                     }
                 }
                 else if (Action.Kind == DockKinds.Tradelane)

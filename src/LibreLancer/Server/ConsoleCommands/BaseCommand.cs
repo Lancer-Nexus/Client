@@ -4,7 +4,7 @@ namespace LibreLancer.Server.ConsoleCommands
     public class BaseCommand : IConsoleCommand
     {
         public string Name => "base";
-        public string? Permission => "command.base";
+        public bool Admin => true;
 
         public void Run(Player player, string arguments)
         {

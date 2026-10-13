@@ -26,6 +26,7 @@ using LibreLancer.Thn;
 using AnmScript = LibreLancer.Utf.Anm.Script;
 using LibreLancer.World;
 using LibreLancer.World.Components;
+using LibreLancer.World.Equipments;
 using WattleScript.Interpreter;
 
 namespace LibreLancer
@@ -42,7 +43,6 @@ namespace LibreLancer
         private ShipSteeringComponent steering = null!;
         private ShipInputComponent shipInput = null!;
         private WeaponControlComponent weapons = null!;
-        private PowerCoreComponent powerCore = null!;
         private CHealthComponent playerHealth = null!;
         public DirectiveRunnerComponent Directives = null!;
         public SelectedTargetComponent Selection = null!;
@@ -90,7 +90,6 @@ namespace LibreLancer
         public bool RtcMusic = false;
         public bool RtcMusicOneShot = false;
         private bool musicTriggered = false;
-        private ScannerComponent? scanner;
         private Vector3 tractorOrigin;
         private bool canTractorAny;
         private bool canTractorAll;
@@ -111,7 +110,8 @@ namespace LibreLancer
         private double accum = 0;
 
         public bool Dead = false;
-        private readonly MouseTargetingGesture mouseTargeting = new();
+        private bool isLeftDown = false;
+        private double leftDownTimer = 0;
         private bool mouseFlight = false;
 
         public SpaceGameplay(FreelancerGame g, CGameSession session) : base(g)
@@ -172,7 +172,7 @@ namespace LibreLancer
             player.AddComponent(Directives);
 
             FLLog.Debug("Client", $"Spawning self with rotation {session.PlayerOrientation}");
-            player.SetLocalTransform(new Transform3D(session.PlayerPosition, session.PlayerOrientation));
+            player.SetTransform(new Transform3D(session.PlayerPosition, session.PlayerOrientation));
             playerHealth = new CHealthComponent(player)
             {
                 MaxHealth = session.PlayerShip.Hitpoints,
@@ -199,7 +199,9 @@ namespace LibreLancer
                 player.DisableCmpPart(part, null, Game.ResourceManager, out _);
             }
 
-            if (!player.TryGetComponent(out powerCore!))
+            player.ResolveReferences();
+
+            if (player.CoreEquipment.Power == null)
             {
                 throw new Exception("Player launched without a powercore equipped!");
             }
@@ -212,7 +214,7 @@ namespace LibreLancer
                 };
 
             _chaseCamera.ChasePosition = session.PlayerPosition;
-            _chaseCamera.ChaseOrientation = Matrix4x4.CreateFromQuaternion(player.LocalTransform.Orientation);
+            _chaseCamera.ChaseOrientation = Matrix4x4.CreateFromQuaternion(player.Transform.Orientation);
             var offset = session.PlayerShip.ChaseOffset;
 
             _chaseCamera.DesiredPositionOffset = offset;
@@ -240,7 +242,7 @@ namespace LibreLancer
             sysrender.ZOverride = true; // Draw all with regular Z
             world = new GameWorld(sysrender, Game.Sound, Game.ResourceManager, () => session.WorldTime);
             // Game.GameData.PreloadObjects(session.Preloads);
-            world.LoadSystem(sys, Game.ResourceManager, Game.Sound, false);
+            world.LoadSystem(sys, Game.ResourceManager, Game.Sound);
             session.WorldReady();
             world.AddObject(player);
             player.Register(world);
@@ -278,14 +280,14 @@ namespace LibreLancer
                 return false;
             }
 
-            var shield = player.GetFirstChildComponent<CShieldComponent>();
+            var shield = player.CoreEquipment.Shield;
 
             if (shield == null)
             {
                 return false;
             }
 
-            if (shield.Equip.Def.MaxCapacity - shield.Health < 100)
+            if (shield.Equipment.Def.MaxCapacity - shield.ShieldHealth < 100)
             {
                 return false;
             }
@@ -462,7 +464,7 @@ namespace LibreLancer
 
             private Contact GetContact(GameObject obj)
             {
-                var distance = Vector3.Distance(playerPos, obj.WorldTransform.Position);
+                var distance = Vector3.Distance(playerPos, obj.Transform.Position);
                 var name = obj.Name?.GetName(game.Game.GameData, playerPos);
 
                 ContactIcon icon = ContactIcon.WeaponPlatform;
@@ -565,7 +567,7 @@ namespace LibreLancer
 
             void UpdateList()
             {
-                playerPos = game.player.WorldTransform.Position;
+                playerPos = game.player.Transform.Position;
                 Contacts = game.world.Objects.Where(x => x != game.player &&
                                                          x.Kind is GameObjectKind.Ship or GameObjectKind.Solar
                                                              or GameObjectKind.Waypoint or GameObjectKind.Loot &&
@@ -699,8 +701,7 @@ namespace LibreLancer
         private (ParticleEffectRenderer? Renderer, SoundInstance? Sound)
             AttachShipEffect(
                 ResolvedFx? effect,
-                bool loopSound = false,
-            bool playSound = true)
+                bool loopSound = false)
         {
             if (effect == null)
                 return (null, null);
@@ -715,7 +716,7 @@ namespace LibreLancer
             }
 
             SoundInstance? sound = null;
-            if (playSound && effect.Sound != null)
+            if (effect.Sound != null)
             {
                 sound = Game.Sound.GetInstance(effect.Sound.Nickname, 0, -1, -1, null);
                 sound?.Play(loopSound);
@@ -734,8 +735,8 @@ namespace LibreLancer
         private TradelaneEquipment? GetTradelaneEquipment(ObjNetId ring)
         {
             var obj = world.GetObject(ring);
-            if (obj?.TryGetComponent<CTradelaneComponent>(out var lane) ?? false)
-                return lane.Def;
+            if (obj?.TryFindEquipment<Tradelane>(out var lane) ?? false)
+                return lane.Equipment;
 
             var fromLoadout = obj?.SystemObject?.Loadout?.Items
                 .Select(x => x.Equipment)
@@ -900,6 +901,11 @@ namespace LibreLancer
                 if (updateStartDelay == 0)
                 {
                     session.GameplayUpdate(this, FixedDelta);
+
+                    if (isLeftDown)
+                    {
+                        leftDownTimer -= FixedDelta;
+                    }
 
                     if (musicTriggered)
                     {
@@ -1076,13 +1082,14 @@ namespace LibreLancer
             DrawSelectedFormationLine();
 
             // do tractor beam things
-            if (player.TryGetComponent<CTractorComponent>(out var tractor))
+            if (player.CoreEquipment.Tractor != null)
             {
+                var tractor = player.CoreEquipment.Tractor;
                 tractorOrigin = tractor.WorldOrigin;
                 maxTractorDistance = tractor.Equipment.Def.MaxLength;
                 canTractorAny = true;
 
-                if (tractor.BeamCount > 0)
+                if (tractor.ClientBeamCount > 0)
                 {
                     canTractorAll = false;
                 }
@@ -1098,7 +1105,6 @@ namespace LibreLancer
                 canTractorAll = false;
             }
             // query scanner
-            player.TryGetComponent(out scanner);
         }
 
         private void TractorSelected()
@@ -1146,15 +1152,15 @@ namespace LibreLancer
             {
                 if (UseDockCamera())
                 {
-                    var tr = dockCameraInfo.DockHardpoint.Transform * dockCameraInfo.Parent.WorldTransform;
-                    undockCamera.Update(Game.Width, Game.Height, tr.Position, player.LocalTransform.Position);
+                    var tr = dockCameraInfo.DockHardpoint.Transform * dockCameraInfo.Parent.Transform;
+                    undockCamera.Update(Game.Width, Game.Height, tr.Position, player.Transform.Position);
                 }
 
-                _turretViewCamera.ChasePosition = player.LocalTransform.Position;
-                _chaseCamera.ChaseOrientation = Matrix4x4.CreateFromQuaternion(player.LocalTransform.Orientation);
+                _turretViewCamera.ChasePosition = player.Transform.Position;
+                _chaseCamera.ChaseOrientation = Matrix4x4.CreateFromQuaternion(player.Transform.Orientation);
                 var cruiseLag = CalculateCruiseCameraLag(delta);
-                var playerForward = Vector3.Transform(-Vector3.UnitZ, player.LocalTransform.Orientation);
-                _chaseCamera.ChasePosition = player.LocalTransform.Position - (playerForward * cruiseLag);
+                var playerForward = Vector3.Transform(-Vector3.UnitZ, player.Transform.Orientation);
+                _chaseCamera.ChasePosition = player.Transform.Position - (playerForward * cruiseLag);
             }
 
             _turretViewCamera.Update(delta);
@@ -1206,11 +1212,23 @@ namespace LibreLancer
 
             if (!(Game.Debug.CaptureMouse) && !ui.MouseWanted(Game.Mouse.X, Game.Mouse.Y))
             {
-                mouseTargeting.LeftMouseDown(pointerAvailable: true);
+                var newSelection = GetMouseSelection();
+
+                if (newSelection != null)
+                {
+                    Selection.Selected = newSelection;
+                }
+
+                if (!isLeftDown)
+                {
+                    isLeftDown = true;
+                    leftDownTimer = 0.25;
+                }
             }
             else
             {
-                mouseTargeting.LeftMouseDown(pointerAvailable: false);
+                isLeftDown = false;
+                leftDownTimer = 0;
             }
         }
 
@@ -1218,16 +1236,8 @@ namespace LibreLancer
         {
             if ((e.Buttons & MouseButtons.Left) > 0)
             {
-                if (mouseTargeting.LeftMouseUp(mouseFlight,
-                        !Game.Debug.CaptureMouse && !ui.MouseWanted(Game.Mouse.X, Game.Mouse.Y)))
-                {
-                    var newSelection = GetMouseSelection();
-                    if (newSelection != null)
-                    {
-                        Selection.Selected = newSelection;
-                    }
-                }
-
+                leftDownTimer = 0;
+                isLeftDown = false;
             }
         }
 
@@ -1252,7 +1262,16 @@ namespace LibreLancer
             {
                 return;
             }
-            world.SpawnTempFx(df.Explosion.Effect, obj.WorldTransform.Position);
+            world.SpawnTempFx(df.Explosion.Effect, obj.Transform.Position);
+        }
+
+        public void Explode(EquipmentObject obj)
+        {
+            if (obj.Equipment.Explosion?.Effect == null)
+            {
+                return;
+            }
+            world.SpawnTempFx(obj.Equipment.Explosion.Effect, obj.GetTransform().Position);
         }
 
         public void StopShip()
@@ -1285,17 +1304,16 @@ namespace LibreLancer
                 return false;
             }
 
-            var myPos = player.WorldTransform.Position;
+            var myPos = player.Transform.Position;
             var myVel = player.PhysicsComponent!.Body.LinearVelocity;
             var otherPos = GetSelectedTargetPosition();
             var otherVel = Selection.Selected.PhysicsComponent.Body.LinearVelocity;
-            var offset = otherPos - Selection.Selected.WorldTransform.Position;
+            var offset = otherPos - Selection.Selected.Transform.Position;
             otherVel += Vector3.Cross(Selection.Selected.PhysicsComponent.Body.AngularVelocity, offset);
             var speed = weapons.GetAverageGunSpeed();
-            if (speed <= float.Epsilon)
-            {
+            if (speed <= 0)
                 return false;
-            }            Aiming.GetTargetLeading(otherPos - myPos, otherVel - myVel, speed, out var t);
+            Aiming.GetTargetLeading(otherPos - myPos, otherVel - myVel, speed, out var t);
             worldPos = (otherPos + otherVel * t);
             bool vis;
             (screenPos, vis) = ScreenPosition(worldPos);
@@ -1311,11 +1329,11 @@ namespace LibreLancer
             {
                 var part = collisionGroup.ModelPart;
                 var localPosition = part.LocalTransform.Transform(part.Mesh?.Center ?? Vector3.Zero);
-                return selected.WorldTransform.Transform(localPosition);
+                return selected.Transform.Transform(localPosition);
             }
 
             Selection.SelectedPart = null;
-            return selected.WorldTransform.Position;
+            return selected.Transform.Position;
         }
 
         private Vector3 GetAimPoint()
@@ -1362,8 +1380,6 @@ namespace LibreLancer
             {
                 return;
             }
-
-            mouseTargeting.Update(delta);
 
             Input.Update();
 
@@ -1423,7 +1439,7 @@ namespace LibreLancer
             shipInput.Viewport = new Vector2(Game.Width, Game.Height);
             shipInput.Camera = _chaseCamera;
 
-            if ((mouseTargeting.MouseFlightFromHold || mouseFlight) && control.Active)
+            if (((isLeftDown && leftDownTimer < 0) || mouseFlight) && control.Active)
             {
                 var mX = Game.Mouse.X;
                 var mY = Game.Mouse.Y;
@@ -1675,7 +1691,7 @@ namespace LibreLancer
 
         private (Vector2 pos, bool visible) ScreenPosition(GameObject obj)
         {
-            return ScreenPosition(obj.WorldTransform.Position);
+            return ScreenPosition(obj.Transform.Position);
         }
 
         private GameObject? GetMouseSelection()
@@ -1688,7 +1704,7 @@ namespace LibreLancer
         {
             GameObject? result = null;
             var bestDistance = float.MaxValue;
-            var playerPosition = player.WorldTransform.Position;
+            var playerPosition = player.Transform.Position;
             foreach (var obj in world.Objects)
             {
                 if (obj.Kind != GameObjectKind.Waypoint)
@@ -1702,7 +1718,7 @@ namespace LibreLancer
                     continue;
                 }
 
-                var distance = Vector3.Distance(playerPosition, obj.WorldTransform.Position);
+                var distance = Vector3.Distance(playerPosition, obj.Transform.Position);
                 var pickRadius = MathHelper.Clamp(distance / 220f, 18f, 90f);
                 var mouseDistance = Vector2.Distance(new Vector2(mouseX, mouseY), pos);
                 if (mouseDistance <= pickRadius && mouseDistance < bestDistance)
@@ -1745,8 +1761,8 @@ namespace LibreLancer
 
         private bool ComputeBestPathToSelection(StarSystem system, Vector3 pos)
         {
-            var cruiseSpeed = player.GetFirstChildComponent<CEngineComponent>()?.Engine.CruiseSpeed ?? 300f;
-            if (!session.ComputeBestPathToSelection(sys, player.WorldTransform.Position, system, pos, cruiseSpeed))
+            var cruiseSpeed = player.CoreEquipment.Engine?.Equipment.CruiseSpeed ?? 300f;
+            if (!session.ComputeBestPathToSelection(sys, player.Transform.Position, system, pos, cruiseSpeed))
                 return false;
             RefreshActiveUserWaypoint(false, false);
             return true;
@@ -1767,7 +1783,7 @@ namespace LibreLancer
                 Nickname = $"user_waypoint_{userWaypointCounter++}",
                 Name = new ObjectName(1090) // Waypoint
             };
-            userWaypoint.SetLocalTransform(new Transform3D(pos, Quaternion.Identity));
+            userWaypoint.SetTransform(new Transform3D(pos, Quaternion.Identity));
             world.AddObject(userWaypoint);
             userWaypoint.Register(world);
 
@@ -1793,8 +1809,8 @@ namespace LibreLancer
                 return;
             }
 
-            var playerPosition = player.WorldTransform.Position;
-            var waypointPosition = userWaypoint.WorldTransform.Position;
+            var playerPosition = player.Transform.Position;
+            var waypointPosition = userWaypoint.Transform.Position;
             if (Vector3.Distance(playerPosition, waypointPosition) > UserWaypointReachDistance)
             {
                 return;
@@ -1819,14 +1835,14 @@ namespace LibreLancer
                 return;
             bestPathRecheckTimer = 0;
 
-            var cruiseSpeed = player.GetFirstChildComponent<CEngineComponent>()?.Engine.CruiseSpeed ?? 300f;
-            if (session.RecalculateBestPath(sys, player.WorldTransform.Position, cruiseSpeed))
+            var cruiseSpeed = player.CoreEquipment.Engine?.Equipment.CruiseSpeed ?? 300f;
+            if (session.RecalculateBestPath(sys, player.Transform.Position, cruiseSpeed))
                 RefreshActiveUserWaypoint(false, false);
         }
 
         private void UpdateWaypointRenderStyle()
         {
-            var playerPosition = player.WorldTransform.Position;
+            var playerPosition = player.Transform.Position;
             foreach (var obj in world.Objects)
             {
                 if (obj.Kind != GameObjectKind.Waypoint)
@@ -1835,7 +1851,7 @@ namespace LibreLancer
                 }
 
                 var selected = obj == Selection.Selected;
-                var distance = Vector3.Distance(playerPosition, obj.WorldTransform.Position);
+                var distance = Vector3.Distance(playerPosition, obj.Transform.Position);
                 var scale = selected ? MathHelper.Clamp(distance / 5000f, 1.5f, 18f) : 1f;
                 if (obj.RenderComponent is ModelRenderer renderer)
                 {
@@ -1869,7 +1885,7 @@ namespace LibreLancer
                     {
                         Name = new ObjectName(1091) // Mission Waypoint
                     };
-                    missionWaypoint.SetLocalTransform(new Transform3D(pos, Quaternion.Identity));
+                    missionWaypoint.SetTransform(new Transform3D(pos, Quaternion.Identity));
                     world.AddObject(missionWaypoint);
                     missionWaypoint.Register(world);
                 }
@@ -1895,10 +1911,10 @@ namespace LibreLancer
                 return;
             }
 
-            var cruiseSpeed = player.GetFirstChildComponent<CEngineComponent>()?.Engine.CruiseSpeed ?? 300f;
+            var cruiseSpeed = player.CoreEquipment.Engine?.Equipment.CruiseSpeed ?? 300f;
             if (session.ComputeBestPathToSelection(
                     sys,
-                    player.WorldTransform.Position,
+                    player.Transform.Position,
                     destination,
                     objective.Position,
                     cruiseSpeed))
@@ -1919,7 +1935,7 @@ namespace LibreLancer
                 var currentObject = world.GetObject(objective.Object);
                 if (currentObject != null)
                 {
-                    position = currentObject.WorldTransform.Position;
+                    position = currentObject.Transform.Position;
                     return true;
                 }
             }
@@ -1932,7 +1948,7 @@ namespace LibreLancer
             {
                 position = objective.Kind == ObjectiveKind.NavMarker
                     ? objective.Position
-                    : (world.GetObject(objective.Object)?.WorldTransform ?? Transform3D.Identity).Position;
+                    : (world.GetObject(objective.Object)?.Transform ?? Transform3D.Identity).Position;
                 return position != Vector3.Zero;
             }
 
@@ -1949,7 +1965,7 @@ namespace LibreLancer
             if (jumpObject == null)
                 return false;
 
-            position = world.GetObject(jumpObject.Nickname)?.WorldTransform.Position ?? jumpObject.Position;
+            position = world.GetObject(jumpObject.Nickname)?.Transform.Position ?? jumpObject.Position;
             return position != Vector3.Zero;
         }
 
@@ -1991,10 +2007,10 @@ namespace LibreLancer
             if (Selection.Selected?.Model != null)
             {
                 targetWireframe.Model = Selection.Selected.Model.RigidModel;
-                var lookAt = Matrix4x4.CreateLookAt(player.LocalTransform.Position,
-                    Vector3.Transform(Vector3.UnitZ * 4, player.LocalTransform.Matrix()), Vector3.UnitY);
+                var lookAt = Matrix4x4.CreateLookAt(player.Transform.Position,
+                    Vector3.Transform(Vector3.UnitZ * 4, player.Transform.Matrix()), Vector3.UnitY);
 
-                targetWireframe.Matrix = (lookAt * Selection.Selected.LocalTransform.Matrix()).ClearTranslation();
+                targetWireframe.Matrix = (lookAt * Selection.Selected.Transform.Matrix()).ClearTranslation();
                 targetWireframe.ChildModels.Clear();
                 targetWireframe.Parts.Clear();
 
@@ -2017,28 +2033,27 @@ namespace LibreLancer
                     Selection.SelectedPart = null;
                 }
 
-                foreach (var child in Selection.Selected.Children)
+                foreach (var child in Selection.Selected.AllEquipment)
                 {
-                    if (child.Model == null ||
-                        !GameObject.IsCargoPodChild(child))
+                    if (!child.TryGetModel(out var model))
                     {
                         continue;
                     }
 
-                    var childMatrix = child.LocalTransform.Matrix();
+                    var childMatrix = child.GetTransform().Matrix();
                     if (child.Attachment != null)
                     {
                         childMatrix *= child.Attachment.Transform.Matrix();
                     }
 
                     var healthPct = 1f;
-                    if (child.TryGetComponent<CHealthComponent>(out var health) && health.MaxHealth > 0)
+                    if (!child.Invincible)
                     {
-                        healthPct = MathHelper.Clamp(health.CurrentHealth / health.MaxHealth, 0, 1);
+                        healthPct = MathHelper.Clamp(child.Health / child.MaxHealth, 0, 1);
                     }
 
                     targetWireframe.ChildModels.Add(new TargetShipWireframe.ChildModel(
-                        child.Model.RigidModel,
+                        model,
                         childMatrix * targetWireframe.Matrix,
                         healthPct));
                 }
@@ -2112,7 +2127,6 @@ namespace LibreLancer
             }
 
             ui.RenderWidget(delta);
-            DrawClusterDebugHud();
             session.SetDebug(Game.Debug.Enabled);
             DrawDebugWindow(delta);
 
@@ -2128,9 +2142,6 @@ namespace LibreLancer
 
         public override void Exiting()
         {
-            ui.TextScale = previousTextScale;
-            clusterDebugText?.Dispose();
-            clusterDebugText = null;
             session.OnExit();
         }
     }

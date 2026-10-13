@@ -24,7 +24,6 @@ namespace LibreLancer.Database
 
         public DbSet<Character> Characters { get; set; }
         public DbSet<Account> Accounts { get; set; }
-        public DbSet<TransferSnapshotImport> TransferSnapshotImports { get; set; }
 
         protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
         {
@@ -40,7 +39,6 @@ namespace LibreLancer.Database
             modelBuilder.Entity<Reputation>().Property(x => x.RepGroup).HasColumnType("TEXT COLLATE NOCASE");
             // Indexes
             modelBuilder.Entity<Account>().HasIndex(x => x.AccountIdentifier);
-            modelBuilder.Entity<TransferSnapshotImport>().HasKey(x => x.TransferId);
 
             modelBuilder.Entity<VisitEntry>().HasIndex(x => new { x.CharacterId, x.Hash }).IsUnique();
             modelBuilder.Entity<VisitEntry>().HasIndex(x => x.CharacterId);
@@ -124,8 +122,8 @@ VisitValue=excluded.VisitValue, UpdateDate=excluded.UpdateDate WHERE VisitValue 
             var nowUtc = DateTime.UtcNow;
             foreach (var update in ChangeTracker
                          .Entries()
-                         .Where(x => x.Entity is BaseEntity &&
-                                     x.State is EntityState.Modified or EntityState.Added)
+                         .Where(x => x.Entity is BaseEntity && x.State == EntityState.Modified ||
+                                     x.State == EntityState.Added)
                          .Select(x => new { Entity = (BaseEntity)x.Entity, State = x.State })
                     )
             {

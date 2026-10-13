@@ -11,7 +11,6 @@ namespace LibreLancer.Server.Ai
     public class AiDockState : AiState
     {
         private GameObject target;
-        public GameObject Target => target;
         public GotoKind GotoKind;
         public AiDockState(GameObject target, GotoKind gotoKind)
         {

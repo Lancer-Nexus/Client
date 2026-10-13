@@ -4,16 +4,6 @@
 
 namespace LibreLancer.World
 {
-	public sealed record PIDControllerTransferState(double P, double I, double D, double Integral, double LastError)
-	{
-		public void Validate()
-		{
-			if (!double.IsFinite(P) || !double.IsFinite(I) || !double.IsFinite(D) ||
-				!double.IsFinite(Integral) || !double.IsFinite(LastError))
-				throw new System.IO.InvalidDataException("PID controller transfer state is invalid.");
-		}
-	}
-
 	public class PIDController
 	{
 		public double P;
@@ -22,19 +12,6 @@ namespace LibreLancer.World
 
         private double integral;
         private double lastError;
-
-		public PIDControllerTransferState CaptureTransferState() =>
-			new(P, I, D, integral, lastError);
-
-		public void RestoreTransferState(PIDControllerTransferState state)
-		{
-			state.Validate();
-			P = state.P;
-			I = state.I;
-			D = state.D;
-			integral = state.Integral;
-			lastError = state.LastError;
-		}
 
 		public void Reset()
 		{

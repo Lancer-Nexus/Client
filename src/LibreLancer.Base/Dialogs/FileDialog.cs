@@ -181,37 +181,14 @@ public static class FileDialog
         }
     }
 
-    // SDL retains filter pointers until its asynchronous dialog callback runs.
-    private sealed class SDLDialogContext(SDL3.SDL_DialogFileCallback callback, SDLFilters? filters) : IDisposable
-    {
-        public SDL3.SDL_DialogFileCallback Callback { get; } = callback;
-        public void Dispose() => filters?.Dispose();
-    }
-
-    private static GCHandle CreateSDLDialogHandle(SDL3.SDL_DialogFileCallback callback, SDLFilters? filters = null) =>
-        GCHandle.Alloc(new SDLDialogContext(callback, filters), GCHandleType.Normal);
-
-    private static void ReleaseSDLDialogHandle(IntPtr userdata)
-    {
-        var handle = GCHandle.FromIntPtr(userdata);
-        try
-        {
-            ((SDLDialogContext)handle.Target!).Dispose();
-        }
-        finally
-        {
-            handle.Free();
-        }
-    }
-
     private static unsafe void ThrowNfdError() => throw new Exception(Marshal.PtrToStringUTF8((IntPtr) NFD.NFD_GetError()));
     public static unsafe void Open(Action<string?> onOpen, FileDialogFilters? filters = null, string? defaultPath = null)
     {
         if (Sdl3Handle != IntPtr.Zero)
         {
-            var sf = SDLFilters.Create(filters);
+            using var sf = SDLFilters.Create(filters);
             SDL3.SDL_DialogFileCallback cb = Callback;
-            var cbh = CreateSDLDialogHandle(cb, sf);
+            var cbh = GCHandle.Alloc(cb, GCHandleType.Normal);
             SDL3.SDL_ShowOpenFileDialog(cb,
                 (IntPtr)cbh,
                 Sdl3Handle,
@@ -224,30 +201,26 @@ public static class FileDialog
 
             void Callback(IntPtr userdata, IntPtr fileList, int filter)
             {
-                try
-                {
-                    if (fileList == IntPtr.Zero)
-                    {
-                        return;
-                    }
+                var self = GCHandle.FromIntPtr(userdata);
+                self.Free();
 
-                    var files = (IntPtr*)fileList;
-                    if (*files == IntPtr.Zero)
-                    {
-                        return;
-                    }
-
-                    onOpen(Marshal.PtrToStringUTF8(*files)!);
-                }
-                finally
+                if (fileList == IntPtr.Zero)
                 {
-                    ReleaseSDLDialogHandle(userdata);
+                    return;
                 }
+
+                var files = (IntPtr*)fileList;
+                if (*files == IntPtr.Zero)
+                {
+                    return;
+                }
+
+                onOpen(Marshal.PtrToStringUTF8(*files)!);
             }
         }
 
         NFD.NFD_ClearError();
-        using var f = NfdFilters.Create(filters);
+        var f = NfdFilters.Create(filters);
         void* path = null;
         using var def = Utf8Native.Create(defaultPath);
         var res = NFD.NFD_OpenDialogN(&path, f, f.Count, (void*)def.Buffer);
@@ -268,31 +241,26 @@ public static class FileDialog
         if (Sdl3Handle != IntPtr.Zero)
         {
             SDL3.SDL_DialogFileCallback cb = Callback;
-            var cbh = CreateSDLDialogHandle(cb);
+            var cbh = GCHandle.Alloc(cb, GCHandleType.Normal);
             SDL3.SDL_ShowOpenFolderDialog(cb, (IntPtr)cbh, Sdl3Handle, null, false);
             return;
 
             void Callback(IntPtr userdata, IntPtr filelist, int filter)
             {
-                try
+                var self = GCHandle.FromIntPtr(userdata);
+                self.Free();
+                if (filelist == IntPtr.Zero)
                 {
-                    if (filelist == IntPtr.Zero)
-                    {
-                        return;
-                    }
-
-                    var files = (IntPtr*)filelist;
-                    if (*files == IntPtr.Zero)
-                    {
-                        return;
-                    }
-
-                    onOpen(Marshal.PtrToStringUTF8(*files)!);
+                    return;
                 }
-                finally
+
+                var files = (IntPtr*)filelist;
+                if (*files == IntPtr.Zero)
                 {
-                    ReleaseSDLDialogHandle(userdata);
+                    return;
                 }
+
+                onOpen(Marshal.PtrToStringUTF8(*files)!);
             }
         }
 
@@ -316,9 +284,9 @@ public static class FileDialog
     {
         if (Sdl3Handle != IntPtr.Zero)
         {
-            var sf = SDLFilters.Create(filters);
+            using var sf = SDLFilters.Create(filters);
             SDL3.SDL_DialogFileCallback cb = Callback;
-            var cbh = CreateSDLDialogHandle(cb, sf);
+            var cbh = GCHandle.Alloc(cb, GCHandleType.Normal);
             SDL3.SDL_ShowSaveFileDialog(cb,
                 (IntPtr)cbh,
                 Sdl3Handle,
@@ -329,30 +297,25 @@ public static class FileDialog
 
             void Callback(IntPtr userdata, IntPtr filelist, int filter)
             {
-                try
+                var self = GCHandle.FromIntPtr(userdata);
+                self.Free();
+                if (filelist == IntPtr.Zero)
                 {
-                    if (filelist == IntPtr.Zero)
-                    {
-                        return;
-                    }
-
-                    var files = (IntPtr*)filelist;
-                    if (*files == IntPtr.Zero)
-                    {
-                        return;
-                    }
-
-                    onSave(Marshal.PtrToStringUTF8(*files)!);
+                    return;
                 }
-                finally
+
+                var files = (IntPtr*)filelist;
+                if (*files == IntPtr.Zero)
                 {
-                    ReleaseSDLDialogHandle(userdata);
+                    return;
                 }
+
+                onSave(Marshal.PtrToStringUTF8(*files)!);
             }
         }
 
         NFD.NFD_ClearError();
-        using var f = NfdFilters.Create(filters);
+        var f = NfdFilters.Create(filters);
         void* path = null;
         var res = NFD.NFD_SaveDialogN(&path, f, f.Count, null, null);
 
@@ -375,9 +338,9 @@ public static class FileDialog
     {
         if (Sdl3Handle != IntPtr.Zero)
         {
-            var sf = SDLFilters.Create(filters);
+            using var sf = SDLFilters.Create(filters);
             SDL3.SDL_DialogFileCallback cb = Callback;
-            var cbh = CreateSDLDialogHandle(cb, sf);
+            var cbh = GCHandle.Alloc(cb, GCHandleType.Normal);
             SDL3.SDL_ShowOpenFileDialog(cb,
                 (IntPtr)cbh,
                 Sdl3Handle,
@@ -390,27 +353,22 @@ public static class FileDialog
 
             void Callback(IntPtr userdata, IntPtr filelist, int filter)
             {
-                try
+                var self = GCHandle.FromIntPtr(userdata);
+                self.Free();
+                if (filelist == IntPtr.Zero)
                 {
-                    if (filelist == IntPtr.Zero)
-                    {
-                        return;
-                    }
+                    return;
+                }
 
-                    var files = (IntPtr*)filelist;
-                    List<string> strings = [];
-                    var i = 0;
-                    while (files[i] != IntPtr.Zero)
-                    {
-                        strings.Add(Marshal.PtrToStringUTF8(files[i])!);
-                        i++;
-                    }
-                    onOpen(strings.ToArray());
-                }
-                finally
+                var files = (IntPtr*)filelist;
+                List<string> strings = [];
+                var i = 0;
+                while (files[i] != IntPtr.Zero)
                 {
-                    ReleaseSDLDialogHandle(userdata);
+                    strings.Add(Marshal.PtrToStringUTF8(files[i])!);
+                    i++;
                 }
+                onOpen(strings.ToArray());
             }
         }
 

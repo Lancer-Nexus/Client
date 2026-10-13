@@ -17,7 +17,6 @@ namespace LibreLancer.Interface
         // State
         public float ViewportWidth;
         public float ViewportHeight;
-        public float TextScale { get; set; } = 1f;
         public float MouseX;
         public float MouseY;
         public bool MouseLeftDown;
@@ -236,7 +235,7 @@ namespace LibreLancer.Interface
         {
             var ratio = ViewportHeight / 480;
             var pixels = inputPoints * ratio;
-            return (int) Math.Floor(pixels * TextScale);
+            return (int) Math.Floor(pixels);
         }
 
         public void Update(double globalTime, double deltaTime, int mouseX, int mouseY, bool leftDown)
@@ -497,7 +496,7 @@ namespace LibreLancer.Interface
                 var measuredText = RenderContext.Renderer2D.MeasureStringCached(
                     ref rolloverCache, fnt, sz, requestedRollover, false,
                     shadow != null, TextAlignment.Left, maxWidth);
-                var rectSize = PixelsToPoints(measuredText);
+                var rectSize = PixelsToPoints(measuredText.Size);
 
                 var ttRect = new RectangleF(0, 0, rectSize.X + 4, rectSize.Y + 2);
                 style?.Background?.Draw(this, dlist, ttRect);
@@ -528,7 +527,7 @@ namespace LibreLancer.Interface
                 var measuredText = RenderContext.Renderer2D.MeasureStringCached(
                     ref tooltipCache, fnt, sz, requestedTooltip, false,
                     shadow != null, TextAlignment.Left, maxWidth);
-                var rectSize = PixelsToPoints(measuredText);
+                var rectSize = PixelsToPoints(measuredText.Size);
 
                 var rectOffset = style?.OffsetY ?? 0;
 

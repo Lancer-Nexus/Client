@@ -918,7 +918,7 @@ namespace LibreLancer
                             break;
                         case ScriptState.Cutscene:
                         case ScriptState.Enter:
-                            SkipCurrentSceneScript();
+                            SceneOnScriptFinished(waitingForFinish!);
                             break;
                     }
                 }
@@ -928,19 +928,6 @@ namespace LibreLancer
                     paused = true;
                     ui.Event("Pause");
                 }
-            }
-        }
-
-        private void SkipCurrentSceneScript()
-        {
-            if (waitingForFinish == null)
-            {
-                return;
-            }
-
-            if (scene?.FinishScript(waitingForFinish) != true)
-            {
-                SceneOnScriptFinished(waitingForFinish);
             }
         }
 
@@ -955,8 +942,6 @@ namespace LibreLancer
             {
                 return;
             }
-
-            playerShip.Children.RemoveAll(x => x.TryGetComponent<EquipmentComponent>(out _));
 
             foreach (var mount in session.Items.Where(x => !string.IsNullOrEmpty(x.Hardpoint)))
             {
@@ -1029,11 +1014,10 @@ namespace LibreLancer
             var ctx = ThnRoomHandler.CreateContext(currentBase, currentRoom);
             ctx.PlayerShip = playerShip;
 
-            if (playerShip.TryGetComponent<CEngineComponent>(out var cengine))
+            if (playerShip.CoreEquipment.Engine != null)
             {
-                ctx.PlayerEngine = cengine;
-                cengine.Active = false;
-                cengine.PlaySound = false;
+                ctx.PlayerEngine = playerShip.CoreEquipment.Engine;
+                ctx.PlayerEngine.Active = false;
             }
 
 
@@ -1364,15 +1348,21 @@ namespace LibreLancer
             {
                 return;
             }
-
-            playerShip.SetLocalTransform(playerShip.HardpointExists("HpMount")
+            var childTransform = playerShip.HardpointExists("HpMount")
                 ? playerShip.GetHardpoint("HpMount")!.Transform.Inverse()
-                : Transform3D.Identity);
-
-            if (shipMarker.Object != null)
+                : Transform3D.Identity;
+            // Set up object
+            var thnObject = new ThnSceneObject()
             {
-                playerShip.Reparent(shipMarker.Object);
-            }
+                Name = $"$$_PLAYER_SHIP",
+                Object = playerShip,
+            };
+            thnObject.Attachments.Add(
+                new ThnAttachment(new ThnObjectParent(shipMarker, null, null) { ChildOffset = childTransform })
+                {
+                    Position = true, Orientation = true
+                });
+            scene.AddObject(thnObject);
         }
 
         private void RoomDoSceneScript(ThnScript? sc, ScriptState state)
@@ -1389,7 +1379,7 @@ namespace LibreLancer
             waitingForFinish = sc;
             if (hasLandingAnimation && state == ScriptState.Enter && sc != null)
                 locationAnnouncementDelay = Math.Max(0, sc.Duration - 8);
-            scene!.BeginScene(Scripts(sceneScripts, [sc]), sceneScripts.Length);
+            scene!.BeginScene(Scripts(sceneScripts, [sc]));
             PopulateRoomNpcs();
             string[] ships = [];
 
@@ -1410,14 +1400,24 @@ namespace LibreLancer
 
                 var toSellShip = Game.GameData.Items.Ships.Get(ships[i])!;
                 // Set up object
-                var obj = new GameObject(toSellShip.ModelFile!.LoadFile(Game.ResourceManager)!, Game.ResourceManager,
-                    true, false) { Parent = marker.Object };
-                marker.Object!.Children.Add(obj);
-
-                if (obj.HardpointExists("HpMount"))
+                var thnObject = new ThnSceneObject()
                 {
-                    obj.SetLocalTransform(obj.GetHardpoint("HpMount")!.Transform.Inverse());
+                    Name = $"$$_SOLD_SHIP_{i}",
+                    Object = new GameObject(toSellShip.ModelFile!.LoadFile(Game.ResourceManager)!, Game.ResourceManager,
+                        true, false),
+                };
+                var offset = Transform3D.Identity;
+                if (thnObject.Object.HardpointExists("HpMount"))
+                {
+                    offset = thnObject.Object.GetHardpoint("HpMount")!.Transform.Inverse();
                 }
+
+                thnObject.Attachments.Add(
+                    new ThnAttachment(new ThnObjectParent(marker, null, null) { ChildOffset = offset })
+                    {
+                        Position = true, Orientation = true
+                    });
+                scene.AddObject(thnObject);
             }
 
             if (sc == null)

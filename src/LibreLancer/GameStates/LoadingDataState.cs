@@ -55,7 +55,6 @@ namespace LibreLancer
                 Game.ChangeState(Game.Config.CustomState != null
                     ? Game.Config.CustomState(Game)
                     : new LuaMenu(Game));
-                UpdaterStartupHealth.AcknowledgeReady();
             });
         }
     }

@@ -1,11 +1,10 @@
-﻿// ReSharper disable InconsistentNaming
+// ReSharper disable InconsistentNaming
 
 namespace LibreLancer.Utf.Ale;
 
 public enum AleProperty : uint
 {
     // Manual Entry
-    DustField_MaxRadius = 0xE63AA248,
     BeamApp_LineAppearance = 0x1C65B7B9,
     // FLAleCrc constants
     AirField_Approach = 0x10423CEB,

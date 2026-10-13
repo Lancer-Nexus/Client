@@ -11,8 +11,6 @@ Maintain the Lancer Nexus client fork while preserving compatibility with upstre
 - The active game instance remains authoritative until the MySQL-backed lease changes atomically at `Committed`; the client must handle rejection, expiry and recovery states.
 - Shared, versioned MessagePack contracts and capabilities belong in `Protocol`; Redis is never exposed to the client.
 
-For clustered LLServer character persistence, register the new display name and initial SaveGame with Gateway under the active account/session before publishing it to the character menu; roll the local compatibility row back on rejection. Read the account roster from Gateway and map Gateway IDs to separate local SQLite cache IDs. Rebuild missing cache rows only from a validated Gateway snapshot; if both a snapshot and local row are absent, omit that legacy character rather than inventing state. Resolve the Gateway-owned character ID and acquire its lease after selection. Load a lease-fenced Gateway SaveGame snapshot when present; only bootstrap revision 1 from the matching local SQLite row when no Gateway snapshot exists. Persist explicit saves, one-minute live checkpoints and committed transfer snapshots using sequential Gateway snapshot revisions. Delete through Gateway's history-preserving tombstone before removing the local cache row. On normal disconnect, capture and confirm the final Gateway snapshot before releasing the exact session, token and fencing version; retain the lease when persistence or release fails. On graceful shutdown, stop new logins, drain in-flight login tasks, pause world simulation, capture each active leased character on the simulation loop, and await its Gateway snapshot write before stopping the server. Characters in a committed transfer use the transfer snapshot path; abrupt termination cannot run these checkpoints. Treat lease rejection, invalid snapshots and unavailable snapshot storage as fail-closed conditions.
-
 ## Rules
 
 - Keep the LibreLancer fork baseline untouched while authoring Nexus work. Store every Nexus client or engine modification only in a focused patch under `patches/`, register it in `patches/series`, and let the build patch applier apply it immediately before compilation.
@@ -38,8 +36,8 @@ For clustered LLServer character persistence, register the new display name and 
 - The main solution is `LibreLancer.sln`; it contains the client, server, editor, launcher, tests and native-integrated projects. Do not invent a second solution or packaging path for MMO work.
 - The primary automated test project is `src/LibreLancer.Tests/LibreLancer.Tests.csproj`. Run the relevant test subset after client changes; use the full solution build when the change crosses shared engine or project boundaries.
 - Native components are configured through the existing `CMakeLists.txt` and dependencies checked by `scripts/depcheck_unix`; do not replace this with a service-style `dotnet restore`-only workflow.
+- Maintain native decoder and text-renderer changes as `lancerdecode` and `blurgtext` targets in `patches/series`, with `base-lancerdecode-commit` and `base-blurgtext-commit` pins. Apply and verify these overlays before building; do not commit modified native submodule sources or publish vendor pointers for local fixes.
 - The current project files target `net10.0`. Keep cluster functionality optional and isolated behind existing configuration/capability boundaries while upstream synchronization remains possible.
-- LLServer's managed FLHook compatibility adapter is optional. Build it only with `-p:EnableFlHookCompat=true`; its runtime stays disabled unless `FlHookCompatEnabled` is explicitly set in a clustered server profile. Keep all related LibreLancer changes in numbered patches under `patches/series`.
 - `src/LibreLancer/LibreLancer.csproj` references the shared `Protocol` submodule for the optional Gateway version handshake; initialize that submodule before building the client.
 
 ## Working-model escalation
@@ -55,7 +53,7 @@ Permission changes use typed Gateway requests and are authorized centrally by Ad
 
 Every player-facing server command that is currently guarded by `Character.Admin` must receive its own `command.<name>` permission and be checked fail-closed through Gateway with the account, session, character lease, instance and system context before execution. Keep the command-to-permission catalog in [Administration's permission guide](../Administration/docs/permission-system.md#permissions-fuer-bestehende-librelancer-adminbefehle). Do not silently retain the legacy flag as a clustered fallback; standalone OP fallback must remain explicitly isolated.
 
-Cluster builds opt into LLServer permission revision synchronization with `-p:EnableClusterIntegration=true`. A clustered instance requires `LANCER_NEXUS_GAME_INSTANCE_KEY` and `LANCER_NEXUS_PERMISSION_REDIS_ENDPOINT=host:port`; runtime status stays not-ready until the Redis subscription is live and the Gateway SQL snapshot is activated and acknowledged. Standalone builds keep cluster integration disabled. See [the Administration permission system guide](../Administration/docs/permission-system.md) for the command syntax and local operator boundaries.
+See [the Administration permission system guide](../Administration/docs/permission-system.md) for the command syntax, local operator boundaries, and the fact that LLServer revision-sync startup is still pending.
 
 1. Identify whether the change belongs in the client or in Gateway/Protocol/Cluster.
 2. Keep the smallest possible patch against the upstream fork.
@@ -90,9 +88,9 @@ LLServer SystemIds defines owned worlds; SystemId is the primary fallback. Trave
 - Before recording a manually applied overlay, reconstruct and compare the full
   series with `python3 scripts/verify-lancer-nexus-overlay.py`. The record command
   enforces this check and requires Python 3. Only CRLF/LF differences are ignored.
-- A GUI compilation failure involving removed admin types can indicate unapplied
-  patch 1098. Inspect the local overlay against a fresh reconstruction before
-  adding replacement contracts or another patch. Patch 1097 also restores failure
+- A GUI compilation failure involving removed admin types can indicate an
+  incomplete server operations bundle. Inspect the local overlay against a fresh reconstruction before
+  adding replacement contracts or another patch. The build integration bundle also restores failure
   propagation in the build entry point.
 - The integrity checker is read-only; preserve unrelated modifications and repair
   identified overlay drift by applying the relevant maintained patch.
@@ -128,3 +126,11 @@ LLServer SystemIds defines owned worlds; SystemId is the primary fallback. Trave
 ## Restart-time ambient NPC recovery
 
 - Before publishing a world or starting population simulation, drain pending checkpoint writes and restore that system's current ambient NPC checkpoints from Coordinator. Resolve stable NPC references and preserve the serialized AI/autopilot state. Keep recovery fail-closed when the checkpoint store is unavailable or corrupt; only a Coordinator 404 after listing means ownership changed and may be skipped.
+
+## Consolidated functional bundles
+
+The active series is eleven Client bundles and two native bundles, described in
+`patches/README.md`. Preserve the pinned baselines and the recorded overlay
+hashes when regenerating a bundle. Validate a fresh complete reconstruction
+before recording the applied state or publishing; historical patch numbers
+in older audit documents refer to Git history.

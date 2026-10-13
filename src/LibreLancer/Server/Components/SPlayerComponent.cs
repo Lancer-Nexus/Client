@@ -5,7 +5,6 @@ using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Numerics;
 using LibreLancer.Data;
-using LibreLancer.Data.GameData;
 using LibreLancer.Data.GameData.Items;
 using LibreLancer.Data.GameData.World;
 using LibreLancer.Missions;
@@ -14,6 +13,7 @@ using LibreLancer.Net;
 using LibreLancer.Net.Protocol;
 using LibreLancer.World;
 using LibreLancer.World.Components;
+using LibreLancer.World.Equipments;
 using LiteNetLib;
 
 namespace LibreLancer.Server.Components
@@ -237,9 +237,9 @@ namespace LibreLancer.Server.Components
         private bool TryScan(GameObject obj, GameWorld world, [MaybeNullWhen(false)] out NetLoadout loadout)
         {
             loadout = null;
-            return Parent.TryGetComponent<ScannerComponent>(out var scanner) &&
+            return Parent.TryFindEquipment<Scanner>(out var scanner) &&
                    scanner.CanScan(obj) &&
-                   world.Server.TryScanCargo(obj, out loadout);
+                   world.Server!.TryScanCargo(obj, out loadout);
         }
 
         private const double JettisonShieldSuppressionTime = 5.0;
@@ -269,23 +269,23 @@ namespace LibreLancer.Server.Components
             }
             Player.UpdateCurrentInventory();
 
-            Parent.GetFirstChildComponent<SShieldComponent>()?.Suppress(JettisonShieldSuppressionTime, world.GameWorld);
+            Parent.CoreEquipment.Shield?.Suppress(JettisonShieldSuppressionTime, world.GameWorld);
             AnimateJettisonBay(world, character.Ship, close: false);
             world.DelayAction(() =>
             {
                 if ((Parent.Flags & GameObjectFlags.Exists) == 0)
                     return;
 
-                var spawnTransform = Parent.WorldTransform;
+                var spawnTransform = Parent.Transform;
                 var launchDirection = Vector3.Transform(-Vector3.UnitZ, spawnTransform.Orientation);
                 var bayStart = GetJettisonBayHardpoint(character.Ship?.HpBaySurface);
                 if (bayStart != null)
-                    spawnTransform = bayStart.Transform * Parent.WorldTransform;
+                    spawnTransform = bayStart.Transform * Parent.Transform;
 
                 var bayTarget = GetJettisonBayHardpoint(character.Ship?.HpBayExternal);
                 if (bayTarget != null)
                 {
-                    var targetTransform = bayTarget.Transform * Parent.WorldTransform;
+                    var targetTransform = bayTarget.Transform * Parent.Transform;
                     var offset = targetTransform.Position - spawnTransform.Position;
                     if (offset.LengthSquared() > float.Epsilon)
                         launchDirection = Vector3.Normalize(offset);
@@ -336,7 +336,7 @@ namespace LibreLancer.Server.Components
         private const float FormationLeaderCruiseCatchupDistance = 450;
 
         private static Vector3 ShipPosition(GameObject ship) =>
-            ship.PhysicsComponent?.Body?.Position ?? ship.WorldTransform.Position;
+            ship.PhysicsComponent?.Body?.Position ?? ship.Transform.Position;
 
         private static bool LocalCruiseStarted(GameObject ship) =>
             ship.TryGetComponent<ShipPhysicsComponent>(out var phys) &&
@@ -350,8 +350,8 @@ namespace LibreLancer.Server.Components
                 return true;
             }
 
-            return ship.TryGetComponent<SEngineComponent>(out var engine) &&
-                   engine.CruiseThrust is CruiseThrustState.CruiseCharging or CruiseThrustState.Cruising;
+            return
+                ship.CoreEquipment.Engine?.CruiseThrust is CruiseThrustState.CruiseCharging or CruiseThrustState.Cruising;
         }
 
         private bool AllowFormationCruise()
@@ -424,7 +424,7 @@ namespace LibreLancer.Server.Components
                 Player.RpcClient.UpdateFormation(Parent.Formation.ToNetFormation(Parent));
             }
 
-            var playerPosition = Parent.WorldTransform.Position;
+            var playerPosition = Parent.Transform.Position;
             var system = world.Server?.System;
             if (system != null)
             {
@@ -434,7 +434,7 @@ namespace LibreLancer.Server.Components
                 {
                     if (obj.SystemObject == null ||
                         obj.SystemObject.Archetype?.CanVisit != true ||
-                        Vector3.Distance(playerPosition, obj.LocalTransform.Position) > Player.GetVisitDistance(obj.SystemObject))
+                        Vector3.Distance(playerPosition, obj.Transform.Position) > Player.GetVisitDistance(obj.SystemObject))
                     {
                         continue;
                     }
@@ -512,37 +512,6 @@ namespace LibreLancer.Server.Components
             {
                 yield return new NetShipCargo(i.ID, i.Equipment!.CRC, null, 255, i.Count, i.IsMissionItem);
             }
-        }
-
-        internal List<BasicCargo> TakeLootableCargoForFuse()
-        {
-            var character = Player.Character;
-            if (character == null)
-            {
-                return [];
-            }
-
-            var slots = character.Items
-                .Where(x => string.IsNullOrEmpty(x.Hardpoint) && x.Equipment?.LootAppearance != null)
-                .ToArray();
-            if (slots.Length == 0)
-            {
-                return [];
-            }
-
-            var result = new List<BasicCargo>(slots.Length);
-            using (var transaction = character.BeginTransaction())
-            {
-                foreach (var slot in slots)
-                {
-                    result.Add(new BasicCargo(slot.Equipment!, slot.Count));
-                    Player.RpcClient.DeleteSlot(slot.ID);
-                    transaction.RemoveCargo(slot, slot.Count);
-                }
-            }
-
-            Player.UpdateCurrentInventory();
-            return result;
         }
     }
 }

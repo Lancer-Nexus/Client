@@ -7,7 +7,7 @@ namespace LibreLancer.Server.ConsoleCommands;
 public class SpawnLootCommand : IConsoleCommand
 {
     public string Name => "spawnloot";
-    public string? Permission => "command.spawnloot";
+    public bool Admin => true;
     public void Run(Player player, string arguments)
     {
         if (!ConsoleCommands.ParseString<string, int>(arguments, out var l, out var count))
@@ -36,7 +36,7 @@ public class SpawnLootCommand : IConsoleCommand
             }
             else
             {
-                var pos = p.LocalTransform.Transform(new Vector3(0, 0, 20));
+                var pos = p.Transform.Transform(new Vector3(0, 0, 20));
                 player.Space.World.SpawnLoot(eq.LootAppearance, eq, count, new Transform3D(pos, Quaternion.Identity));
             }
         });

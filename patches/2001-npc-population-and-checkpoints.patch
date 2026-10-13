@@ -1,0 +1,3695 @@
+diff --git a/src/LibreLancer/Server/Components/SNPCCargoComponent.cs b/src/LibreLancer/Server/Components/SNPCCargoComponent.cs
+index c680c0a..df7061f 100644
+--- a/src/LibreLancer/Server/Components/SNPCCargoComponent.cs
++++ b/src/LibreLancer/Server/Components/SNPCCargoComponent.cs
+@@ -53,4 +53,16 @@ public class SNPCCargoComponent : AbstractCargoComponent
+         var slot = Cargo.FirstOrDefault(x => x.Item is T);
+         return (T) slot.Item;
+     }
++
++    internal List<BasicCargo> TakeLootableCargoForFuse()
++    {
++        var result = new List<BasicCargo>();
++        for (var i = Cargo.Count - 1; i >= 0; i--)
++        {
++            if (Cargo[i].Item.LootAppearance == null) continue;
++            result.Add(Cargo[i]);
++            Cargo.RemoveAt(i);
++        }
++        return result;
++    }
+ }
+diff --git a/src/LibreLancer/Server/Components/SNPCComponent.cs b/src/LibreLancer/Server/Components/SNPCComponent.cs
+index 95ee1ca..f42bbf6 100644
+--- a/src/LibreLancer/Server/Components/SNPCComponent.cs
++++ b/src/LibreLancer/Server/Components/SNPCComponent.cs
+@@ -1,6 +1,9 @@
+ using System;
+ using System.Collections.Generic;
++using System.IO;
++using System.Linq;
+ using System.Numerics;
++using System.Text.Json;
+ using LibreLancer.Data.GameData;
+ using LibreLancer.Data.Schema.Pilots;
+ using LibreLancer.Data.Schema.Ships;
+@@ -21,13 +24,39 @@ namespace LibreLancer.Server.Components
+         public Accessory? CommHelmet;
+
+         public AiState? CurrentDirective;
++        private string previousDirectiveId = "none";
++        private double directiveElapsedSeconds;
+         private NPCManager manager;
+         public MissionRuntime? MissionRuntime;
+
+         public Pilot? Pilot;
+         public StateGraph? StateGraph;
+
+-        private Random random = new();
++        public Guid NpcId { get; set; }
++        public bool TerminalCheckpointPending { get; set; }
++        public long OwnershipVersion { get; set; }
++        public bool PopulationFleeing { get; set; }
++        public ulong? TradeCargoUnitPrice { get; set; }
++
++        private readonly SnapshotableRandom random = new();
++
++        /// <summary>Capture or restore the random stream as part of an NPC runtime snapshot.</summary>
++        public ulong TransferRandomState
++        {
++            get => random.State;
++            set => random.State = value;
++        }
++
++        public string TransferPreviousDirectiveId => previousDirectiveId;
++        public double TransferDirectiveElapsedSeconds => directiveElapsedSeconds;
++        public double TransferMissileTimer => missileTimer;
++
++        public void RestoreTransferTimers(string previousDirective, double elapsedSeconds, double missileCooldown)
++        {
++            previousDirectiveId = string.IsNullOrWhiteSpace(previousDirective) ? "none" : previousDirective;
++            directiveElapsedSeconds = Math.Max(0, elapsedSeconds);
++            missileTimer = Math.Max(0, missileCooldown);
++        }
+
+         public float GetStateValue(StateGraphEntry row, StateGraphEntry column, float defaultVal = 0.0f)
+         {
+@@ -68,6 +97,25 @@ namespace LibreLancer.Server.Components
+
+         public void Docked()
+         {
++            if (MissionRuntime != null)
++            {
++                if (Parent.TryGetComponent<AutopilotComponent>(out var autopilot))
++                    autopilot.Cancel();
++                if (Parent.TryGetComponent<ShipSteeringComponent>(out var steering))
++                {
++                    steering.InThrottle = 0;
++                    steering.Cruise = false;
++                }
++                return;
++            }
++            if (MissionRuntime is null && NpcId != Guid.Empty && OwnershipVersion > 0 &&
++                !TerminalCheckpointPending &&
++                manager.World.Server.TryQueueNpcTerminalCheckpoint(manager.World, Parent,
++                    LancerNexus.Protocol.NpcRetirementReasonV1.Docked, () => manager.Despawn(Parent, false)))
++            {
++                TerminalCheckpointPending = true;
++                return;
++            }
+             manager.Despawn(Parent, false);
+         }
+
+@@ -78,7 +126,9 @@ namespace LibreLancer.Server.Components
+
+         public void SetState(AiState? state, GameWorld world)
+         {
++            previousDirectiveId = CurrentDirective?.GetType().Name ?? "none";
+             this.CurrentDirective = state;
++            directiveElapsedSeconds = 0;
+             lastStateChangeReason = state == null ? "directive cleared" : $"directive set: {state.GetDebugInfo()}";
+             lastBlockReason = state == null ? "none" : "directive active";
+             state?.OnStart(Parent, world, this);
+@@ -126,6 +176,166 @@ namespace LibreLancer.Server.Components
+             stayInRangeRadius = 0;
+         }
+
++        internal NpcAiTransferExtensionV1 CaptureTransferState()
++        {
++            var directiveTarget = CurrentDirective switch
++            {
++                AiAttackState attack => attack.Target,
++                AiDockState dock => dock.Target,
++                _ => null
++            };
++            var selectedTarget = Parent.GetComponent<SelectedTargetComponent>()?.Selected;
++            return new NpcAiTransferExtensionV1
++            {
++                DirectiveTarget = CaptureObjectReference(directiveTarget),
++                SelectedTarget = CaptureObjectReference(selectedTarget),
++                SteeringRollController = Parent.GetComponent<ShipSteeringComponent>()?.CaptureRollControllerTransferState()
++                    ?? throw new InvalidDataException("NPC steering controller is missing during transfer capture."),
++                Steering = Parent.GetComponent<ShipSteeringComponent>()?.CaptureNpcTransferState()
++                    ?? throw new InvalidDataException("NPC steering component is missing during transfer capture."),
++                Physics = Parent.GetComponent<ShipPhysicsComponent>()?.CaptureNpcTransferState()
++                    ?? throw new InvalidDataException("NPC physics component is missing during transfer capture."),
++                GotoKind = CurrentDirective is AiDockState dockDirective ? (int)dockDirective.GotoKind : null,
++                CurrentState = currentState.ToString(),
++                PreviousState = previousState.ToString(),
++                TimeInState = timeInState,
++                MissileTimer = missileTimer,
++                FireTimer = fireTimer,
++                BurstTimer = burstTimer,
++                InBurst = inBurst,
++                FireCycle = fireCycle,
++                WeaponGroupIndex = weaponGroupIndex,
++                DamageTimer = damageTimer,
++                DamageTaken = damageTaken,
++                EvadeX = evadeX,
++                EvadeY = evadeY,
++                EvadeZ = evadeZ,
++                EvadeThrust = evadeThrust,
++                BuzzDirection = new NpcTransferVectorV1(buzzDirection.X, buzzDirection.Y, buzzDirection.Z),
++                StayInRangeTarget = CaptureObjectReference(stayInRangeObject),
++                StayInRangePoint = new NpcTransferVectorV1(stayInRangePoint.X, stayInRangePoint.Y, stayInRangePoint.Z),
++                StayInRangeRadius = stayInRangeRadius,
++                PopulationFleeing = PopulationFleeing,
++                TradeCargoUnitPrice = TradeCargoUnitPrice,
++                AutoTurret = Parent.TryGetComponent<SAutoTurretComponent>(out var autoTurret)
++                    ? autoTurret.CaptureTransferState()
++                    : null
++            };
++        }
++
++        internal void RestoreTransferState(NpcAiTransferExtensionV1 state,
++            Func<NpcTransferObjectReferenceV1, GameObject?> resolveReference)
++        {
++            ValidateTransferState(state);
++
++            var stayTarget = state.StayInRangeTarget is null ? null : resolveReference(state.StayInRangeTarget)
++                ?? throw new InvalidDataException("NPC stay-in-range target could not be resolved.");
++            // Selected targets are transient AI/UI state. They can point to an NPC
++            // from a checkpoint that has not been restored yet, so drop stale references.
++            var selectedTarget = state.SelectedTarget is null ? null : resolveReference(state.SelectedTarget);
++            if (state.SteeringRollController is null)
++                throw new InvalidDataException("NPC steering controller transfer state is missing.");
++            (Parent.GetComponent<ShipSteeringComponent>() ??
++                throw new InvalidDataException("NPC steering component is missing during transfer restore."))
++                .RestoreRollControllerTransferState(state.SteeringRollController);
++            (Parent.GetComponent<ShipSteeringComponent>() ??
++                throw new InvalidDataException("NPC steering component is missing during transfer restore."))
++                .RestoreNpcTransferState(state.Steering ??
++                    throw new InvalidDataException("NPC steering runtime state is missing."));
++            (Parent.GetComponent<ShipPhysicsComponent>() ??
++                throw new InvalidDataException("NPC physics component is missing during transfer restore."))
++                .RestoreNpcTransferState(state.Physics ??
++                    throw new InvalidDataException("NPC physics runtime state is missing."));
++            if ((CurrentDirective is AiAttackState or AiDockState) && state.DirectiveTarget is null)
++                throw new InvalidDataException("NPC directive target reference is missing.");
++
++            currentState = Enum.Parse<StateGraphEntry>(state.CurrentState);
++            previousState = Enum.Parse<StateGraphEntry>(state.PreviousState);
++            timeInState = state.TimeInState;
++            missileTimer = state.MissileTimer;
++            fireTimer = state.FireTimer;
++            burstTimer = state.BurstTimer;
++            inBurst = state.InBurst;
++            fireCycle = state.FireCycle;
++            weaponGroupIndex = state.WeaponGroupIndex;
++            damageTimer = state.DamageTimer;
++            damageTaken = state.DamageTaken;
++            evadeX = state.EvadeX;
++            evadeY = state.EvadeY;
++            evadeZ = state.EvadeZ;
++            evadeThrust = state.EvadeThrust;
++            buzzDirection = new Vector3(state.BuzzDirection.X, state.BuzzDirection.Y, state.BuzzDirection.Z);
++            stayInRangeObject = stayTarget;
++            stayInRangePoint = new Vector3(state.StayInRangePoint.X, state.StayInRangePoint.Y, state.StayInRangePoint.Z);
++            stayInRangeRadius = state.StayInRangeRadius;
++            PopulationFleeing = state.PopulationFleeing;
++            TradeCargoUnitPrice = state.TradeCargoUnitPrice;
++            if (state.AutoTurret is { } autoTurretState)
++            {
++                if (!Parent.TryGetComponent<SAutoTurretComponent>(out var autoTurret))
++                    throw new InvalidDataException("NPC auto-turret transfer state has no target component.");
++                autoTurret.RestoreTransferState(autoTurretState);
++            }
++            Parent.GetComponent<SelectedTargetComponent>()!.Selected = selectedTarget;
++        }
++
++        internal static void ValidateTransferState(NpcAiTransferExtensionV1 state)
++        {
++            if (state.SchemaVersion != 3 || state.SteeringRollController is null ||
++                state.Steering is null || state.Physics is null ||
++                !Enum.TryParse<StateGraphEntry>(state.CurrentState, out var restoredCurrent) ||
++                !Enum.IsDefined(restoredCurrent) || !Enum.TryParse<StateGraphEntry>(state.PreviousState, out var restoredPrevious) ||
++                !Enum.IsDefined(restoredPrevious) || !double.IsFinite(state.TimeInState) || state.TimeInState < 0 ||
++                !double.IsFinite(state.MissileTimer) || !float.IsFinite(state.FireTimer) ||
++                !float.IsFinite(state.BurstTimer) || state.FireCycle < 0 || state.WeaponGroupIndex < 0 ||
++                !double.IsFinite(state.DamageTimer) || !float.IsFinite(state.DamageTaken) || state.DamageTaken < 0 ||
++                !float.IsFinite(state.EvadeX) || !float.IsFinite(state.EvadeY) || !float.IsFinite(state.EvadeZ) ||
++                state.BuzzDirection is null || !float.IsFinite(state.BuzzDirection.X) ||
++                !float.IsFinite(state.BuzzDirection.Y) || !float.IsFinite(state.BuzzDirection.Z) ||
++                state.StayInRangePoint is null || !float.IsFinite(state.StayInRangePoint.X) ||
++                !float.IsFinite(state.StayInRangePoint.Y) || !float.IsFinite(state.StayInRangePoint.Z) ||
++                !float.IsFinite(state.StayInRangeRadius) || state.StayInRangeRadius < 0 ||
++                state.TradeCargoUnitPrice is 0)
++                throw new InvalidDataException("NPC AI transfer state is invalid or unsupported.");
++            state.AutoTurret?.Validate();
++            state.SteeringRollController.Validate();
++            state.Steering.Validate();
++            state.Physics.Validate();
++            if (state.DirectiveTarget is not null && !IsValidTransferReference(state.DirectiveTarget) ||
++                state.SelectedTarget is not null && !IsValidTransferReference(state.SelectedTarget) ||
++                state.StayInRangeTarget is not null && !IsValidTransferReference(state.StayInRangeTarget))
++                throw new InvalidDataException("NPC AI transfer target reference is invalid.");
++        }
++
++        internal static bool IsValidTransferReference(NpcTransferObjectReferenceV1 reference) => reference switch
++        {
++            { Kind: "npc", NpcId: { } id, CharacterId: null, Nickname: null } => id != Guid.Empty,
++            { Kind: "character", NpcId: null, CharacterId: > 0, Nickname: null } => true,
++            { Kind: "nickname", NpcId: null, CharacterId: null, Nickname: { Length: > 0 and <= 96 } } => true,
++            _ => false
++        };
++
++        internal static NpcTransferObjectReferenceV1? CaptureObjectReference(GameObject? target)
++        {
++            if (target is null)
++                return null;
++            if (target.TryGetComponent<SNPCComponent>(out var npc))
++            {
++                if (npc.NpcId == Guid.Empty)
++                    throw new InvalidDataException("NPC AI target has no Coordinator-issued NPC identity.");
++                return new NpcTransferObjectReferenceV1("npc", NpcId: npc.NpcId);
++            }
++            if (target.TryGetComponent<SPlayerComponent>(out var player))
++            {
++                if (player.Player.Character is not { ID: > 0 } character)
++                    throw new InvalidDataException("NPC AI player target has no stable character identity.");
++                return new NpcTransferObjectReferenceV1("character", CharacterId: character.ID);
++            }
++            if (!string.IsNullOrWhiteSpace(target.Nickname))
++                return new NpcTransferObjectReferenceV1("nickname", Nickname: target.Nickname);
++            throw new InvalidDataException("NPC AI target has no stable transfer identity.");
++        }
++
+         private bool TryGetStayInRangeCenter(out Vector3 center)
+         {
+             if (stayInRangeRadius <= 0)
+@@ -215,31 +425,8 @@ namespace LibreLancer.Server.Components
+         private int fireCycle = 0; // Track cycles for weapon grouping
+         private int weaponGroupIndex = 0; // Track which weapon group to fire
+
+-        public struct FireInfo
+-        {
+-            public bool ShouldFireRegular;
+-            public bool ShouldFireAutoTurrets;
+-        }
+-
+-        public FireInfo RunFireTimers(float dt)
++        public bool RunFireTimers(float dt)
+         {
+-            var fireInfo = new FireInfo { ShouldFireRegular = false, ShouldFireAutoTurrets = false };
+-
+-            // Check if ship has auto-turret weapons
+-            bool hasAutoTurrets = false;
+-
+-            if (Parent.TryGetComponent<WeaponControlComponent>(out var weapons))
+-            {
+-                foreach (var gun in Parent.EquipmentOfType<Gun>())
+-                {
+-                    if (gun.GunEquipment.Def.AutoTurret)
+-                    {
+-                        hasAutoTurrets = true;
+-                        break;
+-                    }
+-                }
+-            }
+-
+             if (inBurst)
+             {
+                 burstTimer -= dt;
+@@ -257,29 +444,12 @@ namespace LibreLancer.Server.Components
+                     if (fireTimer <= 0)
+                     {
+                         var interval = Pilot?.Gun?.FireIntervalTime ?? 0;
+-
+                         if (interval == 0)
+-                        {
+-                            interval = 0.1f; // minimum interval for NPCs
+-                        }
++                            interval = 0.1f;
+
+                         fireTimer = ValueWithVariance(interval,
+                             Pilot?.Gun?.FireIntervalVariancePercent);
+-                        fireInfo.ShouldFireRegular = true;
+-
+-                        // Auto-turrets fire based on their interval timing
+-                        if (hasAutoTurrets)
+-                        {
+-                            fireCycle++;
+-                            // Use auto-turret interval timing from INI
+-                            float autoTurretInterval = Pilot?.Gun?.AutoTurretIntervalTime ?? 0.2f;
+-
+-                            if (autoTurretInterval <= 0 || fireCycle >= Math.Max(1, (int) (autoTurretInterval / 0.1f)))
+-                            {
+-                                fireInfo.ShouldFireAutoTurrets = true;
+-                                fireCycle = 0; // Reset cycle counter
+-                            }
+-                        }
++                        return true;
+                     }
+                 }
+             }
+@@ -297,100 +467,27 @@ namespace LibreLancer.Server.Components
+                 }
+             }
+
+-            return fireInfo;
++            return false;
+         }
+
+-        public void FireWeaponGroups(WeaponControlComponent weapons, FireInfo fireInfo, GameWorld world)
++        public void FireWeaponGroups(WeaponControlComponent weapons, GameWorld world)
+         {
+-            // Get all weapons and group them by type
+-            var regularGuns = new List<Gun>();
+-            var autoTurrets = new List<Gun>();
+-
+-            foreach (var gun in Parent.EquipmentOfType<Gun>())
+-            {
+-                if (gun.GunEquipment.Def.AutoTurret)
+-                {
+-                    autoTurrets.Add(gun);
+-                }
+-                else
+-                {
+-                    regularGuns.Add(gun);
+-                }
+-            }
+-
+-            // Create separate aim points for different weapon types due to accuracy differences
+-            Vector3 regularAim = weapons.AimPoint; // Use existing aim point for regular guns
+-            Vector3 autoTurretAim = weapons.AimPoint; // Will be recalculated with more inaccuracy
+-
+-            // If auto-turrets are firing, get a less accurate aim point
+-            if (fireInfo.ShouldFireAutoTurrets &&
+-                Parent.GetComponent<SelectedTargetComponent>()?.Selected is GameObject target)
+-            {
+-                autoTurretAim = GetAimPosition(target, weapons, true); // More inaccurate aim point
+-            }
+-
+-            // Fire regular weapons in groups based on burst timing
+-            if (fireInfo.ShouldFireRegular && regularGuns.Count > 0)
+-            {
+-                // Use INI parameters to determine weapon grouping
+-                float burstInterval = Pilot?.Gun?.FireBurstIntervalTime ?? 1f;
+-                float fireInterval = Pilot?.Gun?.FireIntervalTime ?? 0.1f;
+-                float noBurstInterval = Pilot?.Gun?.FireNoBurstIntervalTime ?? 2f;
+-
+-                // Determine weapon grouping strategy based on timing parameters
+-                int weaponsToFire;
+-
+-                if (burstInterval < 0.3f)
+-                {
+-                    // Rapid fire - fire more weapons per burst
+-                    weaponsToFire = Math.Max(1, regularGuns.Count / 2); // 50% of weapons
+-                }
+-                else if (burstInterval < 1.0f)
+-                {
+-                    // Medium fire rate - fire moderate number of weapons
+-                    weaponsToFire = Math.Max(1, regularGuns.Count / 3); // 33% of weapons
+-                }
+-                else
+-                {
+-                    // Slow fire rate - fire fewer weapons per burst
+-                    weaponsToFire = Math.Max(1, regularGuns.Count / 4); // 25% of weapons
+-                }
+-
+-                // Use weapon group cycling to distribute firing
+-                for (int i = 0; i < weaponsToFire && i < regularGuns.Count; i++)
+-                {
+-                    int weaponIndex = (weaponGroupIndex + i) % regularGuns.Count;
+-                    regularGuns[weaponIndex].Fire(regularAim, world);
+-                }
+-
+-                // Advance weapon group for next firing cycle
+-                weaponGroupIndex = (weaponGroupIndex + weaponsToFire) % regularGuns.Count;
+-            }
++            var regularGuns = Parent.EquipmentOfType<Gun>()
++                .Where(x => !x.GunEquipment.Def.AutoTurret).ToList();
++            if (regularGuns.Count == 0)
++                return;
+
+-            // Fire auto-turrets in groups with their own timing
+-            if (fireInfo.ShouldFireAutoTurrets && autoTurrets.Count > 0)
++            var burstInterval = Pilot?.Gun?.FireBurstIntervalTime ?? 1f;
++            var weaponsToFire = burstInterval < 0.3f
++                ? Math.Max(1, regularGuns.Count / 2)
++                : burstInterval < 1f ? Math.Max(1, regularGuns.Count / 3)
++                : Math.Max(1, regularGuns.Count / 4);
++            for (var i = 0; i < weaponsToFire && i < regularGuns.Count; i++)
+             {
+-                // Use auto-turret specific parameters for grouping
+-                float autoTurretBurstInterval = Pilot?.Gun?.AutoTurretBurstIntervalTime ?? 1f;
+-
+-                // Auto-turrets typically fire fewer weapons per cycle
+-                int turretsToFire;
+-
+-                if (autoTurretBurstInterval < 0.5f)
+-                {
+-                    turretsToFire = Math.Max(1, autoTurrets.Count / 2); // 50% for rapid auto-turrets
+-                }
+-                else
+-                {
+-                    turretsToFire = Math.Max(1, autoTurrets.Count / 4); // 25% for normal auto-turrets
+-                }
+-
+-                for (int i = 0; i < turretsToFire && i < autoTurrets.Count; i++)
+-                {
+-                    int turretIndex = (fireCycle * turretsToFire + i) % autoTurrets.Count;
+-                    autoTurrets[turretIndex].Fire(autoTurretAim, world);
+-                }
++                var weaponIndex = (weaponGroupIndex + i) % regularGuns.Count;
++                regularGuns[weaponIndex].Fire(weapons.AimPoint, world);
+             }
++            weaponGroupIndex = (weaponGroupIndex + weaponsToFire) % regularGuns.Count;
+         }
+
+         private Vector3 AddInaccuracy(Vector3 target, Vector3 myPos, float distance, float maxRange,
+@@ -431,15 +528,8 @@ namespace LibreLancer.Server.Components
+
+         public Vector3 GetAimPosition(GameObject other, WeaponControlComponent weapons, bool isAutoTurret = false)
+         {
+-            if (other.PhysicsComponent == null)
+-            {
+-                return other.Transform.Position;
+-            }
+-
+-            var myPos = Parent.PhysicsComponent!.Body.Position;
+-            var myVelocity = Parent.PhysicsComponent.Body.LinearVelocity;
+-            var otherPos = other.PhysicsComponent.Body.Position;
+-            var otherVelocity = other.PhysicsComponent.Body.LinearVelocity;
++            var (myPos, myVelocity) = GetAimTargetMotion(Parent);
++            var (otherPos, otherVelocity) = GetAimTargetMotion(other);
+             var avgSpeed = weapons.GetAverageGunSpeed();
+             var maxRange = weapons.GetGunMaxRange();
+
+@@ -454,6 +544,14 @@ namespace LibreLancer.Server.Components
+             return AddInaccuracy(otherPos, myPos, staticDist, maxRange, isAutoTurret);
+         }
+
++        internal static (Vector3 Position, Vector3 Velocity) GetAimTargetMotion(GameObject obj)
++        {
++            var body = obj.PhysicsComponent?.Body;
++            return body is { IsDisposed: false }
++                ? (body.Position, body.LinearVelocity)
++                : (obj.Transform.Position, Vector3.Zero);
++        }
++
+         private GameObject? GetHostileAndFire(double time, GameWorld world)
+         {
+             // Get hostile
+@@ -466,6 +564,14 @@ namespace LibreLancer.Server.Components
+             foreach (var other in world.SpatialLookup
+                          .GetNearbyObjects(Parent, myPos, 5000))
+             {
++                // SpatialLookup can retain a removed object until its next rebuild.
++                // A removed ship's physics body may already have been freed while
++                // the stale object reference is still present in this result.
++                if (!IsAvailableAttackTarget(other))
++                {
++                    continue;
++                }
++
+                 if ((other.Flags & GameObjectFlags.Cloaked) == GameObjectFlags.Cloaked)
+                 {
+                     continue;
+@@ -541,13 +647,8 @@ namespace LibreLancer.Server.Components
+                 // Fire guns
+                 if (dist < gunRange)
+                 {
+-                    var fireInfo = RunFireTimers((float) time);
+-
+-                    if (fireInfo.ShouldFireRegular || fireInfo.ShouldFireAutoTurrets)
+-                    {
+-                        // Fire regular guns and auto-turrets separately based on their timers
+-                        FireWeaponGroups(weapons, fireInfo, world);
+-                    }
++                    if (RunFireTimers((float) time))
++                        FireWeaponGroups(weapons, world);
+                 }
+             }
+             else
+@@ -559,6 +660,9 @@ namespace LibreLancer.Server.Components
+             return shootAt;
+         }
+
++        internal static bool IsAvailableAttackTarget(GameObject other) =>
++            (other.Flags & GameObjectFlags.Exists) != 0;
++
+         private StateGraphEntry currentState = StateGraphEntry.NULL;
+         private StateGraphEntry previousState = StateGraphEntry.NULL;
+
+@@ -631,6 +735,10 @@ namespace LibreLancer.Server.Components
+             // Show accuracy info for debugging
+             float npcPower = Pilot?.Gun?.FireAccuracyPowerNpc ?? 0;
+             float npcAngle = Pilot?.Gun?.FireAccuracyConeAngle ?? 0;
++            var autoTurretController = Parent.GetComponent<SAutoTurretComponent>();
++            var autoTurretsTracking = autoTurretController?.TrackingCount ?? 0;
++            var autoTurretFireTimer = autoTurretController?.FireTimer ?? 0;
++            var autoTurretInBurst = autoTurretController?.InBurst ?? false;
+
+             return
+                 $"Autopilot: {beh}\nShooting At: {ls}\n" +
+@@ -642,11 +750,11 @@ namespace LibreLancer.Server.Components
+                 $"Transition Trace: {lastTransitionTrace}\n" +
+                 $"Max Range: {maxRange}\nPhys Active: {physActive}\n" +
+                 $"Weapons: {totalGuns} total ({regularGuns} regular, {autoTurrets} auto-turrets)\n" +
+-                $"Fire Timer: {fireTimer:F2}, Fire Cycle: {fireCycle}\n" +
++                $"Fire Timer: {fireTimer:F2}\n" +
++                $"Auto-Turrets Tracking: {autoTurretsTracking}, Fire Timer: {autoTurretFireTimer:F2}\n" +
+                 $"NPC Base Power: {npcPower} (higher=more inaccuracy)\n" +
+                 $"NPC Base Angle: {npcAngle}\n" +
+-                $"Accuracy: Regular=min 5.0, Auto-Turret=10x base power\n" +
+-                $"InBurst: {inBurst}\n{formation}";
++                $"InBurst: {inBurst}, Auto-Turret InBurst: {autoTurretInBurst}\n{formation}";
+         }
+
+         private void Transition(params StateGraphEntry[] possible)
+@@ -734,6 +842,7 @@ namespace LibreLancer.Server.Components
+
+         public override void Update(double time, GameWorld world)
+         {
++            directiveElapsedSeconds += Math.Max(0, time);
+             if (!Parent.TryGetComponent<AutopilotComponent>(out var ap))
+             {
+                 lastBlockReason = "missing autopilot";
+diff --git a/src/LibreLancer/Server/NPCManager.cs b/src/LibreLancer/Server/NPCManager.cs
+index 5eb9860..bc84207 100644
+--- a/src/LibreLancer/Server/NPCManager.cs
++++ b/src/LibreLancer/Server/NPCManager.cs
+@@ -1,6 +1,9 @@
+ using System;
+ using System.Collections.Generic;
+ using System.Numerics;
++using System.IO;
++using System.Linq;
++using System.Text.Json;
+ using System.Threading.Tasks;
+ using LibreLancer.Data;
+ using LibreLancer.Data.GameData;
+@@ -10,6 +13,9 @@ using LibreLancer.Data.Schema.Solar;
+ using LibreLancer.Missions;
+ using LibreLancer.Net.Protocol;
+ using LibreLancer.Server.Components;
++using LancerNexus.Protocol;
++using MessagePack;
++using LibreLancer.Server.Ai;
+ using LibreLancer.World;
+ using LibreLancer.World.Components;
+ using LibreLancer.World.Equipments;
+@@ -67,6 +73,15 @@ namespace LibreLancer.Server
+
+         private Dictionary<string, GameObject> missionNPCs = new(StringComparer.OrdinalIgnoreCase);
+
++        // DoSpawn can return an inert object while the Coordinator supplies its identity.
++        // Subsequent mission actions must wait for registration on the simulation queue.
++        public bool HasPendingMissionSpawns(MissionRuntime? runtime) => runtime != null &&
++            missionNPCs.Values.Any(obj => obj.NetID == 0 &&
++                obj.TryGetComponent<SNPCComponent>(out var npc) && npc.MissionRuntime == runtime);
++
++        private sealed record ResolvedNpcFormation(NpcFormationStateV1 State,
++            (NpcFormationMemberV1 Member, GameObject Object)[] Members);
++
+         public void NpcDoAction(string nickname, Action<GameObject> act)
+         {
+             World.EnqueueAction(() =>
+@@ -124,7 +139,9 @@ namespace LibreLancer.Server
+                 pos,
+                 orient,
+                 null, 0,
+-                msn);
++                msn,
++                stableNpcId: jumper.NpcId,
++                stableNpcOwnershipVersion: jumper.OwnershipVersion);
+             msn.SystemEnter(World.System.Nickname, jumper.Nickname);
+             return newObj;
+         }
+@@ -144,9 +161,25 @@ namespace LibreLancer.Server
+             MissionRuntime? msn = null,
+             bool registerNpc = true,
+             bool arrivalIndexReserved = false,
+-            IEnumerable<GameObject>? neutralTo = null
++            IEnumerable<GameObject>? neutralTo = null,
++            Guid? stableNpcId = null,
++            long stableNpcOwnershipVersion = 0,
++            bool deferActivation = false
+             )
+         {
++            var identityAllocator = stableNpcId.HasValue ? null : World.Server.GetNpcIdentityAllocator(World.System.Nickname);
++            NpcOwnershipLease? lease = null;
++            var npcId = stableNpcId ?? Guid.NewGuid();
++            if (!stableNpcId.HasValue && identityAllocator != null &&
++                identityAllocator.TryTakeLease(out var assignedLease))
++            {
++                lease = assignedLease;
++                npcId = assignedLease.NpcId;
++            }
++            else if (!stableNpcId.HasValue && identityAllocator != null)
++            {
++                npcId = Guid.Empty;
++            }
+             var ship = World.Server.GameData.Items.Ships.Get(loadout.Archetype);
+             GameObject spawnPoint = World.GameWorld.GetObject(arrivalObj)!;
+             SDockableComponent? sdock = null;
+@@ -204,7 +237,13 @@ namespace LibreLancer.Server
+             obj.AddComponent(cargo);
+             var stateDescription = new StateGraphDescription(stateGraph!.ToUpperInvariant(), "LEADER");
+             World.Server.GameData.Items.Ini.StateGraphDb.Tables.TryGetValue(stateDescription, out var stateTable);
+-            var npcComponent = new SNPCComponent(obj, this, stateTable!) { MissionRuntime = msn, Faction = affiliation };
++            var npcComponent = new SNPCComponent(obj, this, stateTable!)
++            {
++                MissionRuntime = msn,
++                Faction = affiliation,
++                NpcId = npcId,
++                OwnershipVersion = stableNpcOwnershipVersion > 0 ? stableNpcOwnershipVersion : lease?.OwnershipVersion ?? 0
++            };
+             npcComponent.SetPilot(pilot);
+             npcComponent.CommHead = costume?.Head;
+             npcComponent.CommBody = costume?.Body;
+@@ -215,7 +254,8 @@ namespace LibreLancer.Server
+             obj.AddComponent(new ShipSteeringComponent(obj));
+             obj.AddComponent(new ShipPhysicsComponent(obj, ship));
+             obj.AddComponent(new WeaponControlComponent(obj));
+-            obj.AddComponent(new SDestroyableComponent(obj, World));
++            SAutoTurretComponent.TryAdd(obj, () => npcComponent.Pilot?.Gun);
++            obj.AddComponent(new SDestroyableComponent(obj, World, msn));
+             obj.AddComponent(new DirectiveRunnerComponent(obj));
+             obj.ResolveReferences();
+             if (neutralTo != null && obj.TryGetComponent<SRepComponent>(out var rep))
+@@ -228,11 +268,31 @@ namespace LibreLancer.Server
+             {
+                 cloak.SetInitCloaked();
+             }
+-            World.OnNPCSpawn(obj);
+-            if (sdock != null)
++            void ActivateNpc()
+             {
+-                sdock.UndockShip(obj, World.GameWorld, arrivalIndex);
+-                obj.GetComponent<AutopilotComponent>()!.Undock(spawnPoint!, arrivalIndex);
++                World.OnNPCSpawn(obj);
++                if (sdock != null)
++                {
++                    sdock.UndockShip(obj, World.GameWorld, arrivalIndex);
++                    obj.GetComponent<AutopilotComponent>()!.Undock(spawnPoint!, arrivalIndex);
++                }
++            }
++            if (deferActivation)
++            {
++                // The transfer restore path configures all runtime state before adding this object to the simulation.
++            }
++            else if (npcId == Guid.Empty)
++            {
++                identityAllocator!.WhenLeaseAvailable(assignedLease => World.EnqueueAction(() =>
++                {
++                    npcComponent.NpcId = assignedLease.NpcId;
++                    npcComponent.OwnershipVersion = assignedLease.OwnershipVersion;
++                    ActivateNpc();
++                }));
++            }
++            else
++            {
++                ActivateNpc();
+             }
+             if (registerNpc && nickname != null)
+             {
+@@ -240,5 +300,413 @@ namespace LibreLancer.Server
+             }
+             return obj;
+         }
++
++        /// <summary>Recreates an inert NPC transfer snapshot after Coordinator ownership commit.</summary>
++        public GameObject[] RestoreTransfer(NpcTransferSnapshot snapshot, MissionRuntime? missionRuntime = null,
++            bool incrementOwnershipVersion = true, string? expectedSystemId = null,
++            bool emitMissionSystemTransition = true)
++            => RestoreTransferCore(snapshot, missionRuntime, incrementOwnershipVersion, expectedSystemId,
++                emitMissionSystemTransition, validateTransferContract: true,
++                allowUnresolvedAmbientNpcAttackTargets: false);
++
++        internal GameObject[] RestoreCheckpointBatch(NpcTransferSnapshot snapshot, string expectedSystemId)
++            => RestoreTransferCore(snapshot, missionRuntime: null, incrementOwnershipVersion: false,
++                expectedSystemId, emitMissionSystemTransition: true, validateTransferContract: false,
++                allowUnresolvedAmbientNpcAttackTargets: true);
++
++        private GameObject[] RestoreTransferCore(NpcTransferSnapshot snapshot, MissionRuntime? missionRuntime,
++            bool incrementOwnershipVersion, string? expectedSystemId, bool emitMissionSystemTransition,
++            bool validateTransferContract, bool allowUnresolvedAmbientNpcAttackTargets)
++        {
++            if (validateTransferContract) NpcTransferContractValidator.Validate(snapshot);
++            expectedSystemId ??= snapshot.TargetSystemId;
++            if (!string.Equals(expectedSystemId, World.System.Nickname, StringComparison.OrdinalIgnoreCase))
++                throw new InvalidDataException("NPC transfer snapshot targets a different world.");
++            if (snapshot.MissionRuntimeId.HasValue)
++            {
++                if (missionRuntime is null)
++                    throw new InvalidDataException("Mission NPC restoration requires its owning MissionRuntime.");
++                // Validate the whole group before creating or activating any member.
++                foreach (var identity in snapshot.Npcs)
++                    GameServer.ValidateMissionNpcContext(missionRuntime,
++                        MessagePackSerializer.Deserialize<NpcRuntimeStateV1>(identity.RuntimeState));
++            }
++            foreach (var identity in snapshot.Npcs)
++            {
++                var targetVersion = incrementOwnershipVersion ? checked(identity.OwnershipVersion + 1) : identity.OwnershipVersion;
++                if (World.Server.BlocksNpcRetirementActivation(identity.NpcId, targetVersion))
++                    throw new InvalidOperationException("NPC snapshot contains pending or confirmed retirement intent.");
++            }
++            var existingNpcIds = World.GameWorld.Objects
++                .Select(obj => obj.TryGetComponent<SNPCComponent>(out var npc) ? npc.NpcId : Guid.Empty)
++                .Where(id => id != Guid.Empty).ToHashSet();
++            var missingEntries = snapshot.Npcs.Where(npc => !existingNpcIds.Contains(npc.NpcId)).ToArray();
++            if (missingEntries.Length == 0)
++            {
++                RestoreFormations(ResolveFormations(snapshot.Formations, []));
++                return [];
++            }
++            if (missingEntries.Length != snapshot.Npcs.Length)
++            {
++                snapshot = new NpcTransferSnapshot
++                {
++                    TransferId = snapshot.TransferId,
++                    FormationId = snapshot.FormationId,
++                    MissionRuntimeId = snapshot.MissionRuntimeId,
++                    NpcIds = missingEntries.Select(npc => npc.NpcId).ToArray(),
++                    Npcs = missingEntries,
++                    TargetSystemId = snapshot.TargetSystemId,
++                    TargetArrivalObject = snapshot.TargetArrivalObject,
++                    MissionRuntimeState = snapshot.MissionRuntimeState,
++                    Formations = snapshot.Formations
++                };
++            }
++            var restored = new List<(NpcRuntimeSnapshot Identity, NpcRuntimeStateV1 State, GameObject Object)>();
++            var autopilotStates = new Dictionary<GameObject, AutopilotTransferState>();
++            foreach (var identity in snapshot.Npcs)
++            {
++                if (identity.OwnershipVersion == long.MaxValue)
++                    throw new InvalidDataException("NPC ownership version cannot be incremented safely.");
++                var state = MessagePackSerializer.Deserialize<NpcRuntimeStateV1>(identity.RuntimeState);
++                if (string.IsNullOrWhiteSpace(state.Nickname) || string.IsNullOrWhiteSpace(state.StateGraphId))
++                    throw new InvalidDataException("NPC runtime snapshot is missing the identity required for restoration.");
++                var displayName = ResolveNpcDisplayName(state.DisplayName, state.Nickname);
++                if (string.IsNullOrWhiteSpace(state.DisplayName))
++                    FLLog.Warning("NPC Checkpoint", $"Restoring ambient NPC '{state.Nickname}' with its nickname because the saved display name is empty.");
++
++                var ship = World.Server.GameData.Items.Ships.Get(state.LoadoutArchetype)
++                    ?? throw new InvalidDataException($"NPC ship archetype '{state.LoadoutArchetype}' is unavailable.");
++                var loadout = new ObjectLoadout { Archetype = ship.Nickname };
++                foreach (var item in state.Equipment)
++                {
++                    var equipment = World.Server.GameData.Items.Equipment.Get(item.EquipmentId)
++                        ?? throw new InvalidDataException($"NPC equipment '{item.EquipmentId}' is unavailable.");
++                    loadout.Items.Add(new LoadoutItem(item.Hardpoint, equipment));
++                }
++                foreach (var cargo in state.Cargo)
++                {
++                    var equipment = World.Server.GameData.Items.Equipment.Get(cargo.ItemId)
++                        ?? throw new InvalidDataException($"NPC cargo item '{cargo.ItemId}' is unavailable.");
++                    loadout.Cargo.Add(new BasicCargo(equipment, cargo.Count, cargo.Hardpoint));
++                }
++                var faction = string.IsNullOrWhiteSpace(state.FactionId)
++                    ? null
++                    : World.Server.GameData.Items.Factions.Get(state.FactionId)
++                      ?? throw new InvalidDataException($"NPC faction '{state.FactionId}' is unavailable.");
++                var pilot = string.IsNullOrWhiteSpace(state.PilotId)
++                    ? null
++                    : World.Server.GameData.Items.GetPilot(state.PilotId)
++                      ?? throw new InvalidDataException($"NPC pilot '{state.PilotId}' is unavailable.");
++                var costume = new CostumeEntry
++                {
++                    Head = string.IsNullOrWhiteSpace(state.CommHeadId) ? null : World.Server.GameData.Items.Bodyparts.Get(state.CommHeadId),
++                    Body = string.IsNullOrWhiteSpace(state.CommBodyId) ? null : World.Server.GameData.Items.Bodyparts.Get(state.CommBodyId),
++                    Accessory = string.IsNullOrWhiteSpace(state.CommAccessoryId) ? null : World.Server.GameData.Items.Accessories.Get(state.CommAccessoryId)
++                };
++                var stateDescription = new StateGraphDescription(state.StateGraphId.ToUpperInvariant(), "LEADER");
++                if (!World.Server.GameData.Items.Ini.StateGraphDb.Tables.TryGetValue(stateDescription, out var graph))
++                    throw new InvalidDataException($"NPC state graph '{state.StateGraphId}' is unavailable.");
++                var obj = DoSpawn(new ObjectName(displayName), state.Nickname, faction, state.StateGraphId,
++                    costume, loadout, pilot, ToVector(state.Position), ToQuaternion(state.Orientation), null, 0,
++                    missionRuntime, registerNpc: false, stableNpcId: identity.NpcId,
++                    stableNpcOwnershipVersion: incrementOwnershipVersion
++                        ? identity.OwnershipVersion + 1
++                        : identity.OwnershipVersion,
++                    deferActivation: true);
++                RestoreStructuralParts(obj, state.StructuralParts);
++                var npc = obj.GetComponent<SNPCComponent>()!;
++                npc.TransferRandomState = state.Ai.RandomState;
++                if (obj.TryGetComponent<SHealthComponent>(out var health))
++                    health.CurrentHealth = Math.Clamp(state.Health, 0, health.MaxHealth);
++                var equipmentComponents = obj.AllEquipment.ToList();
++                foreach (var equipmentState in state.Equipment)
++                {
++                    var equipment = equipmentComponents.FirstOrDefault(candidate =>
++                            string.Equals(candidate.Equipment.Nickname, equipmentState.EquipmentId, StringComparison.OrdinalIgnoreCase) &&
++                            string.Equals(candidate.Attachment?.Name ?? "internal", equipmentState.Hardpoint,
++                                StringComparison.OrdinalIgnoreCase));
++                    if (equipment is null)
++                        throw new InvalidDataException($"NPC equipment '{equipmentState.EquipmentId}' at '{equipmentState.Hardpoint}' could not be restored.");
++                    equipmentComponents.Remove(equipment);
++                    equipment.Health = Math.Clamp(equipmentState.Health, 0, 1) * equipment.MaxHealth;
++                    if (equipment.Attachment is { } hardpoint && equipmentState.Health < 1)
++                    {
++                        health?.EquipmentHealths.TryAdd(hardpoint, Math.Clamp(equipmentState.Health, 0, 1));
++                    }
++                    if (equipment is PowerCore powerCore &&
++                        equipment.Equipment is LibreLancer.Data.GameData.Items.PowerEquipment powerEquipment)
++                        powerCore.CurrentEnergy = Math.Clamp(equipmentState.Energy, 0, 1) * powerEquipment.Def.Capacity;
++                    if (equipmentState.ExtensionData.Length > 0)
++                    {
++                        var extension = JsonSerializer.Deserialize<NpcEquipmentTransferExtensionV1>(equipmentState.ExtensionData)
++                            ?? throw new InvalidDataException("NPC equipment transfer extension is empty.");
++                        if (extension.SchemaVersion != 1)
++                            throw new InvalidDataException("NPC equipment transfer extension version is unsupported.");
++                        if (extension.Shield is { } shieldState)
++                        {
++                            if (!float.IsFinite(shieldState.Health) || shieldState.Health < 0 ||
++                                !double.IsFinite(shieldState.SuppressionRemainingSeconds) || shieldState.SuppressionRemainingSeconds < 0 ||
++                                !float.IsFinite(shieldState.SuppressedRestoreHealth) || shieldState.SuppressedRestoreHealth < 0 ||
++                                equipment is not Shield shield)
++                                throw new InvalidDataException("NPC shield transfer state is invalid or the target shield is missing.");
++                            shield.RestoreTransferState(shieldState);
++                        }
++                        if (extension.WeaponCooldownSeconds is { } weaponCooldown)
++                        {
++                            if (!double.IsFinite(weaponCooldown) || weaponCooldown < 0 || weaponCooldown > 3600 ||
++                                equipment is not AbstractWeapon weapon)
++                                throw new InvalidDataException("NPC weapon cooldown transfer state is invalid or the target weapon is missing.");
++                            weapon.CurrentCooldown = weaponCooldown;
++                        }
++                        if (extension.WeaponAngles is { } weaponAngles)
++                        {
++                            weaponAngles.Validate();
++                            if (equipment is not AbstractWeapon weapon)
++                                throw new InvalidDataException("NPC weapon angle transfer state has no target weapon.");
++                            weapon.RestoreAngles(new Vector2(weaponAngles.Yaw, weaponAngles.Pitch));
++                        }
++                        if (extension.ThrustCapacityFraction is { } thrustCapacityFraction)
++                        {
++                            if (!float.IsFinite(thrustCapacityFraction) || thrustCapacityFraction is < 0 or > 1 ||
++                                equipment is not PowerCore restoredPowerCore ||
++                                restoredPowerCore.Equipment is not LibreLancer.Data.GameData.Items.PowerEquipment restoredPowerEquipment)
++                                throw new InvalidDataException("NPC thrust capacity transfer state is invalid or the target power core is missing.");
++                            restoredPowerCore.CurrentThrustCapacity = thrustCapacityFraction * restoredPowerEquipment.Def.ThrustCapacity;
++                        }
++                    }
++                }
++                if (state.Autopilot.ExtensionData.Length > 0 && obj.TryGetComponent<AutopilotComponent>(out var autopilot))
++                {
++                    var autopilotState = JsonSerializer.Deserialize<AutopilotTransferState>(state.Autopilot.ExtensionData)
++                        ?? throw new InvalidDataException("NPC autopilot state is empty.");
++                    autopilotState.Validate();
++                    if (!string.Equals(state.Autopilot.Behavior, autopilotState.Behavior.ToString(), StringComparison.Ordinal))
++                        throw new InvalidDataException("NPC autopilot state does not match its declared behavior.");
++                    autopilotStates.Add(obj, autopilotState);
++                }
++                restored.Add((identity, state, obj));
++            }
++
++            var aiStates = new Dictionary<GameObject, NpcAiTransferExtensionV1>();
++            var aiStateIds = new Dictionary<GameObject, string>();
++            foreach (var entry in restored)
++            {
++                if (entry.State.Ai.ExtensionData.Length == 0)
++                    throw new InvalidDataException("NPC AI transfer extension is missing.");
++                var aiState = JsonSerializer.Deserialize<NpcAiTransferExtensionV1>(entry.State.Ai.ExtensionData)
++                    ?? throw new InvalidDataException("NPC AI transfer extension is empty.");
++                if (aiState.SchemaVersion != 3)
++                    throw new InvalidDataException("NPC AI transfer extension version is unsupported.");
++                aiStates.Add(entry.Object, aiState);
++                aiStateIds.Add(entry.Object, entry.State.Ai.StateId);
++                if (entry.State.Ai.StateId is not ("none" or nameof(AiAttackState) or nameof(AiDockState)))
++                {
++                    throw new InvalidDataException($"NPC AI state '{entry.State.Ai.StateId}' is not supported by this restore version.");
++                }
++                if (entry.State.Ai.StateId is nameof(AiAttackState) or nameof(AiDockState))
++                {
++                    if (aiState.DirectiveTarget is null || aiState.GotoKind is null && entry.State.Ai.StateId == nameof(AiDockState))
++                        throw new InvalidDataException("NPC directive target or dock behavior is missing.");
++                    if (entry.State.Ai.StateId == nameof(AiAttackState) &&
++                        aiState.DirectiveTarget.Kind == "npc" && aiState.DirectiveTarget.NpcId != entry.State.CurrentTargetNpcId)
++                        throw new InvalidDataException("NPC attack target reference does not match the stable NPC target ID.");
++                    if (ResolveTransferReference(aiState.DirectiveTarget, restored) is null)
++                    {
++                        if (!allowUnresolvedAmbientNpcAttackTargets ||
++                            !CanDropUnresolvedAmbientNpcAttackTarget(entry.State.Ai.StateId, aiState,
++                                snapshot.MissionRuntimeId.HasValue))
++                            throw new InvalidDataException("NPC directive target could not be resolved after restore.");
++                        FLLog.Warning("NPC Checkpoint", $"Cleared stale attack directive for ambient NPC '{entry.State.Nickname}' because target {aiState.DirectiveTarget.NpcId:D} is not in the recovered system.");
++                        aiStates[entry.Object] = aiState with { DirectiveTarget = null };
++                        aiStateIds[entry.Object] = "none";
++                    }
++                }
++            }
++            var resolvedFormations = ResolveFormations(snapshot.Formations, restored);
++            var previousFormations = resolvedFormations.SelectMany(formation => formation.Members)
++                .GroupBy(member => member.Object)
++                .ToDictionary(group => group.Key, group => group.Key.Formation);
++            RestoreFormations(resolvedFormations);
++            foreach (var entry in restored)
++            {
++                var component = entry.Object.GetComponent<SNPCComponent>()!;
++                var ai = entry.State.Ai;
++                var extension = aiStates[entry.Object];
++                AiState? directive = null;
++                if (aiStateIds[entry.Object] is nameof(AiAttackState) or nameof(AiDockState))
++                {
++                    var target = ResolveTransferReference(extension.DirectiveTarget!, restored)!;
++                    directive = aiStateIds[entry.Object] == nameof(AiAttackState)
++                        ? new AiAttackState(target)
++                        : new AiDockState(target, (GotoKind)extension.GotoKind!.Value);
++                }
++                component.SetState(directive, World.GameWorld);
++                component.RestoreTransferTimers(ai.PreviousStateId, ai.StateElapsedSeconds,
++                    ai.Timers.FirstOrDefault());
++                component.RestoreTransferState(extension,
++                    reference => ResolveTransferReference(reference, restored));
++            }
++            foreach (var entry in restored)
++            {
++                if (autopilotStates.TryGetValue(entry.Object, out var autopilotState) &&
++                    entry.Object.TryGetComponent<AutopilotComponent>(out var autopilot))
++                {
++                    var targetReference = autopilotState.GetTargetReference();
++                    if (targetReference is not null && ResolveTransferReference(targetReference, restored) is null)
++                    {
++                        var normalized = NormalizeUnresolvedNpcGotoTarget(autopilotState,
++                            entry.State.Ai.StateId, snapshot.MissionRuntimeId.HasValue);
++                        if (!ReferenceEquals(normalized, autopilotState))
++                        {
++                            FLLog.Warning("NPC Checkpoint", $"Cleared unresolved Goto target for ambient NPC '{entry.State.Nickname}' during restore.");
++                            autopilotState = normalized;
++                        }
++                    }
++                    autopilot.RestoreTransferState(autopilotState,
++                        reference => ResolveTransferReference(reference, restored));
++                }
++            }
++            var activated = new List<GameObject>(restored.Count);
++            try
++            {
++                foreach (var entry in restored)
++                {
++                    activated.Add(entry.Object);
++                    World.OnNPCSpawn(entry.Object);
++                    if (entry.Object.PhysicsComponent is not { Body: { } body })
++                        throw new InvalidDataException($"NPC '{entry.State.Nickname}' has no registered physics body after activation.");
++                    body.SetTransform(new Transform3D(ToVector(entry.State.Position), ToQuaternion(entry.State.Orientation)));
++                    body.LinearVelocity = ToVector(entry.State.LinearVelocity);
++                    body.AngularVelocity = ToVector(entry.State.AngularVelocity);
++                }
++                foreach (var entry in restored)
++                {
++                    if (missionRuntime == null || entry.State.Nickname is not { Length: > 0 } nickname)
++                        continue;
++                    missionNPCs[nickname] = entry.Object;
++                    if (emitMissionSystemTransition)
++                    {
++                        missionRuntime.SystemExit(entry.Identity.SystemId, nickname);
++                        missionRuntime.SystemEnter(World.System.Nickname, nickname);
++                    }
++                }
++            }
++            catch
++            {
++                foreach (var entry in restored)
++                {
++                    if (entry.State.Nickname is { Length: > 0 } nickname &&
++                        missionNPCs.TryGetValue(nickname, out var registered) && registered == entry.Object)
++                        missionNPCs.Remove(nickname);
++                }
++                foreach (var previousFormation in previousFormations)
++                    previousFormation.Key.Formation = previousFormation.Value;
++                foreach (var obj in activated)
++                    World.RemoveSpawnedObjectImmediate(obj, false);
++                throw;
++            }
++            return restored.Select(entry => entry.Object).ToArray();
++        }
++
++        private ResolvedNpcFormation[] ResolveFormations(NpcFormationStateV1[] formations,
++            List<(NpcRuntimeSnapshot Identity, NpcRuntimeStateV1 State, GameObject Object)> restored)
++        {
++            return formations.Select(formationState =>
++            {
++                var members = formationState.Members.Select(member =>
++                {
++                    GameObject? obj = member.NpcId is { } npcId
++                        ? restored.FirstOrDefault(candidate => candidate.Identity.NpcId == npcId).Object ??
++                          World.GameWorld.Objects.FirstOrDefault(candidate =>
++                              candidate.TryGetComponent<SNPCComponent>(out var npc) && npc.NpcId == npcId)
++                        : World.Players.FirstOrDefault(candidate => candidate.Key.StableCharacterId == member.CharacterId).Value;
++                    return (Member: member, Object: obj ?? throw new InvalidDataException("NPC formation member could not be resolved after restore."));
++                }).ToArray();
++                if (members.Select(entry => entry.Object).Distinct().Count() != members.Length)
++                    throw new InvalidDataException("NPC formation resolves multiple stable references to the same object.");
++                return new ResolvedNpcFormation(formationState, members);
++            }).ToArray();
++        }
++
++        private static void RestoreFormations(ResolvedNpcFormation[] formations)
++        {
++            foreach (var resolved in formations)
++            {
++                var formationState = resolved.State;
++                var members = resolved.Members;
++                var leader = members.Single(entry => entry.Member.IsLeader).Object;
++                var followers = members.Where(entry => !entry.Member.IsLeader).ToArray();
++                var formation = new ShipFormation(leader, followers.Select(entry => entry.Object).ToArray())
++                {
++                    PlayerPosition = formationState.PlayerPosition is null ? null : ToVector(formationState.PlayerPosition),
++                    PlayerTargetPosition = formationState.PlayerTargetPosition is null ? null : ToVector(formationState.PlayerTargetPosition)
++                };
++                foreach (var entry in members)
++                {
++                    entry.Object.Formation = formation;
++                    if (!entry.Member.IsLeader)
++                        formation.SetShipOffset(entry.Object, ToVector(entry.Member.Offset));
++                }
++            }
++        }
++
++        private static Vector3 ToVector(NpcVector3 value) => new(value.X, value.Y, value.Z);
++        private static Quaternion ToQuaternion(NpcQuaternion value) => Quaternion.Normalize(new(value.X, value.Y, value.Z, value.W));
++
++        private void RestoreStructuralParts(GameObject obj, NpcStructuralPartStateV1[] states)
++        {
++            if (states.Length == 0)
++                return;
++            var model = obj.Model ?? throw new InvalidDataException("NPC structural damage has no target ship model.");
++            foreach (var state in states.Where(part => !part.Destroyed))
++            {
++                var group = model.CollisionGroups.FirstOrDefault(candidate =>
++                    string.Equals(candidate.ModelPart.Name, state.PartName, StringComparison.OrdinalIgnoreCase))
++                    ?? throw new InvalidDataException($"NPC structural collision group '{state.PartName}' is unavailable.");
++                group.CurrentHealth = group.MaxHealth * state.HealthFraction;
++            }
++            foreach (var state in states.Where(part => part.Destroyed))
++            {
++                var modelPart = model.RigidModel.AllParts.FirstOrDefault(part =>
++                    string.Equals(part.Name, state.PartName, StringComparison.OrdinalIgnoreCase))
++                    ?? throw new InvalidDataException($"NPC structural part '{state.PartName}' is unavailable.");
++                if (modelPart.Active && !obj.DisableCmpPart(state.PartName, null, World.Server.Resources, out _))
++                    throw new InvalidDataException($"NPC structural part '{state.PartName}' could not be destroyed during restore.");
++            }
++        }
++
++        private GameObject? ResolveTransferReference(NpcTransferObjectReferenceV1 reference,
++            List<(NpcRuntimeSnapshot Identity, NpcRuntimeStateV1 State, GameObject Object)> restored) =>
++            reference.Kind switch
++            {
++                "npc" when reference.NpcId is Guid npcId =>
++                    restored.FirstOrDefault(candidate => candidate.Identity.NpcId == npcId).Object ??
++                    World.GameWorld.Objects.FirstOrDefault(candidate =>
++                        candidate.TryGetComponent<SNPCComponent>(out var npc) && npc.NpcId == npcId),
++                "character" when reference.CharacterId is long characterId =>
++                    World.Players.FirstOrDefault(candidate => candidate.Key.StableCharacterId == characterId).Value,
++                "nickname" when !string.IsNullOrWhiteSpace(reference.Nickname) =>
++                    World.GameWorld.GetObject(reference.Nickname),
++                _ => null
++            };
++
++        internal static AutopilotTransferState NormalizeUnresolvedNpcGotoTarget(AutopilotTransferState state,
++            string aiState, bool hasMissionRuntime) =>
++            state.Behavior == AutopilotBehaviors.Goto && state.GetTargetReference() is not null &&
++            aiState == "none" && !hasMissionRuntime
++                ? new AutopilotTransferState
++                {
++                    PitchController = state.PitchController,
++                    YawController = state.YawController
++                }
++                : state;
++
++        internal static string ResolveNpcDisplayName(string? displayName, string nickname) =>
++            string.IsNullOrWhiteSpace(displayName) ? nickname : displayName;
++
++        internal static bool CanDropUnresolvedAmbientNpcAttackTarget(string aiStateId,
++            NpcAiTransferExtensionV1 state, bool hasMissionRuntime) => !hasMissionRuntime &&
++            aiStateId == nameof(AiAttackState) &&
++            state.DirectiveTarget is { Kind: "npc", NpcId: not null };
+     }
+ }
+diff --git a/src/LibreLancer/Server/NpcCheckpointOutbox.cs b/src/LibreLancer/Server/NpcCheckpointOutbox.cs
+new file mode 100644
+index 0000000..c20e9ca
+--- /dev/null
++++ b/src/LibreLancer/Server/NpcCheckpointOutbox.cs
+@@ -0,0 +1,359 @@
++using System;
++using System.Collections.Concurrent;
++using System.Collections.Generic;
++using System.IO;
++using System.Linq;
++using System.Net.Http;
++using System.Net.Http.Json;
++using System.Text.Json;
++using System.Threading;
++using System.Threading.Channels;
++using System.Threading.Tasks;
++using LancerNexus.Protocol;
++using MessagePack;
++
++namespace LibreLancer.Server;
++
++/// <summary>Durable, single-writer checkpoint delivery. File and network I/O stay off the simulation thread.</summary>
++internal sealed class NpcCheckpointOutbox : IAsyncDisposable
++{
++    private const int Capacity = 1024;
++    private const int MaximumRecordBytes = NpcCheckpointContractValidator.MaximumPayloadBytes + 64 * 1024;
++    private readonly string directory;
++    private readonly string instance;
++    private readonly HttpClient http;
++    private readonly Channel<Item> intake = Channel.CreateBounded<Item>(new BoundedChannelOptions(Capacity)
++        { FullMode = BoundedChannelFullMode.Wait, SingleReader = true, SingleWriter = false });
++    private readonly CancellationTokenSource stopping = new();
++    private readonly ConcurrentDictionary<Guid, long> pendingNpcs = new();
++    private readonly ConcurrentDictionary<Guid, (long Version, long Revision)> revisions = new();
++    private readonly TaskCompletionSource ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
++    private readonly Task persistence;
++    private readonly Task delivery;
++    private readonly Channel<Item> outgoing = Channel.CreateBounded<Item>(new BoundedChannelOptions(Capacity)
++        { FullMode = BoundedChannelFullMode.Wait, SingleReader = true, SingleWriter = true });
++    private readonly Uri endpoint;
++    private readonly string key;
++    private readonly string instanceId;
++
++    public Task Ready => ready.Task;
++
++    public NpcCheckpointOutbox(string directory, Uri coordinator, string apiKey, string instance,
++        HttpMessageHandler? handler = null)
++    {
++        http = new HttpClient(handler ?? new HttpClientHandler { AllowAutoRedirect = false }, disposeHandler: true)
++            { Timeout = Timeout.InfiniteTimeSpan };
++        this.directory = directory;
++        this.instance = instance;
++        instanceId = instance;
++        key = apiKey;
++        endpoint = new Uri(coordinator, "/internal/v1/npc-checkpoints");
++        persistence = Task.Run(PersistAsync);
++        delivery = Task.Run(DeliverAsync);
++    }
++
++    public long GetRevision(Guid npcId, long ownershipVersion) =>
++        revisions.TryGetValue(npcId, out var state) && state.Version == ownershipVersion ? state.Revision : 0;
++
++    public bool IsPending(Guid npcId) => pendingNpcs.ContainsKey(npcId);
++
++    public void ApplyRecoveredCheckpoint(NpcCheckpointRecoveryV1 recovery)
++    {
++        ValidateRecord(recovery, $"{recovery.Snapshot.RequestId:N}.response", response: true);
++        if (!recovery.Result.Accepted)
++            throw new InvalidDataException("Coordinator returned an uncommitted NPC checkpoint as recoverable.");
++        ApplyResult(recovery);
++    }
++
++    public async Task WaitForPendingWritesAsync(CancellationToken cancellationToken = default)
++    {
++        await Ready.WaitAsync(cancellationToken).ConfigureAwait(false);
++        while (!pendingNpcs.IsEmpty)
++            await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken).ConfigureAwait(false);
++    }
++
++    public async Task<NpcCheckpointRecoveryPageV1> GetRecoveryPageAsync(string systemId, Guid? after,
++        CancellationToken cancellationToken = default)
++    {
++        if (string.IsNullOrWhiteSpace(systemId) || systemId.Length > 96)
++            throw new ArgumentException("NPC checkpoint recovery system is invalid.", nameof(systemId));
++        var canonicalSystemId = systemId.ToLowerInvariant();
++        var url = $"{endpoint.AbsoluteUri.TrimEnd('/')}/recovery?instanceId={Uri.EscapeDataString(instance)}&systemId={Uri.EscapeDataString(canonicalSystemId)}&limit=128" +
++                  (after.HasValue ? $"&afterCheckpointId={after.Value:D}" : "");
++        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
++        timeout.CancelAfter(TimeSpan.FromSeconds(4));
++        using var request = CreateAuthenticatedRequest(HttpMethod.Get, new Uri(url));
++        using var response = await http.SendAsync(request, timeout.Token).ConfigureAwait(false);
++        response.EnsureSuccessStatusCode();
++        var page = await ReadBoundedJsonAsync<NpcCheckpointRecoveryPageV1>(response, timeout.Token)
++            .ConfigureAwait(false) ?? throw new InvalidDataException("Coordinator returned an empty NPC recovery page.");
++        if (page.CheckpointIds is not { Length: <= 128 } ||
++            page.CheckpointIds.Any(id => id == Guid.Empty) ||
++            !page.CheckpointIds.Select(id => id.ToString("D")).SequenceEqual(
++                page.CheckpointIds.Select(id => id.ToString("D")).Order(StringComparer.Ordinal)) ||
++            after.HasValue && page.CheckpointIds.Any(id => string.CompareOrdinal(id.ToString("D"), after.Value.ToString("D")) <= 0) ||
++            page.NextAfterCheckpointId is { } next &&
++                (page.CheckpointIds.Length == 0 || next != page.CheckpointIds[^1] || next == after))
++            throw new InvalidDataException("Coordinator returned an invalid NPC checkpoint page.");
++        return page;
++    }
++
++    public async Task<NpcCheckpointRecoveryV1?> GetRecoveryCheckpointAsync(Guid checkpointId, string systemId,
++        CancellationToken cancellationToken = default)
++    {
++        if (checkpointId == Guid.Empty || string.IsNullOrWhiteSpace(systemId) || systemId.Length > 96)
++            throw new ArgumentException("NPC checkpoint recovery identity is invalid.");
++        var url = new Uri($"{endpoint.AbsoluteUri.TrimEnd('/')}/{checkpointId:D}/recovery?instanceId={Uri.EscapeDataString(instance)}");
++        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
++        timeout.CancelAfter(TimeSpan.FromSeconds(4));
++        using var request = CreateAuthenticatedRequest(HttpMethod.Get, url);
++        using var response = await http.SendAsync(request, timeout.Token).ConfigureAwait(false);
++        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
++            return null; // Ownership changed after page discovery; the Coordinator revalidates before disclosure.
++        response.EnsureSuccessStatusCode();
++        var recovery = await ReadBoundedJsonAsync<NpcCheckpointRecoveryV1>(response, timeout.Token)
++            .ConfigureAwait(false) ?? throw new InvalidDataException("Coordinator returned an empty NPC checkpoint.");
++        ValidateRecord(recovery, $"{checkpointId:N}.response", response: true);
++        if (!recovery.Result.Accepted ||
++            !string.Equals(recovery.Snapshot.SystemId, systemId, StringComparison.OrdinalIgnoreCase) ||
++            recovery.Snapshot.Mission is not null || recovery.Snapshot.Npcs.Length == 0)
++            throw new InvalidDataException("Coordinator returned an ineligible NPC checkpoint for recovery.");
++        ApplyRecoveredCheckpoint(recovery);
++        return recovery;
++    }
++
++    private HttpRequestMessage CreateAuthenticatedRequest(HttpMethod method, Uri uri)
++    {
++        var request = new HttpRequestMessage(method, uri);
++        request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", key);
++        return request;
++    }
++
++    private static async Task<T?> ReadBoundedJsonAsync<T>(HttpResponseMessage response,
++        CancellationToken cancellationToken) where T : class
++    {
++        const int maximumResponseBytes = NpcCheckpointContractValidator.MaximumPayloadBytes * 2;
++        if (response.Content.Headers.ContentLength is > maximumResponseBytes)
++            throw new InvalidDataException("NPC checkpoint recovery response exceeds its size limit.");
++        await using var input = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
++        using var output = new MemoryStream();
++        var buffer = new byte[81920];
++        while (true)
++        {
++            var read = await input.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
++            if (read == 0) break;
++            if (output.Length + read > maximumResponseBytes)
++                throw new InvalidDataException("NPC checkpoint recovery response exceeds its size limit.");
++            output.Write(buffer, 0, read);
++        }
++        return JsonSerializer.Deserialize<T>(output.ToArray(), new JsonSerializerOptions(JsonSerializerDefaults.Web));
++    }
++
++    public (Task Durable, Task<NpcCheckpointWriteResponseV1> Completed) Queue(NpcCheckpointWriteRequestV1 request)
++    {
++        NpcCheckpointContractValidator.Validate(request);
++        if (request.InstanceId != instance)
++            throw new ArgumentException("NPC checkpoint belongs to a different instance.");
++        foreach (var member in request.ExpectedRevisions)
++        {
++            var current = GetRevision(member.NpcId, member.OwnershipVersion);
++            if (current != member.Revision || !pendingNpcs.TryAdd(member.NpcId, 0))
++            {
++                foreach (var reserved in request.ExpectedRevisions.TakeWhile(value => value.NpcId != member.NpcId))
++                    pendingNpcs.TryRemove(reserved.NpcId, out _);
++                throw new InvalidOperationException("NPC checkpoint is stale or another write is pending for this member.");
++            }
++        }
++        var item = new Item(request, new(TaskCreationOptions.RunContinuationsAsynchronously),
++            new(TaskCreationOptions.RunContinuationsAsynchronously));
++        if (!intake.Writer.TryWrite(item))
++        {
++            foreach (var member in request.ExpectedRevisions) pendingNpcs.TryRemove(member.NpcId, out _);
++            throw new InvalidOperationException("NPC checkpoint persistence queue is full or closed.");
++        }
++        return (item.Durable.Task, item.Completed.Task);
++    }
++
++    private async Task PersistAsync()
++    {
++        try
++        {
++            Directory.CreateDirectory(directory);
++            foreach (var path in Directory.EnumerateFiles(directory, "*.response").Order())
++            {
++                if (new FileInfo(path).Length > MaximumRecordBytes)
++                    throw new InvalidDataException("NPC checkpoint response record exceeds its limit.");
++                var record = MessagePackSerializer.Deserialize<NpcCheckpointRecoveryV1>(File.ReadAllBytes(path),
++                    MessagePackSerializerOptions.Standard.WithSecurity(MessagePackSecurity.UntrustedData));
++                ValidateRecord(record, path, response: true);
++                ApplyResult(record);
++            }
++            foreach (var path in Directory.EnumerateFiles(directory, "*.pending").Order())
++            {
++                if (new FileInfo(path).Length > NpcCheckpointContractValidator.MaximumPayloadBytes)
++                    throw new InvalidDataException("NPC checkpoint request exceeds its limit.");
++                var request = MessagePackSerializer.Deserialize<NpcCheckpointWriteRequestV1>(File.ReadAllBytes(path),
++                    MessagePackSerializerOptions.Standard.WithSecurity(MessagePackSecurity.UntrustedData));
++                NpcCheckpointContractValidator.Validate(request);
++                if (request.InstanceId != instance || Path.GetFileName(path) != $"{request.RequestId:N}.pending")
++                    throw new InvalidDataException("NPC checkpoint request has invalid identity.");
++                MarkPending(request, true);
++                var item = new Item(request, new(TaskCreationOptions.RunContinuationsAsynchronously),
++                    new(TaskCreationOptions.RunContinuationsAsynchronously));
++                item.Durable.TrySetResult();
++                await outgoing.Writer.WriteAsync(item, stopping.Token);
++            }
++            ready.TrySetResult();
++            await foreach (var item in intake.Reader.ReadAllAsync(stopping.Token))
++            {
++                try
++                {
++                    var path = Path.Combine(directory, $"{item.Request.RequestId:N}.pending");
++                    var bytes = MessagePackSerializer.Serialize(item.Request);
++                    if (File.Exists(path) && !File.ReadAllBytes(path).AsSpan().SequenceEqual(bytes))
++                        throw new InvalidDataException("NPC checkpoint request ID conflicts with durable intent.");
++                    WriteAtomic(path, bytes);
++                    MarkPending(item.Request, true);
++                    item.Durable.TrySetResult();
++                    await outgoing.Writer.WriteAsync(item, stopping.Token);
++                }
++                catch (Exception exception)
++                {
++                    MarkPending(item.Request, false);
++                    item.Durable.TrySetException(exception);
++                    item.Completed.TrySetException(exception);
++                }
++            }
++        }
++        catch (Exception exception)
++        {
++            ready.TrySetException(exception);
++            intake.Writer.TryComplete(exception);
++            while (intake.Reader.TryRead(out var item))
++            {
++                MarkPending(item.Request, false);
++                item.Durable.TrySetException(exception);
++                item.Completed.TrySetException(exception);
++            }
++            throw;
++        }
++        finally { outgoing.Writer.TryComplete(); }
++    }
++
++    private async Task DeliverAsync()
++    {
++        try
++        {
++            await foreach (var item in outgoing.Reader.ReadAllAsync(stopping.Token))
++            {
++                var delay = 100;
++                while (!stopping.IsCancellationRequested)
++                {
++                    try
++                    {
++                        using var request = CreateAuthenticatedRequest(HttpMethod.Post, endpoint);
++                        request.Content = JsonContent.Create(item.Request);
++                        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(stopping.Token);
++                        timeout.CancelAfter(TimeSpan.FromSeconds(4));
++                        using var reply = await http.SendAsync(request, timeout.Token);
++                        var response = await reply.Content.ReadFromJsonAsync<NpcCheckpointWriteResponseV1>(timeout.Token);
++                        if (response is null || response.RequestId != item.Request.RequestId ||
++                            response.Accepted && (response.Revisions is null ||
++                                response.Revisions.Length != item.Request.ExpectedRevisions.Length ||
++                                response.Revisions.Any(result => result is null ||
++                                    !item.Request.ExpectedRevisions.Any(expected => expected.NpcId == result.NpcId &&
++                                        result.Revision == expected.Revision + 1 &&
++                                        result.OwnershipVersion == expected.OwnershipVersion +
++                                            (item.Request.Retirements.Any(retired => retired.NpcId == result.NpcId) ? 1 : 0)))))
++                            throw new InvalidDataException("NPC checkpoint response does not match its durable request.");
++                        var record = new NpcCheckpointRecoveryV1 { Snapshot = item.Request, Result = response };
++                        WriteAtomic(Path.Combine(directory, $"{item.Request.RequestId:N}.response"),
++                            MessagePackSerializer.Serialize(record));
++                        ApplyResult(record);
++                        File.Delete(Path.Combine(directory, $"{item.Request.RequestId:N}.pending"));
++                        MarkPending(item.Request, false);
++                        item.Completed.TrySetResult(response);
++                        break;
++                    }
++                    catch (OperationCanceledException) when (stopping.IsCancellationRequested)
++                    {
++                        item.Completed.TrySetCanceled(stopping.Token);
++                        return;
++                    }
++                    catch (Exception exception) when (exception is HttpRequestException or OperationCanceledException or
++                                                     InvalidDataException or IOException or JsonException)
++                    {
++                        await Task.Delay(delay, stopping.Token);
++                        delay = Math.Min(5000, delay * 2);
++                    }
++                }
++            }
++        }
++        catch (OperationCanceledException) when (stopping.IsCancellationRequested) { }
++        finally { while (outgoing.Reader.TryRead(out var item)) item.Completed.TrySetCanceled(); }
++    }
++
++    private void ApplyResult(NpcCheckpointRecoveryV1 record)
++    {
++        if (!record.Result.Accepted) return;
++        foreach (var revision in record.Result.Revisions)
++        {
++            if (record.Snapshot.Retirements.Any(entry => entry.NpcId == revision.NpcId))
++                revisions.TryRemove(revision.NpcId, out _);
++            else
++                revisions.AddOrUpdate(revision.NpcId, (revision.OwnershipVersion, revision.Revision),
++                    (_, current) => revision.OwnershipVersion > current.Version ||
++                                    revision.OwnershipVersion == current.Version && revision.Revision > current.Revision
++                        ? (revision.OwnershipVersion, revision.Revision) : current);
++        }
++    }
++
++    private void MarkPending(NpcCheckpointWriteRequestV1 request, bool value)
++    {
++        foreach (var member in request.ExpectedRevisions)
++            if (value) pendingNpcs[member.NpcId] = 0;
++            else pendingNpcs.TryRemove(member.NpcId, out _);
++    }
++
++    private void ValidateRecord(NpcCheckpointRecoveryV1 record, string path, bool response)
++    {
++        NpcCheckpointContractValidator.Validate(record.Snapshot);
++        if (record.Snapshot.InstanceId != instance || record.Result.RequestId != record.Snapshot.RequestId ||
++            response && Path.GetFileName(path) != $"{record.Snapshot.RequestId:N}.response")
++            throw new InvalidDataException("NPC checkpoint response record has invalid identity.");
++        if (response && record.Result.Accepted &&
++            (record.Result.Revisions is null || record.Result.Revisions.Length != record.Snapshot.ExpectedRevisions.Length ||
++             record.Result.Revisions.Any(result => result is null ||
++                 !record.Snapshot.ExpectedRevisions.Any(expected => expected.NpcId == result.NpcId &&
++                     result.Revision == expected.Revision + 1 &&
++                     result.OwnershipVersion == expected.OwnershipVersion +
++                         (record.Snapshot.Retirements.Any(retired => retired.NpcId == result.NpcId) ? 1 : 0)))))
++            throw new InvalidDataException("NPC checkpoint response revisions do not match its request.");
++    }
++
++    private static void WriteAtomic(string path, byte[] bytes)
++    {
++        var temporary = path + $".{Guid.NewGuid():N}.tmp";
++        try
++        {
++            using (var file = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None,
++                       4096, FileOptions.WriteThrough))
++            { file.Write(bytes); file.Flush(true); }
++            File.Move(temporary, path, true);
++        }
++        finally { if (File.Exists(temporary)) File.Delete(temporary); }
++    }
++
++    public async ValueTask DisposeAsync()
++    {
++        intake.Writer.TryComplete();
++        try { await persistence.ConfigureAwait(false); } catch { }
++        stopping.Cancel();
++        try { await delivery.ConfigureAwait(false); } catch { }
++        http.Dispose();
++        stopping.Dispose();
++    }
++
++    private sealed record Item(NpcCheckpointWriteRequestV1 Request,
++        TaskCompletionSource Durable, TaskCompletionSource<NpcCheckpointWriteResponseV1> Completed);
++}
+diff --git a/src/LibreLancer/Server/NpcEquipmentTransferState.cs b/src/LibreLancer/Server/NpcEquipmentTransferState.cs
+new file mode 100644
+index 0000000..615d438
+--- /dev/null
++++ b/src/LibreLancer/Server/NpcEquipmentTransferState.cs
+@@ -0,0 +1,161 @@
++using System;
++using System.IO;
++using LibreLancer.World;
++
++namespace LibreLancer.Server;
++
++internal sealed record NpcEquipmentTransferExtensionV1
++{
++    public NpcEquipmentTransferExtensionV1() { }
++    public int SchemaVersion { get; init; } = 1;
++    public NpcShieldTransferStateV1? Shield { get; init; }
++    public double? WeaponCooldownSeconds { get; init; }
++    public NpcWeaponAnglesTransferStateV1? WeaponAngles { get; init; }
++    public float? ThrustCapacityFraction { get; init; }
++}
++
++internal sealed record NpcWeaponAnglesTransferStateV1(float Yaw, float Pitch)
++{
++    public NpcWeaponAnglesTransferStateV1() : this(0, 0) { }
++
++    public void Validate()
++    {
++        if (!float.IsFinite(Yaw) || !float.IsFinite(Pitch))
++            throw new InvalidDataException("NPC weapon angle transfer state is invalid.");
++    }
++}
++
++internal sealed record NpcShieldTransferStateV1(float Health, double SuppressionRemainingSeconds,
++    float SuppressedRestoreHealth)
++{
++    public NpcShieldTransferStateV1() : this(0, 0, 0) { }
++}
++
++internal sealed record NpcAiTransferExtensionV1
++{
++    public NpcAiTransferExtensionV1() { }
++    public int SchemaVersion { get; init; } = 3;
++    public NpcTransferObjectReferenceV1? DirectiveTarget { get; init; }
++    public NpcTransferObjectReferenceV1? SelectedTarget { get; init; }
++    public PIDControllerTransferState? SteeringRollController { get; init; }
++    public NpcShipSteeringTransferStateV1? Steering { get; init; }
++    public NpcShipPhysicsTransferStateV1? Physics { get; init; }
++    public int? GotoKind { get; init; }
++    public string CurrentState { get; init; } = "NULL";
++    public string PreviousState { get; init; } = "NULL";
++    public double TimeInState { get; init; }
++    public double MissileTimer { get; init; }
++    public float FireTimer { get; init; }
++    public float BurstTimer { get; init; }
++    public bool InBurst { get; init; }
++    public int FireCycle { get; init; }
++    public int WeaponGroupIndex { get; init; }
++    public double DamageTimer { get; init; }
++    public float DamageTaken { get; init; }
++    public float EvadeX { get; init; }
++    public float EvadeY { get; init; }
++    public float EvadeZ { get; init; }
++    public bool EvadeThrust { get; init; }
++    public NpcTransferVectorV1 BuzzDirection { get; init; } = new(0, 0, 0);
++    public NpcTransferObjectReferenceV1? StayInRangeTarget { get; init; }
++    public NpcTransferVectorV1 StayInRangePoint { get; init; } = new(0, 0, 0);
++    public float StayInRangeRadius { get; init; }
++    public bool PopulationFleeing { get; init; }
++    public ulong? TradeCargoUnitPrice { get; init; }
++    public NpcAutoTurretTransferStateV1? AutoTurret { get; init; }
++}
++
++internal sealed record NpcAutoTurretTransferStateV1
++{
++    public float BurstTimer { get; init; }
++    public float FireTimer { get; init; }
++    public bool InBurst { get; init; }
++    public ulong RandomState { get; init; }
++
++    public void Validate()
++    {
++        if (!float.IsFinite(BurstTimer) || MathF.Abs(BurstTimer) > 3600 ||
++            !float.IsFinite(FireTimer) || MathF.Abs(FireTimer) > 3600 || RandomState == 0)
++            throw new InvalidDataException("NPC auto-turret transfer state is invalid.");
++    }
++}
++
++internal sealed record NpcShipSteeringTransferStateV1
++{
++    public float Pitch { get; init; }
++    public float Yaw { get; init; }
++    public float Roll { get; init; }
++    public float Throttle { get; init; }
++    public bool Cruise { get; init; }
++    public float CruiseSpeedOffset { get; init; }
++    public bool Thrust { get; init; }
++    public LibreLancer.World.Components.StrafeControls Strafe { get; init; }
++    public bool EngineKill { get; init; }
++
++    public void Validate()
++    {
++        const LibreLancer.World.Components.StrafeControls allControls = LibreLancer.World.Components.StrafeControls.Left |
++            LibreLancer.World.Components.StrafeControls.Right | LibreLancer.World.Components.StrafeControls.Up |
++            LibreLancer.World.Components.StrafeControls.Down;
++        // Formation catch-up can request more than full engine throttle. Preserve that finite value.
++        if (!float.IsFinite(Pitch) || !float.IsFinite(Yaw) || !float.IsFinite(Roll) ||
++            !float.IsFinite(Throttle) || !float.IsFinite(CruiseSpeedOffset) ||
++            Pitch is < -1 or > 1 || Yaw is < -1 or > 1 || Roll is < -1 or > 1 ||
++            (Strafe & ~allControls) != 0 ||
++            (Strafe & (LibreLancer.World.Components.StrafeControls.Left | LibreLancer.World.Components.StrafeControls.Right)) ==
++                (LibreLancer.World.Components.StrafeControls.Left | LibreLancer.World.Components.StrafeControls.Right) ||
++            (Strafe & (LibreLancer.World.Components.StrafeControls.Up | LibreLancer.World.Components.StrafeControls.Down)) ==
++                (LibreLancer.World.Components.StrafeControls.Up | LibreLancer.World.Components.StrafeControls.Down))
++            throw new InvalidDataException("NPC ship steering transfer state is invalid.");
++    }
++}
++
++internal sealed record NpcShipPhysicsTransferStateV1
++{
++    public bool Active { get; init; }
++    public LibreLancer.World.Components.EngineStates EngineState { get; init; }
++    public bool ThrustRequested { get; init; }
++    public bool ThrustDepleted { get; init; }
++    public bool CruiseEnabled { get; init; }
++    public bool PreviousCruiseEnabled { get; init; }
++    public float CruiseSpeedOffset { get; init; }
++    public bool EngineKillEnabled { get; init; }
++    public float ChargePercent { get; init; }
++    public float CruiseAccelPercent { get; init; }
++    public float EnginePower { get; init; }
++    public NpcTransferVectorV1 Steering { get; init; } = new(0, 0, 0);
++    public LibreLancer.World.Components.StrafeControls Strafe { get; init; }
++    public float EngineSpeed { get; init; }
++    public bool EngineKill { get; init; }
++    public LibreLancer.Net.Protocol.CruiseThrustState CruiseThrust { get; init; }
++
++    public void Validate()
++    {
++        // Steering is rotated into world space; its components are not individual [-1, 1] controls.
++        const LibreLancer.World.Components.StrafeControls allControls = LibreLancer.World.Components.StrafeControls.Left |
++            LibreLancer.World.Components.StrafeControls.Right | LibreLancer.World.Components.StrafeControls.Up |
++            LibreLancer.World.Components.StrafeControls.Down;
++        if (!Enum.IsDefined(EngineState) || !Enum.IsDefined(CruiseThrust) ||
++            !float.IsFinite(CruiseSpeedOffset) || !float.IsFinite(ChargePercent) ||
++            ChargePercent is < 0 or > 1 || !float.IsFinite(CruiseAccelPercent) ||
++            CruiseAccelPercent is < 0 or > 1 || !float.IsFinite(EnginePower) ||
++            Steering is null || !float.IsFinite(Steering.X) || !float.IsFinite(Steering.Y) || !float.IsFinite(Steering.Z) ||
++            !float.IsFinite(EngineSpeed) || (Strafe & ~allControls) != 0 ||
++            (Strafe & (LibreLancer.World.Components.StrafeControls.Left | LibreLancer.World.Components.StrafeControls.Right)) ==
++                (LibreLancer.World.Components.StrafeControls.Left | LibreLancer.World.Components.StrafeControls.Right) ||
++            (Strafe & (LibreLancer.World.Components.StrafeControls.Up | LibreLancer.World.Components.StrafeControls.Down)) ==
++                (LibreLancer.World.Components.StrafeControls.Up | LibreLancer.World.Components.StrafeControls.Down))
++            throw new InvalidDataException("NPC ship physics transfer state is invalid.");
++    }
++}
++
++internal sealed record NpcTransferObjectReferenceV1(string Kind, Guid? NpcId = null,
++    long? CharacterId = null, string? Nickname = null)
++{
++    public NpcTransferObjectReferenceV1() : this("") { }
++}
++
++internal sealed record NpcTransferVectorV1(float X, float Y, float Z)
++{
++    public NpcTransferVectorV1() : this(0, 0, 0) { }
++}
+diff --git a/src/LibreLancer/Server/NpcIdentityAllocator.cs b/src/LibreLancer/Server/NpcIdentityAllocator.cs
+new file mode 100644
+index 0000000..690e7b3
+--- /dev/null
++++ b/src/LibreLancer/Server/NpcIdentityAllocator.cs
+@@ -0,0 +1,269 @@
++using System;
++using System.Collections.Generic;
++using System.IO;
++using System.Linq;
++using System.Net.Http;
++using System.Net.Http.Headers;
++using System.Net.Http.Json;
++using System.Text.Json;
++using System.Threading;
++using System.Threading.Tasks;
++using System.Threading.Channels;
++using LancerNexus.Protocol;
++
++namespace LibreLancer.Server;
++
++/// <summary>
++/// Keeps a small coordinator-issued NPC ID block ready. Spawns consume the local queue;
++/// HTTP and MySQL latency is handled by one background worker per instance/system pair.
++/// </summary>
++public sealed class NpcIdentityAllocator : IDisposable
++{
++    private const ushort BatchSize = 128;
++    private const int RefillThreshold = 32;
++    private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(4);
++    private readonly object sync = new();
++    private readonly Queue<NpcOwnershipLease> available = new();
++    private readonly Queue<Action<NpcOwnershipLease>> waiting = new();
++    private readonly Channel<byte> refill = Channel.CreateBounded<byte>(new BoundedChannelOptions(1)
++    {
++        FullMode = BoundedChannelFullMode.DropWrite,
++        SingleReader = true,
++        SingleWriter = false
++    });
++    private readonly HttpClient http;
++    private readonly Uri endpoint;
++    private readonly string instanceId;
++    private readonly string systemId;
++    private readonly CancellationTokenSource shutdown = new();
++    private readonly Task worker;
++    private bool warned;
++
++    public NpcIdentityAllocator(Uri coordinatorBaseUri, string apiKey, string instanceId, string systemId)
++        : this(coordinatorBaseUri, apiKey, instanceId, systemId,
++            new HttpClientHandler { AllowAutoRedirect = false })
++    {
++    }
++
++    internal NpcIdentityAllocator(
++        Uri coordinatorBaseUri,
++        string apiKey,
++        string instanceId,
++        string systemId,
++        HttpMessageHandler handler)
++    {
++        ArgumentNullException.ThrowIfNull(coordinatorBaseUri);
++        ArgumentException.ThrowIfNullOrWhiteSpace(apiKey);
++        ArgumentException.ThrowIfNullOrWhiteSpace(instanceId);
++        ArgumentException.ThrowIfNullOrWhiteSpace(systemId);
++        if (!coordinatorBaseUri.IsAbsoluteUri ||
++            (coordinatorBaseUri.Scheme != Uri.UriSchemeHttps &&
++             !(coordinatorBaseUri.Scheme == Uri.UriSchemeHttp && coordinatorBaseUri.IsLoopback)))
++            throw new ArgumentException("Coordinator URL must use HTTPS (HTTP is allowed for loopback development).", nameof(coordinatorBaseUri));
++
++        endpoint = new Uri(coordinatorBaseUri, "/internal/v1/npcs/allocate");
++        this.instanceId = instanceId;
++        this.systemId = systemId;
++        http = new HttpClient(handler, disposeHandler: true)
++        {
++            Timeout = Timeout.InfiniteTimeSpan
++        };
++        http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
++        worker = Task.Run(AllocationWorkerAsync);
++        SignalRefill();
++    }
++
++    public bool TryTake(out Guid npcId)
++    {
++        if (TryTakeLease(out var lease))
++        {
++            npcId = lease.NpcId;
++            return true;
++        }
++        npcId = Guid.Empty;
++        return false;
++    }
++
++    public bool TryTakeLease(out NpcOwnershipLease lease)
++    {
++        var shouldRefill = false;
++        lock (sync)
++        {
++            if (available.TryDequeue(out lease!))
++            {
++                shouldRefill = available.Count <= RefillThreshold;
++            }
++            else
++            {
++                shouldRefill = true;
++                lease = null!;
++            }
++        }
++        if (shouldRefill)
++            SignalRefill();
++        return lease is not null;
++    }
++
++    /// <summary>Queues a non-blocking continuation for a spawn that arrived during pool refill.</summary>
++    public void WhenAvailable(Action<Guid> continuation)
++    {
++        ArgumentNullException.ThrowIfNull(continuation);
++        WhenLeaseAvailable(lease => continuation(lease.NpcId));
++    }
++
++    public void WhenLeaseAvailable(Action<NpcOwnershipLease> continuation)
++    {
++        ArgumentNullException.ThrowIfNull(continuation);
++        NpcOwnershipLease? allocated = null;
++        lock (sync)
++        {
++            if (!available.TryDequeue(out allocated))
++                waiting.Enqueue(continuation);
++        }
++        if (allocated is not null)
++        {
++            continuation(allocated);
++            SignalRefillIfLow();
++        }
++        else
++        {
++            SignalRefill();
++        }
++    }
++
++    private async Task AllocationWorkerAsync()
++    {
++        try
++        {
++            await foreach (var _ in refill.Reader.ReadAllAsync(shutdown.Token))
++            {
++                lock (sync)
++                {
++                    if (available.Count > RefillThreshold && waiting.Count == 0)
++                        continue;
++                }
++                while (!shutdown.IsCancellationRequested)
++                {
++                    ushort count;
++                    lock (sync)
++                    {
++                        var needed = BatchSize - available.Count;
++                        if (needed <= 0 && waiting.Count == 0)
++                            break;
++                        count = (ushort)Math.Clamp(needed, 1, BatchSize);
++                    }
++
++                    var leases = await RequestBatchWithRetryAsync(count, shutdown.Token);
++                    List<(Action<NpcOwnershipLease> Continuation, NpcOwnershipLease Lease)> callbacks = [];
++                    lock (sync)
++                    {
++                        foreach (var lease in leases)
++                        {
++                            if (waiting.TryDequeue(out var continuation))
++                                callbacks.Add((continuation, lease));
++                            else
++                                available.Enqueue(lease);
++                        }
++                    }
++                    foreach (var callback in callbacks)
++                    {
++                        try
++                        {
++                            callback.Continuation(callback.Lease);
++                        }
++                        catch (Exception exception)
++                        {
++                            FLLog.Error("NPC", $"Could not deliver allocated NPC identity: {exception.Message}");
++                        }
++                    }
++
++                    lock (sync)
++                    {
++                        if (available.Count > RefillThreshold && waiting.Count == 0)
++                            break;
++                    }
++                }
++            }
++        }
++        catch (OperationCanceledException) when (shutdown.IsCancellationRequested)
++        {
++        }
++    }
++
++    private async Task<NpcOwnershipLease[]> RequestBatchWithRetryAsync(ushort count, CancellationToken cancellationToken)
++    {
++        var request = new NpcIdBatchAllocationRequest
++        {
++            RequestId = Guid.NewGuid(),
++            InstanceId = instanceId,
++            SystemId = systemId,
++            Count = count
++        };
++        var retryDelay = TimeSpan.FromMilliseconds(250);
++        while (!cancellationToken.IsCancellationRequested)
++        {
++            try
++            {
++                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
++                timeout.CancelAfter(RequestTimeout);
++                using var response = await http.PostAsJsonAsync(endpoint, request, timeout.Token);
++                if (response.IsSuccessStatusCode)
++                {
++                    var result = await response.Content.ReadFromJsonAsync<NpcIdBatchAllocationResponse>(timeout.Token);
++                    if (result is { Accepted: true } && result.RequestId == request.RequestId &&
++                        result.Npcs is { Length: > 0 } && result.Npcs.Length == count &&
++                        result.Npcs.All(lease => lease is not null && lease.NpcId != Guid.Empty &&
++                                                 lease.OwnershipVersion == 1 && !lease.IsRetired &&
++                                                 string.Equals(lease.InstanceId, instanceId, StringComparison.Ordinal)) &&
++                        result.Npcs.Select(lease => lease.NpcId).Distinct().Count() == result.Npcs.Length)
++                        return result.Npcs;
++
++                    throw new InvalidDataException("Coordinator returned an invalid NPC identity batch.");
++                }
++                throw new HttpRequestException($"Coordinator rejected NPC ID allocation with HTTP {(int)response.StatusCode}.");
++            }
++            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
++            {
++                throw;
++            }
++            catch (Exception exception) when (exception is HttpRequestException or IOException or JsonException or OperationCanceledException or InvalidDataException)
++            {
++                if (!warned)
++                {
++                    warned = true;
++                    FLLog.Warning("NPC", $"Coordinator NPC identity allocation is unavailable; pending spawns are queued: {exception.Message}");
++                }
++                await Task.Delay(retryDelay, cancellationToken);
++                retryDelay = TimeSpan.FromMilliseconds(Math.Min(retryDelay.TotalMilliseconds * 2, 10_000));
++            }
++        }
++        throw new OperationCanceledException(cancellationToken);
++    }
++
++    private void SignalRefill() => refill.Writer.TryWrite(0);
++
++    private void SignalRefillIfLow()
++    {
++        lock (sync)
++        {
++            if (available.Count > RefillThreshold && waiting.Count == 0)
++                return;
++        }
++        SignalRefill();
++    }
++
++    public void Dispose()
++    {
++        shutdown.Cancel();
++        refill.Writer.TryComplete();
++        try
++        {
++            worker.GetAwaiter().GetResult();
++        }
++        catch (OperationCanceledException)
++        {
++        }
++        http.Dispose();
++        shutdown.Dispose();
++    }
++}
+diff --git a/src/LibreLancer/Server/NpcMissionTransferCommitGate.cs b/src/LibreLancer/Server/NpcMissionTransferCommitGate.cs
+new file mode 100644
+index 0000000..cee3005
+--- /dev/null
++++ b/src/LibreLancer/Server/NpcMissionTransferCommitGate.cs
+@@ -0,0 +1,26 @@
++using System;
++using LancerNexus.Protocol;
++
++namespace LibreLancer.Server;
++
++internal static class NpcMissionTransferCommitGate
++{
++    public static bool IsCommittedByCharacterTransfer(Guid transferId, string targetInstanceId,
++        TransferSnapshotImportRecord? import, TransferStatusResponse status, NpcTransferSnapshot snapshot)
++    {
++        if (transferId == Guid.Empty || string.IsNullOrWhiteSpace(targetInstanceId) ||
++            import is not { Imported: true } || import.TransferId != transferId ||
++            import.LeaseVersion <= 0 || import.LeaseVersion == long.MaxValue ||
++            snapshot.TransferId != transferId || snapshot.MissionRuntimeId != transferId ||
++            !string.Equals(snapshot.TargetSystemId, import.TargetSystemId, StringComparison.OrdinalIgnoreCase) ||
++            status.TransferId != transferId ||
++            !string.Equals(status.SourceInstanceId, import.SourceInstanceId, StringComparison.Ordinal) ||
++            !string.Equals(status.TargetInstanceId, targetInstanceId, StringComparison.Ordinal) ||
++            !string.Equals(status.TargetInstanceId, import.TargetInstanceId, StringComparison.Ordinal) ||
++            !string.Equals(status.TargetSystemId, import.TargetSystemId, StringComparison.OrdinalIgnoreCase) ||
++            status.LeaseVersion != import.LeaseVersion + 1)
++            return false;
++
++        return status.State is TransferState.Committed or TransferState.SourceReleased;
++    }
++}
+diff --git a/src/LibreLancer/Server/NpcRetirementOutbox.cs b/src/LibreLancer/Server/NpcRetirementOutbox.cs
+new file mode 100644
+index 0000000..2dacafb
+--- /dev/null
++++ b/src/LibreLancer/Server/NpcRetirementOutbox.cs
+@@ -0,0 +1,270 @@
++using System;
++using System.Collections.Concurrent;
++using System.Collections.Generic;
++using System.IO;
++using System.Linq;
++using System.Net.Http;
++using System.Net.Http.Headers;
++using System.Net.Http.Json;
++using System.Text.Json;
++using System.Threading;
++using System.Threading.Channels;
++using System.Threading.Tasks;
++using LancerNexus.Protocol;
++using MessagePack;
++
++namespace LibreLancer.Server;
++
++/// <summary>Writes retirement intent before sending it; retries unknown outcomes with the same identity.</summary>
++public sealed class NpcRetirementOutbox : IAsyncDisposable
++{
++    private sealed record Item(NpcRetirementRequestV1 Request, TaskCompletionSource<bool> Durable,
++        TaskCompletionSource<NpcRetirementResponseV1> Completed);
++    private readonly Channel<Item> intake = Channel.CreateBounded<Item>(1024);
++    private readonly Channel<Item> delivery = Channel.CreateUnbounded<Item>();
++    private readonly object pendingSync = new();
++    private readonly Dictionary<(Guid Id, long Version), HashSet<Guid>> pending = new();
++    private readonly ConcurrentDictionary<(Guid Id, long Version), byte> retired = new();
++    private readonly CancellationTokenSource stopping = new();
++    private readonly HttpClient http;
++    private readonly Uri endpoint;
++    private readonly string directory;
++    private readonly string instance;
++    private readonly Task persistenceWorker;
++    private readonly Task deliveryWorker;
++    private readonly TaskCompletionSource<bool> ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
++    public Task Ready => ready.Task;
++
++    public NpcRetirementOutbox(string directory, Uri coordinator, string key, string instance)
++        : this(directory, coordinator, key, instance, new HttpClientHandler { AllowAutoRedirect = false }) { }
++
++    internal NpcRetirementOutbox(string directory, Uri coordinator, string key, string instance,
++        HttpMessageHandler handler)
++    {
++        ArgumentException.ThrowIfNullOrWhiteSpace(directory);
++        ArgumentException.ThrowIfNullOrWhiteSpace(key);
++        ArgumentException.ThrowIfNullOrWhiteSpace(instance);
++        if (!coordinator.IsAbsoluteUri || coordinator.Scheme != "https" &&
++            !(coordinator.Scheme == "http" && coordinator.IsLoopback))
++            throw new ArgumentException("NPC retirement requires HTTPS or loopback development HTTP.");
++        this.directory = directory;
++        this.instance = instance;
++        endpoint = new Uri(coordinator, "/internal/v1/npc-retirements");
++        http = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan, MaxResponseContentBufferSize = 128 * 1024 };
++        http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", key);
++        persistenceWorker = Task.Run(PersistAsync);
++        deliveryWorker = Task.Run(DeliverAsync);
++    }
++
++    public bool IsPending(Guid npcId, long version)
++    {
++        lock (pendingSync)
++            return pending.ContainsKey((npcId, version));
++    }
++
++    private void MarkPending(NpcRetirementRequestV1 request, bool add)
++    {
++        lock (pendingSync)
++        {
++            foreach (var npc in request.Npcs)
++            {
++                var key = (npc.NpcId, npc.OwnershipVersion);
++                if (add)
++                {
++                    if (!pending.TryGetValue(key, out var requests))
++                        pending[key] = requests = new HashSet<Guid>();
++                    requests.Add(request.RequestId);
++                }
++                else if (pending.TryGetValue(key, out var requests))
++                {
++                    requests.Remove(request.RequestId);
++                    if (requests.Count == 0)
++                        pending.Remove(key);
++                }
++            }
++        }
++    }
++
++    public bool BlocksActivation(Guid npcId, long version) =>
++        retired.ContainsKey((npcId, version)) || IsPending(npcId, version) || retired.ContainsKey((npcId, version));
++
++    // Callers must await Durable before treating intent as restart-safe, and Completed
++    // before applying a confirmed retirement. Neither operation blocks the simulation thread.
++    public (Task Durable, Task<NpcRetirementResponseV1> Completed) Queue(NpcRetirementRequestV1 request)
++    {
++        if (!request.IsValid() || request.InstanceId != instance)
++            throw new ArgumentException("NPC retirement request has invalid identity or owner.");
++        var item = new Item(request with { Npcs = request.Npcs.ToArray() },
++            new(TaskCreationOptions.RunContinuationsAsynchronously),
++            new(TaskCreationOptions.RunContinuationsAsynchronously));
++        if (!intake.Writer.TryWrite(item))
++            throw new InvalidOperationException("NPC retirement persistence queue is full or closed.");
++        return (item.Durable.Task, item.Completed.Task);
++    }
++
++    private async Task PersistAsync()
++    {
++        try
++        {
++            Directory.CreateDirectory(directory);
++            foreach (var path in Directory.EnumerateFiles(directory, "*.response").Order())
++            {
++                if (new FileInfo(path).Length > 128 * 1024)
++                    throw new InvalidDataException("NPC retirement response exceeds its limit.");
++                var response = MessagePackSerializer.Deserialize<NpcRetirementResponseV1>(File.ReadAllBytes(path),
++                    MessagePackSerializerOptions.Standard.WithSecurity(MessagePackSecurity.UntrustedData));
++                if (response.RequestId == Guid.Empty || response.ReasonCode != "processed" ||
++                    Path.GetFileName(path) != $"{response.RequestId:N}.response" || response.Npcs is null ||
++                    response.Npcs.Any(result => result is null || result.NpcId == Guid.Empty ||
++                        result.Accepted && (result.OwnershipVersion <= 1 || result.ReasonCode is not ("retired" or "already_retired"))))
++                    throw new InvalidDataException("NPC retirement response has invalid identity or fence.");
++                RememberRetirements(response);
++            }
++            foreach (var path in Directory.EnumerateFiles(directory, "*.pending").Order())
++            {
++                if (new FileInfo(path).Length > 128 * 1024)
++                    throw new InvalidDataException("NPC retirement outbox record exceeds its limit.");
++                var request = MessagePackSerializer.Deserialize<NpcRetirementRequestV1>(File.ReadAllBytes(path),
++                    MessagePackSerializerOptions.Standard.WithSecurity(MessagePackSecurity.UntrustedData));
++                if (!request.IsValid() || request.InstanceId != instance ||
++                    Path.GetFileName(path) != $"{request.RequestId:N}.pending")
++                    throw new InvalidDataException("NPC retirement outbox record has invalid identity.");
++                var item = new Item(request, new(TaskCreationOptions.RunContinuationsAsynchronously),
++                    new(TaskCreationOptions.RunContinuationsAsynchronously));
++                MarkPending(request, true);
++                item.Durable.SetResult(true);
++                await delivery.Writer.WriteAsync(item);
++            }
++            ready.TrySetResult(true);
++            await foreach (var item in intake.Reader.ReadAllAsync())
++            {
++                try
++                {
++                    var path = Path.Combine(directory, $"{item.Request.RequestId:N}.pending");
++                    var bytes = MessagePackSerializer.Serialize(item.Request);
++                    if (File.Exists(path) && !File.ReadAllBytes(path).AsSpan().SequenceEqual(bytes))
++                        throw new InvalidDataException("NPC retirement request ID conflicts with durable intent.");
++                    WriteAtomic(path, bytes);
++                    MarkPending(item.Request, true);
++                    item.Durable.TrySetResult(true);
++                    await delivery.Writer.WriteAsync(item);
++                }
++                catch (Exception exception)
++                {
++                    item.Durable.TrySetException(exception);
++                    item.Completed.TrySetException(exception);
++                }
++            }
++        }
++        catch (Exception exception)
++        {
++            ready.TrySetException(exception);
++            intake.Writer.TryComplete(exception);
++            while (intake.Reader.TryRead(out var item))
++            {
++                item.Durable.TrySetException(exception);
++                item.Completed.TrySetException(exception);
++            }
++            throw;
++        }
++        finally { delivery.Writer.TryComplete(); }
++    }
++
++    private async Task DeliverAsync()
++    {
++        Item? active = null;
++        try
++        {
++            await foreach (var item in delivery.Reader.ReadAllAsync(stopping.Token))
++            {
++                active = item;
++                var delay = 100;
++                while (!stopping.IsCancellationRequested)
++                {
++                    try
++                    {
++                        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(stopping.Token);
++                        timeout.CancelAfter(TimeSpan.FromSeconds(4));
++                        using var reply = await http.PostAsJsonAsync(endpoint, item.Request, timeout.Token);
++                        reply.EnsureSuccessStatusCode();
++                        var response = await reply.Content.ReadFromJsonAsync<NpcRetirementResponseV1>(timeout.Token);
++                        if (!Matches(item.Request, response))
++                            throw new InvalidDataException("NPC retirement response does not match durable intent.");
++                        WriteAtomic(Path.Combine(directory, $"{item.Request.RequestId:N}.response"),
++                            MessagePackSerializer.Serialize(response!));
++                        RememberRetirements(response!);
++                        File.Delete(Path.Combine(directory, $"{item.Request.RequestId:N}.pending"));
++                        MarkPending(item.Request, false);
++                        item.Completed.TrySetResult(response!);
++                        break;
++                    }
++                    catch (OperationCanceledException) when (stopping.IsCancellationRequested)
++                    {
++                        item.Completed.TrySetCanceled(stopping.Token);
++                        return;
++                    }
++                    catch (Exception exception) when (exception is HttpRequestException or OperationCanceledException or
++                                                     InvalidDataException or IOException or JsonException)
++                    {
++                        await Task.Delay(delay, stopping.Token);
++                        delay = Math.Min(5000, delay * 2);
++                    }
++                }
++                if (stopping.IsCancellationRequested)
++                    item.Completed.TrySetCanceled(stopping.Token);
++                active = null;
++            }
++        }
++        catch (OperationCanceledException) when (stopping.IsCancellationRequested) { }
++        finally
++        {
++            active?.Completed.TrySetCanceled();
++            while (delivery.Reader.TryRead(out var item))
++                item.Completed.TrySetCanceled();
++        }
++    }
++
++    private void RememberRetirements(NpcRetirementResponseV1 response)
++    {
++        foreach (var result in response.Npcs.Where(result => result.Accepted))
++            retired[(result.NpcId, result.OwnershipVersion - 1)] = 0;
++    }
++
++    private static bool Matches(NpcRetirementRequestV1 request, NpcRetirementResponseV1? response) =>
++        response is { ReasonCode: "processed" } && response.RequestId == request.RequestId &&
++        response.Npcs is not null && response.Npcs.Length == request.Npcs.Length &&
++        response.Npcs.All(result => result is not null) &&
++        response.Npcs.Select(result => result.NpcId).Distinct().Count() == response.Npcs.Length &&
++        response.Npcs.All(result => request.Npcs.Any(npc => npc.NpcId == result.NpcId &&
++            (!result.Accepted || result.OwnershipVersion == npc.OwnershipVersion + 1 &&
++                result.ReasonCode is "retired" or "already_retired")));
++
++    private static void WriteAtomic(string path, byte[] bytes)
++    {
++        var temporary = path + $".{Guid.NewGuid():N}.tmp";
++        try
++        {
++            using (var file = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None,
++                       4096, FileOptions.WriteThrough))
++            {
++                file.Write(bytes);
++                file.Flush(true);
++            }
++            File.Move(temporary, path, true);
++        }
++        finally { if (File.Exists(temporary)) File.Delete(temporary); }
++    }
++
++    public async ValueTask DisposeAsync()
++    {
++        intake.Writer.TryComplete();
++        try { await persistenceWorker.ConfigureAwait(false); }
++        finally
++        {
++            stopping.Cancel();
++            await deliveryWorker.ConfigureAwait(false);
++            http.Dispose();
++            stopping.Dispose();
++        }
++    }
++}
+diff --git a/src/LibreLancer/Server/NpcTransferActivationReceipt.cs b/src/LibreLancer/Server/NpcTransferActivationReceipt.cs
+new file mode 100644
+index 0000000..c7b5993
+--- /dev/null
++++ b/src/LibreLancer/Server/NpcTransferActivationReceipt.cs
+@@ -0,0 +1,95 @@
++using System;
++using System.IO;
++using System.Text;
++
++namespace LibreLancer.Server;
++
++/// <summary>Records that a committed NPC snapshot entered this server process's live simulation.</summary>
++public static class NpcTransferActivationReceipt
++{
++    public static bool IsRecorded(string directory, Guid transferId)
++    {
++        return Read(directory, transferId) is not null;
++    }
++
++    public static bool IsRecorded(string directory, Guid transferId, Guid generation)
++    {
++        if (generation == Guid.Empty)
++            throw new ArgumentException("NPC activation generation cannot be empty.", nameof(generation));
++        return Read(directory, transferId)?.Generation == generation;
++    }
++
++    public static void Record(string directory, Guid transferId)
++    {
++        Write(directory, transferId, null);
++    }
++
++    public static void Record(string directory, Guid transferId, Guid generation)
++    {
++        if (generation == Guid.Empty)
++            throw new ArgumentException("NPC activation generation cannot be empty.", nameof(generation));
++        if (IsRecorded(directory, transferId, generation))
++            return;
++        Write(directory, transferId, generation);
++    }
++
++    private static void Write(string directory, Guid transferId, Guid? generation)
++    {
++        var path = GetPath(directory, transferId);
++        Directory.CreateDirectory(directory);
++        if (generation is null && IsRecorded(directory, transferId))
++            return;
++
++        var temporary = $"{path}.{Guid.NewGuid():N}.tmp";
++        try
++        {
++            var value = generation is { } recordGeneration
++                ? $"{transferId:N}:{recordGeneration:N}"
++                : transferId.ToString("N");
++            var bytes = Encoding.ASCII.GetBytes(value);
++            using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None,
++                       4096, FileOptions.WriteThrough))
++            {
++                output.Write(bytes);
++                output.Flush(flushToDisk: true);
++            }
++            try { File.Move(temporary, path, overwrite: true); }
++            catch (IOException) when (File.Exists(path))
++            {
++                if (generation is { } currentGeneration
++                        ? !IsRecorded(directory, transferId, currentGeneration)
++                        : !IsRecorded(directory, transferId))
++                    throw;
++            }
++        }
++        finally
++        {
++            try { File.Delete(temporary); } catch (IOException) { }
++        }
++    }
++
++    private static Receipt? Read(string directory, Guid transferId)
++    {
++        var path = GetPath(directory, transferId);
++        if (!File.Exists(path))
++            return null;
++        var content = File.ReadAllText(path, Encoding.ASCII);
++        var id = transferId.ToString("N");
++        if (string.Equals(content, id, StringComparison.Ordinal))
++            return new Receipt(transferId, null); // Previous versions persisted an unscoped receipt.
++        if (content.Length == 65 && content[32] == ':' &&
++            string.Equals(content[..32], id, StringComparison.Ordinal) &&
++            Guid.TryParseExact(content[33..], "N", out var generation) && generation != Guid.Empty)
++            return new Receipt(transferId, generation);
++        throw new InvalidDataException("NPC transfer activation receipt is corrupt.");
++    }
++
++    private sealed record Receipt(Guid TransferId, Guid? Generation);
++
++    private static string GetPath(string directory, Guid transferId)
++    {
++        if (string.IsNullOrWhiteSpace(directory) || transferId == Guid.Empty)
++            throw new ArgumentException("NPC activation receipt identity is invalid.");
++        return Path.Combine(directory, $"{transferId:N}.activated");
++    }
++}
+diff --git a/src/LibreLancer/Server/NpcTransferGroupReservations.cs b/src/LibreLancer/Server/NpcTransferGroupReservations.cs
+new file mode 100644
+index 0000000..6eb4e7f
+--- /dev/null
++++ b/src/LibreLancer/Server/NpcTransferGroupReservations.cs
+@@ -0,0 +1,53 @@
++using System;
++using System.Collections.Generic;
++using System.Linq;
++
++namespace LibreLancer.Server;
++
++internal enum NpcTransferReservationResult
++{
++    Reserved,
++    AlreadyReserved,
++    Conflict
++}
++
++/// <summary>Prevents escorts from starting duplicate transfers while their trade group is leaving.</summary>
++internal sealed class NpcTransferGroupReservations
++{
++    private readonly object sync = new();
++    private readonly Dictionary<Guid, Guid> npcTransfers = [];
++
++    public NpcTransferReservationResult TryReserve(Guid transferId, IEnumerable<Guid> npcIds)
++    {
++        if (transferId == Guid.Empty)
++            throw new ArgumentException("A transfer ID is required.", nameof(transferId));
++        var ids = npcIds.Distinct().ToArray();
++        if (ids.Length == 0 || ids.Any(id => id == Guid.Empty))
++            throw new ArgumentException("A transfer group must contain valid NPC IDs.", nameof(npcIds));
++
++        lock (sync)
++        {
++            var existing = ids.Where(npcTransfers.ContainsKey)
++                .Select(id => npcTransfers[id])
++                .Distinct()
++                .ToArray();
++            if (existing.Length > 0)
++                return existing.Length == 1 && existing[0] == transferId && ids.All(npcTransfers.ContainsKey)
++                    ? NpcTransferReservationResult.AlreadyReserved
++                    : NpcTransferReservationResult.Conflict;
++
++            foreach (var id in ids)
++                npcTransfers.Add(id, transferId);
++            return NpcTransferReservationResult.Reserved;
++        }
++    }
++
++    public void Release(Guid transferId)
++    {
++        lock (sync)
++        {
++            foreach (var id in npcTransfers.Where(pair => pair.Value == transferId).Select(pair => pair.Key).ToArray())
++                npcTransfers.Remove(id);
++        }
++    }
++}
+diff --git a/src/LibreLancer/Server/NpcTransferJournalDisposition.cs b/src/LibreLancer/Server/NpcTransferJournalDisposition.cs
+new file mode 100644
+index 0000000..fb4aaac
+--- /dev/null
++++ b/src/LibreLancer/Server/NpcTransferJournalDisposition.cs
+@@ -0,0 +1,31 @@
++using System;
++using System.Text;
++
++namespace LibreLancer.Server;
++
++internal enum NpcTransferJournalDisposition
++{
++    Missing,
++    Snapshot,
++    Empty,
++    Conflict
++}
++
++internal static class NpcTransferJournalContract
++{
++    private const string EmptyMarker = "LANCER-NEXUS-NPC-TRANSFER-V1:NO-NPCS";
++
++    public static NpcTransferJournalDisposition Resolve(bool hasSnapshot, bool hasEmptyMarker) =>
++        (hasSnapshot, hasEmptyMarker) switch
++        {
++            (false, false) => NpcTransferJournalDisposition.Missing,
++            (true, false) => NpcTransferJournalDisposition.Snapshot,
++            (false, true) => NpcTransferJournalDisposition.Empty,
++            _ => NpcTransferJournalDisposition.Conflict
++        };
++
++    public static byte[] EmptyMarkerBytes => Encoding.ASCII.GetBytes(EmptyMarker);
++
++    public static bool IsEmptyMarker(ReadOnlySpan<byte> content) =>
++        content.SequenceEqual(Encoding.ASCII.GetBytes(EmptyMarker));
++}
+diff --git a/src/LibreLancer/Server/NpcTransferQuicPeer.cs b/src/LibreLancer/Server/NpcTransferQuicPeer.cs
+new file mode 100644
+index 0000000..9a4af9e
+--- /dev/null
++++ b/src/LibreLancer/Server/NpcTransferQuicPeer.cs
+@@ -0,0 +1,478 @@
++using System;
++using System.Buffers.Binary;
++using System.Collections.Concurrent;
++using System.IO;
++using System.Linq;
++using System.Net;
++using System.Net.Http;
++using System.Net.Http.Headers;
++using System.Net.Http.Json;
++using System.Net.Quic;
++using System.Net.Security;
++using System.Runtime.Versioning;
++using System.Security.Authentication;
++using System.Security.Cryptography;
++using System.Security.Cryptography.X509Certificates;
++using System.Text;
++using System.Threading;
++using System.Threading.Tasks;
++using LancerNexus.Protocol;
++using MessagePack;
++using ProtocolViolationException = LancerNexus.Protocol.ProtocolViolationException;
++
++namespace LibreLancer.Server;
++
++/// <summary>Private mTLS QUIC endpoint for one-shot NPC runtime snapshot handoffs.</summary>
++/// <remarks>
++/// The callback must durably stage the validated snapshot and remain inert until the Coordinator reports
++/// Committed. A positive acknowledgement means staged, not simulated; duplicate transfer IDs must be idempotent.
++/// </remarks>
++[SupportedOSPlatform("linux")]
++public sealed class NpcTransferQuicReceiver : IAsyncDisposable
++{
++    private const long ProtocolErrorCode = 0x200;
++    private const long CloseErrorCode = 0x201;
++    private const int MaximumFrameLength = NpcPeerSnapshotTransferValidator.MaximumSnapshotBytes + 4096;
++    private static readonly SslApplicationProtocol Alpn = new("lancer-nexus-npc-transfer/1");
++    private static readonly MessagePackSerializerOptions UntrustedMessagePack =
++        MessagePackSerializerOptions.Standard.WithSecurity(MessagePackSecurity.UntrustedData);
++
++    private readonly string instanceId;
++    private readonly X509Certificate2 serverCertificate;
++    private readonly X509Certificate2 clientCa;
++    private readonly Uri coordinatorBaseUri;
++    private readonly string coordinatorApiKey;
++    private readonly HttpClient coordinatorHttp = new(new HttpClientHandler { AllowAutoRedirect = false })
++    {
++        Timeout = TimeSpan.FromSeconds(10)
++    };
++    private readonly Func<NpcPeerSnapshotTransfer, CancellationToken, ValueTask<NpcPeerSnapshotTransferAck>> acceptSnapshot;
++    private readonly SemaphoreSlim connectionLimit = new(8, 8);
++    private readonly ConcurrentDictionary<long, Task> activeHandlers = new();
++    private QuicListener? listener;
++    private CancellationTokenSource? shutdown;
++    private Task? acceptLoop;
++    private long handlerId;
++    private bool disposed;
++
++    public NpcTransferQuicReceiver(
++        string instanceId,
++        X509Certificate2 serverCertificate,
++        X509Certificate2 clientCa,
++        Uri coordinatorBaseUri,
++        string coordinatorApiKey,
++        Func<NpcPeerSnapshotTransfer, CancellationToken, ValueTask<NpcPeerSnapshotTransferAck>> acceptSnapshot)
++    {
++        if (string.IsNullOrWhiteSpace(instanceId) || instanceId.Length > 96)
++            throw new ArgumentException("A valid target instance ID is required.", nameof(instanceId));
++        ArgumentNullException.ThrowIfNull(serverCertificate);
++        ArgumentNullException.ThrowIfNull(clientCa);
++        ArgumentNullException.ThrowIfNull(coordinatorBaseUri);
++        if ((coordinatorBaseUri.Scheme != Uri.UriSchemeHttps &&
++             !(coordinatorBaseUri.Scheme == Uri.UriSchemeHttp && coordinatorBaseUri.IsLoopback)) ||
++            !string.IsNullOrEmpty(coordinatorBaseUri.UserInfo) || !string.IsNullOrEmpty(coordinatorBaseUri.Query) ||
++            !string.IsNullOrEmpty(coordinatorBaseUri.Fragment) || string.IsNullOrWhiteSpace(coordinatorApiKey) ||
++            Encoding.UTF8.GetByteCount(coordinatorApiKey) < 32)
++            throw new ArgumentException("A private Coordinator URL and 32-byte internal API key are required.", nameof(coordinatorBaseUri));
++        ArgumentNullException.ThrowIfNull(acceptSnapshot);
++        if (!serverCertificate.HasPrivateKey || !CertificateIdentity.HasDnsIdentity(serverCertificate, instanceId) ||
++            !CertificateIdentity.HasRequiredEku(serverCertificate, client: false) ||
++            DateTime.UtcNow < serverCertificate.NotBefore.ToUniversalTime() ||
++            DateTime.UtcNow > serverCertificate.NotAfter.ToUniversalTime())
++            throw new ArgumentException("The server certificate must be current, include Server Authentication and have a matching instance DNS SAN.", nameof(serverCertificate));
++        if (!clientCa.Extensions.OfType<X509BasicConstraintsExtension>().Any(extension => extension.CertificateAuthority))
++            throw new ArgumentException("The client trust certificate must be a CA certificate.", nameof(clientCa));
++        this.instanceId = instanceId;
++        this.serverCertificate = serverCertificate;
++        this.clientCa = clientCa;
++        this.coordinatorBaseUri = coordinatorBaseUri;
++        this.coordinatorApiKey = coordinatorApiKey;
++        this.acceptSnapshot = acceptSnapshot;
++    }
++
++    public async Task StartAsync(IPEndPoint listenEndPoint, CancellationToken cancellationToken = default)
++    {
++        ObjectDisposedException.ThrowIf(disposed, this);
++        if (listener is not null)
++            throw new InvalidOperationException("The NPC transfer receiver has already started.");
++        if (!QuicListener.IsSupported)
++            throw new PlatformNotSupportedException("NPC transfer QUIC requires a supported MsQuic runtime.");
++
++        shutdown = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
++        var serverAuthentication = new SslServerAuthenticationOptions
++        {
++            ApplicationProtocols = [Alpn],
++            ServerCertificate = serverCertificate,
++            EnabledSslProtocols = SslProtocols.Tls13,
++            ClientCertificateRequired = true,
++            CertificateRevocationCheckMode = X509RevocationMode.NoCheck,
++            RemoteCertificateValidationCallback = (_, certificate, _, errors) =>
++                CertificateIdentity.Validate(certificate, clientCa, client: true, expectedInstanceId: null, errors)
++        };
++        listener = await QuicListener.ListenAsync(new QuicListenerOptions
++        {
++            ListenEndPoint = listenEndPoint,
++            ApplicationProtocols = [Alpn],
++            ConnectionOptionsCallback = (_, _, _) => ValueTask.FromResult(new QuicServerConnectionOptions
++            {
++                DefaultStreamErrorCode = ProtocolErrorCode,
++                DefaultCloseErrorCode = CloseErrorCode,
++                MaxInboundBidirectionalStreams = 1,
++                MaxInboundUnidirectionalStreams = 0,
++                ServerAuthenticationOptions = serverAuthentication
++            })
++        }, shutdown.Token);
++        acceptLoop = AcceptLoopAsync(shutdown.Token);
++    }
++
++    private async Task AcceptLoopAsync(CancellationToken cancellationToken)
++    {
++        while (!cancellationToken.IsCancellationRequested)
++        {
++            await connectionLimit.WaitAsync(cancellationToken);
++            QuicConnection connection;
++            try { connection = await listener!.AcceptConnectionAsync(cancellationToken); }
++            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
++            {
++                connectionLimit.Release();
++                break;
++            }
++            catch (ObjectDisposedException) when (cancellationToken.IsCancellationRequested)
++            {
++                connectionLimit.Release();
++                break;
++            }
++            catch (AuthenticationException exception)
++            {
++                connectionLimit.Release();
++                FLLog.Warning("NPC Transfer", $"Rejected QUIC handshake: {exception.Message}");
++                continue;
++            }
++            catch (QuicException exception)
++            {
++                connectionLimit.Release();
++                FLLog.Warning("NPC Transfer", $"Rejected QUIC connection: {exception.Message}");
++                continue;
++            }
++            catch
++            {
++                connectionLimit.Release();
++                throw;
++            }
++            var id = Interlocked.Increment(ref handlerId);
++            var task = HandleConnectionAsync(connection, cancellationToken);
++            activeHandlers[id] = task;
++            _ = task.ContinueWith(completedTask =>
++            {
++                activeHandlers.TryRemove(id, out _);
++                connectionLimit.Release();
++            }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
++        }
++    }
++
++    private async Task HandleConnectionAsync(QuicConnection connection, CancellationToken cancellationToken)
++    {
++        try
++        {
++            using var requestTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
++            requestTimeout.CancelAfter(TimeSpan.FromSeconds(60));
++            var requestToken = requestTimeout.Token;
++            await using (connection)
++            {
++                var peerCertificate = connection.RemoteCertificate;
++                var peerInstanceId = CertificateIdentity.GetSingleDnsIdentity(peerCertificate);
++                await using var stream = await connection.AcceptInboundStreamAsync(requestToken);
++                if (stream.Type != QuicStreamType.Bidirectional)
++                    throw new ProtocolViolationException("NPC transfer requires one bidirectional QUIC stream.");
++
++                var request = MessagePackSerializer.Deserialize<NpcPeerSnapshotTransfer>(
++                    await ReadFrameAsync(stream, requestToken), UntrustedMessagePack);
++                NpcPeerSnapshotTransferValidator.Validate(request);
++                ValidateSnapshotPayload(request);
++                if (!string.Equals(request.TargetInstanceId, instanceId, StringComparison.Ordinal) ||
++                    !string.Equals(request.SourceInstanceId, peerInstanceId, StringComparison.OrdinalIgnoreCase))
++                    throw new ProtocolViolationException("NPC transfer source/target does not match the authenticated certificates.");
++
++                NpcPeerSnapshotTransferAck acknowledgement;
++                try
++                {
++                    if (!await IsCoordinatorSnapshotAuthoritativeAsync(request, requestToken))
++                    {
++                        acknowledgement = new NpcPeerSnapshotTransferAck
++                        {
++                            TransferId = request.TransferId,
++                            Accepted = false,
++                            ReasonCode = "coordinator_snapshot_not_authoritative"
++                        };
++                    }
++                    else
++                    {
++                        acknowledgement = await acceptSnapshot(request, requestToken);
++                        if (acknowledgement.Accepted &&
++                            !await MarkCoordinatorTargetAcceptedAsync(request.TransferId, requestToken))
++                        {
++                            acknowledgement = new NpcPeerSnapshotTransferAck
++                            {
++                                TransferId = request.TransferId,
++                                Accepted = false,
++                                ReasonCode = "coordinator_target_accept_failed"
++                            };
++                        }
++                    }
++                }
++                catch (Exception) when (!requestToken.IsCancellationRequested)
++                {
++                    acknowledgement = new NpcPeerSnapshotTransferAck
++                    {
++                        TransferId = request.TransferId,
++                        Accepted = false,
++                        ReasonCode = "snapshot_rejected"
++                    };
++                }
++                if (acknowledgement.TransferId != request.TransferId)
++                    throw new ProtocolViolationException("NPC transfer acknowledgement ID does not match the request.");
++                await WriteFrameAsync(stream, MessagePackSerializer.Serialize(acknowledgement), requestToken);
++                stream.CompleteWrites();
++            }
++        }
++        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
++        catch (Exception exception) { FLLog.Error("NPC Transfer", exception.Message); }
++    }
++
++    public static async Task<NpcPeerSnapshotTransferAck> SendAsync(
++        IPEndPoint targetEndPoint,
++        string targetInstanceId,
++        X509Certificate2 sourceCertificate,
++        X509Certificate2 serverCa,
++        NpcPeerSnapshotTransfer request,
++        CancellationToken cancellationToken = default)
++    {
++        ArgumentNullException.ThrowIfNull(targetEndPoint);
++        ArgumentNullException.ThrowIfNull(sourceCertificate);
++        ArgumentNullException.ThrowIfNull(serverCa);
++        if (!serverCa.Extensions.OfType<X509BasicConstraintsExtension>().Any(extension => extension.CertificateAuthority))
++            throw new ArgumentException("The server trust certificate must be a CA certificate.", nameof(serverCa));
++        NpcPeerSnapshotTransferValidator.Validate(request);
++        ValidateSnapshotPayload(request);
++        if (!sourceCertificate.HasPrivateKey ||
++            !CertificateIdentity.HasDnsIdentity(sourceCertificate, request.SourceInstanceId) ||
++            !string.Equals(request.TargetInstanceId, targetInstanceId, StringComparison.Ordinal))
++            throw new ProtocolViolationException("NPC transfer request does not match the source/target certificate identities.");
++
++        using var sendTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
++        sendTimeout.CancelAfter(TimeSpan.FromSeconds(60));
++        var sendToken = sendTimeout.Token;
++        await using var connection = await QuicConnection.ConnectAsync(new QuicClientConnectionOptions
++        {
++            RemoteEndPoint = targetEndPoint,
++            DefaultStreamErrorCode = ProtocolErrorCode,
++            DefaultCloseErrorCode = CloseErrorCode,
++            MaxInboundBidirectionalStreams = 1,
++            MaxInboundUnidirectionalStreams = 0,
++            ClientAuthenticationOptions = new SslClientAuthenticationOptions
++            {
++                ApplicationProtocols = [Alpn],
++                TargetHost = targetInstanceId,
++                ClientCertificates = new X509CertificateCollection { sourceCertificate },
++                EnabledSslProtocols = SslProtocols.Tls13,
++                CertificateRevocationCheckMode = X509RevocationMode.NoCheck,
++                RemoteCertificateValidationCallback = (_, certificate, _, errors) =>
++                    CertificateIdentity.Validate(certificate, serverCa, client: false, targetInstanceId, errors)
++            }
++        }, sendToken);
++        await using var stream = await connection.OpenOutboundStreamAsync(QuicStreamType.Bidirectional, sendToken);
++        await WriteFrameAsync(stream, MessagePackSerializer.Serialize(request), sendToken);
++        stream.CompleteWrites();
++        var acknowledgement = MessagePackSerializer.Deserialize<NpcPeerSnapshotTransferAck>(
++            await ReadFrameAsync(stream, sendToken), UntrustedMessagePack);
++        if (acknowledgement.TransferId != request.TransferId)
++            throw new ProtocolViolationException("NPC transfer acknowledgement ID does not match the request.");
++        return acknowledgement;
++    }
++
++    private static async Task<byte[]> ReadFrameAsync(QuicStream stream, CancellationToken cancellationToken)
++    {
++        var header = new byte[sizeof(int)];
++        await stream.ReadExactlyAsync(header, cancellationToken);
++        var length = BinaryPrimitives.ReadInt32BigEndian(header);
++        if (length is <= 0 or > MaximumFrameLength)
++            throw new ProtocolViolationException("NPC transfer frame is empty or exceeds the payload limit.");
++        var payload = new byte[length];
++        await stream.ReadExactlyAsync(payload, cancellationToken);
++        return payload;
++    }
++
++    private static void ValidateSnapshotPayload(NpcPeerSnapshotTransfer request)
++    {
++        var snapshot = MessagePackSerializer.Deserialize<NpcTransferSnapshot>(request.SnapshotMessagePack, UntrustedMessagePack);
++        NpcTransferContractValidator.Validate(snapshot);
++        if (snapshot.TransferId != request.TransferId)
++            throw new ProtocolViolationException("NPC peer envelope and snapshot transfer IDs do not match.");
++    }
++
++    private async Task<bool> IsCoordinatorSnapshotAuthoritativeAsync(
++        NpcPeerSnapshotTransfer request, CancellationToken cancellationToken)
++    {
++        var url = new Uri(coordinatorBaseUri,
++            $"/internal/v1/npc-transfers/{request.TransferId:D}/recovery?instanceId={Uri.EscapeDataString(instanceId)}");
++        using var message = new HttpRequestMessage(HttpMethod.Get, url);
++        message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", coordinatorApiKey);
++        using var response = await coordinatorHttp.SendAsync(message, cancellationToken);
++        if (!response.IsSuccessStatusCode)
++            return false;
++        var recovery = await response.Content.ReadFromJsonAsync<NpcTransferRecoveryResponse>(cancellationToken);
++        if (recovery is null || recovery.TransferId != request.TransferId ||
++            !string.Equals(recovery.SourceInstanceId, request.SourceInstanceId, StringComparison.Ordinal) ||
++            !string.Equals(recovery.TargetInstanceId, request.TargetInstanceId, StringComparison.Ordinal) ||
++            string.IsNullOrWhiteSpace(recovery.SnapshotSha256) || recovery.State is not (NpcTransferState.SourceFrozen or
++                NpcTransferState.TargetAccepted or NpcTransferState.Committed or NpcTransferState.SourceReleased))
++            return false;
++        byte[] authoritativeHash;
++        try { authoritativeHash = Convert.FromHexString(recovery.SnapshotSha256); }
++        catch (FormatException) { return false; }
++        return authoritativeHash.Length == SHA256.HashSizeInBytes &&
++               CryptographicOperations.FixedTimeEquals(authoritativeHash, SHA256.HashData(request.SnapshotMessagePack));
++    }
++
++    private async Task<bool> MarkCoordinatorTargetAcceptedAsync(Guid transferId, CancellationToken cancellationToken)
++    {
++        var recoveryUrl = new Uri(coordinatorBaseUri,
++            $"/internal/v1/npc-transfers/{transferId:D}/recovery?instanceId={Uri.EscapeDataString(instanceId)}");
++        using (var recoveryRequest = new HttpRequestMessage(HttpMethod.Get, recoveryUrl))
++        {
++            recoveryRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", coordinatorApiKey);
++            using var recoveryResponse = await coordinatorHttp.SendAsync(recoveryRequest, cancellationToken);
++            if (!recoveryResponse.IsSuccessStatusCode)
++                return false;
++            var recovery = await recoveryResponse.Content.ReadFromJsonAsync<NpcTransferRecoveryResponse>(cancellationToken);
++            if (recovery is null || recovery.TransferId != transferId)
++                return false;
++            if (recovery.State is NpcTransferState.Committed or NpcTransferState.SourceReleased)
++                return true;
++        }
++        var url = new Uri(coordinatorBaseUri, $"/internal/v1/npc-transfers/{transferId:D}/phase");
++        using var message = new HttpRequestMessage(HttpMethod.Post, url)
++        {
++            Content = JsonContent.Create(new NpcTransferPhaseRequest
++            {
++                TransferId = transferId,
++                State = NpcTransferState.TargetAccepted
++            })
++        };
++        message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", coordinatorApiKey);
++        using var response = await coordinatorHttp.SendAsync(message, cancellationToken);
++        if (!response.IsSuccessStatusCode)
++            return false;
++        var result = await response.Content.ReadFromJsonAsync<NpcTransferPhaseResponse>(cancellationToken);
++        return result is { Accepted: true } && result.TransferId == transferId;
++    }
++
++    private static async Task WriteFrameAsync(QuicStream stream, byte[] payload, CancellationToken cancellationToken)
++    {
++        if (payload.Length is <= 0 or > MaximumFrameLength)
++            throw new ProtocolViolationException("NPC transfer frame is empty or exceeds the payload limit.");
++        var header = new byte[sizeof(int)];
++        BinaryPrimitives.WriteInt32BigEndian(header, payload.Length);
++        await stream.WriteAsync(header, cancellationToken);
++        await stream.WriteAsync(payload, cancellationToken);
++    }
++
++    public async ValueTask DisposeAsync()
++    {
++        if (disposed)
++            return;
++        disposed = true;
++        shutdown?.Cancel();
++        if (listener is not null)
++            await listener.DisposeAsync();
++        if (acceptLoop is not null)
++        {
++            try { await acceptLoop; }
++            catch (OperationCanceledException) { }
++            catch (ObjectDisposedException) { }
++            catch (QuicException) { }
++            catch (Exception exception) { FLLog.Error("NPC Transfer", exception.Message); }
++        }
++        var handlers = activeHandlers.Values.ToArray();
++        try { await Task.WhenAll(handlers); }
++        catch (OperationCanceledException) { }
++        catch (QuicException) { }
++        shutdown?.Dispose();
++        coordinatorHttp.Dispose();
++        connectionLimit.Dispose();
++        shutdown = null;
++        listener = null;
++    }
++
++    private sealed record NpcTransferRecoveryResponse(
++        Guid TransferId,
++        string SourceInstanceId,
++        string TargetInstanceId,
++        string TargetSystemId,
++        Guid[] NpcIds,
++        DateTime ExpiresUtc,
++        NpcTransferState State,
++        string? SnapshotSha256,
++        NpcTransferSnapshot? Snapshot);
++
++    private sealed record NpcTransferPhaseResponse(
++        bool Accepted,
++        string ReasonCode,
++        Guid TransferId,
++        NpcTransferState State);
++
++    private static class CertificateIdentity
++    {
++        private const string ServerAuthEku = "1.3.6.1.5.5.7.3.1";
++        private const string ClientAuthEku = "1.3.6.1.5.5.7.3.2";
++
++        public static bool Validate(X509Certificate? certificate, X509Certificate2 trustedRoot, bool client,
++            string? expectedInstanceId, SslPolicyErrors errors)
++        {
++            if (certificate is null || errors.HasFlag(SslPolicyErrors.RemoteCertificateNotAvailable))
++                return false;
++            try
++            {
++                // QUIC owns the certificate instance passed to this callback. Cloning it here
++                // prevents disposing that instance while the TLS handshake still uses it.
++                using var leaf = new X509Certificate2(certificate);
++                var identity = GetSingleDnsIdentity(leaf);
++                if (expectedInstanceId is not null &&
++                    !string.Equals(identity, expectedInstanceId, StringComparison.OrdinalIgnoreCase))
++                    return false;
++                var requiredEku = client ? ClientAuthEku : ServerAuthEku;
++                if (!leaf.Extensions.OfType<X509EnhancedKeyUsageExtension>().Any(extension =>
++                        extension.EnhancedKeyUsages.Cast<Oid>().Any(oid => oid.Value == requiredEku)))
++                    return false;
++                using var chain = new X509Chain();
++                chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
++                chain.ChainPolicy.CustomTrustStore.Add(trustedRoot);
++                chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
++                chain.ChainPolicy.VerificationFlags = X509VerificationFlags.NoFlag;
++                return chain.Build(leaf);
++            }
++            catch (ProtocolViolationException) { return false; }
++            catch (CryptographicException) { return false; }
++            catch (InvalidOperationException) { return false; }
++        }
++
++        public static bool HasDnsIdentity(X509Certificate2 certificate, string expectedInstanceId) =>
++            string.Equals(GetSingleDnsIdentity(certificate), expectedInstanceId, StringComparison.OrdinalIgnoreCase);
++
++        public static bool HasRequiredEku(X509Certificate2 certificate, bool client) =>
++            certificate.Extensions.OfType<X509EnhancedKeyUsageExtension>().Any(extension =>
++                extension.EnhancedKeyUsages.Cast<Oid>().Any(oid => oid.Value == (client ? ClientAuthEku : ServerAuthEku)));
++
++        public static string GetSingleDnsIdentity(X509Certificate? certificate)
++        {
++            if (certificate is null)
++                throw new ProtocolViolationException("mTLS peer certificate is missing.");
++            using var cert = new X509Certificate2(certificate);
++            var extension = cert.Extensions.OfType<X509SubjectAlternativeNameExtension>().SingleOrDefault();
++            var names = extension?.EnumerateDnsNames().ToArray() ?? [];
++            if (names.Length != 1 || string.IsNullOrWhiteSpace(names[0]) || names[0].Contains('*'))
++                throw new ProtocolViolationException("mTLS peer certificate must contain exactly one non-wildcard DNS SAN.");
++            return names[0];
++        }
++    }
++}
+diff --git a/src/LibreLancer/Server/SpacePopulationBattle.cs b/src/LibreLancer/Server/SpacePopulationBattle.cs
+index 0e0297f..0e8a11f 100644
+--- a/src/LibreLancer/Server/SpacePopulationBattle.cs
++++ b/src/LibreLancer/Server/SpacePopulationBattle.cs
+@@ -1,4 +1,4 @@
+-using System;
++﻿using System;
+ using System.Linq;
+ using System.Numerics;
+ using LibreLancer.Server.Components;
+@@ -44,7 +44,11 @@ public partial class SpacePopulationManager
+             if (!group.InCombat)
+                 continue;
+
++            if (group.Fleeing)
++                continue;
++
+             group.InCombat = false;
++            group.AlertTarget = null;
+             group.InitialPathTarget = group.ResumeDutyTarget;
+             group.ResumeDutyTarget = null;
+             ClearCombatTargets(group);
+@@ -54,6 +58,13 @@ public partial class SpacePopulationManager
+
+     private GameObject? FindGroupHostile(PopGroup group, float range)
+     {
++        if (group.AlertTarget is { } alert && Alive(alert) &&
++            Vector3.DistanceSquared(group.Ships.FirstOrDefault(Alive)?.Transform.Position ?? alert.Transform.Position,
++                alert.Transform.Position) <= range * range)
++        {
++            return alert;
++        }
++
+         foreach (var ship in group.Ships)
+         {
+             if (!Alive(ship))
+@@ -216,7 +227,8 @@ public partial class SpacePopulationManager
+                 var persistDistance = state.InBattle || GroupInCombat(group, players)
+                     ? Math.Max(basePersistDistance, BattlePersistDistance)
+                     : basePersistDistance;
+-                if (players.Length == 0 || group.Ships.All(x => DistanceToNearestPlayer(x.Transform.Position, players) > persistDistance))
++                if (!group.IsTransferred && (players.Length == 0 ||
++                    group.Ships.All(x => DistanceToNearestPlayer(x.Transform.Position, players) > persistDistance)))
+                 {
+                     foreach (var ship in group.Ships)
+                     {
+@@ -227,5 +239,18 @@ public partial class SpacePopulationManager
+                 }
+             }
+         }
++        for (int i = transferredGroups.Count - 1; i >= 0; i--)
++        {
++            var members = transferredGroups[i].Where(Alive).ToArray();
++            if (members.Length == 0)
++            {
++                transferredGroups.RemoveAt(i);
++                continue;
++            }
++            transferredGroups[i] = members;
++            // Transferred ships leave through their route, destruction or another handoff.
++            // Player distance must never discard a leased NPC.
++
++        }
+     }
+ }
+diff --git a/src/LibreLancer/Server/SpacePopulationBehavior.cs b/src/LibreLancer/Server/SpacePopulationBehavior.cs
+index beed016..d778c0e 100644
+--- a/src/LibreLancer/Server/SpacePopulationBehavior.cs
++++ b/src/LibreLancer/Server/SpacePopulationBehavior.cs
+@@ -1,5 +1,6 @@
+-using System;
++﻿using System;
+ using System.Collections.Generic;
++using System.IO;
+ using System.Linq;
+ using System.Numerics;
+ using LibreLancer.Data.GameData.World;
+@@ -28,7 +29,7 @@ public partial class SpacePopulationManager
+         if (directives.Length == 0)
+             return;
+
+-        var leadOnly = group.Encounter.Formation != null && group.Ships.Count > 1;
++        var leadOnly = group.Encounter?.Formation != null && group.Ships.Count > 1;
+         foreach (var ship in group.Ships)
+         {
+             if (!Alive(ship))
+@@ -40,29 +41,185 @@ public partial class SpacePopulationManager
+         }
+     }
+
++    public void AdoptTransferredTraderGroup(GameObject[] ships, string? arrivalObject)
++    {
++        var members = ships.Where(Alive).ToArray();
++        if (members.Length == 0)
++            return;
++        var position = members[0].Transform.Position;
++        if (zones.Count == 0)
++        {
++            transferredGroups.Add(members);
++            BindStandaloneTraderCombatReactions(members);
++            var transferredLeader = members.FirstOrDefault(x => x.Formation is null || x.Formation.LeadShip == x) ?? members[0];
++            if (members.Any(ship => ship.GetComponent<SNPCComponent>()?.PopulationFleeing == true))
++            {
++                var fleeRoute = BuildStandaloneFriendlyEscapeRoute(position,
++                    transferredLeader.GetComponent<SRepComponent>()?.Faction);
++                if (fleeRoute.Length > 0)
++                {
++                    transferredLeader.GetComponent<DirectiveRunnerComponent>()?.SetDirectives(fleeRoute, world.GameWorld);
++                    return;
++                }
++            }
++            var initialCargoRoute = BuildTradeCargoDirectives(members, position, arrivalObject);
++            if (initialCargoRoute.Length > 0)
++            {
++                var traderLeader = members.FirstOrDefault(x => x.Formation is null || x.Formation.LeadShip == x) ?? members[0];
++                traderLeader.GetComponent<DirectiveRunnerComponent>()?.SetDirectives(initialCargoRoute, world.GameWorld);
++                return;
++            }
++            transferredLeader.GetComponent<DirectiveRunnerComponent>()?.SetDirectives(
++                BuildLocalWanderDirectives(position), world.GameWorld);
++            return;
++        }
++        var state = zones.OrderBy(candidate => candidate.Zone.DistanceToEdge(position)).First();
++        var group = new PopGroup(state, null!)
++        {
++            IsTransferred = true,
++            PersistDistance = DefaultPersistDistance,
++            ArrivalObject = arrivalObject
++        };
++        group.Ships.AddRange(members);
++        group.Fleeing = members.Any(ship => ship.GetComponent<SNPCComponent>()?.PopulationFleeing == true);
++        state.Groups.Add(group);
++        BindTraderCombatReactions(group);
++        var leader = group.Ships.FirstOrDefault(x => x.Formation is null || x.Formation.LeadShip == x) ?? group.Ships[0];
++        leader.GetComponent<DirectiveRunnerComponent>()?.SetDirectives(
++            group.Fleeing
++                ? BuildFriendlyEscapeRoute(group, leader.Transform.Position,
++                    leader.GetComponent<SRepComponent>()?.Faction)
++                : BuildTradeCargoDirectives(group.Ships, leader.Transform.Position, arrivalObject) is { Length: > 0 } cargoRoute
++                    ? cargoRoute
++                    : BuildTradeDirectives(state), world.GameWorld);
++    }
++
++    internal void AdoptRecoveredCheckpointGroup(GameObject[] ships)
++    {
++        var members = ships.Distinct().ToArray();
++        if (members.Length == 0 || members.Any(ship => !Alive(ship) ||
++                !ship.TryGetComponent<SNPCComponent>(out var npc) || npc.MissionRuntime is not null ||
++                npc.NpcId == Guid.Empty || npc.TerminalCheckpointPending))
++            throw new InvalidDataException("Recovered NPC checkpoint group is incomplete or ineligible.");
++        var ids = members.Select(ship => ship.GetComponent<SNPCComponent>()!.NpcId).ToHashSet();
++        if (transferredGroups.Any(group => group.Any(ship =>
++                ship.TryGetComponent<SNPCComponent>(out var npc) && ids.Contains(npc.NpcId))))
++            throw new InvalidDataException("Recovered NPC checkpoint group overlaps an active population group.");
++        transferredGroups.Add(members);
++        BindStandaloneTraderCombatReactions(members);
++    }
++
++    /// <summary>Returns a population group to local traffic after its gate transfer fails.</summary>
++    public void ResumeFailedTraderGroup(Guid[] npcIds, string failedGate)
++    {
++        if (npcIds.Length == 0)
++            return;
++
++        var ids = npcIds.ToHashSet();
++        var members = world.GameWorld.Objects
++            .Where(obj => obj.TryGetComponent<SNPCComponent>(out var npc) && ids.Contains(npc.NpcId) && Alive(obj))
++            .ToArray();
++        if (members.Length != ids.Count)
++            return;
++
++        foreach (var state in zones)
++        {
++            for (int i = state.Groups.Count - 1; i >= 0; i--)
++            {
++                var group = state.Groups[i];
++                group.Ships.RemoveAll(ship => ship.TryGetComponent<SNPCComponent>(out var npc) && ids.Contains(npc.NpcId));
++                if (group.Ships.Count == 0)
++                    state.Groups.RemoveAt(i);
++            }
++        }
++        for (int i = transferredGroups.Count - 1; i >= 0; i--)
++        {
++            transferredGroups[i] = transferredGroups[i].Where(ship =>
++                !ship.TryGetComponent<SNPCComponent>(out var npc) || !ids.Contains(npc.NpcId)).ToArray();
++            if (transferredGroups[i].Length == 0)
++                transferredGroups.RemoveAt(i);
++        }
++
++        var leader = members.FirstOrDefault(obj => obj.Formation is null || obj.Formation.LeadShip == obj) ?? members[0];
++        if (zones.Count > 0)
++        {
++            var state = zones.OrderBy(candidate => candidate.Zone.DistanceToEdge(leader.Transform.Position)).First();
++            var group = new PopGroup(state, null!)
++            {
++                IsTransferred = true, PersistDistance = DefaultPersistDistance, ArrivalObject = failedGate
++            };
++            group.Ships.AddRange(members);
++            group.Fleeing = members.Any(ship => ship.GetComponent<SNPCComponent>()?.PopulationFleeing == true);
++            state.Groups.Add(group);
++            BindTraderCombatReactions(group);
++            leader.GetComponent<DirectiveRunnerComponent>()?.SetDirectives(
++                group.Fleeing
++                    ? BuildFriendlyEscapeRoute(group, leader.Transform.Position,
++                        leader.GetComponent<SRepComponent>()?.Faction) is { Length: > 0 } escapeRoute
++                        ? escapeRoute
++                        : BuildWanderDirectives(state.Zone)
++                    : BuildTradeCargoDirectives(group.Ships, leader.Transform.Position, failedGate) is { Length: > 0 } cargoRoute
++                        ? cargoRoute
++                        : BuildTradeDirectives(state), world.GameWorld);
++        }
++        else
++        {
++            transferredGroups.Add(members);
++            BindStandaloneTraderCombatReactions(members);
++            var gate = world.GameWorld.GetObject(failedGate);
++            var away = gate is null ? Vector3.UnitZ : leader.Transform.Position - gate.Transform.Position;
++            if (away.LengthSquared() < 1)
++                away = Vector3.UnitZ;
++            var target = leader.Transform.Position + Vector3.Normalize(away) * 5000;
++            leader.GetComponent<DirectiveRunnerComponent>()?.SetDirectives(
++                [new GotoVecDirective { Target = target, CruiseKind = GotoKind.GotoCruise, Range = 750, MaxThrottle = 100 }],
++                world.GameWorld);
++        }
++    }
++
++
+     private MissionDirective[] BuildDirectives(PopGroup group, Vector3 currentPosition)
+     {
++        if (group.Fleeing)
++        {
++            var escapeRoute = BuildFriendlyEscapeRoute(group, currentPosition,
++                group.Ships.FirstOrDefault(Alive)?.GetComponent<SRepComponent>()?.Faction);
++            return escapeRoute.Length > 0 ? escapeRoute : BuildWanderDirectives(group.State.Zone);
++        }
++
+         var retirementDockable = GetRetirementDockable(group, currentPosition);
+         if (retirementDockable != null)
+             return BuildRetirementDirectives(retirementDockable);
+
+-        var behavior = group.Encounter.FormationDefinition?.Behavior ?? EncounterBehavior.wander;
++        var behavior = group.IsTransferred
++            ? EncounterBehavior.trade
++            : group.Encounter.FormationDefinition?.Behavior ?? EncounterBehavior.wander;
+         return behavior switch
+         {
++            EncounterBehavior.patrol_path when group.PatrolPathExhausted => BuildWanderDirectives(group.State.Zone),
+             EncounterBehavior.patrol_path => BuildPathDirectives(group, GotoKind.GotoCruise, 100, PatrolPathWaypointRange),
+-            EncounterBehavior.trade when IsPatrol(group.State.Zone) => BuildPathDirectives(group, GotoKind.GotoCruise, 100, PatrolPathWaypointRange),
+-            EncounterBehavior.trade => BuildTradeDirectives(group.State, currentPosition, group.ArrivalObject),
++            EncounterBehavior.trade => BuildHybridTradeDirectives(group, currentPosition),
+             _ => BuildWanderDirectives(group.State.Zone)
+         };
+     }
+
++    private MissionDirective[] BuildHybridTradeDirectives(PopGroup group, Vector3 currentPosition)
++    {
++        var cargoRoute = BuildTradeCargoDirectives(group.Ships, currentPosition, group.ArrivalObject);
++        if (cargoRoute.Length > 0)
++            return cargoRoute;
++        if (IsPatrol(group.State.Zone) && !group.PatrolPathExhausted)
++            return BuildPathDirectives(group, GotoKind.GotoCruise, 100, PatrolPathWaypointRange);
++        return BuildTradeDirectives(group.State);
++    }
++
+     private GameObject? GetRetirementDockable(PopGroup group, Vector3 currentPosition)
+     {
+         var reliefTime = group.State.Zone.ReliefTime;
+         if (reliefTime <= 0 || group.AgeSeconds < reliefTime)
+             return null;
+
+-        var behavior = group.Encounter.FormationDefinition?.Behavior ?? EncounterBehavior.wander;
++        var behavior = group.Encounter?.FormationDefinition?.Behavior ?? EncounterBehavior.trade;
+         if (behavior != EncounterBehavior.patrol_path && !IsPatrol(group.State.Zone))
+             return null;
+
+@@ -113,25 +270,31 @@ public partial class SpacePopulationManager
+         return directives;
+     }
+
+-    private MissionDirective[] BuildTradeDirectives(ZoneState state, Vector3 currentPosition, string? excludeDockable)
++    private MissionDirective[] BuildTradeDirectives(ZoneState state)
+     {
+-        var dockable = FindDockable(currentPosition, excludeDockable);
+-        if (!string.IsNullOrWhiteSpace(dockable?.Nickname))
++        if (IsPatrol(state.Zone) && state.Path is { Count: > 1 })
++            return BuildPathDirectives(state, GotoKind.GotoCruise, 100, PatrolPathWaypointRange);
++        return BuildWanderDirectives(state.Zone);
++    }
++
++    private MissionDirective[] BuildLocalWanderDirectives(Vector3 position)
++    {
++        var count = random.Next(2, 5);
++        var directives = new MissionDirective[count];
++        for (int i = 0; i < directives.Length; i++)
+         {
+-            return
+-            [
+-                new GotoShipDirective
+-                {
+-                    Target = dockable.Nickname!,
+-                    CruiseKind = GotoKind.GotoCruise,
+-                    Range = 750,
+-                    MaxThrottle = 100
+-                },
+-                new DockDirective { Target = dockable.Nickname! }
+-            ];
++            var angle = random.NextSingle() * MathF.Tau;
++            var distance = random.NextSingle() * 4000 + 1000;
++            directives[i] = new GotoVecDirective
++            {
++                Target = position + new Vector3(MathF.Cos(angle) * distance,
++                    random.NextSingle() * 1000 - 500, MathF.Sin(angle) * distance),
++                CruiseKind = GotoKind.GotoNoCruise,
++                Range = 500,
++                MaxThrottle = 80
++            };
+         }
+-
+-        return BuildPathDirectives(state, GotoKind.GotoCruise, 100);
++        return directives;
+     }
+
+     private MissionDirective[] BuildPathDirectives(
+@@ -192,7 +355,10 @@ public partial class SpacePopulationManager
+         var result = new List<Vector3>();
+         var path = group.State.Path;
+         if (path == null || path.Count == 0 || group.PathIndex < 0)
++        {
++            group.PatrolPathExhausted = true;
+             return result;
++        }
+
+         if (group.InitialPathTarget is { } initialTarget)
+         {
+@@ -226,6 +392,7 @@ public partial class SpacePopulationManager
+         }
+
+         group.PathIndex = index;
++        group.PatrolPathExhausted = IsPatrolPathExhausted(path.Count, index, closedLoop);
+         return result;
+     }
+
+@@ -258,7 +425,7 @@ public partial class SpacePopulationManager
+         result.Add(target);
+     }
+
+-    private static bool IsClosedPath(List<PatrolPathSegment> path)
++    internal static bool IsClosedPath(List<PatrolPathSegment> path)
+     {
+         if (path.Count < 3)
+             return false;
+@@ -271,6 +438,9 @@ public partial class SpacePopulationManager
+         return Vector3.DistanceSquared(first, last) < 1;
+     }
+
++    internal static bool IsPatrolPathExhausted(int pathCount, int lastPlannedIndex, bool closedLoop) =>
++        !closedLoop && (pathCount < 2 || lastPlannedIndex >= pathCount - 1);
++
+     private GameObject? FindRetirementDockable(PopGroup group, Vector3 currentPosition)
+     {
+         var maxDistance = group.PersistDistance > 0
+@@ -330,6 +500,41 @@ public partial class SpacePopulationManager
+         return nearest;
+     }
+
++    private GameObject? FindPopulationJumpGate(Vector3 currentPosition, string? excludeNickname)
++    {
++        GameObject? nearest = null;
++        var nearestDistance = float.MaxValue;
++        foreach (var obj in world.GameWorld.Objects)
++        {
++            if (obj.SystemObject == null ||
++                string.IsNullOrWhiteSpace(obj.Nickname) ||
++                (obj.Flags & GameObjectFlags.Exists) != GameObjectFlags.Exists ||
++                !obj.TryGetComponent<SDockableComponent>(out var dockable) ||
++                !IsInterSystemPopulationJump(dockable.Action, world.System.Nickname) ||
++                world.Server.GameData.Items.Systems.Get(dockable.Action.Target!) is null)
++            {
++                continue;
++            }
++            if (!string.IsNullOrWhiteSpace(excludeNickname) &&
++                excludeNickname.Equals(obj.Nickname, StringComparison.OrdinalIgnoreCase))
++            {
++                continue;
++            }
++
++            var distance = Vector3.DistanceSquared(currentPosition, obj.Transform.Position);
++            if (distance >= nearestDistance)
++                continue;
++
++            nearestDistance = distance;
++            nearest = obj;
++        }
++        return nearest;
++    }
++
++    internal static bool IsInterSystemPopulationJump(DockAction? action, string sourceSystemId) =>
++        action is { Kind: DockKinds.Jump, Target.Length: > 0, Exit.Length: > 0 } &&
++        !action.Target.Equals(sourceSystemId, StringComparison.OrdinalIgnoreCase);
++
+     private Vector3 GetFirstDirectiveTarget(ZoneState state, EncounterInfo info)
+     {
+         var behavior = info.FormationDefinition?.Behavior ?? EncounterBehavior.wander;
+@@ -357,4 +562,44 @@ public partial class SpacePopulationManager
+                 AssignDirectives(group);
+         }
+     }
++
++    private void UpdateIdleTransferredGroupDirectives()
++    {
++        foreach (var ships in transferredGroups)
++        {
++            var leader = ships.FirstOrDefault(Alive);
++            if (leader == null)
++                continue;
++            var runner = leader.GetComponent<DirectiveRunnerComponent>();
++            if (runner is not { Active: false })
++                continue;
++
++            var position = leader.Transform.Position;
++            if (ships.Any(ship => ship.GetComponent<SNPCComponent>()?.PopulationFleeing == true))
++            {
++                var faction = leader.GetComponent<SRepComponent>()?.Faction;
++                var fleeRoute = BuildStandaloneFriendlyEscapeRoute(position, faction);
++                if (fleeRoute.Length > 0)
++                {
++                    runner.SetDirectives(fleeRoute, world.GameWorld);
++                    continue;
++                }
++                runner.SetDirectives(BuildLocalWanderDirectives(position), world.GameWorld);
++                continue;
++            }
++            var cargoRoute = BuildTradeCargoDirectives(ships, position, null);
++            if (cargoRoute.Length > 0)
++            {
++                runner.SetDirectives(cargoRoute, world.GameWorld);
++                continue;
++            }
++            if (zones.Count > 0)
++            {
++                var state = zones.OrderBy(candidate => candidate.Zone.DistanceToEdge(position)).First();
++                runner.SetDirectives(BuildTradeDirectives(state), world.GameWorld);
++            }
++            else
++                runner.SetDirectives(BuildLocalWanderDirectives(position), world.GameWorld);
++        }
++    }
+ }
+diff --git a/src/LibreLancer/Server/SpacePopulationManager.cs b/src/LibreLancer/Server/SpacePopulationManager.cs
+index 2b9d372..8ce1c9a 100644
+--- a/src/LibreLancer/Server/SpacePopulationManager.cs
++++ b/src/LibreLancer/Server/SpacePopulationManager.cs
+@@ -26,8 +26,13 @@ public partial class SpacePopulationManager
+     private readonly ServerWorld world;
+     private readonly Random random = new();
+     private readonly List<ZoneState> zones = [];
++    private readonly List<GameObject[]> transferredGroups = [];
+     private readonly Dictionary<string, EncounterIni?> encounterCache = new(StringComparer.OrdinalIgnoreCase);
+     private int spawnCounter;
++    private readonly string populationSpawnNamespace = Guid.NewGuid().ToString("N");
++
++    internal string NextPopulationNickname(int memberIndex) =>
++        $"spacepop_{populationSpawnNamespace}_{++spawnCounter}_{memberIndex}";
+
+     public SpacePopulationManager(ServerWorld world)
+     {
+@@ -47,6 +52,11 @@ public partial class SpacePopulationManager
+         InitializePaths();
+     }
+
++    // These groups remain authoritative traffic even when no player observes the system.
++    public bool HasActiveTransferredShips =>
++        transferredGroups.Any(group => group.Any(Alive)) ||
++        zones.Any(state => state.Groups.Any(group => group.IsTransferred && group.Ships.Any(Alive)));
++
+     public void Update(double delta)
+     {
+         var players = GetPlayerObjects();
+@@ -54,9 +64,7 @@ public partial class SpacePopulationManager
+             UpdateBattleState(state, players, delta);
+
+         PruneAndDespawn(players);
+-
+-        if (players.Length == 0)
+-            return;
++        UpdateIdleTransferredGroupDirectives();
+
+         foreach (var state in zones)
+         {
+@@ -65,6 +73,9 @@ public partial class SpacePopulationManager
+
+             UpdateGroupCombat(state);
+             UpdateIdleGroupDirectives(state);
++            // Continue existing routes without creating unobserved ambient population.
++            if (players.Length == 0)
++                continue;
+             state.TimeUntilHeartbeat -= delta;
+             if (state.TimeUntilHeartbeat > 0)
+                 continue;
+@@ -82,7 +93,7 @@ public partial class SpacePopulationManager
+             .GroupBy(x => x.Zone.PathLabel![0], StringComparer.OrdinalIgnoreCase)
+             .ToDictionary(
+                 x => x.Key,
+-                x => x.OrderBy(y => y.Label).ToList(),
++                x => x.OrderBy(y => y.Label).DistinctBy(y => y.Label).ToList(),
+                 StringComparer.OrdinalIgnoreCase);
+
+         foreach (var state in zones)
+@@ -99,14 +110,17 @@ public partial class SpacePopulationManager
+         }
+     }
+
+-    private static IEnumerable<PatrolPathSegment> PatrolPathSegments(Zone zone)
++    internal static IEnumerable<PatrolPathSegment> PatrolPathSegments(Zone zone)
+     {
+         if (zone.PathLabel is not { Length: >= 2 })
+             yield break;
+
++        HashSet<int> labels = [];
+         for (int i = 1; i < zone.PathLabel.Length; i++)
+         {
+-            if (int.TryParse(zone.PathLabel[i], out var label))
++            if (int.TryParse(zone.PathLabel[i], out var label) && label >= 0 &&
++                labels.Add(label) && float.IsFinite(zone.Position.X) &&
++                float.IsFinite(zone.Position.Y) && float.IsFinite(zone.Position.Z))
+                 yield return new PatrolPathSegment(zone, label);
+         }
+     }
+diff --git a/src/LibreLancer/Server/SpacePopulationSpawner.cs b/src/LibreLancer/Server/SpacePopulationSpawner.cs
+index d2edc79..b674066 100644
+--- a/src/LibreLancer/Server/SpacePopulationSpawner.cs
++++ b/src/LibreLancer/Server/SpacePopulationSpawner.cs
+@@ -3,6 +3,7 @@ using System.Collections.Generic;
+ using System.Linq;
+ using System.Numerics;
+ using LibreLancer.Data.GameData;
++using LibreLancer.Data.GameData.Items;
+ using LibreLancer.Data.Schema.Missions;
+ using LibreLancer.Missions;
+ using LibreLancer.Server.Components;
+@@ -49,6 +50,9 @@ public partial class SpacePopulationManager
+             faction,
+             world.Server.GameData.Items,
+             random);
++        TradeCargoPlan? tradeCargo = TryLoadTradeCargo(info, faction, out var selectedCargo)
++            ? selectedCargo
++            : null;
+         if (info.Ships.Count == 0)
+             return;
+         if (state.InBattle &&
+@@ -66,7 +70,7 @@ public partial class SpacePopulationManager
+         if (!TryFindSpawnLocation(state, info, context.Players, creationDistance, false, out var spawn))
+             return;
+
+-        SpawnGroup(state, info, faction, spawn, populationClasses);
++        SpawnGroup(state, info, faction, spawn, populationClasses, tradeCargo);
+     }
+
+     public void PopulateInitialAroundPlayer(GameObject player)
+@@ -115,6 +119,9 @@ public partial class SpacePopulationManager
+             faction,
+             world.Server.GameData.Items,
+             random);
++        TradeCargoPlan? tradeCargo = TryLoadTradeCargo(info, faction, out var selectedCargo)
++            ? selectedCargo
++            : null;
+         if (info.Ships.Count == 0)
+             return;
+         if (state.InBattle &&
+@@ -132,7 +139,7 @@ public partial class SpacePopulationManager
+         if (!TryFindSpawnLocation(state, info, context.Players, creationDistance, true, out var spawn))
+             return;
+
+-        SpawnGroup(state, info, faction, spawn, populationClasses);
++        SpawnGroup(state, info, faction, spawn, populationClasses, tradeCargo);
+     }
+
+     private int CountShips(ZoneState state) =>
+@@ -238,7 +245,8 @@ public partial class SpacePopulationManager
+         EncounterInfo info,
+         Faction faction,
+         SpawnLocation spawn,
+-        HashSet<string> populationClasses)
++        HashSet<string> populationClasses,
++        TradeCargoPlan? tradeCargo = null)
+     {
+         var items = world.Server.GameData.Items;
+         var position = spawn.Position;
+@@ -264,6 +272,12 @@ public partial class SpacePopulationManager
+             arrivalDockable = dockable;
+         }
+         var neutralTo = ActiveRandomMissionPlayerObjects();
++        var cargoCarrierIndex = info.Ships.FindIndex(x =>
++            x.MakeClass?.Contains("freight", StringComparison.OrdinalIgnoreCase) == true ||
++            x.MakeClass?.Contains("transport", StringComparison.OrdinalIgnoreCase) == true);
++        if (cargoCarrierIndex < 0)
++            cargoCarrierIndex = 0;
++        var cargoAssigned = false;
+
+         for (int i = 0; i < info.Ships.Count; i++)
+         {
+@@ -293,7 +307,7 @@ public partial class SpacePopulationManager
+                 ? "FIGHTER"
+                 : entry.Ship.StateGraph;
+             var pilot = string.IsNullOrWhiteSpace(entry.Ship.Pilot) ? null : items.GetPilot(entry.Ship.Pilot);
+-            var nickname = $"spacepop_{++spawnCounter}_{i}";
++            var nickname = NextPopulationNickname(i);
+             var offset = spawn.ArrivalObject == null
+                 ? GetSpawnOffset(info, i, orientation)
+                 : Vector3.Zero;
+@@ -315,11 +329,22 @@ public partial class SpacePopulationManager
+                 reservedArrival,
+                 neutralTo);
+             group.Ships.Add(obj);
++            if (!cargoAssigned && tradeCargo is { } cargo && i >= cargoCarrierIndex)
++            {
++                if (obj.GetComponent<SNPCCargoComponent>() is { } cargoComponent)
++                {
++                    cargoComponent.Cargo.Add(new BasicCargo(cargo.Commodity, cargo.Quantity));
++                    if (obj.GetComponent<SNPCComponent>() is { } npc)
++                        npc.TradeCargoUnitPrice = cargo.SourceUnitPrice;
++                }
++                cargoAssigned = true;
++            }
+         }
+
+         if (group.Ships.Count == 0)
+             return;
+
++        BindTraderCombatReactions(group);
+         state.Groups.Add(group);
+         RecordFormationCreation(state, info);
+         if (info.Formation != null && group.Ships.Count > 1)
+@@ -422,7 +447,7 @@ public partial class SpacePopulationManager
+             return true;
+
+         if (!formation.AllowSimultaneousCreation && state.Groups.Any(x =>
+-                ReferenceEquals(x.Encounter.FormationDefinition, formation) &&
++                ReferenceEquals(x.Encounter?.FormationDefinition, formation) &&
+                 x.Ships.Any(Alive)))
+         {
+             return false;
+diff --git a/src/LibreLancer/Server/SpacePopulationState.cs b/src/LibreLancer/Server/SpacePopulationState.cs
+index 06ff5b3..f25715b 100644
+--- a/src/LibreLancer/Server/SpacePopulationState.cs
++++ b/src/LibreLancer/Server/SpacePopulationState.cs
+@@ -1,4 +1,5 @@
+ using System.Collections.Generic;
++using System.Linq;
+ using System.Numerics;
+ using LibreLancer.Data.Schema.Missions;
+ using LibreLancer.World;
+@@ -20,7 +21,7 @@ public partial class SpacePopulationManager
+         public int PathIndex = -1;
+     }
+
+-    private readonly record struct PatrolPathSegment(Zone Zone, int Label);
++    internal readonly record struct PatrolPathSegment(Zone Zone, int Label);
+
+     private sealed class PopGroup(ZoneState state, EncounterInfo encounter)
+     {
+@@ -33,10 +34,44 @@ public partial class SpacePopulationManager
+         public float PersistDistance;
+         public int PathIndex = state.PathIndex;
+         public Vector3? InitialPathTarget;
++        public bool PatrolPathExhausted;
+         public bool InCombat;
++        public bool Fleeing;
++        public GameObject? AlertTarget;
++        public bool IsTransferred;
+         public Vector3? ResumeDutyTarget;
+     }
+
++    public JumperNpc[] GatherPopulationTransferGroup(GameObject ship)
++    {
++        var transferred = transferredGroups.FirstOrDefault(group => group.Contains(ship));
++        if (transferred is not null)
++        {
++            if (transferred.Any(member => !Alive(member) ||
++                    !member.TryGetComponent<Components.SNPCComponent>(out var npc) || npc.MissionRuntime is not null ||
++                    npc.TerminalCheckpointPending))
++                return [];
++            return transferred.Select(member => JumperNpc.FromGameObject(member, world)).ToArray();
++        }
++        foreach (var state in zones)
++        foreach (var group in state.Groups)
++        {
++            if (!group.Ships.Contains(ship) ||
++                !CanTransferPopulationGroup(group.IsTransferred, group.Encounter?.FormationDefinition?.Behavior))
++                continue;
++            var members = group.Ships.Where(Alive).ToArray();
++            if (members.Length == 0 || members.Any(member =>
++                    !member.TryGetComponent<Components.SNPCComponent>(out var npc) || npc.MissionRuntime is not null ||
++                    npc.TerminalCheckpointPending))
++                return [];
++            return members.Select(member => JumperNpc.FromGameObject(member, world)).ToArray();
++        }
++        return [];
++    }
++
++    internal static bool CanTransferPopulationGroup(bool isTransferred, EncounterBehavior? behavior) =>
++        isTransferred || behavior == EncounterBehavior.trade;
++
+     private readonly record struct SpawnLocation(
+         Vector3 Position,
+         Quaternion Orientation,
+diff --git a/src/LibreLancer/Server/WorldProvider.cs b/src/LibreLancer/Server/WorldProvider.cs
+index 9bf5e02..94fc7aa 100644
+--- a/src/LibreLancer/Server/WorldProvider.cs
++++ b/src/LibreLancer/Server/WorldProvider.cs
+@@ -1,5 +1,6 @@
+ using System;
+ using System.Collections.Concurrent;
++using System.Net.Http;
+ using System.Net.Security;
+ using System.Threading;
+ using System.Threading.Tasks;
+@@ -30,37 +31,40 @@ public class WorldProvider
+
+     private ConcurrentDictionary<StarSystem, WorldState> worlds = new();
+
+-    private void LoadWorld(StarSystem system, out WorldState ws, PreloadObject[] preloads)
++    private async Task LoadWorldAsync(StarSystem system, PreloadObject[] preloads)
+     {
+-        var x = new WorldState();
+-        if (worlds.TryAdd(system, new WorldState()))
++        if (!worlds.TryAdd(system, new WorldState())) return;
++        try
+         {
+-            x.World = new ServerWorld(system, server);
++            var world = new ServerWorld(system, server);
+             server.GameData.PreloadObjects(preloads, server.Resources);
+-            x.Ready = true;
+-            server.WorldReady(x.World);
+-            worlds.AddOrUpdate(
+-                system,
+-                _ => x,
+-                (_, _) => x
+-            );
++            await server.RestoreNpcCheckpointsForWorldAsync(world).ConfigureAwait(false);
++            FLLog.Info("SpawnFlow", $"World restore completed for {system.Nickname}.");
++            server.WorldReady(world);
++            worlds[system] = new WorldState { Ready = true, World = world };
++        }
++        catch
++        {
++            worlds.TryRemove(system, out _);
++            throw;
+         }
+-        ws = x;
+     }
+     public void RequestWorld(StarSystem system, Action<ServerWorld> spunUp, PreloadObject[] preloads)
+     {
+         Task.Run(async () =>
+         {
+-            if (!worlds.TryGetValue(system, out var ws))
+-                LoadWorld(system, out ws, preloads);
+-            while (!ws.Ready)
++            while (true)
+             {
++                if (worlds.TryGetValue(system, out var ws) && ws.Ready)
++                {
++                    spunUp(ws.World);
++                    return;
++                }
++                try { await LoadWorldAsync(system, preloads); }
++                catch (HttpRequestException) { await Task.Delay(TimeSpan.FromSeconds(2)); }
++                catch (TaskCanceledException) { await Task.Delay(TimeSpan.FromSeconds(2)); }
+                 await Task.Delay(33);
+-                if (!worlds.TryGetValue(system, out ws))
+-                    LoadWorld(system, out ws, preloads);
+             }
+-
+-            spunUp(ws.World);
+         }).ContinueWith(x =>
+         {
+             if (x.Exception != null)
