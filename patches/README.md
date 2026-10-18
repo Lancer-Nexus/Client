@@ -1,6 +1,6 @@
 # Client patch groups
 
-The active series contains 375 Client patches and two native patches. Each
+The active series contains 376 Client patches and two native patches. Each
 file belongs to one functional bundle; the combined output preserves the
 integration, upstream compatibility fixes, tests and project documentation.
 
@@ -328,3 +328,5 @@ jump-gate route.
 | 2377 | Record NAP-only dynamic asteroid particle-effect parsing and startup evidence |
 
 | 2378 | Distinguish the empty sun Sph placeholder from StarArch sun and lens-glow rendering |
+
+| 2379 | Distinguish retail Fade 1D sampler settings from the Atmosphere MAT scalar |
