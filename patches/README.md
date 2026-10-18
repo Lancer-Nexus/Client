@@ -1,6 +1,6 @@
 # Client patch groups
 
-The active series contains 366 Client patches and two native patches. Each
+The active series contains 367 Client patches and two native patches. Each
 file belongs to one functional bundle; the combined output preserves the
 integration, upstream compatibility fixes, tests and project documentation.
 
@@ -315,3 +315,4 @@ jump-gate route.
 | 2367 | Add NAP-only M01A visual A/B evidence for the soft-particle toggle |
 | 2368 | Remove stale OpenGL imports and refresh the backend boundary audit |
 | 2369 | Compact SDL_GPU SPIR-V bindings and serialize original-to-SDL slot maps |
+| 2370 | Keep selected PBR shader variants within SDL_GPU's uniform-buffer limit |
