@@ -348,3 +348,4 @@ jump-gate route.
 | 2391 | Use the production Freelancer FVF declaration in the SDL_GPU PBR draw smoke |
 
 | 2392 | Draw real NAP CMP/VMesh FVF3 geometry through the SDL_GPU production PBR smoke |
+| 2393 | Sample real Freelancer MAT diffuse DDS textures in the SDL_GPU PBR VMesh smoke |

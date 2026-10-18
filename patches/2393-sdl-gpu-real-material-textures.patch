@@ -1,0 +1,439 @@
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -16,15 +16,31 @@
+ using LibreLancer.Utf.Dfm;
+ using LibreLancer.Utf.Cmp;
+ using LibreLancer.Utf.Vms;
++using LibreLancer.Utf.Mat;
++using LibreLancer.Utf;
++using LibreLancer.ImageLib;
+ 
+ namespace lancer;
+ 
+ internal static class MainClass
+ {
+-    private sealed record VMeshTriangle(float[] Vertices, D3DFVF Format, string Description);
+-
+-    private static VMeshTriangle LoadVmeshTriangle(string path)
++    private sealed record VMeshTriangle(float[] Vertices, D3DFVF Format, string Description,
++        float[] DiffuseColor, byte[]? DiffuseDds);
++
++    private static VMeshTriangle LoadVmeshTriangle(string path, string? materialPath = null)
+     {
++        MatFile? externalMaterials = null;
++        TxmFile? externalTextures = null;
++        if (!string.IsNullOrWhiteSpace(materialPath))
++        {
++            // Material parsing resolves aliases through this process-global map.
++            // The diagnostic has no loaded FreelancerData, so initialize the same
++            // empty fallback used when no material_map.ini is available.
++            _ = new MaterialMap();
++            using var materialStream = File.OpenRead(materialPath);
++            UtfLoader.LoadResourceFile(materialStream, materialPath, null!, out externalMaterials,
++                out externalTextures, out _);
++        }
+         using var stream = File.OpenRead(path);
+         var cmp = new CmpFile(path, stream);
+         if (cmp.VMeshLibrary == null)
+@@ -34,6 +50,7 @@
+         VMeshRef? selectedRef = null;
+         VMeshData? selectedData = null;
+         TMeshHeader? selectedMesh = null;
++        Material? selectedMaterial = null;
+         var selectedIndexStart = 0;
+         var largestTriangle = 0;
+         foreach (var model in cmp.Models.Values.OrderBy(x => x.Path, StringComparer.Ordinal))
+@@ -73,6 +90,9 @@
+                     selectedRef = meshRef;
+                     selectedData = data;
+                     selectedMesh = mesh;
++                    selectedMaterial = selectedModel.MaterialLibrary?.Materials.GetValueOrDefault(mesh.MaterialCrc)
++                                       ?? cmp.MaterialLibrary?.Materials.GetValueOrDefault(mesh.MaterialCrc)
++                                       ?? externalMaterials?.Materials.GetValueOrDefault(mesh.MaterialCrc);
+                     selectedIndexStart = indexStart;
+                     largestTriangle = mesh.NumRefVertices;
+                 }
+@@ -132,9 +152,38 @@
+             vertices[offset + 7] = texcoords[i].Y;
+         }
+ 
++        var material = selectedMaterial;
++        var color = material?.Dc ?? LibreLancer.Color4.White;
++        TextureData? diffuseTexture = null;
++        if (material?.DtName is { } diffuseName && externalTextures != null)
++        {
++            diffuseTexture = externalTextures.Textures.FirstOrDefault(x =>
++                string.Equals(x.Key, diffuseName, StringComparison.OrdinalIgnoreCase) ||
++                string.Equals(Path.GetFileNameWithoutExtension(x.Key),
++                    Path.GetFileNameWithoutExtension(diffuseName), StringComparison.OrdinalIgnoreCase)).Value;
++        }
++        var diffuseImage = diffuseTexture?.GetImageResource();
++        byte[]? diffuseDds = diffuseImage?.Type == ImageType.DDS ? diffuseImage.Data : null;
++        var decodedDiffuseInfo = "none";
++        if (diffuseImage?.Type == ImageType.DDS)
++        {
++            using var imageStream = new MemoryStream(diffuseImage.Data, writable: false);
++            var mipImages = DDS.ImageFromStream(imageStream);
++            if (mipImages is { Length: > 0 })
++                decodedDiffuseInfo = $"{mipImages[0].Format} {mipImages[0].Width}x{mipImages[0].Height} " +
++                                     $"mips={mipImages.Length}";
++        }
+         var description = $"{path} model={selectedModel.Path}/{selectedRef.MeshCrc:X8}, " +
+-                          $"material=0x{selectedMesh.MaterialCrc:X8}, sourceReferences={largestTriangle}";
+-        return new VMeshTriangle(vertices, selectedData.VertexFormat.FVF, description);
++                          $"material=0x{selectedMesh.MaterialCrc:X8}" +
++                          (material == null ? " (material unresolved)" :
++                              $" name={material.Name}, type={material.Type}, diffuse={material.DtName ?? "<none>"}, " +
++                              $"Dc=({color.R:F3},{color.G:F3},{color.B:F3},{color.A:F3}), " +
++                              $"embeddedDiffuse={diffuseTexture?.GetType().Name ?? "<missing>"}/" +
++                              $"{diffuseImage?.Type.ToString() ?? "none"}:{diffuseImage?.Data.Length ?? 0} bytes, " +
++                              $"txmEntries={externalTextures?.Textures.Count ?? 0}, image={decodedDiffuseInfo}") +
++                          $", sourceReferences={largestTriangle}";
++        return new VMeshTriangle(vertices, selectedData.VertexFormat.FVF, description,
++            [color.R, color.G, color.B, color.A], diffuseDds);
+     }
+ 
+     [STAThread]
+@@ -146,15 +195,15 @@
+                 D3DFVF.XYZ | D3DFVF.NORMAL | D3DFVF.TEX1).GetVertexDeclaration());
+             return;
+         }
+-        if (args.Length == 2 && args[0] == "--sdl-gpu-vmesh-smoke")
++        if (args.Length is 2 or 3 && args[0] == "--sdl-gpu-vmesh-smoke")
+         {
+             try
+             {
+-                var triangle = LoadVmeshTriangle(args[1]);
++                var triangle = LoadVmeshTriangle(args[1], args.Length == 3 ? args[2] : null);
+                 Console.WriteLine($"Loaded real Freelancer VMesh triangle: {triangle.Description}.");
+                 Environment.ExitCode = SDL3GpuSmoke.Run(
+                     () => new FVFVertex(triangle.Format).GetVertexDeclaration(),
+-                    triangle.Vertices, triangle.Description);
++                    triangle.Vertices, triangle.Description, triangle.DiffuseColor, triangle.DiffuseDds);
+             }
+             catch (Exception exception)
+             {
+@@ -188,7 +237,7 @@
+             Console.WriteLine("Usage: lancer [configuration-path] [--new-game | --load-save <savegame.fl>]");
+             Console.WriteLine("       Standalone test option: --invulnerable=on|off (local embedded server only)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-smoke (SDL3 GPU shader, pipeline, draw, and swapchain test)");
+-            Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-vmesh-smoke <cmp-path> (draw one real FVF3 VMesh triangle from a Freelancer CMP)");
++            Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-vmesh-smoke <cmp-path> [mat-path] (draw one real FVF3 VMesh triangle and sample its MAT diffuse texture)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-shader-bundle-audit (parse every built-in shader variant and validate SDL_GPU slot maps)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-shader-compile-audit (create and release every production SDL_GPU shader on the active driver)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-production-pipeline-audit (create and release a reflected SDL_GPU graphics pipeline for every production shader variant)");
+--- a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
++++ b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+@@ -18,7 +18,8 @@
+ /// <summary>
+ /// SDL_GPU device, swapchain, resource and draw probe. It exercises embedded
+ /// production Freelancer PBR variants with synthetic or real VMesh geometry;
+-/// material and complete game-renderer integration remain separate tasks.
++/// an optional real MAT diffuse DDS can be uploaded and sampled, but the full
++/// game-renderer integration remains a separate task.
+ /// </summary>
+ public static class SDL3GpuSmoke
+ {
+@@ -488,7 +489,8 @@
+     }
+ 
+     public static unsafe int Run(Func<VertexDeclaration> freelancerFvfDeclarationProvider,
+-        float[]? realVmeshVertices = null, string? realVmeshDescription = null)
++        float[]? realVmeshVertices = null, string? realVmeshDescription = null,
++        float[]? realMaterialDiffuse = null, byte[]? realDiffuseDds = null)
+     {
+         ArgumentNullException.ThrowIfNull(freelancerFvfDeclarationProvider);
+         if (!SDL3.Supported)
+@@ -528,6 +530,8 @@
+         IntPtr indexTransferBuffer = IntPtr.Zero;
+         IntPtr diffuseTexture = IntPtr.Zero;
+         IntPtr textureUploadBuffer = IntPtr.Zero;
++        IntPtr realDiffuseTexture = IntPtr.Zero;
++        IntPtr realDiffuseUploadBuffer = IntPtr.Zero;
+         IntPtr occludedTexture = IntPtr.Zero;
+         IntPtr occludedTextureUploadBuffer = IntPtr.Zero;
+         IntPtr depthTexture = IntPtr.Zero;
+@@ -589,6 +593,11 @@
+                 : $"Created SDL_GPU FVF3 VMesh probe from {realVmeshDescription}.");
+             (diffuseTexture, textureUploadBuffer) = CreateNormalTexture(device);
+             Console.WriteLine("Uploaded SDL_GPU BC5 normal texture.");
++            if (realDiffuseDds != null)
++            {
++                (realDiffuseTexture, realDiffuseUploadBuffer) = CreateDdsTexture(device, realDiffuseDds);
++                Console.WriteLine("Uploaded the real MAT diffuse compressed texture and mip chain to SDL_GPU.");
++            }
+             (occludedTexture, occludedTextureUploadBuffer) = CreateNormalTexture(device, 153, 153);
+             Console.WriteLine("Uploaded alternate BC5 texture for the depth rejection check.");
+             normalSampler = CreateDiffuseSampler(device);
+@@ -709,15 +718,18 @@
+             renderPass = IntPtr.Zero;
+ 
+             ExecuteProductionPbrDraw(commandBuffer, pbrPipeline, vertexBuffer, diffuseTexture, normalSampler,
+-                colorTargets, width, height);
++                colorTargets, width, height, materialDiffuse: realMaterialDiffuse,
++                materialTexture: realDiffuseTexture);
+             ClearShadowDepth(commandBuffer, shadowDepthTexture, 0.6f);
+             ExecuteProductionPbrDraw(commandBuffer, shadowPbrPipeline, vertexBuffer, diffuseTexture,
+                 normalSampler, colorTargets, width, height, shadowed: true,
+-                shadowDepthTexture: shadowDepthTexture, viewportX: 0.39f);
++                shadowDepthTexture: shadowDepthTexture, viewportX: 0.39f, materialDiffuse: realMaterialDiffuse,
++                materialTexture: realDiffuseTexture);
+             ClearShadowDepth(commandBuffer, shadowDepthTexture, 0.4f);
+             ExecuteProductionPbrDraw(commandBuffer, shadowPbrPipeline, vertexBuffer, diffuseTexture,
+                 normalSampler, colorTargets, width, height, shadowed: true,
+-                shadowDepthTexture: shadowDepthTexture, viewportX: 0.70f);
++                shadowDepthTexture: shadowDepthTexture, viewportX: 0.70f, materialDiffuse: realMaterialDiffuse,
++                materialTexture: realDiffuseTexture);
+ 
+             copyPass = SDL3.SDL_BeginGPUCopyPass(commandBuffer);
+             if (copyPass == IntPtr.Zero)
+@@ -925,6 +937,10 @@
+                     SDL3.SDL_ReleaseGPUTexture(device, diffuseTexture);
+                 if (textureUploadBuffer != IntPtr.Zero)
+                     SDL3.SDL_ReleaseGPUTransferBuffer(device, textureUploadBuffer);
++                if (realDiffuseTexture != IntPtr.Zero)
++                    SDL3.SDL_ReleaseGPUTexture(device, realDiffuseTexture);
++                if (realDiffuseUploadBuffer != IntPtr.Zero)
++                    SDL3.SDL_ReleaseGPUTransferBuffer(device, realDiffuseUploadBuffer);
+                 if (occludedTexture != IntPtr.Zero)
+                     SDL3.SDL_ReleaseGPUTexture(device, occludedTexture);
+                 if (occludedTextureUploadBuffer != IntPtr.Zero)
+@@ -1014,7 +1030,7 @@
+     private static unsafe void ExecuteProductionPbrDraw(IntPtr commandBuffer, IntPtr pipeline,
+         IntPtr vertexBuffer, IntPtr texture, IntPtr sampler, Span<SDL3.SDL_GPUColorTargetInfo> colorTargets,
+         uint width, uint height, bool shadowed = false, IntPtr shadowDepthTexture = default,
+-        float viewportX = -1.0f)
++        float viewportX = -1.0f, float[]? materialDiffuse = null, IntPtr materialTexture = default)
+     {
+         Span<byte> transforms = stackalloc byte[128];
+         transforms.Clear();
+@@ -1059,7 +1075,10 @@
+ 
+         Span<byte> pbrParameters = stackalloc byte[112];
+         pbrParameters.Clear();
+-        for (var i = 0; i < 8; i++)
++        for (var i = 0; i < 4; i++)
++            WriteFloat(pbrParameters, i * sizeof(float),
++                materialDiffuse != null && i < materialDiffuse.Length ? materialDiffuse[i] : 1.0f);
++        for (var i = 4; i < 8; i++)
+             WriteFloat(pbrParameters, i * sizeof(float), 1.0f);
+         WriteFloat(pbrParameters, 32, 1.0f);
+         WriteFloat(pbrParameters, 36, 0.55f);
+@@ -1116,19 +1135,20 @@
+             vertices[0] = new SDL3.SDL_GPUBufferBinding { buffer = vertexBuffer, offset = 0 };
+             SDL3.SDL_BindGPUVertexBuffers(renderPass, 0, vertices, 1);
+             Span<SDL3.SDL_GPUTextureSamplerBinding> textures = stackalloc SDL3.SDL_GPUTextureSamplerBinding[3];
+-            textures[0] = new SDL3.SDL_GPUTextureSamplerBinding { texture = texture, sampler = sampler };
++            textures[0] = new SDL3.SDL_GPUTextureSamplerBinding
++                { texture = materialTexture != IntPtr.Zero ? materialTexture : texture, sampler = sampler };
+             if (shadowed)
+             {
+                 if (shadowDepthTexture == IntPtr.Zero)
+                     throw new InvalidOperationException("The production PBR shadow draw needs a depth texture.");
+                 textures[1] = new SDL3.SDL_GPUTextureSamplerBinding
+                     { texture = shadowDepthTexture, sampler = sampler };
+-                textures[2] = textures[0];
++                textures[2] = new SDL3.SDL_GPUTextureSamplerBinding { texture = texture, sampler = sampler };
+                 SDL3.SDL_BindGPUFragmentSamplers(renderPass, 0, textures, 3);
+             }
+             else
+             {
+-                textures[1] = textures[0];
++                textures[1] = new SDL3.SDL_GPUTextureSamplerBinding { texture = texture, sampler = sampler };
+                 SDL3.SDL_BindGPUFragmentSamplers(renderPass, 0, textures, 2);
+             }
+             SDL3.SDL_DrawGPUPrimitives(renderPass, 3, 1, 3, 0);
+@@ -1428,6 +1448,129 @@
+         return (texture, transfer);
+     }
+ 
++    private static unsafe (IntPtr Texture, IntPtr TransferBuffer) CreateDdsTexture(IntPtr device,
++        byte[] ddsData)
++    {
++        using var stream = new MemoryStream(ddsData, writable: false);
++        var mips = LibreLancer.ImageLib.DDS.ImageFromStream(stream);
++        if (mips is not { Length: > 0 })
++            throw new InvalidDataException("SDL_GPU diffuse upload requires a 2D DDS mip chain.");
++        var format = mips[0].Format switch
++        {
++            SurfaceFormat.Dxt1 => SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_BC1_RGBA_UNORM,
++            SurfaceFormat.Dxt3 => SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_BC2_RGBA_UNORM,
++            SurfaceFormat.Dxt5 => SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_BC3_RGBA_UNORM,
++            SurfaceFormat.Rgtc1 => SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_BC4_R_UNORM,
++            SurfaceFormat.Rgtc2 => SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_BC5_RG_UNORM,
++            _ => throw new InvalidDataException($"SDL_GPU diffuse DDS format {mips[0].Format} is not supported by the compressed upload path.")
++        };
++        for (var i = 0; i < mips.Length; i++)
++        {
++            var expectedWidth = Math.Max(1, mips[0].Width >> i);
++            var expectedHeight = Math.Max(1, mips[0].Height >> i);
++            if (mips[i].Format != mips[0].Format || mips[i].Width != expectedWidth ||
++                mips[i].Height != expectedHeight || mips[i].Data.Length == 0)
++                throw new InvalidDataException($"DDS mip {i} has invalid dimensions or no data.");
++        }
++        if (!SDL3.SDL_GPUTextureSupportsFormat(device, format,
++                SDL3.SDL_GPUTextureType.SDL_GPU_TEXTURETYPE_2D,
++                SDL3.SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_SAMPLER))
++            throw new InvalidOperationException($"The selected SDL_GPU driver does not support sampleable {mips[0].Format} diffuse textures.");
++
++        var totalBytes = mips.Sum(x => checked((long)x.Data.Length));
++        if (totalBytes > uint.MaxValue)
++            throw new InvalidDataException("DDS mip chain is too large for an SDL_GPU transfer buffer.");
++        var texture = SDL3.SDL_CreateGPUTexture(device, new SDL3.SDL_GPUTextureCreateInfo
++        {
++            type = SDL3.SDL_GPUTextureType.SDL_GPU_TEXTURETYPE_2D,
++            format = format,
++            usage = SDL3.SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_SAMPLER,
++            width = (uint)mips[0].Width,
++            height = (uint)mips[0].Height,
++            layer_count_or_depth = 1,
++            num_levels = (uint)mips.Length,
++            sample_count = SDL3.SDL_GPUSampleCount.SDL_GPU_SAMPLECOUNT_1
++        });
++        if (texture == IntPtr.Zero)
++            throw Failure("Creating the real SDL_GPU diffuse texture failed");
++
++        var transfer = SDL3.SDL_CreateGPUTransferBuffer(device, new SDL3.SDL_GPUTransferBufferCreateInfo
++        {
++            usage = SDL3.SDL_GPUTransferBufferUsage.SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
++            size = (uint)totalBytes
++        });
++        if (transfer == IntPtr.Zero)
++        {
++            SDL3.SDL_ReleaseGPUTexture(device, texture);
++            throw Failure("Creating the real SDL_GPU diffuse upload buffer failed");
++        }
++
++        var mapped = SDL3.SDL_MapGPUTransferBuffer(device, transfer, false);
++        if (mapped == IntPtr.Zero)
++        {
++            SDL3.SDL_ReleaseGPUTexture(device, texture);
++            SDL3.SDL_ReleaseGPUTransferBuffer(device, transfer);
++            throw Failure("Mapping the real SDL_GPU diffuse upload buffer failed");
++        }
++        uint[] mipOffsets = new uint[mips.Length];
++        uint offset = 0;
++        for (var i = 0; i < mips.Length; i++)
++        {
++            mipOffsets[i] = offset;
++            Marshal.Copy(mips[i].Data, 0, IntPtr.Add(mapped, checked((int)offset)), mips[i].Data.Length);
++            offset = checked(offset + (uint)mips[i].Data.Length);
++        }
++        SDL3.SDL_UnmapGPUTransferBuffer(device, transfer);
++
++        var commandBuffer = SDL3.SDL_AcquireGPUCommandBuffer(device);
++        if (commandBuffer == IntPtr.Zero)
++        {
++            SDL3.SDL_ReleaseGPUTexture(device, texture);
++            SDL3.SDL_ReleaseGPUTransferBuffer(device, transfer);
++            throw Failure("Acquiring an SDL_GPU command buffer for diffuse upload failed");
++        }
++        var copyPass = SDL3.SDL_BeginGPUCopyPass(commandBuffer);
++        if (copyPass == IntPtr.Zero)
++        {
++            SDL3.SDL_CancelGPUCommandBuffer(commandBuffer);
++            SDL3.SDL_ReleaseGPUTexture(device, texture);
++            SDL3.SDL_ReleaseGPUTransferBuffer(device, transfer);
++            throw Failure("Beginning the SDL_GPU diffuse upload pass failed");
++        }
++        for (var i = 0; i < mips.Length; i++)
++        {
++            var mip = mips[i];
++            var source = new SDL3.SDL_GPUTextureTransferInfo
++            {
++                transfer_buffer = transfer,
++                offset = mipOffsets[i],
++                pixels_per_row = 0,
++                rows_per_layer = 0
++            };
++            var destination = new SDL3.SDL_GPUTextureRegion
++            {
++                texture = texture,
++                mip_level = (uint)i,
++                layer = 0,
++                x = 0,
++                y = 0,
++                z = 0,
++                w = (uint)mip.Width,
++                h = (uint)mip.Height,
++                d = 1
++            };
++            SDL3.SDL_UploadToGPUTexture(copyPass, source, destination, false);
++        }
++        SDL3.SDL_EndGPUCopyPass(copyPass);
++        if (!SDL3.SDL_SubmitGPUCommandBuffer(commandBuffer))
++        {
++            SDL3.SDL_ReleaseGPUTexture(device, texture);
++            SDL3.SDL_ReleaseGPUTransferBuffer(device, transfer);
++            throw Failure("Submitting the real SDL_GPU diffuse upload failed");
++        }
++        return (texture, transfer);
++    }
++
+     private static unsafe void ClearShadowDepth(IntPtr commandBuffer, IntPtr depthTexture,
+         float clearDepth)
+     {
+--- a/patches/series
++++ b/patches/series
+@@ -390,3 +390,4 @@
+ client 2390-sdl-gpu-real-fvf-input-layouts.patch
+ client 2391-use-production-vertex-declarations-in-sdl-gpu-smoke.patch
+ client 2392-sdl-gpu-real-vmesh-smoke.patch
++client 2393-sdl-gpu-real-material-textures.patch
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -348,3 +348,4 @@
+ | 2391 | Use the production Freelancer FVF declaration in the SDL_GPU PBR draw smoke |
+ 
+ | 2392 | Draw real NAP CMP/VMesh FVF3 geometry through the SDL_GPU production PBR smoke |
++| 2393 | Sample real Freelancer MAT diffuse DDS textures in the SDL_GPU PBR VMesh smoke |
+--- /dev/null
++++ b/docs/evidence/renderer/sdl-gpu-real-material-textures-20261019.md
+@@ -0,0 +1,47 @@
++# SDL_GPU real VMesh material texture sampling
++
++Date: 2026-10-19
++
++## Scope
++
++Extend `--sdl-gpu-vmesh-smoke` to read an external Freelancer `.mat` file, resolve
++the selected VMesh material and its MAT-owned texture library, and upload/sample
++the diffuse DDS through the embedded production PBR shader. The smoke also
++forwards the MAT `Dc` value. The BC5 normal input remains synthetic.
++
++## Runtime runs
++
++Both runs used NAP source files under `Data/NAP/`, SDL_GPU with Vulkan/Mesa on
++Intel Haswell, a 640x360 RGBA16F scene target, production PBR variants with and
++without shadows, and indexed VMesh coverage readback.
++
++- `li_elite.cmp` with `li_playerships.mat`: selected
++  `Li_elite_lod1021202161040.3db/0CF9309F`, material CRC `0xE89BB35A`, material
++  `elite_lod` (`DcDt`, diffuse `Li_elite_textures_lod_256.tga`), and
++  `Dc=(1,1,1,1)`. The MAT TXM resolved the texture to a 43,816-byte DXT1 DDS,
++  256x256 with 7 mip levels. Exit code 0; 1/4 interior samples differed from
++  clear; PBR readback `(92,109,125,255)`.
++- `transport_large.cmp` with `utility_transport.mat`: selected
++  `trans_tail_fin_lod1020926170242.3db/E5523F20`, material CRC `0xF7062051`,
++  material `utility_panels_01M` (`DcDt`, diffuse `utility_panels_01.TGA`), and
++  `Dc=(0.631,0.631,0.631,1)`. The MAT TXM resolved a 699,192-byte DXT1 DDS,
++  1024x1024 with 11 mip levels. Exit code 0; 2/4 interior samples differed
++  from clear; PBR readback `(36,33,29,255)`.
++
++The diagnostic initializes the fallback `MaterialMap` because it runs without
++`FreelancerData`. Compressed DDS formats BC1, BC2, BC3, BC4 and BC5 are mapped to
++SDL_GPU sampler formats; unsupported DDS types fail with an explicit message.
++Mip data is uploaded through a GPU transfer buffer and retained until GPU idle.
++
++## Verification and limits
++
++The Release `lancer.csproj` build succeeded with 168 warnings from the applied
++overlay/upstream code and no errors. The synthetic `--sdl-gpu-smoke` regression
++passed. Both real asset runs uploaded all DDS mip levels and passed draw,
++coverage and presentation checks. The change proves MAT/TXM resolution and
++diffuse DDS sampling in the diagnostic production-PBR draw.
++
++This does not implement SDL_GPU material handling in the game renderer. Full
++VMesh ranges, CMP part transforms, real normal/metallic/roughness maps, DFM
++skinning, whole-scene rendering, GL/Vulkan parity, performance and a supported
++GPU matrix remain open. Mesa reports incomplete Haswell Vulkan support.
