@@ -1,6 +1,6 @@
 # Client patch groups
 
-The active series contains 372 Client patches and two native patches. Each
+The active series contains 373 Client patches and two native patches. Each
 file belongs to one functional bundle; the combined output preserves the
 integration, upstream compatibility fixes, tests and project documentation.
 
@@ -322,3 +322,5 @@ jump-gate route.
 | 2374 | Make shadow receiver depth mapping explicit across OpenGL and Vulkan |
 
 | 2375 | Verify the shared shadow depth mapping in the NAP-only OpenGL system renderer |
+
+| 2376 | Parse and render configured particle effects for dynamic asteroids |

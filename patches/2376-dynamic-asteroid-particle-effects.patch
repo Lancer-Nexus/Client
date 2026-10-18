@@ -1,0 +1,137 @@
+diff --git a/docs/evidence/renderer/dynamic-asteroid-effects-20261018/README.md b/docs/evidence/renderer/dynamic-asteroid-effects-20261018/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..925e3c4496113a4930fe08097c5b411126085513
+--- /dev/null
++++ b/docs/evidence/renderer/dynamic-asteroid-effects-20261018/README.md
+@@ -0,0 +1,7 @@
++# Dynamische Asteroiden-Effekte
++
++- Datenfluss ergänzt: `Asteroidarch.ini` → `ResolvedFx` → `ParticleEffectRenderer` am dynamischen Asteroiden.
++- Die Effekt-Lichtkurve wird an den Render-Effekt gebunden; der bestehende globale Partikeleffekt-Schalter bleibt maßgeblich.
++- Regressionstest: `DynamicAsteroidParticleEffectTests`, 3 bestanden.
++- Release-Build: `src/lancer/lancer.csproj`, 0 Warnungen und 0 Fehler.
++- Ein NAP-only Laufzeit-/Bildvergleich steht noch aus; die visuelle Wirkung ist daher nicht abgenommen.
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+index 91affc22f2466f9b530296d1a42b3fe84215773e..1006f9fdc19236c22fb7fa8448b5a2c62746275a 100644
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -468,3 +468,15 @@ definierten leeren Pixelbereich. Der Vertrag ist eine Grundlage für weitere
+ Backends, aber noch kein Vulkan-/SDL_GPU-Nachweis. Screenshot-Readback ist
+ synchron und sollte bei häufigen Aufnahmen später über einen asynchronen
+ Readback-Pfad ergänzt werden.
++
++
++## Dynamische Asteroiden-Effekte
++
++`particle_effect` aus `Asteroidarch.ini` wird nun geparst, über `Effects.ini`
++aufgelöst und als `ParticleEffectRenderer` an dynamische Asteroiden angehängt.
++Der Renderer verwendet die normale Renderoption für Partikeleffekte und
++übernimmt die konfigurierte Effektlichtkurve. Parser-Regressionen decken die
++Badlands-/Lava-Namen sowie das optionale Fehlen des Eintrags ab. Der fokussierte
++Testlauf besteht (3/3), der Release-Client-Build besteht (0 Warnungen, 0 Fehler).
++Ein NAP-only Sichttest der Asteroiden-Effekte steht noch aus. Details:
++[`Dynamic asteroid effects`](evidence/renderer/dynamic-asteroid-effects-20261018/README.md).
+diff --git a/src/LibreLancer.Data/GameData/DynamicAsteroid.cs b/src/LibreLancer.Data/GameData/DynamicAsteroid.cs
+index 5f4151603798ed712bd3038807bc157f37562651..4400dbf4a4cc3f51af6bd6fcd3c5493e15ba95d2 100644
+--- a/src/LibreLancer.Data/GameData/DynamicAsteroid.cs
++++ b/src/LibreLancer.Data/GameData/DynamicAsteroid.cs
+@@ -4,4 +4,5 @@ public class DynamicAsteroid : IdentifiableItem
+ {
+     public ResolvedModel? ModelFile;
+     public Explosion? Explosion;
++    public ResolvedFx? ParticleEffect;
+ }
+diff --git a/src/LibreLancer.Data/GameItemDb.cs b/src/LibreLancer.Data/GameItemDb.cs
+index 18cd15f20cc10fbb2866db22aa35f09b011396de..99b67d6c4c051ebe9902585d061042d8c5aea3e2 100644
+--- a/src/LibreLancer.Data/GameItemDb.cs
++++ b/src/LibreLancer.Data/GameItemDb.cs
+@@ -2432,7 +2432,8 @@ public class GameItemDb
+             {
+                 Nickname = dynast.Nickname,
+                 ModelFile = ResolveDrawable(dynast.MaterialLibrary ?? "", dynast.DaArchetype),
+-                Explosion = Explosions.Get(dynast.ExplosionArch)
++                Explosion = Explosions.Get(dynast.ExplosionArch),
++                ParticleEffect = Effects.Get(dynast.ParticleEffect)
+             };
+             dyn.CRC = FLHash.CreateID(dyn.Nickname);
+             DynamicAsteroids.Add(dyn);
+diff --git a/src/LibreLancer.Data/Schema/Solar/DynamicAsteroid.cs b/src/LibreLancer.Data/Schema/Solar/DynamicAsteroid.cs
+index f6f584d3d54b3b94771f29fd95c13c1691ae0a48..006f57283e3b7a06bd747e6d20b85f75e0155ca4 100644
+--- a/src/LibreLancer.Data/Schema/Solar/DynamicAsteroid.cs
++++ b/src/LibreLancer.Data/Schema/Solar/DynamicAsteroid.cs
+@@ -13,4 +13,6 @@ public partial class DynamicAsteroid
+     public string? MaterialLibrary;
+     [Entry("explosion_arch")]
+     public string? ExplosionArch;
++    [Entry("particle_effect")]
++    public string? ParticleEffect;
+ }
+diff --git a/src/LibreLancer.Tests/DynamicAsteroidParticleEffectTests.cs b/src/LibreLancer.Tests/DynamicAsteroidParticleEffectTests.cs
+new file mode 100644
+index 0000000000000000000000000000000000000000..b60d5dc72e6cc7bb7fd4255389852f64095bd2e5
+--- /dev/null
++++ b/src/LibreLancer.Tests/DynamicAsteroidParticleEffectTests.cs
+@@ -0,0 +1,38 @@
++using LibreLancer.Data.Ini;
++using LibreLancer.Data.Schema.Solar;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class DynamicAsteroidParticleEffectTests
++{
++    [Theory]
++    [InlineData("gf_blsmallasteroid")]
++    [InlineData("gf_dynamiclavaast")]
++    public void ParsesDynamicAsteroidParticleEffect(string nickname)
++    {
++        var section = new Section("DynamicAsteroid");
++        Add(section, "nickname", "test_dynamic_asteroid");
++        Add(section, "particle_effect", nickname);
++
++        Assert.True(DynamicAsteroid.TryParse(section, out var asteroid));
++        Assert.Equal(nickname, asteroid!.ParticleEffect);
++    }
++
++    [Fact]
++    public void ParticleEffectRemainsOptional()
++    {
++        var section = new Section("DynamicAsteroid");
++        Add(section, "nickname", "test_dynamic_asteroid");
++
++        Assert.True(DynamicAsteroid.TryParse(section, out var asteroid));
++        Assert.Null(asteroid!.ParticleEffect);
++    }
++
++    private static void Add(Section section, string key, string value)
++    {
++        var entry = new Entry(section, key);
++        entry.Add(value);
++        section.Add(entry);
++    }
++}
+diff --git a/src/LibreLancer/Client/CGameSession.Space.cs b/src/LibreLancer/Client/CGameSession.Space.cs
+index e5b0e8490af2710897b7e0c451bff178ad936c51..70fcc7775907dd2ecb49766ef820efe589dcc6d2 100644
+--- a/src/LibreLancer/Client/CGameSession.Space.cs
++++ b/src/LibreLancer/Client/CGameSession.Space.cs
+@@ -1228,6 +1228,20 @@ public partial class CGameSession
+                     newObj.AddComponent(new DynamicAsteroidComponent(newObj, objInfo.MaxVelocities.X, objInfo.MaxVelocities.Y, 0, 0, null, null));
+                     if(asteroid.Explosion != null)
+                         newObj.AddComponent(new CExplosionComponent(newObj, asteroid.Explosion));
++                    if (asteroid.ParticleEffect is { } particleEffect)
++                    {
++                        var effect = particleEffect.GetEffect(Game.ResourceManager);
++                        if (effect != null)
++                        {
++                            var renderer = new ParticleEffectRenderer(effect)
++                            {
++                                LightGroup = newObj.RenderComponent?.LightGroup ?? 0
++                            };
++                            renderer.SetEffectLight(particleEffect.DynamicLightAnimation,
++                                particleEffect.LightRadius, particleEffect.LightTimeScale);
++                            newObj.ExtraRenderers.Add(renderer);
++                        }
++                    }
+                 }
+                 else
+                 {
