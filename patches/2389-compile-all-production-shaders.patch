@@ -1,0 +1,69 @@
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -22,6 +22,7 @@
+ | Systemrenderer-Lifecycle | `SystemRenderer.Dispose()` versucht die Freigabe aller Frame-/Effekt-/Target-Ressourcen und GPU-Timerabfragen auch dann, wenn einzelne Freigaben fehlschlagen; Fehler werden gebündelt. Wiederholtes Dispose ist wirkungslos. | Fehlerfortsetzung der allgemeinen Bereinigungsroutine ist unit-getestet. Native GL-Fehlerinjektion und Kontextverlust bleiben offen. Siehe `docs/evidence/renderer/system-renderer-cleanup-20261018/`. |
+ | RenderContext-Lifecycle | SDL2/SDL3 geben den RenderContext vor dem nativen Kontextabbau frei. Nach Abschluss der GPU-Fences werden Shader, SMAA-Texturen, Fullscreen- und Renderer2D-Puffer, Font-Texturen sowie der unmanaged 2D-Pool auch bei Einzel-Fehlern bereinigt. | Headless-Regression prüft Fence-Drain, Wiederholbarkeit und bekannte Kontext-Ressourcen. GL-native Fehlerpfade und Kontextverlust bleiben offen. Siehe `docs/evidence/renderer/render-context-shutdown-20261018/`. |
+ | Shader-Cache über Context-Wechsel | Built-in-Shaderbündel werden je `RenderContext` neu bezogen; `AsteroidBandMaterial` hält keinen globalen Shaderverweis mehr. | Headless-Regression prüft den Wechsel nach dem Schließen des ersten Shader-Scopes. Native GL-Kontextverlust- und Gerätewechselabnahme bleiben offen. Siehe `docs/evidence/renderer/render-context-shader-cache-20261018.md`. |
++| Shader-Kompilierung | Alle 25 Shader-Bundles und die definierten Feature-Permutationen kompilieren mit dem im Repository enthaltenen DXC. | Belegt den HLSL-/SPIR-V-Compilerpfad, nicht die Pipeline-Erstellung oder das Zeichnen auf realen Treibern. Siehe `docs/evidence/renderer/shader-bundle-dxc-audit-20261018.md`. |
+ | Dynamische Lichter und Schatten | Persistente und kurzlebige Lichter werden priorisiert; `lgt_effect`-Lichter von fliegenden Projektilen folgen nun dem Projektilalter und seiner Position. Ein ausgewähltes Richtungslicht läuft durch Shadow-Map-Pass und 3×3-PCF. Alpha-Test-Texturen werden auch in PBR-Depth-/Shadow-Pässen anhand eines Material-Uniforms ausgeschnitten; blendtransparente Materialien werfen keine Schatten. Lichtprojektion ist im Licht-XY-Raum verankert und texelgesnappt; Mesh-Cullingradien berücksichtigen `RenderScale`. | Unit-Tests decken Lichtkurvenzeit, Position, Gruppe und ungültige Radien für Projektil-Lichter ab. Hi02 belegt Pass, Lichtauswahl und Live-Schaltung auf einer OpenGL-GPU. Kamera-Fit-/Stabilitäts- und RenderScale-Radiustests bestehen. Ein NAP-only-Hi02-A/B auf Intel HD 4600 bestätigt den aktiven Pass bei Bias 0 und 0,02; der Hull-Unterschied ist subtil und kalibriert keinen empfohlenen Wert. Eine Ingame-Abnahme von Waffenfeuer-/Projektillichtern, Offscreen-Castern, weiteren Materialien/Szenen und GPU-Kosten bleibt offen. Siehe `docs/evidence/renderer/shadow-map-hi02-live-toggle-20261017/`, `docs/evidence/renderer/shadow-camera-stability-20261018.md` und `docs/evidence/renderer/scaled-model-culling-20261018.md`. |
+ | Diagnose | CPU-Framezeitprofile, asynchrone OpenGL-GPU-Passzeiten, Bloom-/Shadow-Passzeiten, Ziel-/Speicherschätzungen und CSV-Ausgabe. Environment-Cubemaps mit mehreren Catalog-Aliasen werden im geschätzten GPU-Texturspeicher nur einmal gezählt und bei Bereinigung auch nur einmal freigegeben. | Langzeitprofile und plattformübergreifende Vergleichsbaselines fehlen. Einzelne asynchrone Samples sind keine FPS-Baseline. |
+ 
+diff --git a/docs/evidence/renderer/shader-bundle-dxc-audit-20261018.md b/docs/evidence/renderer/shader-bundle-dxc-audit-20261018.md
+new file mode 100644
+--- /dev/null
++++ b/docs/evidence/renderer/shader-bundle-dxc-audit-20261018.md
+@@ -0,0 +1,34 @@
++# Produktionsshader: DXC-Bundle-Audit
++
++Stand: 2026-10-18
++
++Alle 25 Shader-Beschreibungen aus `src/LibreLancer/Shaders/*.txt` wurden mit
++dem in `bin/builddeps/bin/dxc` enthaltenen DXC kompiliert. `LLShaderCompiler`
++hat dabei die in jedem Bundle deklarierten Feature-Permutationen erzeugt und
++alle Ergebnisse in temporäre `.bin`-Bundles gepackt. Der Lauf endete mit
++Exitcode 0 und `Done`; 25 Bundles mit zusammen 3.421.914 Byte wurden erzeugt.
++
++Die Matrix umfasste unter anderem Basic-/Skinned-Basic, PBR/PBR-Skinned,
++Materialshader, Nebel, Partikel, Sonne, SMAA-nahe Sprite-/Navmap-Ausgaben,
++Depth-only, Alpha-Test, Normal-/Metal-/Roughness-Maps und Shadowmap-Varianten.
++Der einzelne Nomad-Bundlebuild nach der Änderung aus Patch 2388 ist in diesem
++Vollmatrixlauf enthalten.
++
++Reproduktion aus dem Client-Repository:
++
++```bash
++shader_args=()
++while IFS= read -r shader; do
++  name=${shader##*/}
++  name=${name%.txt}
++  shader_args+=("$shader" "/tmp/lancer-shader-audit-$name.bin")
++done < <(find src/LibreLancer/Shaders -maxdepth 1 -type f -name '*.txt' -print | sort)
++LD_LIBRARY_PATH="$PWD/bin/builddeps/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
++DOTNET_ROOT=/opt/dotnet-10 DOTNET_ROOT_X64=/opt/dotnet-10 \
++/opt/dotnet-10/dotnet run --project src/LLShaderCompiler/LLShaderCompiler.csproj \
++  --no-restore -- --dxc "$PWD/bin/builddeps/bin/dxc" "${shader_args[@]}" --verbose
++```
++
++Das ist ein Compiler-/Bundle-Nachweis. Native GL/Vulkan-Pipelineerstellung,
++Interface-Kompatibilität zur GPU, visuelle Ausgabe und Performance auf
++Hardwaretreibern bleiben gesonderte Abnahmepunkte.
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 385 Client patches and two native patches. Each
++The active series contains 386 Client patches and two native patches. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -386,3 +386,4 @@
+ client 2386-render-context-scoped-shader-cache.patch
+ client 2387-render-pass-required-writes.patch
+ client 2388-nomad-gradient-legacy-parity.patch
++client 2389-compile-all-production-shaders.patch
