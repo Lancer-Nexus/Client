@@ -1,6 +1,6 @@
 # Client patch groups
 
-The active series contains 367 Client patches and two native patches. Each
+The active series contains 368 Client patches and two native patches. Each
 file belongs to one functional bundle; the combined output preserves the
 integration, upstream compatibility fixes, tests and project documentation.
 
@@ -316,3 +316,4 @@ jump-gate route.
 | 2368 | Remove stale OpenGL imports and refresh the backend boundary audit |
 | 2369 | Compact SDL_GPU SPIR-V bindings and serialize original-to-SDL slot maps |
 | 2370 | Keep selected PBR shader variants within SDL_GPU's uniform-buffer limit |
+| 2371 | Execute the embedded production PBR shader in SDL_GPU and read back its pixel |
