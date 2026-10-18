@@ -1,0 +1,467 @@
+--- a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
++++ b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+@@ -16,9 +16,9 @@
+ namespace LibreLancer.Platforms;
+ 
+ /// <summary>
+-/// SDL_GPU device, swapchain, resource and draw probe. It exercises one embedded
+-/// production Freelancer PBR variant with synthetic FVF3 geometry and material
+-/// data; the complete game renderer remains a separate integration task.
++/// SDL_GPU device, swapchain, resource and draw probe. It exercises embedded
++/// production Freelancer PBR variants with synthetic or real VMesh geometry;
++/// material and complete game-renderer integration remain separate tasks.
+ /// </summary>
+ public static class SDL3GpuSmoke
+ {
+@@ -487,7 +487,8 @@
+         }
+     }
+ 
+-    public static unsafe int Run(Func<VertexDeclaration> freelancerFvfDeclarationProvider)
++    public static unsafe int Run(Func<VertexDeclaration> freelancerFvfDeclarationProvider,
++        float[]? realVmeshVertices = null, string? realVmeshDescription = null)
+     {
+         ArgumentNullException.ThrowIfNull(freelancerFvfDeclarationProvider);
+         if (!SDL3.Supported)
+@@ -579,9 +580,13 @@
+                     SDL3.SDL_GPUPresentMode.SDL_GPU_PRESENTMODE_VSYNC))
+                 throw Failure("Setting SDL_GPU swapchain parameters failed");
+ 
+-            (vertexBuffer, transferBuffer) = CreateVertexBuffer(device);
++            (vertexBuffer, transferBuffer) = realVmeshVertices == null
++                ? CreateVertexBuffer(device)
++                : CreateVertexBuffer(device, realVmeshVertices);
+             (indexBuffer, indexTransferBuffer) = CreateIndexBuffer(device);
+-            Console.WriteLine("Created SDL_GPU FVF3 vertex and 16-bit VMesh index buffers.");
++            Console.WriteLine(realVmeshVertices == null
++                ? "Created SDL_GPU synthetic FVF3 vertex and 16-bit VMesh index buffers."
++                : $"Created SDL_GPU FVF3 VMesh probe from {realVmeshDescription}.");
+             (diffuseTexture, textureUploadBuffer) = CreateNormalTexture(device);
+             Console.WriteLine("Uploaded SDL_GPU BC5 normal texture.");
+             (occludedTexture, occludedTextureUploadBuffer) = CreateNormalTexture(device, 153, 153);
+@@ -625,7 +630,7 @@
+             readbackBuffer = SDL3.SDL_CreateGPUTransferBuffer(device, new SDL3.SDL_GPUTransferBufferCreateInfo
+             {
+                 usage = SDL3.SDL_GPUTransferBufferUsage.SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD,
+-                size = 16
++                size = 28
+             });
+             if (readbackBuffer == IntPtr.Zero)
+                 throw Failure("Creating the SDL_GPU pixel readback buffer failed");
+@@ -750,6 +755,29 @@
+             shadowPixel.x = (uint)(width * 0.825f);
+             pixelDestination.offset = 12;
+             SDL3.SDL_DownloadFromGPUTexture(copyPass, shadowPixel, pixelDestination);
++            if (realVmeshVertices != null)
++            {
++                // Sample three interior barycentric points as well as the center:
++                // a real triangle's normal/UV response can legitimately match the
++                // clear color at one pixel, so one readback is not a coverage proof.
++                ReadOnlySpan<Vector3> weights =
++                [
++                    new Vector3(0.60f, 0.20f, 0.20f),
++                    new Vector3(0.20f, 0.60f, 0.20f),
++                    new Vector3(0.20f, 0.20f, 0.60f)
++                ];
++                for (var i = 0; i < weights.Length; i++)
++                {
++                    var w = weights[i];
++                    var ndcX = realVmeshVertices[24] * w.X + realVmeshVertices[32] * w.Y + realVmeshVertices[40] * w.Z;
++                    var ndcY = realVmeshVertices[25] * w.X + realVmeshVertices[33] * w.Y + realVmeshVertices[41] * w.Z;
++                    var sample = centerPixel;
++                    sample.x = (uint)Math.Clamp((ndcX * 0.5f + 0.5f) * width, 0, width - 1);
++                    sample.y = (uint)Math.Clamp((ndcY * 0.5f + 0.5f) * height, 0, height - 1);
++                    pixelDestination.offset = (uint)(16 + i * 4);
++                    SDL3.SDL_DownloadFromGPUTexture(copyPass, sample, pixelDestination);
++                }
++            }
+             SDL3.SDL_EndGPUCopyPass(copyPass);
+             copyPass = IntPtr.Zero;
+ 
+@@ -777,12 +805,19 @@
+             var expectedBlue = ToOutputByte(AcesFitted(2.0f * (0.5f + 0.5f * MathF.Sqrt(0.6f))), isSrgb);
+             var red = isBgra ? channel2 : channel0;
+             var blue = isBgra ? channel0 : channel2;
+-            if (alpha < 240 || Math.Abs(red - expectedRed) > 24 ||
+-                Math.Abs(green - expectedGreen) > 24 || Math.Abs(blue - expectedBlue) > 24)
++            if (realVmeshVertices == null)
++            {
++                if (alpha < 240 || Math.Abs(red - expectedRed) > 24 ||
++                    Math.Abs(green - expectedGreen) > 24 || Math.Abs(blue - expectedBlue) > 24)
++                    throw new InvalidOperationException(
++                        $"SDL_GPU sampled texture center pixel mismatch for {swapchainFormat}: " +
++                        $"({red}, {green}, {blue}, {alpha}); expected approximately " +
++                        $"({expectedRed}, {expectedGreen}, {expectedBlue}, 255).");
++            }
++            else if (alpha < 240)
+                 throw new InvalidOperationException(
+-                    $"SDL_GPU sampled texture center pixel mismatch for {swapchainFormat}: " +
+-                    $"({red}, {green}, {blue}, {alpha}); expected approximately " +
+-                    $"({expectedRed}, {expectedGreen}, {expectedBlue}, 255).");
++                    $"SDL_GPU real VMesh center pixel was not opaque for {swapchainFormat}: " +
++                    $"({red}, {green}, {blue}, {alpha}).");
+ 
+             var pbrChannel0 = Marshal.ReadByte(mappedPixel, 4);
+             var pbrGreen = Marshal.ReadByte(mappedPixel, 5);
+@@ -792,12 +827,16 @@
+             var pbrBlue = isBgra ? pbrChannel0 : pbrChannel2;
+             var expectedPbrRed = ToOutputByte(0.58f, isSrgb);
+             var expectedPbrGreen = ToOutputByte(0.306f, isSrgb);
+-            if (pbrAlpha < 240 || Math.Abs(pbrRed - expectedPbrRed) > 32 ||
+-                Math.Abs(pbrGreen - expectedPbrGreen) > 32 || pbrBlue > 24)
++            if (pbrAlpha < 240 || (realVmeshVertices == null &&
++                (Math.Abs(pbrRed - expectedPbrRed) > 32 ||
++                 Math.Abs(pbrGreen - expectedPbrGreen) > 32 || pbrBlue > 24)) ||
++                (realVmeshVertices != null && pbrRed + pbrGreen + pbrBlue < 24))
+                 throw new InvalidOperationException(
+-                    $"SDL_GPU production PBR pixel mismatch for {swapchainFormat}: " +
+-                    $"({pbrRed}, {pbrGreen}, {pbrBlue}, {pbrAlpha}); expected approximately " +
+-                    $"({expectedPbrRed}, {expectedPbrGreen}, 0, 255).");
++                    $"SDL_GPU production PBR pixel check failed for {swapchainFormat}: " +
++                    $"({pbrRed}, {pbrGreen}, {pbrBlue}, {pbrAlpha})" +
++                    (realVmeshVertices == null
++                        ? $"; expected approximately ({expectedPbrRed}, {expectedPbrGreen}, 0, 255)."
++                        : "; expected an opaque non-black VMesh draw."));
+             var visibleShadowChannel0 = Marshal.ReadByte(mappedPixel, 8);
+             var visibleShadowGreen = Marshal.ReadByte(mappedPixel, 9);
+             var visibleShadowChannel2 = Marshal.ReadByte(mappedPixel, 10);
+@@ -810,19 +849,47 @@
+             var shadowAlpha = Marshal.ReadByte(mappedPixel, 15);
+             var shadowRed = isBgra ? shadowChannel2 : shadowChannel0;
+             var shadowBlue = isBgra ? shadowChannel0 : shadowChannel2;
+-            if (visibleShadowAlpha < 240 ||
+-                visibleShadowRed + visibleShadowGreen + visibleShadowBlue < 50)
++            if (realVmeshVertices == null && (visibleShadowAlpha < 240 ||
++                visibleShadowRed + visibleShadowGreen + visibleShadowBlue < 50))
+                 throw new InvalidOperationException(
+                     $"SDL_GPU production PBR shadow visibility pixel was not lit for {swapchainFormat}: " +
+                     $"({visibleShadowRed}, {visibleShadowGreen}, {visibleShadowBlue}, {visibleShadowAlpha}); " +
+                     "expected a lit pixel when the depth map is clear.");
+-            if (shadowAlpha < 240 || shadowRed > 40 || shadowGreen > 40 || shadowBlue > 40)
++            if (realVmeshVertices == null &&
++                (shadowAlpha < 240 || shadowRed > 40 || shadowGreen > 40 || shadowBlue > 40))
+                 throw new InvalidOperationException(
+                     $"SDL_GPU production PBR shadow pixel was not occluded for {swapchainFormat}: " +
+                     $"({shadowRed}, {shadowGreen}, {shadowBlue}, {shadowAlpha}); expected a near-black pixel.");
++            if (realVmeshVertices != null)
++            {
++                var clearRed = ToOutputByte(AcesFitted(0.08f), isSrgb);
++                var clearGreen = ToOutputByte(AcesFitted(0.32f), isSrgb);
++                var clearBlue = ToOutputByte(AcesFitted(0.62f), isSrgb);
++                var coveredSamples = 0;
++                for (var offset = 0; offset < 28; offset += 4)
++                {
++                    if (offset is 4 or 8 or 12)
++                        continue;
++                    var sample0 = Marshal.ReadByte(mappedPixel, offset);
++                    var sampleG = Marshal.ReadByte(mappedPixel, offset + 1);
++                    var sample2 = Marshal.ReadByte(mappedPixel, offset + 2);
++                    var sampleR = isBgra ? sample2 : sample0;
++                    var sampleB = isBgra ? sample0 : sample2;
++                    var distance = Math.Abs(sampleR - clearRed) + Math.Abs(sampleG - clearGreen) +
++                                   Math.Abs(sampleB - clearBlue);
++                    if (Marshal.ReadByte(mappedPixel, offset + 3) >= 240 && distance >= 40)
++                        coveredSamples++;
++                }
++                if (coveredSamples == 0)
++                    throw new InvalidOperationException(
++                        $"SDL_GPU real VMesh triangle did not change any interior sample from the scene clear " +
++                        $"({clearRed}, {clearGreen}, {clearBlue}, 255).");
++                Console.WriteLine($"Real VMesh coverage readback: {coveredSamples}/4 interior samples differ from clear.");
++            }
+             SDL3.SDL_UnmapGPUTransferBuffer(device, readbackBuffer);
+ 
+-            Console.WriteLine($"Presented SDL_GPU BC5 normal-mapped scene through an RGBA16F target and depth-tested pass at {width}x{height}; " +
++            Console.WriteLine($"Presented SDL_GPU {(realVmeshVertices == null ? "synthetic" : "real VMesh")} " +
++                              $"BC5 normal-mapped scene through an RGBA16F target and depth-tested pass at {width}x{height}; " +
+                               $"center pixel ({red}, {green}, {blue}, {alpha}) and production PBR pixel " +
+                               $"({pbrRed}, {pbrGreen}, {pbrBlue}, {pbrAlpha}), visible-shadow pixel " +
+                               $"({visibleShadowRed}, {visibleShadowGreen}, {visibleShadowBlue}, {visibleShadowAlpha}) " +
+@@ -1139,7 +1206,15 @@
+              0.7f, -0.65f, 0.5f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f,
+              0.0f,  0.75f, 0.5f, 0.0f, 0.0f, 1.0f, 0.5f, 1.0f
+         ];
+-        const uint byteSize = (uint)(48 * sizeof(float));
++        return CreateVertexBuffer(device, vertices.ToArray());
++    }
++
++    private static unsafe (IntPtr VertexBuffer, IntPtr TransferBuffer) CreateVertexBuffer(IntPtr device,
++        float[] vertices)
++    {
++        if (vertices.Length != 48)
++            throw new ArgumentException("The SDL_GPU FVF3 probe expects six interleaved vertices.", nameof(vertices));
++        var byteSize = (uint)(vertices.Length * sizeof(float));
+         var vertexBuffer = SDL3.SDL_CreateGPUBuffer(device, new SDL3.SDL_GPUBufferCreateInfo
+         {
+             usage = SDL3.SDL_GPUBufferUsageFlags.SDL_GPU_BUFFERUSAGE_VERTEX,
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -7,18 +7,136 @@
+ using System.IO;
+ using System.Linq;
+ using System.Globalization;
++using System.Numerics;
+ using LibreLancer.Data.Schema;
+ using LibreLancer.Graphics;
+ using LibreLancer.Graphics.Vertices;
+ using LibreLancer;
+ using LibreLancer.Platforms;
+ using LibreLancer.Utf.Dfm;
++using LibreLancer.Utf.Cmp;
+ using LibreLancer.Utf.Vms;
+ 
+ namespace lancer;
+ 
+ internal static class MainClass
+ {
++    private sealed record VMeshTriangle(float[] Vertices, D3DFVF Format, string Description);
++
++    private static VMeshTriangle LoadVmeshTriangle(string path)
++    {
++        using var stream = File.OpenRead(path);
++        var cmp = new CmpFile(path, stream);
++        if (cmp.VMeshLibrary == null)
++            throw new InvalidDataException($"CMP has no VMeshLibrary: {path}");
++
++        ModelFile? selectedModel = null;
++        VMeshRef? selectedRef = null;
++        VMeshData? selectedData = null;
++        TMeshHeader? selectedMesh = null;
++        var selectedIndexStart = 0;
++        var largestTriangle = 0;
++        foreach (var model in cmp.Models.Values.OrderBy(x => x.Path, StringComparer.Ordinal))
++        {
++            foreach (var meshRef in model.Levels.OfType<VMeshRef>())
++            {
++                if (!cmp.VMeshLibrary.Meshes.TryGetValue(meshRef.MeshCrc, out var data))
++                    continue;
++                var expected = D3DFVF.XYZ | D3DFVF.NORMAL | D3DFVF.TEX1;
++                if (data.VertexFormat.FVF != expected)
++                    continue;
++                for (var meshIndex = meshRef.StartMesh;
++                     meshIndex < meshRef.StartMesh + meshRef.MeshCount && meshIndex < data.Meshes.Length;
++                     meshIndex++)
++                {
++                    var mesh = data.Meshes[meshIndex];
++                    if (mesh.NumRefVertices < 3 || mesh.NumRefVertices <= largestTriangle)
++                        continue;
++                    // Match VMeshRef.CreateLevel's production MeshDrawcall contract:
++                    // TMeshHeader.TriangleStart is already the index start for this draw.
++                    var indexStart = mesh.TriangleStart;
++                    if (indexStart < 0 || indexStart + 3 > data.Indices.Length)
++                        continue;
++                    var valid = true;
++                    for (var i = 0; i < 3; i++)
++                    {
++                        var vertex = meshRef.StartVertex + mesh.StartVertex + data.Indices[indexStart + i];
++                        if (vertex >= data.VertexCount)
++                        {
++                            valid = false;
++                            break;
++                        }
++                    }
++                    if (!valid)
++                        continue;
++                    selectedModel = model;
++                    selectedRef = meshRef;
++                    selectedData = data;
++                    selectedMesh = mesh;
++                    selectedIndexStart = indexStart;
++                    largestTriangle = mesh.NumRefVertices;
++                }
++            }
++        }
++
++        if (selectedModel == null || selectedRef == null || selectedData == null || selectedMesh == null)
++            throw new InvalidDataException(
++                $"CMP contains no indexed XYZ|NORMAL|TEX1 VMesh draw with valid indices: {path}");
++
++        Span<Vector3> positions = stackalloc Vector3[3];
++        Span<Vector3> normals = stackalloc Vector3[3];
++        Span<Vector2> texcoords = stackalloc Vector2[3];
++        for (var i = 0; i < 3; i++)
++        {
++            var vertex = selectedRef.StartVertex + selectedMesh.StartVertex +
++                         selectedData.Indices[selectedIndexStart + i];
++            positions[i] = selectedData.GetPosition(vertex);
++            normals[i] = selectedData.GetNormal(vertex);
++            texcoords[i] = selectedData.GetTexCoord(vertex, 0);
++        }
++
++        // Project the actual triangle into a stable diagnostic view while retaining
++        // its winding, vertex normals, and authored UVs.
++        var edge = positions[1] - positions[0];
++        var second = positions[2] - positions[0];
++        if (edge.LengthSquared() < 1e-12f)
++            throw new InvalidDataException($"Selected VMesh triangle is degenerate: {path}");
++        var axisX = Vector3.Normalize(edge);
++        var plane = Vector3.Cross(edge, second);
++        if (plane.LengthSquared() < 1e-12f)
++            throw new InvalidDataException($"Selected VMesh triangle is collinear: {path}");
++        var axisY = Vector3.Normalize(Vector3.Cross(Vector3.Normalize(plane), axisX));
++        Span<Vector2> projected = stackalloc Vector2[3];
++        var center = (positions[0] + positions[1] + positions[2]) / 3f;
++        var maxExtent = 0f;
++        for (var i = 0; i < 3; i++)
++        {
++            var delta = positions[i] - center;
++            projected[i] = new Vector2(Vector3.Dot(delta, axisX), Vector3.Dot(delta, axisY));
++            maxExtent = MathF.Max(maxExtent, MathF.Max(MathF.Abs(projected[i].X), MathF.Abs(projected[i].Y)));
++        }
++        if (maxExtent < 1e-6f)
++            throw new InvalidDataException($"Selected VMesh triangle has no projected extent: {path}");
++
++        var vertices = new float[48]; // Three degenerate vertices preserve the base-offset smoke check.
++        for (var i = 0; i < 3; i++)
++        {
++            var offset = (i + 3) * 8;
++            vertices[offset] = projected[i].X / maxExtent * 0.78f;
++            vertices[offset + 1] = projected[i].Y / maxExtent * 0.78f;
++            vertices[offset + 2] = 0.5f;
++            vertices[offset + 3] = normals[i].X;
++            vertices[offset + 4] = normals[i].Y;
++            vertices[offset + 5] = normals[i].Z;
++            vertices[offset + 6] = texcoords[i].X;
++            vertices[offset + 7] = texcoords[i].Y;
++        }
++
++        var description = $"{path} model={selectedModel.Path}/{selectedRef.MeshCrc:X8}, " +
++                          $"material=0x{selectedMesh.MaterialCrc:X8}, sourceReferences={largestTriangle}";
++        return new VMeshTriangle(vertices, selectedData.VertexFormat.FVF, description);
++    }
++
+     [STAThread]
+     public static void Main(string[] args)
+     {
+@@ -28,6 +146,23 @@
+                 D3DFVF.XYZ | D3DFVF.NORMAL | D3DFVF.TEX1).GetVertexDeclaration());
+             return;
+         }
++        if (args.Length == 2 && args[0] == "--sdl-gpu-vmesh-smoke")
++        {
++            try
++            {
++                var triangle = LoadVmeshTriangle(args[1]);
++                Console.WriteLine($"Loaded real Freelancer VMesh triangle: {triangle.Description}.");
++                Environment.ExitCode = SDL3GpuSmoke.Run(
++                    () => new FVFVertex(triangle.Format).GetVertexDeclaration(),
++                    triangle.Vertices, triangle.Description);
++            }
++            catch (Exception exception)
++            {
++                Console.Error.WriteLine($"SDL_GPU VMesh probe failed: {exception.Message}");
++                Environment.ExitCode = 1;
++            }
++            return;
++        }
+         if (args.Length == 1 && args[0] == "--sdl-gpu-shader-bundle-audit")
+         {
+             Environment.ExitCode = SDL3GpuSmoke.AuditProductionShaderBundles();
+@@ -53,6 +188,7 @@
+             Console.WriteLine("Usage: lancer [configuration-path] [--new-game | --load-save <savegame.fl>]");
+             Console.WriteLine("       Standalone test option: --invulnerable=on|off (local embedded server only)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-smoke (SDL3 GPU shader, pipeline, draw, and swapchain test)");
++            Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-vmesh-smoke <cmp-path> (draw one real FVF3 VMesh triangle from a Freelancer CMP)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-shader-bundle-audit (parse every built-in shader variant and validate SDL_GPU slot maps)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-shader-compile-audit (create and release every production SDL_GPU shader on the active driver)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-production-pipeline-audit (create and release a reflected SDL_GPU graphics pipeline for every production shader variant)");
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 388 Client patches and two native patches. Each
++The active series contains 389 Client patches and two native patches. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -342,3 +342,9 @@
+ | 2384 | Reconcile HDR cubemap visual acceptance status with the NAP-only A/B evidence |
+ 
+ | 2385 | Preserve FX particle spawning when linked appearance transforms are singular |
++
++| 2390 | Supply production FVF and DFM vertex layouts to SDL_GPU pipeline audits |
++
++| 2391 | Use the production Freelancer FVF declaration in the SDL_GPU PBR draw smoke |
++
++| 2392 | Draw real NAP CMP/VMesh FVF3 geometry through the SDL_GPU production PBR smoke |
+--- /dev/null
++++ b/docs/evidence/renderer/sdl-gpu-real-vmesh-smoke-20261019.md
+@@ -0,0 +1,77 @@
++# SDL_GPU real VMesh input smoke (2026-10-19)
++
++## What this checks
++
++The diagnostic command `--sdl-gpu-vmesh-smoke <cmp-path>` parses a Freelancer CMP,
++selects its largest indexed draw with the exact `XYZ | NORMAL | TEX1` FVF layout,
++and passes one indexed triangle through the production vertex declaration and
++embedded production PBR variants. It retains the selected triangle's actual
++positions, normals and UVs, projects the triangle into a stable diagnostic view,
++and checks GPU readback at interior pixels. The production `VMeshRef.CreateLevel`
++index-start and base-vertex rules are used.
++
++The smoke deliberately does not claim a full model render: it uses one triangle,
++a synthetic BC5 normal texture and synthetic material parameters. It does not
++bind the CMP material library or retail diffuse/normal textures, apply the part
++transform, load DFM skinning, or exercise the full game render graph. Shadow
++pixel expectations remain checked by the synthetic smoke; they are not used as
++an acceptance condition for asset-derived normals/materials.
++
++## Input provenance
++
++Both model files were read directly from `Data/NAP/Models/`:
++
++| Asset | SHA-256 |
++|---|---|
++| `ships/liberty/li_elite/li_elite.cmp` | `c3323595bf0fded56c1c5072efbf3260ee74b6d2b86d40e4b8cffd8d8e52b22a` |
++| `ships/utility/transport_large/transport_large.cmp` | `3854b4bee0156e20feaf3f69e2987c88ae11ffcf2ba1375e2d6d115e8c529c37` |
++
++These are direct NAP source-file probes, not a test of the active NAP container
++mount or its manifest.
++
++## Build and runtime
++
++Release build:
++
++```sh
++DOTNET_ROOT=/opt/dotnet-10 DOTNET_ROOT_X64=/opt/dotnet-10 \
++  /opt/dotnet-10/dotnet build src/lancer/lancer.csproj -c Release \
++  --no-restore -p:UseSharedCompilation=false
++```
++
++The build passed with zero errors. The SDL_GPU runs used the normal driver
++selection and chose Vulkan/Mesa on Intel Haswell. Mesa reports that Haswell
++Vulkan support is incomplete; this is a path smoke, not GPU compatibility or
++performance certification.
++
++```sh
++DOTNET_ROOT=/opt/dotnet-10 DOTNET_ROOT_X64=/opt/dotnet-10 \
++  /opt/dotnet-10/dotnet src/lancer/bin/Release/net10.0/lancer.dll \
++  --sdl-gpu-vmesh-smoke ../Data/NAP/Models/ships/liberty/li_elite/li_elite.cmp
++
++DOTNET_ROOT=/opt/dotnet-10 DOTNET_ROOT_X64=/opt/dotnet-10 \
++  /opt/dotnet-10/dotnet src/lancer/bin/Release/net10.0/lancer.dll \
++  --sdl-gpu-vmesh-smoke ../Data/NAP/Models/ships/utility/transport_large/transport_large.cmp
++```
++
++Both returned exit code 0 at 640x360. The selected LI Elite draw was
++`Li_elite_lod1021202161040.3db/0CF9309F`, material CRC `0xE89BB35A`, with
++1,422 references in the selected draw. The selected Transporter draw was
++`trans_tail_fin_lod1020926170242.3db/E5523F20`, material CRC `0xF7062051`, with
++225 references. Each loaded PBR variants with and without shadow resources,
++created the RGBA16F scene target, executed the three production PBR draws, and
++reported successful coverage readback (1/4 LI Elite samples, 2/4 Transporter
++samples differed from the scene clear).
++
++The existing synthetic `--sdl-gpu-smoke` also returned exit code 0 after this
++change, including its stricter normal-map, indexed-offset, PBR and shadow pixel
++checks.
++
++## Remaining SDL_GPU renderer work
++
++This step proves asset parsing, production FVF layout selection, actual VMesh
++position/normal/UV upload, indexed geometry coverage and production PBR shader
++execution for two NAP CMP inputs. Material/texture binding, full VMesh draw ranges,
++CMP part transforms, DFM skinning, real-scene lighting/shadows, render-graph
++integration, presentation parity, performance and a supported desktop GPU matrix
++remain open.

@@ -1,6 +1,6 @@
 # Client patch groups
 
-The active series contains 388 Client patches and two native patches. Each
+The active series contains 389 Client patches and two native patches. Each
 file belongs to one functional bundle; the combined output preserves the
 integration, upstream compatibility fixes, tests and project documentation.
 
@@ -342,3 +342,9 @@ jump-gate route.
 | 2384 | Reconcile HDR cubemap visual acceptance status with the NAP-only A/B evidence |
 
 | 2385 | Preserve FX particle spawning when linked appearance transforms are singular |
+
+| 2390 | Supply production FVF and DFM vertex layouts to SDL_GPU pipeline audits |
+
+| 2391 | Use the production Freelancer FVF declaration in the SDL_GPU PBR draw smoke |
+
+| 2392 | Draw real NAP CMP/VMesh FVF3 geometry through the SDL_GPU production PBR smoke |
