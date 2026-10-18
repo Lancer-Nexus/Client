@@ -1,6 +1,6 @@
 # Client patch groups
 
-The active series contains 383 Client patches and two native patches. Each
+The active series contains 384 Client patches and two native patches. Each
 file belongs to one functional bundle; the combined output preserves the
 integration, upstream compatibility fixes, tests and project documentation.
 
