@@ -1,0 +1,168 @@
+diff --git a/docs/evidence/renderer/sdl-gpu-production-bundle-audit-20261018.md b/docs/evidence/renderer/sdl-gpu-production-bundle-audit-20261018.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..8fd149022762a6c595d7fcc2ea9447f1fcd95416
+--- /dev/null
++++ b/docs/evidence/renderer/sdl-gpu-production-bundle-audit-20261018.md
+@@ -0,0 +1,28 @@
++# SDL_GPU production shader bundle audit (2026-10-18)
++
++The new no-device audit command enumerates every public `ShaderBundle` field in
++`LibreLancer.Shaders.AllShaders`, opens its embedded `.bin` resource, and parses
++every compiled feature variant through `SDL3GpuShaderProgramReader`. The reader
++validates versioned SPIR-V payload lengths and the compact SDL_GPU descriptor
++slot map. Empty `NULL` feature entries are counted and skipped.
++
++Command:
++
++```sh
++DOTNET_ROOT=/opt/dotnet-10 DOTNET_ROOT_X64=/opt/dotnet-10 \
++  /opt/dotnet-10/dotnet run --project src/lancer/lancer.csproj -c Release \
++  --no-build -- --sdl-gpu-shader-bundle-audit
++```
++
++Result: all 25 built-in bundles parsed. All 3,487 compiled feature variants use
++shader bytecode version 2 with a validated SDL_GPU slot map; there were no
++legacy variants and no empty feature entries. `Basic_FVF` and `Basic_PositionColor`
++were 1,024 and 64 variants respectively; `Basic_Skinned` had 256; `PBR` and
++`PBR_Skinned` each had 1,024. The remaining bundles are enumerated in the
++command output and are all included in the totals.
++
++This audit validates the serialized shader inputs and binding maps only. It does
++not create GPU pipelines for every permutation, check each shader's device
++resource limits, render real Freelancer meshes, or execute the game render graph.
++Only the separately documented PBR smoke variants have been created and drawn
++on Vulkan so far.
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+index b52f8df197b736a168bbaec9c605c3599fddbedc..706d23be70a56db570d265aa75e3c90c6ab723b4 100644
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -445,7 +445,9 @@ View-Vektor und bündelt UV-Selektoren im PBR-Parameterblock. Damit benötigen
+ seine Fragmentvarianten drei Uniformblöcke ohne Schatten und vier mit Schatten,
+ innerhalb des SDL_GPU-Limits. Das belegt weiterhin keine Ausführung der echten
+ Freelancer-Meshes oder -Materialdaten und keinen Renderer-Bindungspfad im
+-SDL_GPU-Spielrenderer. `SDL3GpuShaderProgramReader` now owns the versioned SPIR-V payload and slot-map reader used by the SDL_GPU probe; it checks descriptor remaps against compact SPIR-V bindings before shader creation. This gives a production backend the same validated shader input contract without claiming that the renderer is ported. A fresh Release run on Mesa/Vulkan Intel Haswell parsed both PBR variants and retained the expected BC5, PBR and shadow readback pixels; the run details are in [`SDL_GPU shader bundle reader smoke`](evidence/renderer/sdl-gpu-shader-reader-smoke-20261018.md). Details: [`SDL_GPU production PBR draw`](evidence/renderer/sdl-gpu-production-pbr-draw-20261018.md).
++SDL_GPU-Spielrenderer. `SDL3GpuShaderProgramReader` now owns the versioned SPIR-V payload and slot-map reader used by the SDL_GPU probe; it checks descriptor remaps against compact SPIR-V bindings before shader creation. This gives a production backend the same validated shader input contract without claiming that the renderer is ported.
++
++The new `--sdl-gpu-shader-bundle-audit` command read all embedded bundles in `AllShaders`: 25 bundles and 3,487 feature variants, all with version-2 slot maps and no legacy or empty entries. It validates payload parsing and slot-map consistency, not 3,487 device pipelines. The run is documented in [`SDL_GPU production shader bundle audit`](evidence/renderer/sdl-gpu-production-bundle-audit-20261018.md). A fresh Release run on Mesa/Vulkan Intel Haswell parsed both PBR variants and retained the expected BC5, PBR and shadow readback pixels; the run details are in [`SDL_GPU shader bundle reader smoke`](evidence/renderer/sdl-gpu-shader-reader-smoke-20261018.md). Details: [`SDL_GPU production PBR draw`](evidence/renderer/sdl-gpu-production-pbr-draw-20261018.md).
+ 
+ Der 18.10.-Smoke lädt nun zusätzlich die Produktionspermutation
+ `PBR_VIEW_VECTOR | SHADOWMAP` (Featuremaske 768). Zwei Draws derselben
+diff --git a/patches/README.md b/patches/README.md
+index 498a61f234e87ed7de9281304d6fc047a96a4550..ca143c2e41035342ccdb561c078870148c8c354e 100644
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -332,3 +332,5 @@ jump-gate route.
+ | 2379 | Distinguish retail Fade 1D sampler settings from the Atmosphere MAT scalar |
+ 
+ | 2380 | Share SDL_GPU shader program decoding and validate compact descriptor remaps |
++
++| 2381 | Audit every built-in shader bundle with the SDL_GPU reader |
+diff --git a/patches/series b/patches/series
+index 77eddc6c152a96b2454a050903e4e22c9fcd8738..4cd7828df29feb240ae76b0fa9bb6346daf7b471 100644
+--- a/patches/series
++++ b/patches/series
+@@ -378,3 +378,4 @@ client 2377-dynamic-asteroid-runtime-evidence.patch
+ client 2378-sun-sph-placeholder-renderer-path.patch
+ client 2379-atmosphere-fade-retail-sampler-trace.patch
+ client 2380-sdl-gpu-shader-program-reader.patch
++client 2381-sdl-gpu-shader-bundle-audit.patch
+diff --git a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+index 0d06a225c04fb8fdbf38f3826ca2ebe7955906eb..b3d1554bf147543cf1650f1216703ab7bf983ea9 100644
+--- a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
++++ b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+@@ -23,6 +23,71 @@ public static class SDL3GpuSmoke
+     private const string ShaderBundleResource = "SDLGPUSmoke.bin";
+     private const string CopyShaderBundleResource = "SDLGPUCopy.bin";
+ 
++    public static int AuditProductionShaderBundles()
++    {
++        try
++        {
++            var assembly = Assembly.Load("LibreLancer");
++            var shaderCatalog = assembly.GetType("LibreLancer.Shaders.AllShaders", throwOnError: true)!;
++            var bundles = shaderCatalog.GetFields(BindingFlags.Public | BindingFlags.Static)
++                .Where(field => field.FieldType == typeof(ShaderBundle))
++                .OrderBy(field => field.Name, StringComparer.Ordinal)
++                .ToArray();
++            if (bundles.Length == 0)
++                throw new InvalidDataException("The built-in shader catalog contains no shader bundles.");
++
++            var totalVariants = 0;
++            var totalEmptyVariants = 0;
++            var totalMappedVariants = 0;
++            var totalLegacyVariants = 0;
++            foreach (var field in bundles)
++            {
++                var resourceName = field.Name + ".bin";
++                using var stream = assembly.GetManifestResourceStream(resourceName)
++                                   ?? throw new FileNotFoundException($"Missing embedded production shader bundle {resourceName}.");
++                var bundle = BytecodesBundle.FromStream(stream);
++                var variants = 0;
++                var emptyVariants = 0;
++                var mappedVariants = 0;
++                var legacyVariants = 0;
++                for (var index = 0; index < bundle.ShaderCount; index++)
++                {
++                    var shader = bundle.GetShader(index);
++                    if (shader.Length == 5 && shader.SequenceEqual("NULL\0"u8))
++                    {
++                        emptyVariants++;
++                        continue;
++                    }
++
++                    var version = ShaderBytecodes.GetVersion(shader);
++                    _ = SDL3GpuShaderProgramReader.Parse(shader);
++                    variants++;
++                    if (version >= 2)
++                        mappedVariants++;
++                    else
++                        legacyVariants++;
++                }
++
++                totalVariants += variants;
++                totalEmptyVariants += emptyVariants;
++                totalMappedVariants += mappedVariants;
++                totalLegacyVariants += legacyVariants;
++                Console.WriteLine($"{field.Name}: {variants} parsed, {mappedVariants} with SDL_GPU maps, " +
++                                  $"{legacyVariants} legacy, {emptyVariants} empty feature entries.");
++            }
++
++            Console.WriteLine($"SDL_GPU production shader audit passed: {bundles.Length} bundles, " +
++                              $"{totalVariants} parsed variants, {totalMappedVariants} mapped, " +
++                              $"{totalLegacyVariants} legacy, {totalEmptyVariants} empty entries.");
++            return totalVariants == 0 ? 1 : 0;
++        }
++        catch (Exception exception)
++        {
++            Console.Error.WriteLine($"SDL_GPU production shader audit failed: {exception}");
++            return 1;
++        }
++    }
++
+     public static unsafe int Run()
+     {
+         if (!SDL3.Supported)
+diff --git a/src/lancer/Program.cs b/src/lancer/Program.cs
+index fad926a3b292791f0c87940374c81a40f8eaf6d1..293984b4ebdb9133f50457a1e00b8b23e40e8df6 100644
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -24,6 +24,11 @@ internal static class MainClass
+             Environment.ExitCode = SDL3GpuSmoke.Run();
+             return;
+         }
++        if (args.Length == 1 && args[0] == "--sdl-gpu-shader-bundle-audit")
++        {
++            Environment.ExitCode = SDL3GpuSmoke.AuditProductionShaderBundles();
++            return;
++        }
+         if (args.Length == 1 && args[0] == "--gl-texture-readback-smoke")
+         {
+             Environment.ExitCode = GLTextureReadbackSmoke.Run();
+@@ -34,6 +39,7 @@ internal static class MainClass
+             Console.WriteLine("Usage: lancer [configuration-path] [--new-game | --load-save <savegame.fl>]");
+             Console.WriteLine("       Standalone test option: --invulnerable=on|off (local embedded server only)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-smoke (SDL3 GPU shader, pipeline, draw, and swapchain test)");
++            Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-shader-bundle-audit (parse every built-in shader variant and validate SDL_GPU slot maps)");
+             Console.WriteLine("       Renderer backend diagnostic: --gl-texture-readback-smoke (OpenGL mip/region texture readback test)");
+             Console.WriteLine("       Render overrides (each option is independent):");
+             Console.WriteLine("         --render-normal-maps=on|off");

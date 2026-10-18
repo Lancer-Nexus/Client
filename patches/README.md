@@ -332,3 +332,5 @@ jump-gate route.
 | 2379 | Distinguish retail Fade 1D sampler settings from the Atmosphere MAT scalar |
 
 | 2380 | Share SDL_GPU shader program decoding and validate compact descriptor remaps |
+
+| 2381 | Audit every built-in shader bundle with the SDL_GPU reader |
