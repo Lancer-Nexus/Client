@@ -1,6 +1,6 @@
 # Client patch groups
 
-The active series contains 373 Client patches and two native patches. Each
+The active series contains 374 Client patches and two native patches. Each
 file belongs to one functional bundle; the combined output preserves the
 integration, upstream compatibility fixes, tests and project documentation.
 
@@ -324,3 +324,5 @@ jump-gate route.
 | 2375 | Verify the shared shadow depth mapping in the NAP-only OpenGL system renderer |
 
 | 2376 | Parse and render configured particle effects for dynamic asteroids |
+
+| 2377 | Record NAP-only dynamic asteroid particle-effect parsing and startup evidence |
