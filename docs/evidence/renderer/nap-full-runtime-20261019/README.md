@@ -36,7 +36,8 @@ Bild bestätigt die Szene, aber ohne Vergleichslauf nicht den einzelnen Beitrag
 jedes aktivierten Effekts. Der Testlauf endete durch das vorgesehene 120-Sekunden-Timeout (Exit 124), nicht
 durch einen Spielabsturz. Ein separater Lauf änderte nur Bloom auf `off` und
 erreichte ebenfalls `FP7_system` sowie den M01A-Trigger `play_sad_music`; beide
-Profile starteten mit null Spielständen und denselben NAP-Paketen. Die beiden
+Profile starteten mit null Spielständen und denselben NAP-Paketen. Ein dritter
+Lauf ließ Bloom aus und schaltete zusätzlich `--render-particle-effects=off`. Die beiden
 Aufnahmen sind zeitlich auf diesen Trigger ausgerichtet, aber wegen Animation,
 Explosion und Kamerafahrt nicht framegenau. Sie zeigen eine qualitative
 Änderung der großflächigen Aufhellung. Der deutliche Ring bleibt auch mit Bloom
@@ -45,8 +46,21 @@ ist aus diesem Bildpaar nicht bestimmt.
 
 ![Bloom Ein/Aus-Vergleich im M01A-Intro](bloom-on-off-overview.png)
 
-Das Bildpaar ist kein pixelgenauer Bloom-Funktions- oder Halo-Kalibrierungstest.
-Es ist kein FPS- oder GPU-Kostenbeleg.
+Die dritte Aufnahme entfernt zusammen mit der Explosionswolke auch den großen
+Ring. Der M01A-Trigger startet `freeport7_dome_fuse2`; dieses Fuse startet am
+Dome `gf_piratestationexplode#3` (`Data/NAP/Effects/fx/FuseFreeport7.ini`).
+`ExplosionsAle.ini` ordnet diesen visuellen Effekt
+`gf_piratestationexplode.ale` und den Texturen `hexagon.txm` /
+`planetflare.txm` zu. Die ALE-Datei enthält `FxRectAppearance`-Einträge
+`gf_piratestationexplode_flashbang#...` mit `planetflare`. Zusammen mit dem
+Ein/Aus-Lauf weist das den großen Ring dem Freelancer-Explosionssprite zu; er
+ist kein Bloom-Halo. Welche Flashbang-Instanz den sichtbaren Ring zeichnet, ist
+noch nicht einzeln aufgelöst.
+
+![Bloom- und Partikeleffekt-Matrix im M01A-Intro](bloom-particle-ring-isolation.png)
+
+Die zeitlich getrennten Bilder sind kein pixelgenauer Bloom- oder Halo-
+Kalibrierungstest. Es ist kein FPS- oder GPU-Kostenbeleg.
 
 ![NAP-only-M01A-Intro mit aktiven Rendereroptionen](fp7-intro-live.png)
 
