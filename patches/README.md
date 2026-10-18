@@ -1,6 +1,6 @@
 # Client patch groups
 
-The active series contains 381 Client patches and two native patches. Each
+The active series contains 382 Client patches and two native patches. Each
 file belongs to one functional bundle; the combined output preserves the
 integration, upstream compatibility fixes, tests and project documentation.
 
@@ -340,3 +340,5 @@ jump-gate route.
 | 2383 | Create SDL_GPU graphics pipelines for every production shader variant |
 
 | 2384 | Reconcile HDR cubemap visual acceptance status with the NAP-only A/B evidence |
+
+| 2385 | Preserve FX particle spawning when linked appearance transforms are singular |

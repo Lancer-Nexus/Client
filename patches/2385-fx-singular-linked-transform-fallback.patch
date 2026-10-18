@@ -1,0 +1,68 @@
+--- a/src/LibreLancer/Fx/ParticleEffectInstance.cs
++++ b/src/LibreLancer/Fx/ParticleEffectInstance.cs
+@@ -232,11 +232,20 @@
+                         ref Matrix4x4 linkedAppearanceTransform=ref NodeTransforms[r.Linked.NodeIdx];
+                         if(!linkedAppearanceTransform.IsIdentity)
+                         {
+-                            //TODO: Use optimized inversion
+-                            Matrix4x4 linkedAppearanceInverseTransform;
+-                            Matrix4x4.Invert(linkedAppearanceTransform,out linkedAppearanceInverseTransform);
+-                            //To get into the same space as the particle node first go from the emitter node into world space and then back to the particle node space
+-                            EmitterParticleSpawnTransforms[r.EmitterNodeIdx]= NodeTransforms[r.NodeIdx] * linkedAppearanceInverseTransform;
++                            if (Matrix4x4.Invert(linkedAppearanceTransform, out var linkedAppearanceInverseTransform) &&
++                                IsFinite(linkedAppearanceInverseTransform))
++                            {
++                                // To get into the same space as the particle node first go from the emitter node into world space and then back to the particle node space.
++                                var spawnTransform = NodeTransforms[r.NodeIdx] * linkedAppearanceInverseTransform;
++                                EmitterParticleSpawnTransforms[r.EmitterNodeIdx] = IsFinite(spawnTransform)
++                                    ? spawnTransform
++                                    : NodeTransforms[r.NodeIdx];
++                            }
++                            else
++                            {
++                                // A singular linked appearance transform has no inverse; keep particles in emitter-node space.
++                                EmitterParticleSpawnTransforms[r.EmitterNodeIdx] = NodeTransforms[r.NodeIdx];
++                            }
+                         }
+                         else
+                             EmitterParticleSpawnTransforms[r.EmitterNodeIdx]= NodeTransforms[r.NodeIdx];
+@@ -253,6 +262,12 @@
+             }
+         }
+ 
++        private static bool IsFinite(Matrix4x4 value) =>
++            float.IsFinite(value.M11) && float.IsFinite(value.M12) && float.IsFinite(value.M13) && float.IsFinite(value.M14) &&
++            float.IsFinite(value.M21) && float.IsFinite(value.M22) && float.IsFinite(value.M23) && float.IsFinite(value.M24) &&
++            float.IsFinite(value.M31) && float.IsFinite(value.M32) && float.IsFinite(value.M33) && float.IsFinite(value.M34) &&
++            float.IsFinite(value.M41) && float.IsFinite(value.M42) && float.IsFinite(value.M43) && float.IsFinite(value.M44);
++
+         public void Draw(Matrix4x4 transform, float sparam)
+         {
+             if ((ParticleEffectPool?)Pool == null)
+diff --git a/patches/README.md b/patches/README.md
+index e1aec818f..abc42afa7 100644
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 381 Client patches and two native patches. Each
++The active series contains 382 Client patches and two native patches. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -340,3 +340,5 @@ jump-gate route.
+ | 2383 | Create SDL_GPU graphics pipelines for every production shader variant |
+ 
+ | 2384 | Reconcile HDR cubemap visual acceptance status with the NAP-only A/B evidence |
++
++| 2385 | Preserve FX particle spawning when linked appearance transforms are singular |
+diff --git a/patches/series b/patches/series
+index 3d2f8811a..e81c7197d 100644
+--- a/patches/series
++++ b/patches/series
+@@ -382,3 +382,4 @@ client 2381-sdl-gpu-shader-bundle-audit.patch
+ client 2382-sdl-gpu-production-shader-compile-audit.patch
+ client 2383-sdl-gpu-production-pipeline-audit.patch
+ client 2384-reconcile-hdr-cubemap-visual-acceptance.patch
++client 2385-fx-singular-linked-transform-fallback.patch
