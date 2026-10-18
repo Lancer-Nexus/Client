@@ -1,0 +1,506 @@
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+index a52fb70..7aa08b8 100644
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -409,6 +409,18 @@ Materialauflösung oder Freelancer-Spiel-/Editor-Szenen. Haswell-Vulkan-
+ Unterstützung ist laut Mesa unvollständig. Befehls- und Buildnachweis:
+ [`SDL_GPU FVF3 normal-map smoke`](evidence/renderer/sdl-gpu-fvf3-normal-smoke-20261018.md).
+ 
++Die Shader-Bundles enthalten jetzt für SPIR-V die kompaktierten SDL_GPU-
++Bindungsnummern und zusätzlich die Zuordnung von den bisherigen Slots. Der
++Compilerlauf über alle 41 in Projektdateien registrierten Shaderbeschreibungen
++und ihre Varianten war erfolgreich. Im PBR-Bundle wurden 512 Permutationen
++erzeugt; die SPIR-V-Bindungen und serialisierten Slotmaps stimmen überein.
++Der vorhandene Vulkan-Smoke liest das neue Format und besteht mit dem bekannten
++RGBA16F-/Depth-/BC5-Readback. Das belegt weiterhin keine Ausführung der echten
++Spielshader im SDL_GPU-Renderer. Außerdem überschreiten PBR-Fragmentvarianten
++mit fünf Uniformblöcken das SDL_GPU-Limit von vier pro Stufe. Die Umnummerierung
++behebt Lücken, reduziert aber nicht die benötigte Blockanzahl; ein Backendpfad
++für diese Shader bleibt offen.
++
+ ## Backend-Grenzen
+ 
+ Der Screenshotpfad ist von SDL2/SDL3 nach `RenderContext.ReadBackbuffer`
+diff --git a/docs/vulkan-backend-untersuchung.md b/docs/vulkan-backend-untersuchung.md
+index 5306d1a..178a53b 100644
+--- a/docs/vulkan-backend-untersuchung.md
++++ b/docs/vulkan-backend-untersuchung.md
+@@ -534,7 +534,9 @@ Der Vulkan-Teil baut die Deskriptor-Layouts allein aus den **Anzahlen** (`num_sa
+ 
+ Die Reflexion im `LLShaderCompiler` zählt die Ressourcen und prüft nur die **Set-Nummern** (`SpvcReflection`, Fehler `InvalidDescriptorSet`), nicht die Bindungsnummern. Die MSL-Übersetzung übernimmt die Bindungsnummern unverändert. Der GL-Teil nutzt Namen und braucht sie nicht.
+ 
+-**Folge:** Für SDL_GPU (und analog für D3D12 und Metal) ist eine Umnummerierung nötig, entweder im Compiler (SPIR-V neu nummerieren, vor SPIRV-Cross) oder als Tabelle je Shader im Bündel (Client-Slot → SDL-Slot). Der Client setzt Uniform-Blöcke über feste Indizes (`SetUniformBlock(2, …)`, `3`, `5`), eine Tabelle würde diese Indizes auf SDL-Slots abbilden.
++**Stand 2026-10-18:** Der Compiler schreibt nun eine SDL_GPU-SPIR-V-Variante mit fortlaufenden Bindungen und speichert je Stufe die Zuordnung `(DescriptorSet, OriginalBinding, SdlBinding)` im Shaderbundle. DXIL-, MSL- und GLSL-Übersetzungen verwenden weiter den Original-SPIR-V-Code. Ein Lauf über alle 41 in den Projektdateien registrierten Shaderbeschreibungen und Varianten gelang; für `PBR.bin` wurden 512 Permutationen erzeugt und die gespeicherten Slotmaps gegen die resultierenden SPIR-V-Dekorationen geprüft. Der SDL_GPU-API-Smoke liest das neue Bundleformat und besteht weiterhin.
++
++Die Slotmap ist noch nicht an einen Spielshader- oder Renderer-Bindungspfad angeschlossen. Sie muss die festen Clientindizes (`SetUniformBlock(2, …)`, `3`, `5`) auf SDL-Slots abbilden. Außerdem enthalten PBR-Fragmentvarianten fünf aktive Uniformblöcke, während SDL_GPU höchstens vier pro Stufe unterstützt; bloße Umnummerierung kann diese Grenze nicht lösen. Die DFM-Storage-Pufferbereiche (`BindTo(9, start, count)`) brauchen zusätzlich weiterhin einen Basisindex im Shader.
+ 
+ **Weitere Einschränkung der Bindung:** `SDL_BindGPUVertexStorageBuffers` bindet **ganze Puffer** ohne Offset und Länge. Der Client bindet Bereiche (`BindTo(9, start, count)` für Partikel, Strahlen und Bones mit `BufferOffset`, `200` Matrizen). Bei SDL_GPU muss der Anfangsindex als Uniform in den Shader gegeben werden (neuer Uniform-Block oder im Material-Block). Das betrifft `Particle`, `ParticleBeam`, `Basic_Skinned`.
+ 
+@@ -620,7 +622,7 @@ Aus der Dokumentation (3.2.0):
+ 
+ - [ ] **Praktisch prüfen:** minimales SDL_GPU-Programm mit den gebündelten Shadern (SPIR-V und DXIL), eine Pipeline für `Basic_FVF`, auf Linux (Mesa/NVIDIA) und Windows (Vulkan und D3D12).
+ - [ ] Ob ein SDL3-Fenster mit `SDL_WINDOW_OPENGL` für SDL_GPU beanspruchbar ist (sonst Fenstererzeugung je Backend).
+-- [ ] Wie der Compiler die Umnummerierung am besten erhält (SPIR-V-Umschreibung gegenüber Tabelle im Bündel); Auswirkung auf den GL-Teil prüfen.
++- [x] Compilerformat für die SDL_GPU-SPIR-V-Umnummerierung und Slotmap im Bündel umgesetzt; der OpenGL-Leser akzeptiert Shaderheader-Version 2. Eine tatsächliche Produktionsshader-Bindung ist weiterhin offen.
+ - [ ] Verhalten der D3D12- und Metal-Übersetzungen (DXIL über SPIRV-Cross und DXC, MSL über SPIRV-Cross) bei den 361 Varianten.
+ - [ ] Mindestversion von SDL3 für Linux und macOS und deren Bereitstellung im Paket (heute nur Windows gebündelt).
+ - [ ] Messung: Zeichenaufrufe, Pipeline-Varianten und Uniform-Daten je Frame (10.3), erst damit lässt sich die Größe von Pipeline-Cache und Ringpuffern festlegen.
+diff --git a/patches/README.md b/patches/README.md
+index 7685bbe..e619e7e 100644
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 341 Client bundles and two native bundles. Each
++The active series contains 366 Client patches and two native patches. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -314,3 +314,4 @@ jump-gate route.
+ | 2366 | Record NAP-only resize and restore runtime evidence for render-target replacement |
+ | 2367 | Add NAP-only M01A visual A/B evidence for the soft-particle toggle |
+ | 2368 | Remove stale OpenGL imports and refresh the backend boundary audit |
++| 2369 | Compact SDL_GPU SPIR-V bindings and serialize original-to-SDL slot maps |
+diff --git a/patches/series b/patches/series
+index dc3e56a..e6612c3 100644
+--- a/patches/series
++++ b/patches/series
+@@ -366,3 +366,4 @@ client 2365-release-render-targets-before-reallocation.patch
+ client 2366-render-target-resize-runtime-evidence.patch
+ client 2367-soft-particle-m01a-visual-ab.patch
+ client 2368-audit-renderer-gl-boundaries.patch
++client 2369-compact-sdl-gpu-production-shader-bindings.patch
+diff --git a/src/LLShaderCompiler/ReflectedShader.cs b/src/LLShaderCompiler/ReflectedShader.cs
+index 67dcb3e..12f6696 100644
+--- a/src/LLShaderCompiler/ReflectedShader.cs
++++ b/src/LLShaderCompiler/ReflectedShader.cs
+@@ -8,6 +8,8 @@ public class ReflectedShader
+     public uint NumUniformBuffers;
+     public string EntryPoint;
+     public byte[] Code;
++    public byte[]? SdlGpuCode;
++    public SpirvBindingRemap[] SdlGpuBindingRemaps = [];
+ 
+     public ReflectedShader(string entryPoint, byte[] code)
+     {
+diff --git a/src/LLShaderCompiler/ShaderBundleWriter.cs b/src/LLShaderCompiler/ShaderBundleWriter.cs
+index bbb6543..f669ed2 100644
+--- a/src/LLShaderCompiler/ShaderBundleWriter.cs
++++ b/src/LLShaderCompiler/ShaderBundleWriter.cs
+@@ -17,14 +17,15 @@ public class ShaderBundle
+ 
+ public class ShaderBundleWriter
+ {
+-    private const uint FORMAT_VERSION = 1;
++    private const uint BUNDLE_FORMAT_VERSION = 1;
++    private const uint SHADER_FORMAT_VERSION = 2;
+ 
+     public static void Write(Stream outStream, ShaderBundle bundle)
+     {
+         using var comp = new ZstdSharp.CompressionStream(outStream, 22);
+         var writer = new BinaryWriter(comp);
+         writer.Write("\b\0LLSHDR"u8);
+-        writer.Write(FORMAT_VERSION);
++        writer.Write(BUNDLE_FORMAT_VERSION);
+         uint featuresMask = 0;
+ 
+         var written = new ShaderBytes[bundle.Shaders.Length];
+@@ -32,7 +33,7 @@ public class ShaderBundleWriter
+         {
+             var shader = bundle.Shaders[i];
+             written[i] = new ShaderBytes(
+-                spirv: GetShaderBytes(shader.SPIRV),
++                spirv: GetShaderBytes(shader.SPIRV, includeSdlGpuBindings: true),
+                 dxil: GetShaderBytes(shader.DXIL),
+                 msl: GetShaderBytes(shader.MSL),
+                 gl: shader.GL == null ? null : GetGLBytes(shader.GL));
+@@ -121,7 +122,7 @@ public class ShaderBundleWriter
+         public void Write(BinaryWriter writer)
+         {
+             writer.Write("shdr"u8);
+-            writer.Write(FORMAT_VERSION);
++            writer.Write(SHADER_FORMAT_VERSION);
+             writer.Write(SPIRV.Length);
+             writer.Write(DXIL.Length);
+             writer.Write(MSL.Length);
+@@ -143,7 +144,7 @@ public class ShaderBundleWriter
+         writer.Write(bytes);
+     }
+ 
+-    static byte[] GetShaderBytes(GPUProgram? sh)
++    static byte[] GetShaderBytes(GPUProgram? sh, bool includeSdlGpuBindings = false)
+     {
+         if (sh == null)
+         {
+@@ -151,23 +152,33 @@ public class ShaderBundleWriter
+         }
+         var ms = new MemoryStream();
+         var writer = new BinaryWriter(ms);
+-        WriteVarUInt32(writer, sh.Vertex.NumSamplers);
+-        WriteVarUInt32(writer, sh.Vertex.NumStorageTextures);
+-        WriteVarUInt32(writer, sh.Vertex.NumStorageBuffers);
+-        WriteVarUInt32(writer, sh.Vertex.NumUniformBuffers);
+-        WriteUTF8(writer, sh.Vertex.EntryPoint);
+-        WriteVarUInt32(writer, (uint)sh.Vertex.Code.Length);
+-        writer.Write(sh.Vertex.Code);
+-        WriteVarUInt32(writer, sh.Fragment.NumSamplers);
+-        WriteVarUInt32(writer, sh.Fragment.NumStorageTextures);
+-        WriteVarUInt32(writer, sh.Fragment.NumStorageBuffers);
+-        WriteVarUInt32(writer, sh.Fragment.NumUniformBuffers);
+-        WriteUTF8(writer, sh.Fragment.EntryPoint);
+-        WriteVarUInt32(writer, (uint)sh.Fragment.Code.Length);
+-        writer.Write(sh.Fragment.Code);
++        WriteStage(writer, sh.Vertex, includeSdlGpuBindings);
++        WriteStage(writer, sh.Fragment, includeSdlGpuBindings);
+         return ms.ToArray();
+     }
+ 
++    static void WriteStage(BinaryWriter writer, ReflectedShader shader, bool includeSdlGpuBindings)
++    {
++        WriteVarUInt32(writer, shader.NumSamplers);
++        WriteVarUInt32(writer, shader.NumStorageTextures);
++        WriteVarUInt32(writer, shader.NumStorageBuffers);
++        WriteVarUInt32(writer, shader.NumUniformBuffers);
++        IReadOnlyList<SpirvBindingRemap> remaps = includeSdlGpuBindings
++            ? shader.SdlGpuBindingRemaps
++            : Array.Empty<SpirvBindingRemap>();
++        WriteVarUInt32(writer, (uint)remaps.Count);
++        foreach (var remap in remaps)
++        {
++            WriteVarUInt32(writer, remap.DescriptorSet);
++            WriteVarUInt32(writer, remap.OriginalBinding);
++            WriteVarUInt32(writer, remap.SdlBinding);
++        }
++        WriteUTF8(writer, shader.EntryPoint);
++        var code = includeSdlGpuBindings ? shader.SdlGpuCode ?? shader.Code : shader.Code;
++        WriteVarUInt32(writer, (uint)code.Length);
++        writer.Write(code);
++    }
++
+     static byte[] GetGLBytes(GLShader gl)
+     {
+         var ms = new MemoryStream();
+diff --git a/src/LLShaderCompiler/ShaderCompiler.cs b/src/LLShaderCompiler/ShaderCompiler.cs
+index f97a32e..1b95bc9 100644
+--- a/src/LLShaderCompiler/ShaderCompiler.cs
++++ b/src/LLShaderCompiler/ShaderCompiler.cs
+@@ -34,7 +34,7 @@ public static class ShaderCompiler
+                 Console.WriteLine($"Compiling {(defines.Count > 0 ? string.Join(", ", defines) : "default")}.");
+ 
+             var variant = await CompileVariantSPIRV(shader, defines);
+-            var reflected = SpvcReflection.ReflectProgram(variant.Vertex, variant.Fragment);
++            var reflected = SpvcReflection.ReflectProgram(variant.Vertex, variant.Fragment, shader.FriendlyName);
+             var glCompiled = shader.NoLegacy
+                 ? null
+                 : GLTranslator.TranslateProgram(shader.FriendlyName, variant.Vertex, variant.Fragment);
+diff --git a/src/LLShaderCompiler/ShaderCompilerException.cs b/src/LLShaderCompiler/ShaderCompilerException.cs
+index 72c6ebe..8f6de81 100644
+--- a/src/LLShaderCompiler/ShaderCompilerException.cs
++++ b/src/LLShaderCompiler/ShaderCompilerException.cs
+@@ -14,6 +14,7 @@ public enum ShaderError : int
+     MissingDescriptorSet = 7,
+     VaryingMissing = 8,
+     VaryingMismatch = 9,
++    SdlGpuBindingError = 10,
+     GLBufferNotReadOnly = 1001,
+     GLBufferInvalidType = 1002,
+     GLComputeUnsupported = 1003,
+diff --git a/src/LLShaderCompiler/SpirvBindingCompactor.cs b/src/LLShaderCompiler/SpirvBindingCompactor.cs
+new file mode 100644
+index 0000000..adde5e0
+--- /dev/null
++++ b/src/LLShaderCompiler/SpirvBindingCompactor.cs
+@@ -0,0 +1,94 @@
++using System.Buffers.Binary;
++
++namespace LLShaderCompiler;
++
++public readonly record struct SpirvBindingRemap(uint DescriptorSet, uint OriginalBinding, uint SdlBinding);
++
++internal static class SpirvBindingCompactor
++{
++    private const uint SpirvMagic = 0x07230203;
++    private const ushort OpDecorate = 71;
++    private const ushort OpGroupDecorate = 74;
++    private const ushort DecorationBinding = 33;
++    private const ushort DecorationDescriptorSet = 34;
++
++    public static (byte[] Code, SpirvBindingRemap[] Bindings) Compact(byte[] code, string file,
++        ShaderStage stage)
++    {
++        if (code.Length < 20 || (code.Length & 3) != 0)
++            throw BindingError(file, stage, "Invalid SPIR-V module length");
++
++        var words = new uint[code.Length / 4];
++        for (var i = 0; i < words.Length; i++)
++            words[i] = BinaryPrimitives.ReadUInt32LittleEndian(code.AsSpan(i * 4, 4));
++        if (words[0] != SpirvMagic)
++            throw BindingError(file, stage, "Invalid SPIR-V module signature");
++
++        var bindings = new Dictionary<uint, uint>();
++        var descriptorSets = new Dictionary<uint, uint>();
++        var instructionOffsets = new List<(int Offset, int Count)>();
++        for (var offset = 5; offset < words.Length;)
++        {
++            var header = words[offset];
++            var wordCount = checked((int)(header >> 16));
++            var opcode = (ushort)header;
++            if (wordCount == 0 || wordCount > words.Length - offset)
++                throw BindingError(file, stage, "Malformed SPIR-V instruction length");
++            instructionOffsets.Add((offset, wordCount));
++
++            if (opcode == OpDecorate && wordCount >= 4)
++            {
++                var target = words[offset + 1];
++                var decoration = (ushort)words[offset + 2];
++                if (decoration == DecorationBinding)
++                    bindings[target] = words[offset + 3];
++                else if (decoration == DecorationDescriptorSet)
++                    descriptorSets[target] = words[offset + 3];
++            }
++            offset += wordCount;
++        }
++
++        foreach (var (offset, wordCount) in instructionOffsets)
++        {
++            if ((ushort)words[offset] != OpGroupDecorate || wordCount < 3)
++                continue;
++            var groupId = words[offset + 1];
++            if (bindings.ContainsKey(groupId) || descriptorSets.ContainsKey(groupId))
++                throw BindingError(file, stage,
++                    "SDL_GPU binding compaction does not support SPIR-V decoration groups");
++        }
++
++        var resources = bindings
++            .Where(x => descriptorSets.ContainsKey(x.Key))
++            .Select(x => (Id: x.Key, Set: descriptorSets[x.Key], Binding: x.Value))
++            .ToArray();
++        var remaps = resources
++            .GroupBy(x => x.Set)
++            .SelectMany(group => group.Select(x => x.Binding).Distinct().Order()
++                .Select((binding, slot) => new SpirvBindingRemap(group.Key, binding, checked((uint)slot))))
++            .OrderBy(x => x.DescriptorSet)
++            .ThenBy(x => x.OriginalBinding)
++            .ToArray();
++
++        var compactSlots = remaps.ToDictionary(x => (x.DescriptorSet, x.OriginalBinding), x => x.SdlBinding);
++        var compactById = resources.ToDictionary(x => x.Id,
++            x => compactSlots[(x.Set, x.Binding)]);
++        foreach (var (offset, wordCount) in instructionOffsets)
++        {
++            if ((ushort)words[offset] != OpDecorate || wordCount < 4 ||
++                (ushort)words[offset + 2] != DecorationBinding)
++                continue;
++            if (compactById.TryGetValue(words[offset + 1], out var compactBinding))
++                words[offset + 3] = compactBinding;
++        }
++
++        var compactCode = new byte[code.Length];
++        for (var i = 0; i < words.Length; i++)
++            BinaryPrimitives.WriteUInt32LittleEndian(compactCode.AsSpan(i * 4, 4), words[i]);
++        return (compactCode, remaps);
++    }
++
++    private static ShaderCompilerException BindingError(string file, ShaderStage stage, string message) =>
++        new(ShaderError.SdlGpuBindingError, file, 0, 0,
++            $"Cannot compact {stage.ToString().ToLowerInvariant()} SPIR-V bindings for SDL_GPU: {message}");
++}
+diff --git a/src/LLShaderCompiler/Translation/SpvcReflection.cs b/src/LLShaderCompiler/Translation/SpvcReflection.cs
+index 0c4913f..b0118ff 100644
+--- a/src/LLShaderCompiler/Translation/SpvcReflection.cs
++++ b/src/LLShaderCompiler/Translation/SpvcReflection.cs
+@@ -12,12 +12,13 @@ public static class SpvcReflection
+             $"Expected {stage.ToString().ToLower()} descriptor set {expected} for '{Spvc.compiler_get_name(compiler, id)}', got {actual}.");
+     }
+ 
+-    public static GPUProgram ReflectProgram(byte[] vertex, byte[] fragment)
++    public static GPUProgram ReflectProgram(byte[] vertex, byte[] fragment, string file = "")
+     {
+-        return new GPUProgram(ReflectShader(vertex, ShaderStage.Vertex), ReflectShader(fragment, ShaderStage.Fragment));
++        return new GPUProgram(ReflectShader(vertex, ShaderStage.Vertex, file),
++            ReflectShader(fragment, ShaderStage.Fragment, file));
+     }
+ 
+-    static unsafe ReflectedShader ReflectShader(byte[] spirv, ShaderStage stage)
++    static unsafe ReflectedShader ReflectShader(byte[] spirv, ShaderStage stage, string file)
+     {
+         using var ctx = ContextHandle.Create();
+ 
+@@ -98,12 +99,15 @@ public static class SpvcReflection
+             }
+         }
+ 
++        var compacted = SpirvBindingCompactor.Compact(spirv, file, stage);
+         return new ReflectedShader("main", spirv)
+         {
+             NumSamplers = checked((uint)numTextureSamplers),
+             NumStorageTextures = checked((uint)numStorageTextures),
+             NumStorageBuffers = checked((uint)numStorageBuffers),
+-            NumUniformBuffers = checked((uint)numUniformBuffers)
++            NumUniformBuffers = checked((uint)numUniformBuffers),
++            SdlGpuCode = compacted.Code,
++            SdlGpuBindingRemaps = compacted.Bindings
+         };
+     }
+ }
+diff --git a/src/LibreLancer.Base/Graphics/ShaderBytecodes.cs b/src/LibreLancer.Base/Graphics/ShaderBytecodes.cs
+index 21ed44e..ae73a99 100644
+--- a/src/LibreLancer.Base/Graphics/ShaderBytecodes.cs
++++ b/src/LibreLancer.Base/Graphics/ShaderBytecodes.cs
+@@ -22,8 +22,8 @@ internal unsafe class ShaderBytecodes
+         var header = MemoryMarshal.Cast<byte, ShaderHeader>(shader.Slice(0, sizeof(ShaderHeader)));
+         if (header[0].Magic != SIGNATURE)
+             throw new FormatException("Byte array is not shader");
+-        if(header[0].Version != 1)
+-            throw new FormatException("Expected shader version 1");
++        if(header[0].Version is not (1 or 2))
++            throw new FormatException($"Unsupported shader version {header[0].Version}");
+         return ref header.GetPinnableReference();
+     }
+ 
+@@ -55,4 +55,10 @@ internal unsafe class ShaderBytecodes
+         ref readonly ShaderHeader header = ref VerifyHeader(shader);
+         return shader.Slice(sizeof(ShaderHeader), (int)header.SpirvLength);
+     }
++
++    public static uint GetVersion(ReadOnlySpan<byte> shader)
++    {
++        ref readonly ShaderHeader header = ref VerifyHeader(shader);
++        return header.Version;
++    }
+ }
+diff --git a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+index 43c6dd8..009a080 100644
+--- a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
++++ b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+@@ -1,6 +1,8 @@
+ using System;
++using System.Buffers.Binary;
+ using System.Text;
+ using System.IO;
++using System.Linq;
+ using System.Runtime.InteropServices;
+ using System.Threading;
+ using LibreLancer.Graphics;
+@@ -333,7 +335,8 @@ public static class SDL3GpuSmoke
+     }
+ 
+     private readonly record struct CompiledStage(uint Samplers, uint StorageTextures, uint StorageBuffers,
+-        uint UniformBuffers, string Entrypoint, byte[] Code);
++        uint UniformBuffers, SdlGpuBindingRemap[] BindingRemaps, string Entrypoint, byte[] Code);
++    private readonly record struct SdlGpuBindingRemap(uint DescriptorSet, uint OriginalBinding, uint SdlBinding);
+ 
+     private static (IntPtr Vertex, IntPtr Fragment) CreateShaders(IntPtr device,
+         string shaderBundleResource = ShaderBundleResource)
+@@ -341,11 +344,19 @@ public static class SDL3GpuSmoke
+         using var stream = typeof(SDL3GpuSmoke).Assembly.GetManifestResourceStream(shaderBundleResource)
+                            ?? throw new FileNotFoundException($"Missing embedded SDL_GPU smoke shader bundle: {shaderBundleResource}");
+         var bundle = BytecodesBundle.FromStream(stream);
+-        var program = ShaderBytecodes.GetSPIRV(bundle.GetShader(0));
++        var shaderBytes = bundle.GetShader(0);
++        var hasSdlGpuBindingMap = ShaderBytecodes.GetVersion(shaderBytes) >= 2;
++        var program = ShaderBytecodes.GetSPIRV(shaderBytes);
+         var offset = 0;
+-        var vertex = ReadStage(program, ref offset);
+-        var fragment = ReadStage(program, ref offset);
+-        Console.WriteLine($"SDL_GPU shader bindings: vertex samplers={vertex.Samplers}, fragment samplers={fragment.Samplers}");
++        var vertex = ReadStage(program, ref offset, hasSdlGpuBindingMap);
++        var fragment = ReadStage(program, ref offset, hasSdlGpuBindingMap);
++        if (hasSdlGpuBindingMap)
++        {
++            ValidateBindingRemaps(vertex, new uint[] { 0, 1 });
++            ValidateBindingRemaps(fragment, new uint[] { 2, 3 });
++        }
++        Console.WriteLine($"SDL_GPU shader bindings: vertex samplers={vertex.Samplers}, fragment samplers={fragment.Samplers}, " +
++                          $"compacted slots={vertex.BindingRemaps.Length + fragment.BindingRemaps.Length}");
+         if (offset != program.Length)
+             throw new InvalidDataException("Unexpected trailing data in SDL_GPU smoke SPIR-V bundle");
+         var vertexHandle = CreateSpirvShader(device, vertex, SDL3.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_VERTEX);
+@@ -362,12 +373,23 @@ public static class SDL3GpuSmoke
+         }
+     }
+ 
+-    private static CompiledStage ReadStage(ReadOnlySpan<byte> program, ref int offset)
++    private static CompiledStage ReadStage(ReadOnlySpan<byte> program, ref int offset, bool hasBindingMap)
+     {
+         uint samplers = ReadVarUInt32(program, ref offset);
+         uint storageTextures = ReadVarUInt32(program, ref offset);
+         uint storageBuffers = ReadVarUInt32(program, ref offset);
+         uint uniformBuffers = ReadVarUInt32(program, ref offset);
++        var bindingCount = hasBindingMap ? checked((int)ReadVarUInt32(program, ref offset)) : 0;
++        if (bindingCount > 128)
++            throw new InvalidDataException("SDL_GPU shader has an unreasonable binding map size");
++        var bindingRemaps = new SdlGpuBindingRemap[bindingCount];
++        for (var i = 0; i < bindingRemaps.Length; i++)
++        {
++            bindingRemaps[i] = new SdlGpuBindingRemap(
++                ReadVarUInt32(program, ref offset),
++                ReadVarUInt32(program, ref offset),
++                ReadVarUInt32(program, ref offset));
++        }
+         var entrypointLength = checked((int)ReadVarUInt32(program, ref offset));
+         EnsureAvailable(program, offset, entrypointLength);
+         var entrypoint = Encoding.UTF8.GetString(program.Slice(offset, entrypointLength));
+@@ -376,7 +398,60 @@ public static class SDL3GpuSmoke
+         EnsureAvailable(program, offset, codeLength);
+         var code = program.Slice(offset, codeLength).ToArray();
+         offset += codeLength;
+-        return new CompiledStage(samplers, storageTextures, storageBuffers, uniformBuffers, entrypoint, code);
++        return new CompiledStage(samplers, storageTextures, storageBuffers, uniformBuffers, bindingRemaps,
++            entrypoint, code);
++    }
++
++    private static void ValidateBindingRemaps(CompiledStage stage, uint[] acceptedSets)
++    {
++        if (stage.Code.Length < 20 || (stage.Code.Length & 3) != 0 ||
++            BinaryPrimitives.ReadUInt32LittleEndian(stage.Code) != 0x07230203)
++            throw new InvalidDataException("SDL_GPU shader contains invalid SPIR-V");
++
++        var descriptorSets = new System.Collections.Generic.Dictionary<uint, uint>();
++        var bindings = new System.Collections.Generic.Dictionary<uint, uint>();
++        var words = new uint[stage.Code.Length / 4];
++        for (var i = 0; i < words.Length; i++)
++            words[i] = BinaryPrimitives.ReadUInt32LittleEndian(stage.Code.AsSpan(i * 4, 4));
++        for (var offset = 5; offset < words.Length;)
++        {
++            var wordCount = checked((int)(words[offset] >> 16));
++            if (wordCount == 0 || wordCount > words.Length - offset)
++                throw new InvalidDataException("SDL_GPU shader contains a malformed SPIR-V instruction");
++            if ((ushort)words[offset] == 71 && wordCount >= 4)
++            {
++                var target = words[offset + 1];
++                var decoration = (ushort)words[offset + 2];
++                if (decoration == 33)
++                    bindings[target] = words[offset + 3];
++                else if (decoration == 34)
++                    descriptorSets[target] = words[offset + 3];
++            }
++            offset += wordCount;
++        }
++
++        var encodedSlots = new System.Collections.Generic.HashSet<(uint Set, uint Binding)>();
++        foreach (var group in stage.BindingRemaps.GroupBy(x => x.DescriptorSet))
++        {
++            if (!acceptedSets.Contains(group.Key))
++                throw new InvalidDataException($"Unexpected SDL_GPU descriptor set {group.Key}");
++            var ordered = group.OrderBy(x => x.SdlBinding).ToArray();
++            for (var i = 0; i < ordered.Length; i++)
++            {
++                if (ordered[i].SdlBinding != (uint)i)
++                    throw new InvalidDataException($"SDL_GPU descriptor set {group.Key} is not compact");
++                encodedSlots.Add((group.Key, ordered[i].SdlBinding));
++            }
++        }
++
++        var shaderSlots = new System.Collections.Generic.HashSet<(uint Set, uint Binding)>();
++        foreach (var resource in bindings)
++        {
++            if (descriptorSets.TryGetValue(resource.Key, out var set))
++                shaderSlots.Add((set, resource.Value));
++        }
++        if (!shaderSlots.SetEquals(encodedSlots))
++            throw new InvalidDataException("SDL_GPU shader binding map does not match its compact SPIR-V decorations");
+     }
+ 
+     private static uint ReadVarUInt32(ReadOnlySpan<byte> data, ref int offset)
