@@ -1,0 +1,399 @@
+--- a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
++++ b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+@@ -1,5 +1,6 @@
+ using System;
+ using System.Buffers.Binary;
++using System.Collections.Generic;
+ using System.Text;
+ using System.IO;
+ using System.Linq;
+@@ -197,6 +198,279 @@
+             if (window != IntPtr.Zero)
+                 SDL3.SDL_DestroyWindow(window);
+             SDL3.SDL_Quit();
++        }
++    }
++
++    public static unsafe int AuditProductionGraphicsPipelines()
++    {
++        if (!SDL3.Supported)
++        {
++            Console.Error.WriteLine("SDL_GPU production pipeline audit requires SDL3.");
++            return 2;
++        }
++
++        if (!SDL3.SDL_Init(SDL3.SDL_InitFlags.SDL_INIT_VIDEO))
++        {
++            Console.Error.WriteLine($"SDL video initialization failed: {SDL3.SDL_GetError()}");
++            return 1;
++        }
++
++        IntPtr window = IntPtr.Zero;
++        IntPtr device = IntPtr.Zero;
++        try
++        {
++            window = SDL3.SDL_CreateWindow("Lancer Nexus SDL_GPU pipeline audit", 64, 64,
++                SDL3.SDL_WindowFlags.SDL_WINDOW_HIDDEN);
++            if (window == IntPtr.Zero)
++                throw Failure("Audit window creation failed");
++
++            var shaderFormats = SDL3.SDL_GPUShaderFormat.SDL_GPU_SHADERFORMAT_SPIRV |
++                                SDL3.SDL_GPUShaderFormat.SDL_GPU_SHADERFORMAT_DXIL |
++                                SDL3.SDL_GPUShaderFormat.SDL_GPU_SHADERFORMAT_MSL;
++            device = SDL3.SDL_CreateGPUDevice(shaderFormats, false, null!);
++            if (device == IntPtr.Zero)
++                throw Failure("SDL_GPU device creation failed");
++            if ((SDL3.SDL_GetGPUShaderFormats(device) & SDL3.SDL_GPUShaderFormat.SDL_GPU_SHADERFORMAT_SPIRV) == 0)
++                throw new InvalidOperationException("The selected SDL_GPU driver does not support production SPIR-V shaders.");
++
++            Console.WriteLine($"SDL_GPU production pipeline audit driver: {SDL3.SDL_GetGPUDeviceDriver(device)}");
++            var assembly = Assembly.Load("LibreLancer");
++            var shaderCatalog = assembly.GetType("LibreLancer.Shaders.AllShaders", throwOnError: true)!;
++            var bundles = shaderCatalog.GetFields(BindingFlags.Public | BindingFlags.Static)
++                .Where(field => field.FieldType == typeof(ShaderBundle))
++                .OrderBy(field => field.Name, StringComparer.Ordinal)
++                .ToArray();
++            if (bundles.Length == 0)
++                throw new InvalidDataException("The built-in shader catalog contains no shader bundles.");
++
++            var totalVariants = 0;
++            foreach (var field in bundles)
++            {
++                var resourceName = field.Name + ".bin";
++                using var stream = assembly.GetManifestResourceStream(resourceName)
++                                   ?? throw new FileNotFoundException($"Missing embedded production shader bundle {resourceName}.");
++                var bundle = BytecodesBundle.FromStream(stream);
++                var pipelinesCreated = 0;
++                for (var index = 0; index < bundle.ShaderCount; index++)
++                {
++                    var shaderBytes = bundle.GetShader(index);
++                    if (shaderBytes.Length == 5 && shaderBytes.SequenceEqual("NULL\0"u8))
++                        continue;
++
++                    var features = bundle.GetFeatures(index);
++                    IntPtr vertexShader = IntPtr.Zero;
++                    IntPtr fragmentShader = IntPtr.Zero;
++                    IntPtr pipeline = IntPtr.Zero;
++                    try
++                    {
++                        var program = SDL3GpuShaderProgramReader.Parse(shaderBytes);
++                        var attributes = ReflectVertexAttributes(program.Vertex.Code, out var vertexStride);
++                        vertexShader = CreateSpirvShader(device, program.Vertex,
++                            SDL3.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_VERTEX);
++                        fragmentShader = CreateSpirvShader(device, program.Fragment,
++                            SDL3.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_FRAGMENT);
++                        pipeline = CreateProductionAuditPipeline(device, vertexShader, fragmentShader,
++                            attributes, vertexStride);
++                        pipelinesCreated++;
++                        totalVariants++;
++                    }
++                    catch (Exception exception)
++                    {
++                        throw new InvalidOperationException(
++                            $"SDL_GPU rejected production pipeline {field.Name}, feature mask 0x{features:X8}.", exception);
++                    }
++                    finally
++                    {
++                        if (pipeline != IntPtr.Zero)
++                            SDL3.SDL_ReleaseGPUGraphicsPipeline(device, pipeline);
++                        if (fragmentShader != IntPtr.Zero)
++                            SDL3.SDL_ReleaseGPUShader(device, fragmentShader);
++                        if (vertexShader != IntPtr.Zero)
++                            SDL3.SDL_ReleaseGPUShader(device, vertexShader);
++                    }
++                }
++
++                Console.WriteLine($"{field.Name}: {pipelinesCreated} production pipelines created.");
++            }
++
++            Console.WriteLine($"SDL_GPU production pipeline audit passed: {bundles.Length} bundles, " +
++                              $"{totalVariants} pipelines created and released.");
++            return totalVariants == 0 ? 1 : 0;
++        }
++        catch (Exception exception)
++        {
++            Console.Error.WriteLine($"SDL_GPU production pipeline audit failed: {exception}");
++            return 1;
++        }
++        finally
++        {
++            if (device != IntPtr.Zero)
++            {
++                SDL3.SDL_WaitForGPUIdle(device);
++                SDL3.SDL_DestroyGPUDevice(device);
++            }
++            if (window != IntPtr.Zero)
++                SDL3.SDL_DestroyWindow(window);
++            SDL3.SDL_Quit();
++        }
++    }
++
++    private static SDL3.SDL_GPUVertexAttribute[] ReflectVertexAttributes(ReadOnlySpan<byte> spirv, out uint stride)
++    {
++        if (spirv.Length < 20 || (spirv.Length & 3) != 0)
++            throw new InvalidDataException("Production vertex shader has invalid SPIR-V size.");
++
++        var locations = new Dictionary<uint, uint>();
++        var pointers = new Dictionary<uint, (uint StorageClass, uint Pointee)>();
++        var scalarTypes = new Dictionary<uint, (bool IsFloat, bool IsSigned, uint Width)>();
++        var vectorTypes = new Dictionary<uint, (uint ComponentType, uint ComponentCount)>();
++        var variables = new List<(uint ResultType, uint ResultId, uint StorageClass)>();
++        var words = new uint[spirv.Length / sizeof(uint)];
++        for (var i = 0; i < words.Length; i++)
++            words[i] = BinaryPrimitives.ReadUInt32LittleEndian(spirv.Slice(i * sizeof(uint), sizeof(uint)));
++
++        for (var offset = 5; offset < words.Length;)
++        {
++            var wordCount = checked((int)(words[offset] >> 16));
++            var opcode = (ushort)words[offset];
++            if (wordCount == 0 || wordCount > words.Length - offset)
++                throw new InvalidDataException("Production vertex shader contains a malformed SPIR-V instruction.");
++
++            switch (opcode)
++            {
++                case 21 when wordCount >= 4: // OpTypeInt
++                    scalarTypes[words[offset + 1]] = (false, words[offset + 3] != 0, words[offset + 2]);
++                    break;
++                case 22 when wordCount >= 3: // OpTypeFloat
++                    scalarTypes[words[offset + 1]] = (true, false, words[offset + 2]);
++                    break;
++                case 23 when wordCount >= 4: // OpTypeVector
++                    vectorTypes[words[offset + 1]] = (words[offset + 2], words[offset + 3]);
++                    break;
++                case 32 when wordCount >= 4: // OpTypePointer
++                    pointers[words[offset + 1]] = (words[offset + 2], words[offset + 3]);
++                    break;
++                case 59 when wordCount >= 4: // OpVariable
++                    variables.Add((words[offset + 1], words[offset + 2], words[offset + 3]));
++                    break;
++                case 71 when wordCount >= 4 && (ushort)words[offset + 2] == 30: // OpDecorate Location
++                    locations[words[offset + 1]] = words[offset + 3];
++                    break;
++            }
++            offset += wordCount;
++        }
++
++        var reflected = new List<(uint Location, SDL3.SDL_GPUVertexElementFormat Format, uint Size)>();
++        foreach (var variable in variables)
++        {
++            if (variable.StorageClass != 1 || !locations.TryGetValue(variable.ResultId, out var location))
++                continue;
++            if (!pointers.TryGetValue(variable.ResultType, out var pointer) || pointer.StorageClass != 1)
++                throw new InvalidDataException($"Vertex input at location {location} has an unsupported pointer type.");
++
++            var componentType = pointer.Pointee;
++            uint componentCount = 1;
++            if (vectorTypes.TryGetValue(componentType, out var vector))
++            {
++                componentType = vector.ComponentType;
++                componentCount = vector.ComponentCount;
++            }
++            if (componentCount is < 1 or > 4 || !scalarTypes.TryGetValue(componentType, out var scalar) || scalar.Width != 32)
++                throw new InvalidDataException($"Vertex input at location {location} has an unsupported scalar/vector type.");
++
++            var format = (scalar.IsFloat, scalar.IsSigned, componentCount) switch
++            {
++                (true, _, 1) => SDL3.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_FLOAT,
++                (true, _, 2) => SDL3.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2,
++                (true, _, 3) => SDL3.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3,
++                (true, _, 4) => SDL3.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4,
++                (false, true, 1) => SDL3.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_INT,
++                (false, true, 2) => SDL3.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_INT2,
++                (false, true, 3) => SDL3.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_INT3,
++                (false, true, 4) => SDL3.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_INT4,
++                (false, false, 1) => SDL3.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_UINT,
++                (false, false, 2) => SDL3.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_UINT2,
++                (false, false, 3) => SDL3.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_UINT3,
++                (false, false, 4) => SDL3.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_UINT4,
++                _ => throw new InvalidDataException($"Vertex input at location {location} has an unsupported format.")
++            };
++            reflected.Add((location, format, componentCount * sizeof(uint)));
++        }
++
++        reflected.Sort((a, b) => a.Location.CompareTo(b.Location));
++        stride = 0;
++        var result = new SDL3.SDL_GPUVertexAttribute[reflected.Count];
++        for (var i = 0; i < reflected.Count; i++)
++        {
++            var attribute = reflected[i];
++            result[i] = new SDL3.SDL_GPUVertexAttribute
++            {
++                location = attribute.Location,
++                buffer_slot = 0,
++                format = attribute.Format,
++                offset = stride
++            };
++            stride = checked(stride + attribute.Size);
++        }
++        return result;
++    }
++
++    private static unsafe IntPtr CreateProductionAuditPipeline(IntPtr device, IntPtr vertexShader,
++        IntPtr fragmentShader, SDL3.SDL_GPUVertexAttribute[] attributes, uint vertexStride)
++    {
++        var colorTarget = new SDL3.SDL_GPUColorTargetDescription
++        {
++            format = SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
++            blend_state = new SDL3.SDL_GPUColorTargetBlendState
++            {
++                color_write_mask = SDL3.SDL_GPUColorComponentFlags.SDL_GPU_COLORCOMPONENT_R |
++                                   SDL3.SDL_GPUColorComponentFlags.SDL_GPU_COLORCOMPONENT_G |
++                                   SDL3.SDL_GPUColorComponentFlags.SDL_GPU_COLORCOMPONENT_B |
++                                   SDL3.SDL_GPUColorComponentFlags.SDL_GPU_COLORCOMPONENT_A,
++                enable_color_write_mask = true
++            }
++        };
++        var buffer = new SDL3.SDL_GPUVertexBufferDescription
++        {
++            slot = 0,
++            pitch = vertexStride,
++            input_rate = SDL3.SDL_GPUVertexInputRate.SDL_GPU_VERTEXINPUTRATE_VERTEX
++        };
++        fixed (SDL3.SDL_GPUVertexAttribute* attributePointer = attributes)
++        {
++            var info = new SDL3.SDL_GPUGraphicsPipelineCreateInfo
++            {
++                vertex_shader = vertexShader,
++                fragment_shader = fragmentShader,
++                vertex_input_state = new SDL3.SDL_GPUVertexInputState
++                {
++                    vertex_buffer_descriptions = attributes.Length == 0 ? null : &buffer,
++                    num_vertex_buffers = attributes.Length == 0 ? 0u : 1u,
++                    vertex_attributes = attributePointer,
++                    num_vertex_attributes = (uint)attributes.Length
++                },
++                primitive_type = SDL3.SDL_GPUPrimitiveType.SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
++                rasterizer_state = new SDL3.SDL_GPURasterizerState
++                {
++                    fill_mode = SDL3.SDL_GPUFillMode.SDL_GPU_FILLMODE_FILL,
++                    cull_mode = SDL3.SDL_GPUCullMode.SDL_GPU_CULLMODE_NONE,
++                    front_face = SDL3.SDL_GPUFrontFace.SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE,
++                    enable_depth_clip = true
++                },
++                multisample_state = new SDL3.SDL_GPUMultisampleState
++                {
++                    sample_count = SDL3.SDL_GPUSampleCount.SDL_GPU_SAMPLECOUNT_1
++                },
++                target_info = new SDL3.SDL_GPUGraphicsPipelineTargetInfo
++                {
++                    color_target_descriptions = &colorTarget,
++                    num_color_targets = 1
++                }
++            };
++            var pipeline = SDL3.SDL_CreateGPUGraphicsPipeline(device, info);
++            if (pipeline == IntPtr.Zero)
++                throw Failure("Creating an SDL_GPU production graphics pipeline failed");
++            return pipeline;
+         }
+     }
+ 
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -34,6 +34,11 @@
+             Environment.ExitCode = SDL3GpuSmoke.CompileProductionShaderBundles();
+             return;
+         }
++        if (args.Length == 1 && args[0] == "--sdl-gpu-production-pipeline-audit")
++        {
++            Environment.ExitCode = SDL3GpuSmoke.AuditProductionGraphicsPipelines();
++            return;
++        }
+         if (args.Length == 1 && args[0] == "--gl-texture-readback-smoke")
+         {
+             Environment.ExitCode = GLTextureReadbackSmoke.Run();
+@@ -46,6 +51,7 @@
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-smoke (SDL3 GPU shader, pipeline, draw, and swapchain test)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-shader-bundle-audit (parse every built-in shader variant and validate SDL_GPU slot maps)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-shader-compile-audit (create and release every production SDL_GPU shader on the active driver)");
++            Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-production-pipeline-audit (create and release a reflected SDL_GPU graphics pipeline for every production shader variant)");
+             Console.WriteLine("       Renderer backend diagnostic: --gl-texture-readback-smoke (OpenGL mip/region texture readback test)");
+             Console.WriteLine("       Render overrides (each option is independent):");
+             Console.WriteLine("         --render-normal-maps=on|off");
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -458,6 +458,16 @@
+ contracts and the game renderer backend remain open. See
+ [`SDL_GPU production shader compile audit`](evidence/renderer/sdl-gpu-production-shader-compile-audit-20261018.md).
+ 
++The `--sdl-gpu-production-pipeline-audit` command then created and released
++3,487 SDL_GPU graphics pipelines across the same 25 production bundles. Vertex
++attribute locations and 32-bit scalar/vector formats are reflected from SPIR-V;
++the probe uses a synthetic packed input buffer description and an RGBA8 color
++target. This confirms SDL_GPU pipeline creation for every current shader pair,
++but does not draw with retail Freelancer vertex buffers, material textures,
++depth targets or render-target formats. The separate PBR FVF3 smoke remains the
++draw-level evidence. See
++[`SDL_GPU production pipeline audit`](evidence/renderer/sdl-gpu-production-pipeline-audit-20261018.md).
++
+ Der 18.10.-Smoke lädt nun zusätzlich die Produktionspermutation
+ `PBR_VIEW_VECTOR | SHADOWMAP` (Featuremaske 768). Zwei Draws derselben
+ Permutation verwenden dieselbe synthetische Beleuchtung und Geometrie; nur der
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 379 Client patches and two native patches. Each
++The active series contains 380 Client patches and two native patches. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -336,3 +336,5 @@
+ | 2381 | Audit every built-in shader bundle with the SDL_GPU reader |
+ 
+ | 2382 | Create and release every production SDL_GPU shader stage on the active driver |
++
++| 2383 | Create SDL_GPU graphics pipelines for every production shader variant |
+--- a/patches/series
++++ b/patches/series
+@@ -380,3 +380,4 @@
+ client 2380-sdl-gpu-shader-program-reader.patch
+ client 2381-sdl-gpu-shader-bundle-audit.patch
+ client 2382-sdl-gpu-production-shader-compile-audit.patch
++client 2383-sdl-gpu-production-pipeline-audit.patch
+--- /dev/null
++++ b/docs/evidence/renderer/sdl-gpu-production-pipeline-audit-20261018.md
+@@ -0,0 +1,43 @@
++# SDL_GPU production graphics pipeline audit
++
++## Build and runtime
++
++Release build:
++
++```sh
++DOTNET_ROOT=/opt/dotnet-10 DOTNET_ROOT_X64=/opt/dotnet-10 \
++  /opt/dotnet-10/dotnet build src/lancer/lancer.csproj -c Release \
++  -p:UseSharedCompilation=false --no-restore -v:q
++```
++
++Result: 0 errors and 168 existing compiler warnings.
++
++Pipeline audit:
++
++```sh
++DOTNET_ROOT=/opt/dotnet-10 DOTNET_ROOT_X64=/opt/dotnet-10 \
++  /opt/dotnet-10/dotnet run --project src/lancer/lancer.csproj -c Release \
++  --no-build -- --sdl-gpu-production-pipeline-audit
++```
++
++Result on 2026-10-18: exit code 0 on the SDL_GPU Vulkan driver (Mesa Intel
++Haswell). The probe created and released 3,487 graphics pipelines across all 25
++nonempty production shader bundles. This includes 1,024 Basic_FVF, 256
++Basic_Skinned, 1,024 PBR, and 1,024 PBR_Skinned permutations. Mesa reported that
++Haswell Vulkan support is incomplete.
++
++## What this checks
++
++For each compiled production vertex/fragment pair, the probe reflects vertex
++attribute locations and 32-bit scalar/vector types from SPIR-V, creates the
++SDL_GPU shader objects, creates a pipeline with those reflected attributes and
++an RGBA8 color target, then releases all GPU objects. Any failure reports the
++bundle and feature mask.
++
++This checks pipeline creation against the current shader interfaces, but it
++does not draw with retail Freelancer mesh buffers, map semantic inputs to the
++actual FVF byte offsets, bind production material textures, or exercise the
++production depth/render-target formats. The separate FVF3 PBR draw smoke covers
++one production PBR variant with synthetic geometry. The complete SDL_GPU game
++and editor render paths remain unimplemented. Repeat on the target RTX 5060 and
++a supported driver before release acceptance.
