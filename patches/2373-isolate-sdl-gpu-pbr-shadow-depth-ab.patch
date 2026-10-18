@@ -1,0 +1,218 @@
+diff --git a/docs/evidence/renderer/sdl-gpu-production-pbr-draw-20261018.md b/docs/evidence/renderer/sdl-gpu-production-pbr-draw-20261018.md
+index eee92f0..0e6779e 100644
+--- a/docs/evidence/renderer/sdl-gpu-production-pbr-draw-20261018.md
++++ b/docs/evidence/renderer/sdl-gpu-production-pbr-draw-20261018.md
+@@ -33,21 +33,22 @@ BC5-/HDR-/Depth-Smoke bestand ebenfalls mit Mittelpunktpixel
+ `(226, 214, 230, 255)`.
+ 
+ Der Lauf belegt die SDL_GPU-Kompatibilität und tatsächliche Fragmentausgabe
+-dieser PBR-Variante. Noch offen sind echte Mesh- und Materialassets, PBR mit
+-Schatten und DFM-Skinning sowie die Einbindung der GPU-Ressourcen- und
+-Rendercommandpfade in `SystemRenderer` und `RenderContext`.
++dieser PBR-Variante. Noch offen sind echte Mesh- und Materialassets,
++DFM-Skinning sowie die Einbindung der GPU-Ressourcen- und Rendercommandpfade
++in `SystemRenderer` und `RenderContext`.
+ 
+ ## Schattenkartenvariante
+ 
+ Der Smoke lädt zusätzlich die Produktionspermutation `PBR_VIEW_VECTOR | SHADOWMAP`
+ (Featuremaske 768; 3 Vertex- und 4 Fragmentuniformblöcke, 3 Fragment-Sampler).
+-Eine samplebare D32-Tiefentextur wird auf Tiefe 0 gelöscht, während der synthetische
+-Empfänger bei Tiefe 0,5 liegt. Ein gerichtetes Licht mit aktivem Shadow-Flag beleuchtet
+-das zweite Dreieck; der Vergleich in `DirectionalShadowVisibility` muss es vollständig
+-abschirmen. Der Swapchain-Readback ergab unverschattet `(148, 78, 0, 255)` und
+-abgeschattet `(0, 0, 0, 255)`. Beide Prüfungen liefen auf Mesa/Vulkan Intel Haswell.
+-
+-Damit ist die tatsächliche Sample- und Shadow-Visibility-Ausgabe dieser
+-Produktionsshaderpermutation belegt. Es bleibt ein synthetischer API-Smoke; die
+-Schattenkarte ist noch nicht in `SystemRenderer` eingebunden und verwendet keine
+-Freelancer-Geometrie oder Szenenbeleuchtung.
++Mit derselben Permutation, demselben gerichteten Licht und demselben Dreieck wird
++eine samplebare D32-Tiefentextur zuerst auf 1 (Licht sichtbar) und danach auf 0
++(Empfänger bei Tiefe 0,5 abgeschattet) gelöscht. Der Swapchain-Readback ergab
++bei Tiefe 1 `(54, 33, 9, 255)` und bei Tiefe 0 `(0, 0, 0, 255)`. Beide
++Prüfungen liefen auf Mesa/Vulkan Intel Haswell. Dieser A/B belegt, dass die
++Schattenpermutation den Tiefentexturwert für die Lichttransmission berücksichtigt.
++
++Die Spielpipeline besitzt daneben bereits einen separaten OpenGL-Schattenpass in
++`SystemRenderer`; dieser SDL_GPU-Smoke integriert oder ersetzt ihn nicht. Der
++Probe bleibt synthetisch und verwendet keine Freelancer-Geometrie oder
++Szenenbeleuchtung.
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+index 0165a99..052e352 100644
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -430,6 +430,17 @@ innerhalb des SDL_GPU-Limits. Das belegt weiterhin keine Ausführung der echten
+ Freelancer-Meshes oder -Materialdaten und keinen Renderer-Bindungspfad im
+ SDL_GPU-Spielrenderer. Details: [`SDL_GPU production PBR draw`](evidence/renderer/sdl-gpu-production-pbr-draw-20261018.md).
+ 
++Der 18.10.-Smoke lädt nun zusätzlich die Produktionspermutation
++`PBR_VIEW_VECTOR | SHADOWMAP` (Featuremaske 768). Zwei Draws derselben
++Permutation verwenden dieselbe synthetische Beleuchtung und Geometrie; nur der
++Inhalt der samplebaren D32-Tiefenkarte wechselt zwischen 1 und 0. Der Pixel
++wechselt von `(54, 33, 9, 255)` zu `(0, 0, 0, 255)`. Das weist nach, dass der
++Shader auf Vulkan tatsächlich die Tiefenkarte für die Lichttransmission
++samplet. Der Spielrenderer besitzt weiterhin seinen separaten OpenGL-
++Schattenpass; eine SDL_GPU-Ausführung des Spiel-Rendergraphs, echte Assets,
++Skinned Meshes und Szenen bleiben offen. Details und Grenzen stehen im
++genannten Produktions-PBR-Nachweis.
++
+ ## Backend-Grenzen
+ 
+ Der Screenshotpfad ist von SDL2/SDL3 nach `RenderContext.ReadBackbuffer`
+diff --git a/patches/README.md b/patches/README.md
+index c8b605e..18a0c5e 100644
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 369 Client patches and two native patches. Each
++The active series contains 370 Client patches and two native patches. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -318,3 +318,4 @@ jump-gate route.
+ | 2370 | Keep selected PBR shader variants within SDL_GPU's uniform-buffer limit |
+ | 2371 | Execute the embedded production PBR shader in SDL_GPU and read back its pixel |
+ | 2372 | Validate production PBR shadow sampling with an SDL_GPU depth-map pixel readback |
++| 2373 | Isolate PBR shadow-map sampling with a same-shader SDL_GPU depth A/B |
+diff --git a/patches/series b/patches/series
+index 5378824..c077ba7 100644
+--- a/patches/series
++++ b/patches/series
+@@ -370,3 +370,4 @@ client 2369-compact-sdl-gpu-production-shader-bindings.patch
+ client 2370-pbr-sdl-gpu-uniform-budget.patch
+ client 2371-sdl-gpu-production-pbr-draw.patch
+ client 2372-sdl-gpu-production-pbr-shadow-draw.patch
++client 2373-isolate-sdl-gpu-pbr-shadow-depth-ab.patch
+diff --git a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+index 93fa5a3..8650384 100644
+--- a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
++++ b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+@@ -127,8 +127,7 @@ public static class SDL3GpuSmoke
+             depthTexture = CreateDepthTexture(device, width, height);
+             Console.WriteLine($"Created SDL_GPU D32 depth target at {width}x{height}.");
+             shadowDepthTexture = CreateDepthTexture(device, 4, 4, sampleable: true);
+-            ClearShadowDepth(commandBuffer, shadowDepthTexture);
+-            Console.WriteLine("Created and cleared a sampleable D32 shadow map for the PBR shadow variant.");
++            Console.WriteLine("Created a sampleable D32 shadow map for the PBR shadow variant.");
+             var hdrFormat = SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+             hdrSceneTexture = CreateHdrSceneTexture(device, width, height, hdrFormat);
+             Console.WriteLine($"Created sampleable RGBA16F scene target at {width}x{height}.");
+@@ -152,7 +151,7 @@ public static class SDL3GpuSmoke
+             readbackBuffer = SDL3.SDL_CreateGPUTransferBuffer(device, new SDL3.SDL_GPUTransferBufferCreateInfo
+             {
+                 usage = SDL3.SDL_GPUTransferBufferUsage.SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD,
+-                size = 12
++                size = 16
+             });
+             if (readbackBuffer == IntPtr.Zero)
+                 throw Failure("Creating the SDL_GPU pixel readback buffer failed");
+@@ -232,9 +231,14 @@ public static class SDL3GpuSmoke
+ 
+             ExecuteProductionPbrDraw(commandBuffer, pbrPipeline, vertexBuffer, diffuseTexture, normalSampler,
+                 colorTargets, width, height);
++            ClearShadowDepth(commandBuffer, shadowDepthTexture, 1.0f);
+             ExecuteProductionPbrDraw(commandBuffer, shadowPbrPipeline, vertexBuffer, diffuseTexture,
+                 normalSampler, colorTargets, width, height, shadowed: true,
+-                shadowDepthTexture: shadowDepthTexture);
++                shadowDepthTexture: shadowDepthTexture, viewportX: 0.39f);
++            ClearShadowDepth(commandBuffer, shadowDepthTexture, 0.0f);
++            ExecuteProductionPbrDraw(commandBuffer, shadowPbrPipeline, vertexBuffer, diffuseTexture,
++                normalSampler, colorTargets, width, height, shadowed: true,
++                shadowDepthTexture: shadowDepthTexture, viewportX: 0.70f);
+ 
+             copyPass = SDL3.SDL_BeginGPUCopyPass(commandBuffer);
+             if (copyPass == IntPtr.Zero)
+@@ -264,9 +268,13 @@ public static class SDL3GpuSmoke
+             pbrPixel.y = (uint)(height * 0.165f);
+             pixelDestination.offset = 4;
+             SDL3.SDL_DownloadFromGPUTexture(copyPass, pbrPixel, pixelDestination);
++            var visibleShadowPixel = pbrPixel;
++            visibleShadowPixel.x = (uint)(width * 0.515f);
++            pixelDestination.offset = 8;
++            SDL3.SDL_DownloadFromGPUTexture(copyPass, visibleShadowPixel, pixelDestination);
+             var shadowPixel = pbrPixel;
+             shadowPixel.x = (uint)(width * 0.825f);
+-            pixelDestination.offset = 8;
++            pixelDestination.offset = 12;
+             SDL3.SDL_DownloadFromGPUTexture(copyPass, shadowPixel, pixelDestination);
+             SDL3.SDL_EndGPUCopyPass(copyPass);
+             copyPass = IntPtr.Zero;
+@@ -316,12 +324,24 @@ public static class SDL3GpuSmoke
+                     $"SDL_GPU production PBR pixel mismatch for {swapchainFormat}: " +
+                     $"({pbrRed}, {pbrGreen}, {pbrBlue}, {pbrAlpha}); expected approximately " +
+                     $"({expectedPbrRed}, {expectedPbrGreen}, 0, 255).");
+-            var shadowChannel0 = Marshal.ReadByte(mappedPixel, 8);
+-            var shadowGreen = Marshal.ReadByte(mappedPixel, 9);
+-            var shadowChannel2 = Marshal.ReadByte(mappedPixel, 10);
+-            var shadowAlpha = Marshal.ReadByte(mappedPixel, 11);
++            var visibleShadowChannel0 = Marshal.ReadByte(mappedPixel, 8);
++            var visibleShadowGreen = Marshal.ReadByte(mappedPixel, 9);
++            var visibleShadowChannel2 = Marshal.ReadByte(mappedPixel, 10);
++            var visibleShadowAlpha = Marshal.ReadByte(mappedPixel, 11);
++            var visibleShadowRed = isBgra ? visibleShadowChannel2 : visibleShadowChannel0;
++            var visibleShadowBlue = isBgra ? visibleShadowChannel0 : visibleShadowChannel2;
++            var shadowChannel0 = Marshal.ReadByte(mappedPixel, 12);
++            var shadowGreen = Marshal.ReadByte(mappedPixel, 13);
++            var shadowChannel2 = Marshal.ReadByte(mappedPixel, 14);
++            var shadowAlpha = Marshal.ReadByte(mappedPixel, 15);
+             var shadowRed = isBgra ? shadowChannel2 : shadowChannel0;
+             var shadowBlue = isBgra ? shadowChannel0 : shadowChannel2;
++            if (visibleShadowAlpha < 240 ||
++                visibleShadowRed + visibleShadowGreen + visibleShadowBlue < 50)
++                throw new InvalidOperationException(
++                    $"SDL_GPU production PBR shadow visibility pixel was not lit for {swapchainFormat}: " +
++                    $"({visibleShadowRed}, {visibleShadowGreen}, {visibleShadowBlue}, {visibleShadowAlpha}); " +
++                    "expected a lit pixel when the depth map is clear.");
+             if (shadowAlpha < 240 || shadowRed > 40 || shadowGreen > 40 || shadowBlue > 40)
+                 throw new InvalidOperationException(
+                     $"SDL_GPU production PBR shadow pixel was not occluded for {swapchainFormat}: " +
+@@ -330,7 +350,9 @@ public static class SDL3GpuSmoke
+ 
+             Console.WriteLine($"Presented SDL_GPU BC5 normal-mapped scene through an RGBA16F target and depth-tested pass at {width}x{height}; " +
+                               $"center pixel ({red}, {green}, {blue}, {alpha}) and production PBR pixel " +
+-                              $"({pbrRed}, {pbrGreen}, {pbrBlue}, {pbrAlpha}) and shadowed PBR pixel " +
++                              $"({pbrRed}, {pbrGreen}, {pbrBlue}, {pbrAlpha}), visible-shadow pixel " +
++                              $"({visibleShadowRed}, {visibleShadowGreen}, {visibleShadowBlue}, {visibleShadowAlpha}) " +
++                              "and shadowed PBR pixel " +
+                               $"({shadowRed}, {shadowGreen}, {shadowBlue}, {shadowAlpha}) passed; " +
+                               "16-bit indices, first-index offset and vertex offset were used.");
+             Thread.Sleep(750);
+@@ -460,7 +482,8 @@ public static class SDL3GpuSmoke
+ 
+     private static unsafe void ExecuteProductionPbrDraw(IntPtr commandBuffer, IntPtr pipeline,
+         IntPtr vertexBuffer, IntPtr texture, IntPtr sampler, Span<SDL3.SDL_GPUColorTargetInfo> colorTargets,
+-        uint width, uint height, bool shadowed = false, IntPtr shadowDepthTexture = default)
++        uint width, uint height, bool shadowed = false, IntPtr shadowDepthTexture = default,
++        float viewportX = -1.0f)
+     {
+         Span<byte> transforms = stackalloc byte[128];
+         transforms.Clear();
+@@ -549,7 +572,7 @@ public static class SDL3GpuSmoke
+             SDL3.SDL_BindGPUGraphicsPipeline(renderPass, pipeline);
+             var viewport = new SDL3.SDL_GPUViewport
+             {
+-                x = width * (shadowed ? 0.70f : 0.04f),
++                x = width * (viewportX >= 0.0f ? viewportX : shadowed ? 0.70f : 0.04f),
+                 y = height * 0.04f,
+                 w = width * 0.25f,
+                 h = height * 0.25f,
+@@ -989,13 +1012,14 @@ public static class SDL3GpuSmoke
+         return (texture, transfer);
+     }
+ 
+-    private static unsafe void ClearShadowDepth(IntPtr commandBuffer, IntPtr depthTexture)
++    private static unsafe void ClearShadowDepth(IntPtr commandBuffer, IntPtr depthTexture,
++        float clearDepth)
+     {
+         Span<SDL3.SDL_GPUColorTargetInfo> noColorTargets = Span<SDL3.SDL_GPUColorTargetInfo>.Empty;
+         var depthTarget = new SDL3.SDL_GPUDepthStencilTargetInfo
+         {
+             texture = depthTexture,
+-            clear_depth = 0.0f,
++            clear_depth = clearDepth,
+             load_op = SDL3.SDL_GPULoadOp.SDL_GPU_LOADOP_CLEAR,
+             store_op = SDL3.SDL_GPUStoreOp.SDL_GPU_STOREOP_STORE,
+             stencil_load_op = SDL3.SDL_GPULoadOp.SDL_GPU_LOADOP_DONT_CARE,
