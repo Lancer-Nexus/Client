@@ -1,0 +1,223 @@
+--- a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
++++ b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+@@ -85,6 +85,118 @@
+         {
+             Console.Error.WriteLine($"SDL_GPU production shader audit failed: {exception}");
+             return 1;
++        }
++    }
++
++    public static unsafe int CompileProductionShaderBundles()
++    {
++        if (!SDL3.Supported)
++        {
++            Console.Error.WriteLine("SDL_GPU shader compile audit requires SDL3.");
++            return 2;
++        }
++
++        if (!SDL3.SDL_Init(SDL3.SDL_InitFlags.SDL_INIT_VIDEO))
++        {
++            Console.Error.WriteLine($"SDL video initialization failed: {SDL3.SDL_GetError()}");
++            return 1;
++        }
++
++        IntPtr window = IntPtr.Zero;
++        IntPtr device = IntPtr.Zero;
++        try
++        {
++            window = SDL3.SDL_CreateWindow("Lancer Nexus SDL_GPU shader audit", 64, 64,
++                SDL3.SDL_WindowFlags.SDL_WINDOW_HIDDEN);
++            if (window == IntPtr.Zero)
++                throw Failure("Audit window creation failed");
++
++            var shaderFormats = SDL3.SDL_GPUShaderFormat.SDL_GPU_SHADERFORMAT_SPIRV |
++                                SDL3.SDL_GPUShaderFormat.SDL_GPU_SHADERFORMAT_DXIL |
++                                SDL3.SDL_GPUShaderFormat.SDL_GPU_SHADERFORMAT_MSL;
++            device = SDL3.SDL_CreateGPUDevice(shaderFormats, false, null!);
++            if (device == IntPtr.Zero)
++                throw Failure("SDL_GPU device creation failed");
++
++            var supportedFormats = SDL3.SDL_GetGPUShaderFormats(device);
++            if ((supportedFormats & SDL3.SDL_GPUShaderFormat.SDL_GPU_SHADERFORMAT_SPIRV) == 0)
++                throw new InvalidOperationException("The selected SDL_GPU driver does not support production SPIR-V shaders.");
++
++            Console.WriteLine($"SDL_GPU shader audit driver: {SDL3.SDL_GetGPUDeviceDriver(device)}");
++            var assembly = Assembly.Load("LibreLancer");
++            var shaderCatalog = assembly.GetType("LibreLancer.Shaders.AllShaders", throwOnError: true)!;
++            var bundles = shaderCatalog.GetFields(BindingFlags.Public | BindingFlags.Static)
++                .Where(field => field.FieldType == typeof(ShaderBundle))
++                .OrderBy(field => field.Name, StringComparer.Ordinal)
++                .ToArray();
++            if (bundles.Length == 0)
++                throw new InvalidDataException("The built-in shader catalog contains no shader bundles.");
++
++            var totalVariants = 0;
++            var totalStages = 0;
++            foreach (var field in bundles)
++            {
++                var resourceName = field.Name + ".bin";
++                using var stream = assembly.GetManifestResourceStream(resourceName)
++                                   ?? throw new FileNotFoundException($"Missing embedded production shader bundle {resourceName}.");
++                var bundle = BytecodesBundle.FromStream(stream);
++                var compiledStages = 0;
++                for (var index = 0; index < bundle.ShaderCount; index++)
++                {
++                    var shaderBytes = bundle.GetShader(index);
++                    if (shaderBytes.Length == 5 && shaderBytes.SequenceEqual("NULL\0"u8))
++                        continue;
++
++                    var features = bundle.GetFeatures(index);
++                    IntPtr vertexShader = IntPtr.Zero;
++                    IntPtr fragmentShader = IntPtr.Zero;
++                    try
++                    {
++                        var program = SDL3GpuShaderProgramReader.Parse(shaderBytes);
++                        vertexShader = CreateSpirvShader(device, program.Vertex,
++                            SDL3.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_VERTEX);
++                        fragmentShader = CreateSpirvShader(device, program.Fragment,
++                            SDL3.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_FRAGMENT);
++                        compiledStages += 2;
++                        totalStages += 2;
++                        totalVariants++;
++                    }
++                    catch (Exception exception)
++                    {
++                        throw new InvalidOperationException(
++                            $"SDL_GPU rejected production shader {field.Name}, feature mask 0x{features:X8}.", exception);
++                    }
++                    finally
++                    {
++                        if (fragmentShader != IntPtr.Zero)
++                            SDL3.SDL_ReleaseGPUShader(device, fragmentShader);
++                        if (vertexShader != IntPtr.Zero)
++                            SDL3.SDL_ReleaseGPUShader(device, vertexShader);
++                    }
++                }
++
++                Console.WriteLine($"{field.Name}: {compiledStages} production shader stages compiled.");
++            }
++
++            Console.WriteLine($"SDL_GPU production shader compile audit passed: {bundles.Length} bundles, " +
++                              $"{totalVariants} variants, {totalStages} shader stages.");
++            return totalStages == 0 ? 1 : 0;
++        }
++        catch (Exception exception)
++        {
++            Console.Error.WriteLine($"SDL_GPU production shader compile audit failed: {exception}");
++            return 1;
++        }
++        finally
++        {
++            if (device != IntPtr.Zero)
++            {
++                SDL3.SDL_WaitForGPUIdle(device);
++                SDL3.SDL_DestroyGPUDevice(device);
++            }
++            if (window != IntPtr.Zero)
++                SDL3.SDL_DestroyWindow(window);
++            SDL3.SDL_Quit();
+         }
+     }
+ 
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -29,6 +29,11 @@
+             Environment.ExitCode = SDL3GpuSmoke.AuditProductionShaderBundles();
+             return;
+         }
++        if (args.Length == 1 && args[0] == "--sdl-gpu-shader-compile-audit")
++        {
++            Environment.ExitCode = SDL3GpuSmoke.CompileProductionShaderBundles();
++            return;
++        }
+         if (args.Length == 1 && args[0] == "--gl-texture-readback-smoke")
+         {
+             Environment.ExitCode = GLTextureReadbackSmoke.Run();
+@@ -40,6 +45,7 @@
+             Console.WriteLine("       Standalone test option: --invulnerable=on|off (local embedded server only)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-smoke (SDL3 GPU shader, pipeline, draw, and swapchain test)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-shader-bundle-audit (parse every built-in shader variant and validate SDL_GPU slot maps)");
++            Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-shader-compile-audit (create and release every production SDL_GPU shader on the active driver)");
+             Console.WriteLine("       Renderer backend diagnostic: --gl-texture-readback-smoke (OpenGL mip/region texture readback test)");
+             Console.WriteLine("       Render overrides (each option is independent):");
+             Console.WriteLine("         --render-normal-maps=on|off");
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -449,6 +449,15 @@
+ 
+ The new `--sdl-gpu-shader-bundle-audit` command read all embedded bundles in `AllShaders`: 25 bundles and 3,487 feature variants, all with version-2 slot maps and no legacy or empty entries. It validates payload parsing and slot-map consistency, not 3,487 device pipelines. The run is documented in [`SDL_GPU production shader bundle audit`](evidence/renderer/sdl-gpu-production-bundle-audit-20261018.md). A fresh Release run on Mesa/Vulkan Intel Haswell parsed both PBR variants and retained the expected BC5, PBR and shadow readback pixels; the run details are in [`SDL_GPU shader bundle reader smoke`](evidence/renderer/sdl-gpu-shader-reader-smoke-20261018.md). Details: [`SDL_GPU production PBR draw`](evidence/renderer/sdl-gpu-production-pbr-draw-20261018.md).
+ 
++The `--sdl-gpu-shader-compile-audit` command now creates and releases both
++shader stages for every nonempty production variant through SDL_GPU on the
++active device. Mesa/Vulkan Intel Haswell accepted all 3,487 variants (6,974
++shader stages). This confirms SPIR-V driver compilation and the declared
++per-stage resource counts for the current embedded catalog. It does not create
++graphics pipelines for every vertex layout or prove draw compatibility; those
++contracts and the game renderer backend remain open. See
++[`SDL_GPU production shader compile audit`](evidence/renderer/sdl-gpu-production-shader-compile-audit-20261018.md).
++
+ Der 18.10.-Smoke lädt nun zusätzlich die Produktionspermutation
+ `PBR_VIEW_VECTOR | SHADOWMAP` (Featuremaske 768). Zwei Draws derselben
+ Permutation verwenden dieselbe synthetische Beleuchtung und Geometrie; nur der
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 376 Client patches and two native patches. Each
++The active series contains 379 Client patches and two native patches. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -334,3 +334,5 @@
+ | 2380 | Share SDL_GPU shader program decoding and validate compact descriptor remaps |
+ 
+ | 2381 | Audit every built-in shader bundle with the SDL_GPU reader |
++
++| 2382 | Create and release every production SDL_GPU shader stage on the active driver |
+--- a/patches/series
++++ b/patches/series
+@@ -379,3 +379,4 @@
+ client 2379-atmosphere-fade-retail-sampler-trace.patch
+ client 2380-sdl-gpu-shader-program-reader.patch
+ client 2381-sdl-gpu-shader-bundle-audit.patch
++client 2382-sdl-gpu-production-shader-compile-audit.patch
+--- /dev/null
++++ b/docs/evidence/renderer/sdl-gpu-production-shader-compile-audit-20261018.md
+@@ -0,0 +1,36 @@
++# SDL_GPU production shader compile audit
++
++## Command and result
++
++Release build:
++
++```sh
++DOTNET_ROOT=/opt/dotnet-10 DOTNET_ROOT_X64=/opt/dotnet-10 \
++  /opt/dotnet-10/dotnet build src/lancer/lancer.csproj -c Release \
++  -p:UseSharedCompilation=false --no-restore -v:q
++```
++
++Result: 0 build errors. The build reported 168 existing compiler warnings.
++
++GPU audit:
++
++```sh
++DOTNET_ROOT=/opt/dotnet-10 DOTNET_ROOT_X64=/opt/dotnet-10 \
++  /opt/dotnet-10/dotnet run --project src/lancer/lancer.csproj -c Release \
++  --no-build -- --sdl-gpu-shader-compile-audit
++```
++
++Result on 2026-10-18: exit code 0, SDL_GPU driver `vulkan`, 25 embedded bundles,
++3,487 nonempty feature variants and 6,974 successfully created shader stages.
++Each SDL_GPU shader object was released before the next variant. The driver
++reported `MESA-INTEL: Haswell Vulkan support is incomplete` twice during startup.
++
++## Scope
++
++This exercises the real SDL_GPU shader creation path and confirms that the
++active Vulkan driver accepts every current production SPIR-V module and its
++declared sampler, storage and uniform-buffer counts. It does not build a
++graphics pipeline for every variant, validate all Freelancer vertex layouts,
++textures or render targets, or execute the full game/editor renderer through
++SDL_GPU. Haswell Vulkan support is incomplete, so repeat this audit on the
++target RTX 5060 system and another supported driver before release acceptance.
