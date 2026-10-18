@@ -349,3 +349,5 @@ jump-gate route.
 
 | 2392 | Draw real NAP CMP/VMesh FVF3 geometry through the SDL_GPU production PBR smoke |
 | 2393 | Sample real Freelancer MAT diffuse DDS textures in the SDL_GPU PBR VMesh smoke |
+
+| 2394 | Draw complete indexed NAP VMesh material surfaces through the SDL_GPU PBR smoke |
