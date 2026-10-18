@@ -1,0 +1,155 @@
+diff --git a/docs/evidence/renderer/sdl-gpu-production-pbr-draw-20261018.md b/docs/evidence/renderer/sdl-gpu-production-pbr-draw-20261018.md
+index 0e6779e..8d12063 100644
+--- a/docs/evidence/renderer/sdl-gpu-production-pbr-draw-20261018.md
++++ b/docs/evidence/renderer/sdl-gpu-production-pbr-draw-20261018.md
+@@ -52,3 +52,20 @@ Die Spielpipeline besitzt daneben bereits einen separaten OpenGL-Schattenpass in
+ `SystemRenderer`; dieser SDL_GPU-Smoke integriert oder ersetzt ihn nicht. Der
+ Probe bleibt synthetisch und verwendet keine Freelancer-Geometrie oder
+ Szenenbeleuchtung.
++
++## Shadow-Tiefenbereich zwischen OpenGL und Vulkan
++
++Die gemeinsame Shadow-Shaderfunktion hat nun einen expliziten
++`ZeroToOneClipDepth`-Vertrag. Der OpenGL-Spielpfad meldet `false` und behält
++die Abbildung `ndc.z * 0.5 + 0.5`; Vulkan verwendet `ndc.z` unverändert. Der
++SDL_GPU-Smoke setzt denselben Uniformschalter wie ein Zero-to-one-Backend und
++testet mit Empfängertiefe `0,5` zwei Grenzwerte: Shadow-Depth `0,6` muss Licht
++durchlassen, `0,4` muss abschatten. Der Vulkan-Readback lieferte weiter
++`(54, 33, 9, 255)` und `(0, 0, 0, 255)`. Mit der früher fest eingebauten
++OpenGL-Abbildung wäre `0,6` fälschlich als Schatten behandelt worden.
++
++Der Release-Build kompilierte die Shaderpakete für alle registrierten
++Permutationen und 22 Projekte ohne Fehler; der Vulkan-Smoke lief erfolgreich
++auf Mesa/Vulkan Intel Haswell. Eine NAP-only-OpenGL-Szenenabnahme nach dieser
++Änderung steht noch aus. Der Spielrenderer bleibt aktuell OpenGL; der
++Zero-to-one-Schalter bereitet den gemeinsamen Shadervertrag für SDL_GPU vor.
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+index 052e352..3bc49e2 100644
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -433,12 +433,16 @@ SDL_GPU-Spielrenderer. Details: [`SDL_GPU production PBR draw`](evidence/rendere
+ Der 18.10.-Smoke lädt nun zusätzlich die Produktionspermutation
+ `PBR_VIEW_VECTOR | SHADOWMAP` (Featuremaske 768). Zwei Draws derselben
+ Permutation verwenden dieselbe synthetische Beleuchtung und Geometrie; nur der
+-Inhalt der samplebaren D32-Tiefenkarte wechselt zwischen 1 und 0. Der Pixel
++Inhalt der samplebaren D32-Tiefenkarte wechselt zwischen 0,6 und 0,4 bei
++Empfängertiefe 0,5. Der Shader berücksichtigt nun, ob das Backend OpenGLs
++`[-1,1]`-Clipbereich oder Vulkan/SDL_GPU's `0..1`-Clipbereich verwendet. Der Pixel
+ wechselt von `(54, 33, 9, 255)` zu `(0, 0, 0, 255)`. Das weist nach, dass der
+ Shader auf Vulkan tatsächlich die Tiefenkarte für die Lichttransmission
+ samplet. Der Spielrenderer besitzt weiterhin seinen separaten OpenGL-
+ Schattenpass; eine SDL_GPU-Ausführung des Spiel-Rendergraphs, echte Assets,
+-Skinned Meshes und Szenen bleiben offen. Details und Grenzen stehen im
++Skinned Meshes und Szenen bleiben offen. Eine NAP-only-OpenGL-Abnahme des
++unveränderten Depth-Mappings ist nach der gemeinsamen Shaderänderung noch
++erforderlich. Details und Grenzen stehen im
+ genannten Produktions-PBR-Nachweis.
+ 
+ ## Backend-Grenzen
+diff --git a/patches/README.md b/patches/README.md
+index 18a0c5e..7408bc0 100644
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 370 Client patches and two native patches. Each
++The active series contains 371 Client patches and two native patches. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -319,3 +319,4 @@ jump-gate route.
+ | 2371 | Execute the embedded production PBR shader in SDL_GPU and read back its pixel |
+ | 2372 | Validate production PBR shadow sampling with an SDL_GPU depth-map pixel readback |
+ | 2373 | Isolate PBR shadow-map sampling with a same-shader SDL_GPU depth A/B |
++| 2374 | Make shadow receiver depth mapping explicit across OpenGL and Vulkan |
+diff --git a/patches/series b/patches/series
+index c077ba7..9ab97c4 100644
+--- a/patches/series
++++ b/patches/series
+@@ -371,3 +371,4 @@ client 2370-pbr-sdl-gpu-uniform-budget.patch
+ client 2371-sdl-gpu-production-pbr-draw.patch
+ client 2372-sdl-gpu-production-pbr-shadow-draw.patch
+ client 2373-isolate-sdl-gpu-pbr-shadow-depth-ab.patch
++client 2374-backend-shadow-depth-range-contract.patch
+diff --git a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderContext.cs b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderContext.cs
+index 18f9d7b..48a9211 100644
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderContext.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderContext.cs
+@@ -689,6 +689,7 @@ internal class GLRenderContext : IRenderContext
+         GraphicsFeature.S3TC => GLExtensions.S3TC,
+         GraphicsFeature.RGTC => GLExtensions.RGTC,
+         GraphicsFeature.GLES => GL.GLES,
++        GraphicsFeature.ZeroToOneClipDepth => false,
+         _ => false
+     };
+ 
+diff --git a/src/LibreLancer.Base/Graphics/GraphicsFeature.cs b/src/LibreLancer.Base/Graphics/GraphicsFeature.cs
+index 344d897..f30fdb1 100644
+--- a/src/LibreLancer.Base/Graphics/GraphicsFeature.cs
++++ b/src/LibreLancer.Base/Graphics/GraphicsFeature.cs
+@@ -7,5 +7,6 @@ public enum GraphicsFeature
+     S3TC,
+     RGTC,
+     DebugInfo,
+-    LargeStorageBuffers
++    LargeStorageBuffers,
++    ZeroToOneClipDepth
+ }
+diff --git a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+index 8650384..8608ad3 100644
+--- a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
++++ b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+@@ -231,11 +231,11 @@ public static class SDL3GpuSmoke
+ 
+             ExecuteProductionPbrDraw(commandBuffer, pbrPipeline, vertexBuffer, diffuseTexture, normalSampler,
+                 colorTargets, width, height);
+-            ClearShadowDepth(commandBuffer, shadowDepthTexture, 1.0f);
++            ClearShadowDepth(commandBuffer, shadowDepthTexture, 0.6f);
+             ExecuteProductionPbrDraw(commandBuffer, shadowPbrPipeline, vertexBuffer, diffuseTexture,
+                 normalSampler, colorTargets, width, height, shadowed: true,
+                 shadowDepthTexture: shadowDepthTexture, viewportX: 0.39f);
+-            ClearShadowDepth(commandBuffer, shadowDepthTexture, 0.0f);
++            ClearShadowDepth(commandBuffer, shadowDepthTexture, 0.4f);
+             ExecuteProductionPbrDraw(commandBuffer, shadowPbrPipeline, vertexBuffer, diffuseTexture,
+                 normalSampler, colorTargets, width, height, shadowed: true,
+                 shadowDepthTexture: shadowDepthTexture, viewportX: 0.70f);
+@@ -557,6 +557,7 @@ public static class SDL3GpuSmoke
+             MemoryMarshal.Write(shadowParameters, in identity);
+             WriteFloat(shadowParameters, 64, 0.005f);
+             WriteFloat(shadowParameters, 68, 0.25f);
++            WriteFloat(shadowParameters, 72, 0.0f);
+             fixed (byte* ptr = shadowParameters)
+                 SDL3.SDL_PushGPUFragmentUniformData(commandBuffer, 3, (IntPtr)ptr,
+                     (uint)shadowParameters.Length);
+diff --git a/src/LibreLancer/Render/RenderMaterial.cs b/src/LibreLancer/Render/RenderMaterial.cs
+index a88cc3c..114bd79 100644
+--- a/src/LibreLancer/Render/RenderMaterial.cs
++++ b/src/LibreLancer/Render/RenderMaterial.cs
+@@ -223,7 +223,8 @@ namespace LibreLancer.Render
+             var parameters = new ShadowParameters
+             {
+                 ViewProjection = ShadowViewProjection,
+-                Values = new Vector4(ShadowBias, ShadowMapTexelSize, 0, 0)
++                Values = new Vector4(ShadowBias, ShadowMapTexelSize,
++                    context.HasFeature(GraphicsFeature.ZeroToOneClipDepth) ? 0.0f : 1.0f, 0.0f)
+             };
+             shader.SetUniformBlock(7, ref parameters);
+             context.Textures[6] = ShadowDepthTexture;
+diff --git a/src/LibreLancer/Shaders/includes/Lighting.hlsl b/src/LibreLancer/Shaders/includes/Lighting.hlsl
+index 8322d99..01aa1cb 100644
+--- a/src/LibreLancer/Shaders/includes/Lighting.hlsl
++++ b/src/LibreLancer/Shaders/includes/Lighting.hlsl
+@@ -64,9 +64,9 @@ float DirectionalShadowVisibility(float3 worldPosition)
+     if (any(uv < 0.0) || any(uv > 1.0) || ndc.z < 0.0 || ndc.z > 1.0)
+         return 1.0;
+ 
+-    // System.Numerics projections use a zero-to-one clip depth; OpenGL's
+-    // default depth mapping stores that range in the upper half of [0, 1].
+-    float receiverDepth = ndc.z * 0.5 + 0.5;
++    // System.Numerics projections use zero-to-one clip depth. OpenGL's default
++    // depth mapping stores it in the upper half of [0, 1]; Vulkan keeps it as-is.
++    float receiverDepth = ShadowPadding.x > 0.5 ? ndc.z * 0.5 + 0.5 : ndc.z;
+     float visible = 0.0;
+     [unroll]
+     for (int y = -1; y <= 1; y++)

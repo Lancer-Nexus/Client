@@ -1,6 +1,6 @@
 # Client patch groups
 
-The active series contains 370 Client patches and two native patches. Each
+The active series contains 371 Client patches and two native patches. Each
 file belongs to one functional bundle; the combined output preserves the
 integration, upstream compatibility fixes, tests and project documentation.
 
@@ -319,3 +319,4 @@ jump-gate route.
 | 2371 | Execute the embedded production PBR shader in SDL_GPU and read back its pixel |
 | 2372 | Validate production PBR shadow sampling with an SDL_GPU depth-map pixel readback |
 | 2373 | Isolate PBR shadow-map sampling with a same-shader SDL_GPU depth A/B |
+| 2374 | Make shadow receiver depth mapping explicit across OpenGL and Vulkan |
