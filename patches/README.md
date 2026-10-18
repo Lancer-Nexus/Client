@@ -330,3 +330,5 @@ jump-gate route.
 | 2378 | Distinguish the empty sun Sph placeholder from StarArch sun and lens-glow rendering |
 
 | 2379 | Distinguish retail Fade 1D sampler settings from the Atmosphere MAT scalar |
+
+| 2380 | Share SDL_GPU shader program decoding and validate compact descriptor remaps |
