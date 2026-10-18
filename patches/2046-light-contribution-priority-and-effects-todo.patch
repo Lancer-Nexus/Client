@@ -1,0 +1,230 @@
+--- a/src/LibreLancer/Render/RenderHelpers.cs
++++ b/src/LibreLancer/Render/RenderHelpers.cs
+@@ -55,7 +55,7 @@
+                 lights.Lights.SourceLighting = src;
+ 
+                 Span<int> selected = stackalloc int[MAX_LIGHTS];
+-                Span<float> distances = stackalloc float[MAX_LIGHTS];
++                Span<float> priorities = stackalloc float[MAX_LIGHTS];
+ 				for (var i = 0; i < src.FrameLights.Count; i++)
+ 				{
+ 					if (src.FrameLights[i].LightGroup != lightGroup)
+@@ -68,7 +68,7 @@
+                         continue;
+                     }
+ 
+-                    var l = src.FrameLights[i].Light;
++					var l = src.FrameLights[i].Light;
+ 					var r2 = r + l.Range;
+ 					// l.Kind > 0 - test if not directional
+ 					if (l.Kind > 0 && Vector3.DistanceSquared(l.Position, c) > (r2 * r2))
+@@ -82,14 +82,17 @@
+                         continue;
+                     }
+ 
++                    var priority = CalculateLightPriority(l, c, r);
++                    if (priority <= 0)
++                        continue;
++
+                     if (i >= BitArray128.Capacity)
+                     {
+                         continue;
+                     }
+ 
+-                    var distance = l.Kind == LightKind.Directional ? -1f : Vector3.DistanceSquared(l.Position, c);
+                     var insertAt = 0;
+-                    while (insertAt < lc && distances[insertAt] <= distance)
++                    while (insertAt < lc && priorities[insertAt] >= priority)
+                         insertAt++;
+                     if (insertAt >= MAX_LIGHTS)
+                         continue;
+@@ -98,11 +101,11 @@
+                     for (var move = newCount - 1; move > insertAt; move--)
+                     {
+                         selected[move] = selected[move - 1];
+-                        distances[move] = distances[move - 1];
++                        priorities[move] = priorities[move - 1];
+                     }
+ 
+                     selected[insertAt] = i;
+-                    distances[insertAt] = distance;
++                    priorities[insertAt] = priority;
+                     lc = newCount;
+ 				}
+ 
+@@ -143,6 +146,42 @@
+             return lights;
+ 		}
+ 
++        internal static float CalculateLightPriority(RenderLight light, Vector3 objectCenter, float objectRadius)
++        {
++            var color = light.Color;
++            var ambient = light.Ambient;
++            var intensity = Math.Max(0, color.R) * 0.2126f +
++                            Math.Max(0, color.G) * 0.7152f +
++                            Math.Max(0, color.B) * 0.0722f +
++                            Math.Max(0, ambient.R) * 0.2126f +
++                            Math.Max(0, ambient.G) * 0.7152f +
++                            Math.Max(0, ambient.B) * 0.0722f;
++            if (!float.IsFinite(intensity) || intensity <= 0)
++                return 0;
++
++            if (light.Kind == LightKind.Directional)
++                return intensity;
++
++            var distance = Math.Max(0, Vector3.Distance(light.Position, objectCenter) - Math.Max(0, objectRadius));
++            var attenuation = light.Attenuation;
++            float factor;
++            if (light.Kind == LightKind.PointAttenCurve)
++            {
++                var normalizedDistance = distance / Math.Max(light.Range, 1);
++                factor = attenuation.X * normalizedDistance * normalizedDistance +
++                         attenuation.Y * normalizedDistance + attenuation.Z;
++            }
++            else
++            {
++                var denominator = attenuation.X + attenuation.Y * distance +
++                                  attenuation.Z * distance * distance;
++                factor = denominator > 0 && float.IsFinite(denominator) ? 1f / denominator : 0;
++            }
++
++            var priority = intensity * Math.Max(0, factor);
++            return float.IsFinite(priority) ? priority : 0;
++        }
++
+ 		// Returns whether or not a spotlight can be culled
+         private static bool SpotlightTest(ref RenderLight light, Vector3 objPos, float objRadius)
+ 		{
+--- a/src/LibreLancer.Tests/TransientLightTests.cs
++++ b/src/LibreLancer.Tests/TransientLightTests.cs
+@@ -59,15 +59,61 @@
+         Assert.False(selected[9]);
+     }
+ 
+-    private static DynamicLight CreateLight(float distance) => new()
++    [Fact]
++    public void ObjectLightingPrioritizesLuminanceOverDistance()
++    {
++        var lighting = new SystemLighting();
++        lighting.BeginFrame(Vector3.Zero);
++        for (var i = 1; i <= 8; i++)
++            lighting.AddFrameLight(CreateLight(i, 0.1f));
++        lighting.AddFrameLight(CreateLight(9, 10f));
++
++        var selected = RenderHelpers.ApplyLights(lighting, 0, Vector3.Zero, 0, null).Lights.SourceEnabled;
++
++        Assert.True(selected[8]);
++        Assert.False(selected[7]);
++    }
++
++    [Fact]
++    public void ObjectLightingPrioritizesAttenuatedContribution()
++    {
++        var lighting = new SystemLighting();
++        lighting.BeginFrame(Vector3.Zero);
++        for (var i = 1; i <= 8; i++)
++            lighting.AddFrameLight(CreateLight(i, 1, LightKind.Point, new Vector3(0, 0, 100)));
++        lighting.AddFrameLight(CreateLight(9, 1, LightKind.Point, Vector3.UnitX));
++
++        var selected = RenderHelpers.ApplyLights(lighting, 0, Vector3.Zero, 0, null).Lights.SourceEnabled;
++
++        Assert.True(selected[8]);
++        Assert.False(selected[7]);
++    }
++
++    [Fact]
++    public void ObjectLightingPrioritizesCurveAttenuation()
++    {
++        var lighting = new SystemLighting();
++        lighting.BeginFrame(Vector3.Zero);
++        for (var i = 1; i <= 8; i++)
++            lighting.AddFrameLight(CreateLight(i, 1, LightKind.PointAttenCurve, new Vector3(0, 0, 0.1f), 10));
++        lighting.AddFrameLight(CreateLight(9, 1, LightKind.PointAttenCurve, new Vector3(0, 0, 0.5f), 10));
++
++        var selected = RenderHelpers.ApplyLights(lighting, 0, Vector3.Zero, 0, null).Lights.SourceEnabled;
++
++        Assert.True(selected[8]);
++        Assert.False(selected[7]);
++    }
++
++    private static DynamicLight CreateLight(float distance, float intensity = 1,
++        LightKind kind = LightKind.Point, Vector3? attenuation = null, float range = 100) => new()
+     {
+         Light = new RenderLight
+         {
+-            Kind = LightKind.Point,
++            Kind = kind,
+             Position = new Vector3(distance, 0, 0),
+-            Range = 100,
+-            Attenuation = Vector3.One,
+-            Color = Color3f.White
++            Range = range,
++            Attenuation = attenuation ?? Vector3.One,
++            Color = new Color3f(intensity, intensity, intensity)
+         }
+     };
+ }
+--- a/docs/dynamic-lighting-audit.md
++++ b/docs/dynamic-lighting-audit.md
+@@ -11,9 +11,12 @@
+   `Update()` aktualisiert deren Farbkurven. `BeginFrame()` kopiert diese
+   Quellen in die Frame-Liste; lokale Lichtquellen werden pro Frame ergänzt.
+ - `RenderHelpers.ApplyLights()` filtert nach Lichtgruppe und Objektabstand und
+-  wählt nun bis zu acht passende Lichter nach Nähe zum Objektzentrum aus.
+-  Die Shader unterstützen neun Slots, von denen ein weiterer für Nebelblitze
+-  vorgesehen ist. Eine Gewichtung nach Lichtintensität oder Attenuation fehlt.
++  wählt bis zu acht passende Lichter nach geschätztem Beleuchtungsbeitrag aus:
++  diffuse/ambient Helligkeit multipliziert mit der Punktlicht- oder
++  Kurvenattenuation am objektseitig nächsten Punkt. Die Shader unterstützen
++  neun Slots, von denen ein weiterer für Nebelblitze vorgesehen ist. Der
++  vorgelagerte Frame-Pool priorisiert weiter nach Kameradistanz; eine allgemeine
++  Sichtbarkeits-/Occlusion-Priorisierung fehlt.
+ - `Settings.DynamicLighting` schaltet den bestehenden Beleuchtungspfad global
+   ein oder aus.
+ - `LightEquipment.EmitRange` und `EmitAttenuation` werden geparst und vom
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -439,7 +439,8 @@
+   Transparenz und bestehende Freelancer-Nebelparameter erhalten.
+ - [ ] Gerichtete Schatten zuerst mit Kaskaden/PCF, anschließend zusätzliche
+   Lichttypen; Shadow-Depth-Targets und Comparison-Sampler abstrahieren.
+-- [ ] Kurzlebige Effektlichter vervollständigen und messen: Mündungslichter aus `Gun.light_anim` sowie Explosionslichter aus `lgt_effect`/`lgt_radius` und `lgt_time_scale` sind vorhanden. Offen sind `lgt_range_scale`, explizite Lichtdaten und hardpointgebundene Lebenszyklen für persistentes Feuer, eine an Sichtbarkeit/Intensität ausgerichtete Priorisierung, Qualitätsbudgets und reproduzierbare NAP-Szenenmessungen. Der Effektpool begrenzt aktive Ereignisse auf 128, der Frame-Pool lokale Lichtquellen auf 32. Siehe [Feuerinventar](evidence/effect-fire-light-input-inventory-20261014.json).
++- [ ] Kurzlebige Effektlichter vervollständigen und messen: Mündungslichter aus `Gun.light_anim` sowie Explosionslichter aus `lgt_effect`/`lgt_radius` und `lgt_time_scale` sind vorhanden. Die per-Objekt-Auswahl priorisiert nach geschätzter Lichtwirkung; der Frame-Pool priorisiert weiter nach Kameradistanz. Offen sind `lgt_range_scale`, explizite Lichtdaten und hardpointgebundene Lebenszyklen für persistentes Feuer, allgemeine Sichtbarkeits-/Occlusion-Priorisierung, Qualitätsbudgets und reproduzierbare NAP-Szenenmessungen. Der Effektpool begrenzt aktive Ereignisse auf 128, der Frame-Pool lokale Lichtquellen auf 32. Siehe [Feuerinventar](evidence/effect-fire-light-input-inventory-20261014.json).
++- [ ] Danach Laser-, Projektil- und Explosionseffekte überarbeiten: Beam- und Trefferdarstellung, Trails, Partikel, Farbverläufe sowie Größen-/Zeitverhalten aufeinander abstimmen und mit dynamischer Beleuchtung integrieren. Originaleffekte und einzeln abschaltbare Qualitätsoptionen erhalten; NAP-Referenzszenen mit Vergleichsbildern und CPU-/GPU-Zeit abnehmen.
+ - [ ] SSAO mit Geometrie-/Nebelmasken und Forward+ mit vielen Lichtquellen
+   implementieren; die feste Lichtgrenze erst nach Messung ersetzen.
+ - [ ] Instancing/Batching für Asteroiden, Partikel und wiederholte Objekte
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -131,9 +131,13 @@
+ - [ ] Screen-Space-Reflections als optionale Ergänzung prüfen; fehlende Bildinformation an Bildschirmrändern und bei verdeckten Objekten muss über den bestehenden PBR-Fallback abgefangen werden.
+ - [ ] Volumetrischen Nebel und volumetrische Lichtstrahlen als eigenständige, skalierbare Qualitätstufe evaluieren; vorhandene Freelancer-Nebelparameter und Transparenzreihenfolge als Referenz verwenden.
+ - [ ] Forward+/Clustered Lighting gegen die aktuelle Beleuchtungsarchitektur und typische Freelancer-Szenen mit vielen Lichtern benchmarken, bevor ein Renderer-Umbau geplant wird.
+-- [ ] Kurzlebige dynamische Lichter für Effekte, Waffenfeuer/Mündungsblitze, Feuer und Explosionen vervollständigen. Vorhanden sind `Gun.light_anim`-Mündungslichter sowie datengetriebene Explosionslichter aus `lgt_effect`/`lgt_radius` einschließlich `lgt_time_scale`; der Effektpool begrenzt aktive Ereignisse auf 128 und der Frame-Pool lokale Lichtquellen auf 32. Offen bleiben die Bedeutung von `lgt_range_scale`, explizite Lichtdaten und hardpointgebundene Lichtlebenszyklen für persistentes Feuer, Sichtbarkeits-/Intensitätspriorisierung, konfigurierbares Qualitätsbudget und visuelle Messungen in typischen NAP-Szenen ([Feuerinventar](evidence/effect-fire-light-input-inventory-20261014.json)).
++- [ ] Kurzlebige dynamische Lichter für Effekte, Waffenfeuer/Mündungsblitze, Feuer und Explosionen vervollständigen. Vorhanden sind `Gun.light_anim`-Mündungslichter sowie datengetriebene Explosionslichter aus `lgt_effect`/`lgt_radius` einschließlich `lgt_time_scale`; der Effektpool begrenzt aktive Ereignisse auf 128 und der Frame-Pool lokale Lichtquellen auf 32. Die per-Objekt-Auswahl priorisiert nun nach geschätzter Lichtwirkung; der Frame-Pool priorisiert weiterhin nach Kameradistanz. Offen bleiben `lgt_range_scale`, explizite Lichtdaten und hardpointgebundene Lichtlebenszyklen für persistentes Feuer, allgemeine Sichtbarkeits-/Occlusion-Priorisierung, konfigurierbares Qualitätsbudget und visuelle Messungen in typischen NAP-Szenen ([Feuerinventar](evidence/effect-fire-light-input-inventory-20261014.json)).
+ 
+-### 5. Weitere Oberflächeneffekte und Renderer-Betrieb
++### 5. Effektüberarbeitung nach Renderer und dynamischer Beleuchtung
++
++- [ ] Laser-, Projektil- und Explosionseffekte visuell überarbeiten: Beam- und Trefferdarstellung, Trails, Partikel, Farbverläufe, Größen- und Zeitverhalten sowie Zusammenspiel mit dynamischem Licht. Originale Freelancer-Effekte müssen weiter funktionieren; neue Qualitätseinstellungen sollen einzeln abschaltbar bleiben. Mit reproduzierbaren NAP-Kampfszenen, Vergleichsbildern und GPU-/CPU-Messungen abnehmen.
++
++### 6. Weitere Oberflächeneffekte und Renderer-Betrieb
+ 
+ - [ ] Decals für Einschläge, Verschmutzung und Missionsmarkierungen untersuchen; Sortierung, Z-Fighting und DFM-/Animierungsfälle abdecken.
+ - [ ] Shader-Varianten und Pipeline-Zustände nachvollziehbar cachen; Shader-Kompilierung darf beim Szenenwechsel keine langen Ruckler oder Backend-Fehler verursachen.
+@@ -141,7 +145,7 @@
+ - [ ] GPU-Partikel nur dann ergänzen, wenn CPU-/GPU-Profile einen Engpass belegen; bestehende Freelancer-Effekte und CPU-Fallback erhalten.
+ - [ ] RenderDoc-/Debug-Marker pro Render-Pass und lesbare GPU-Fehlerdiagnostik für reproduzierbare Grafikfehler vorsehen.
+ 
+-### 6. Zeitliche und räumliche Rekonstruktion
++### 7. Zeitliche und räumliche Rekonstruktion
+ 
+ - [ ] TAA erst nach stabilen Bewegungsvektoren, Kamerajitter und History-Buffer-Lifecycle evaluieren.
+ - [ ] Upscaling nur nach reproduzierbaren Auflösungs-/Performance-Messungen ergänzen; Native-Auflösung und SMAA bleiben verfügbar.
+--- a/patches/series
++++ b/patches/series
+@@ -45,3 +45,4 @@
+ client 2043-dynamic-effect-callsite-coverage.patch
+ client 2044-renderer-lighting-status.patch
+ client 2045-fire-effect-light-input-audit.patch
++client 2046-light-contribution-priority-and-effects-todo.patch

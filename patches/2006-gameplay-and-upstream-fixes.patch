@@ -5860,7 +5860,7 @@ index 6e1855b..5046471 100644
 +    }
 +}
 diff --git a/src/LibreLancer/FreelancerGame.cs b/src/LibreLancer/FreelancerGame.cs
-index a6709c3bcf8952813d1d29f789fb44ef56d35cb5..41f2e2e7ce3f6c2de2c93f811fa43147144691a3 100644
+index a6709c3bc..41f2e2e7c 100644
 --- a/src/LibreLancer/FreelancerGame.cs
 +++ b/src/LibreLancer/FreelancerGame.cs
 @@ -43,6 +43,15 @@ namespace LibreLancer
@@ -11613,10 +11613,10 @@ index 2b02033..ba3bf80 100644
              killSound.Update();
          }
 
-+        var maxVelocity = Parent.PhysicsComponent is { } physics
-+            ? (Parent.GetComponent<ShipPhysicsComponent>()!.Ship.LinearDrag + Equipment.Def.LinearDrag) > 0
-+                ? Equipment.Def.MaxForce / (Parent.GetComponent<ShipPhysicsComponent>()!.Ship.LinearDrag + Equipment.Def.LinearDrag)
-+                : 0
++        var shipPhysics = Parent.GetComponent<ShipPhysicsComponent>();
++        var totalDrag = (shipPhysics?.Ship.LinearDrag ?? 0) + Equipment.Def.LinearDrag;
++        var maxVelocity = Parent.PhysicsComponent is not null && shipPhysics is not null && totalDrag > 0
++            ? Equipment.Def.MaxForce / totalDrag
 +            : 0;
 +        var velocity = Parent.PhysicsComponent?.Body.LinearVelocity.Length() ?? 0;
 +        var sparam = CalculateSParam(EngineKill, Speed, velocity, maxVelocity);
@@ -12258,24 +12258,34 @@ index bea2107..d5d12b0 100644
      ImGuiMouseCursor m_Cursor;
  };
 diff --git a/src/lancer/Program.cs b/src/lancer/Program.cs
-index c3f4ef8..953467b 100644
+index c3f4ef8c9..6bdf95a3f 100644
 --- a/src/lancer/Program.cs
 +++ b/src/lancer/Program.cs
-@@ -3,6 +3,7 @@
+@@ -3,6 +3,10 @@
  // LICENSE, which is part of this source code package
-
+ 
  using System;
++using System.Collections.Generic;
 +using System.IO;
++using LibreLancer.Data.Schema;
++using LibreLancer.Graphics;
  using LibreLancer;
-
+ 
  namespace lancer;
-@@ -12,15 +13,240 @@ internal static class MainClass
+@@ -12,15 +16,347 @@ internal static class MainClass
      [STAThread]
      public static void Main(string[] args)
      {
 +        if (args.Length == 1 && args[0] is "--help" or "-h")
 +        {
 +            Console.WriteLine("Usage: lancer [configuration-path] [--new-game | --load-save <savegame.fl>]");
++            Console.WriteLine("       Render overrides (each option is independent):");
++            Console.WriteLine("         --render-normal-maps=on|off");
++            Console.WriteLine("         --render-generated-tangents=on|off");
++            Console.WriteLine("         --render-surface-profile=original|minimal|standard|full");
++            Console.WriteLine("         --render-per-pixel-lighting=on|off");
++            Console.WriteLine("         --render-antialias=none|smaa-low|smaa-medium|smaa-high|smaa-ultra|msaa-2x|msaa-4x|msaa-8x");
++            Console.WriteLine("         --render-anisotropy=0|2|4|8|16");
 +#if DEBUG
 +            Console.WriteLine("       lancer [configuration-path] --email=... --password=... [--character=...]");
 +            Console.WriteLine("       lancer [configuration-path] --credentials-file=...");
@@ -12283,7 +12293,7 @@ index c3f4ef8..953467b 100644
 +            return;
 +        }
 +        if (!TryParseStartupArguments(args, out var startupArgs, out var startNewGame,
-+                out var loadSavePath, out var startupError))
++                out var loadSavePath, out var renderOverrides, out var startupError))
 +        {
 +            Console.Error.WriteLine(startupError);
 +            Environment.ExitCode = 2;
@@ -12327,6 +12337,7 @@ index c3f4ef8..953467b 100644
 +            Func<string>? filePath = configPath is null ? null : () => configPath;
              var cfg = GameConfig.Create(true, filePath);
 -            game = new FreelancerGame(cfg);
++            renderOverrides.Apply(cfg.Settings);
 +            if ((startNewGame || loadSavePath is not null) &&
 +                !string.IsNullOrWhiteSpace(cfg.ClusterGatewayUrl))
 +            {
@@ -12356,11 +12367,13 @@ index c3f4ef8..953467b 100644
      }
 +
 +    private static bool TryParseStartupArguments(string[] args, out string[] remainingArgs,
-+        out bool startNewGame, out string? loadSavePath, out string? error)
++        out bool startNewGame, out string? loadSavePath, out RenderStartupOverrides renderOverrides,
++        out string? error)
 +    {
 +        var remaining = new System.Collections.Generic.List<string>();
 +        startNewGame = false;
 +        loadSavePath = null;
++        renderOverrides = new RenderStartupOverrides();
 +        error = null;
 +        for (var i = 0; i < args.Length; i++)
 +        {
@@ -12392,6 +12405,14 @@ index c3f4ef8..953467b 100644
 +                }
 +                loadSavePath = Path.GetFullPath(path);
 +            }
++            else if (arg.StartsWith("--render-", StringComparison.Ordinal))
++            {
++                if (!renderOverrides.TryParse(arg, out error))
++                {
++                    remainingArgs = Array.Empty<string>();
++                    return false;
++                }
++            }
 +            else
 +            {
 +                remaining.Add(arg);
@@ -12399,6 +12420,95 @@ index c3f4ef8..953467b 100644
 +        }
 +        remainingArgs = remaining.ToArray();
 +        return true;
++    }
++
++    private sealed class RenderStartupOverrides
++    {
++        private readonly HashSet<string> seen = new(StringComparer.Ordinal);
++        private bool? normalMaps;
++        private bool? generatedTangents;
++        private SurfaceMapProfile? surfaceProfile;
++        private bool? perPixelLighting;
++        private AntialiasMode? antialias;
++        private int? anisotropy;
++
++        public bool TryParse(string argument, out string? error)
++        {
++            error = null;
++            var separator = argument.IndexOf('=');
++            if (separator < 0)
++            {
++                error = $"{argument} requires a value after '='.";
++                return false;
++            }
++            var name = argument[..separator];
++            var value = argument[(separator + 1)..];
++            if (!seen.Add(name))
++            {
++                error = $"{name} may be supplied only once.";
++                return false;
++            }
++            bool ParseToggle(out bool parsed)
++            {
++                if (value.Equals("on", StringComparison.OrdinalIgnoreCase)) { parsed = true; return true; }
++                if (value.Equals("off", StringComparison.OrdinalIgnoreCase)) { parsed = false; return true; }
++                parsed = false;
++                return false;
++            }
++            switch (name)
++            {
++                case "--render-normal-maps":
++                    if (!ParseToggle(out var maps)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
++                    normalMaps = maps;
++                    return true;
++                case "--render-generated-tangents":
++                    if (!ParseToggle(out var tangents)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
++                    generatedTangents = tangents;
++                    return true;
++                case "--render-per-pixel-lighting":
++                    if (!ParseToggle(out var lighting)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
++                    perPixelLighting = lighting;
++                    return true;
++                case "--render-surface-profile":
++                    if (Enum.TryParse(value, true, out SurfaceMapProfile profile) && Enum.IsDefined(profile))
++                    {
++                        surfaceProfile = profile;
++                        return true;
++                    }
++                    error = "--render-surface-profile accepts original, minimal, standard or full.";
++                    return false;
++                case "--render-antialias":
++                    var aaName = value.Replace("-", "", StringComparison.Ordinal);
++                    if (Enum.TryParse(aaName, true, out AntialiasMode aa) && Enum.IsDefined(aa))
++                    {
++                        antialias = aa;
++                        return true;
++                    }
++                    error = "--render-antialias has an unsupported value; use --help for accepted modes.";
++                    return false;
++                case "--render-anisotropy":
++                    if (int.TryParse(value, out var level) && level is 0 or 2 or 4 or 8 or 16)
++                    {
++                        anisotropy = level;
++                        return true;
++                    }
++                    error = "--render-anisotropy accepts 0, 2, 4, 8 or 16.";
++                    return false;
++                default:
++                    error = $"Unknown render option: {name}. Use --help for supported options.";
++                    return false;
++            }
++        }
++
++        public void Apply(GameSettings settings)
++        {
++            if (normalMaps.HasValue) settings.SurfaceNormalMapsEnabled = normalMaps.Value;
++            if (generatedTangents.HasValue) settings.SurfaceGeneratedTangentsEnabled = generatedTangents.Value;
++            if (surfaceProfile.HasValue) settings.SurfaceProfile = surfaceProfile.Value;
++            if (perPixelLighting.HasValue) settings.PerPixelLighting = perPixelLighting.Value;
++            if (antialias.HasValue) settings.Antialias = (int)antialias.Value;
++            if (anisotropy.HasValue) settings.Anisotropy = anisotropy.Value;
++        }
 +    }
 +
 +#if DEBUG

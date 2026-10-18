@@ -1,0 +1,168 @@
+--- a/src/LibreLancer.Data/GameData/Archetypes/Sun.cs
++++ b/src/LibreLancer.Data/GameData/Archetypes/Sun.cs
+@@ -22,6 +22,8 @@
+     public Color3f LensGlowColorInner;
+     public Color3f LensGlowColorOuter;
+     public float LensGlowRadiusScale;
++    public float LensGlowFadeInSeconds;
++    public float LensGlowFadeOutSeconds;
+     public string? SpinesSprite;
+     public float SpinesScale;
+     public List<Spine>? Spines;
+--- a/src/LibreLancer.Data/GameItemDb.cs
++++ b/src/LibreLancer.Data/GameItemDb.cs
+@@ -2534,6 +2534,8 @@
+                 s.LensGlowColorInner = lensGlow.InnerColor;
+                 s.LensGlowColorOuter = lensGlow.OuterColor;
+                 s.LensGlowRadiusScale = lensGlow.RadiusScale;
++                s.LensGlowFadeInSeconds = lensGlow.GlowFadeInSeconds;
++                s.LensGlowFadeOutSeconds = lensGlow.GlowFadeOutSeconds;
+             }
+ 
+             var sp = GetSpines(star.Spines);
+--- a/src/LibreLancer/Render/SunRenderer.cs
++++ b/src/LibreLancer/Render/SunRenderer.cs
+@@ -25,6 +25,8 @@
+         private SunRadialMaterial centerMaterial = null!;
+         private SunRadialMaterial glowMaterial = null!;
+         private SunRadialMaterial? lensGlowMaterial;
++        private float lensGlowAlpha;
++        private float lensGlowTargetAlpha;
+ 
+         private Vector3 genPos;
+         private int bufferIndex;
+@@ -62,6 +64,21 @@
+         public override void Update(double elapsed, Transform3D transform)
+         {
+             pos = transform.Position;
++
++            var fadeSeconds = lensGlowTargetAlpha > lensGlowAlpha
++                ? Sun.LensGlowFadeInSeconds
++                : Sun.LensGlowFadeOutSeconds;
++            if (fadeSeconds <= 0)
++            {
++                lensGlowAlpha = lensGlowTargetAlpha;
++            }
++            else
++            {
++                var step = (float)(Math.Max(0, elapsed) / fadeSeconds);
++                lensGlowAlpha = lensGlowTargetAlpha > lensGlowAlpha
++                    ? Math.Min(lensGlowAlpha + step, lensGlowTargetAlpha)
++                    : Math.Max(lensGlowAlpha - step, lensGlowTargetAlpha);
++            }
+         }
+ 
+         public static int GetVertexCount(Sun sun)
+@@ -118,6 +135,11 @@
+ 
+         public override bool PrepareRender(ICamera camera, NebulaRenderer nr, SystemRenderer sys, bool forceCull)
+         {
++            lensGlowTargetAlpha = Sun.LensGlowSprite != null &&
++                                 camera.FrustumCheck(new BoundingSphere(pos, Math.Max(Sun.Radius, 0)))
++                ? 1f
++                : 0f;
++
+             if (sysr == null)
+             {
+                 spineMaterial = new SunSpineMaterial(sys.ResourceManager, Sun.SpinesSprite!, Vector2.One);
+@@ -194,7 +216,7 @@
+             if (Sun.LensGlowSprite != null && sysr.Settings.RenderSunLensGlow && lensGlowMaterial != null)
+             {
+                 lensGlowMaterial.SizeMultiplier = new Vector2(distScale);
+-                lensGlowMaterial.OuterAlpha = alpha;
++                lensGlowMaterial.OuterAlpha = alpha * lensGlowAlpha;
+                 commands.AddCommand(lensGlowMaterial, null, commands.WorldBuffer.Identity,
+                     Lighting.Empty, sysr.QuadBuffer.VertexBuffer, 1.0f, PrimitiveTypes.TriangleList,
+                     0, idx, 2, SortLayers.SUN, z, null, 2);
+--- a/patches/series
++++ b/patches/series
+@@ -63,3 +63,4 @@
+ client 2061-sun-lens-glow-and-jump-gate-effect-todos.patch
+ client 2062-sun-lens-glow-runtime.patch
+ client 2063-safe-2d-texture-binding.patch
++client 2064-sun-lens-glow-fades.patch
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -37,5 +37,6 @@
+ | 2061 | Sun lens glow, jump gate and tradelane effect renderer TODOs |
+ | 2062 | StarArch lens glow rendering and independent startup/config toggle |
+ | 2063 | Ignore cubemaps in 2D material texture slots to prevent renderer crashes |
++| 2064 | Fade sun lens glow as the sun enters or leaves the camera frustum |
+ | 2011 (`lancerdecode`) | Native Vorbis EOF/reset handling |
+ | 2012 (`blurgtext`) | System FreeType without OT-SVG hooks |
+
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -125,8 +125,9 @@
+   Reproduktion stehen in [ship-light-occlusion.md](ship-light-occlusion.md).
+ - [ ] HDR-Zwischenpuffer, Belichtung und Tonemapping als zusammenhängenden Farbmanagement-Schritt entwerfen; sRGB-Ein-/Ausgabe und UI-Komposition berücksichtigen.
+ - [ ] Bloom als nachgelagerten Effekt mit Threshold, Downsampling-Pyramide und konfigurierbarer Intensität untersuchen.
+-- [ ] Sonnen-Lens-Glow anhand reproduzierbarer NAP-Szenen visuell abnehmen; `lens_flare` und die `lens_glow`-Fade-Werte bleiben separate offene Datenpfade ([Parser-/Laufzeitabgleich](data-client-plan.md)).
++- [ ] Sonnen-Lens-Glow anhand reproduzierbarer NAP-Szenen visuell abnehmen; `lens_flare` und die Stern-Intensitäts-/Zonen-Fades bleiben separate offene Datenpfade ([Parser-/Laufzeitabgleich](data-client-plan.md)).
+   - [x] `lens_glow`-Form, Farbe und Radius aus `StarArch.ini` bis zum `SunRenderer` durchreichen und über `render_sun_lens_glow` / `--render-sun-lens-glow=on|off` einzeln schaltbar machen.
++  - [x] `glow_fade_in_seconds` / `glow_fade_out_seconds` übernehmen und beim Eintritt in bzw. Austritt aus dem Kamerafrustum anwenden.
+   - [ ] Renderer-A/B-Bilder bei sichtbarer und verdeckter Sonne aufnehmen und Radius, Farbe, Blendmodus sowie Fade-Verhalten gegen das Original abstimmen.
+ - [ ] Image-Based Lighting und konsistente Umgebungsreflexionen für den PBR-Pfad prüfen.
+ - [ ] Screen-Space Ambient Occlusion als optionale Ergänzung bewerten; Geometrie- und Nebelartefakte gegen Vanilla-Szenen abgleichen.
+--- a/docs/data-client-plan.md
++++ b/docs/data-client-plan.md
+@@ -266,11 +266,13 @@
+ nicht im Spiel verwendet.
+ 
+ `StarArchIni` parst `lens_flare`, `lens_glow`, `intensity_fade_in/out` und
+-`zone_occlusion_fade_in/out`. `GameItemDb.InitStars()` übernimmt aktuell Radius,
+-Glow/Center und Spines; `SunRenderer` zeichnet Glow, Center und Spines. Die
+-Lens- und Fade-Felder gelangen nicht ins Laufzeitmodell und haben keinen
+-Renderer-Verbraucher. Ihre konkreten Werte stehen in den SDK-Stararchiven; die
+-Abweichung ist ein Codebefund, noch kein Sichtvergleich mit dem Originalspiel.
++`zone_occlusion_fade_in/out`. `GameItemDb.InitStars()` übernimmt zusätzlich die
++referenzierte `LensGlow`-Form, Farbe, Radius und deren
++`glow_fade_in_seconds`/`glow_fade_out_seconds`. `SunRenderer` zeichnet den
++additiven Lens-Glow und blendet ihn beim Eintritt in beziehungsweise Austritt
++aus dem Kamerafrustum ein oder aus. Dieser Fade berücksichtigt keine
++Geometrie-Occlusion. `lens_flare` und die Stern-Intensitäts-/Zonen-Fades werden
++weiterhin nur geparst; der visuelle Abgleich mit dem Originalspiel bleibt offen.
+ 
+ **Schlüssel-zu-Laufzeit-Abgleich SolarArch/StarArch (2026-10-12):** Die
+ HD-`SolarArch.ini` enthält 321 `[Solar]`-Abschnitte mit 28 unterschiedlichen
+@@ -295,13 +297,15 @@
+ Solar-Schemas; ihre Deklaration allein belegt daher keine Unterstützung für
+ Solararchetypen.
+ 
+-Für Sterne übernimmt `GameItemDb.InitStars()` 5 der 11 Schlüssel:
+-`nickname`, `radius`, `star_glow`, `star_center` und `spines`. `SunRenderer`
+-zeichnet Radius, Glow, Center und Spines. Die übrigen sechs Schlüssel
+-`lens_flare`, `lens_glow`, `intensity_fade_in`, `intensity_fade_out`,
+-`zone_occlusion_fade_in` und `zone_occlusion_fade_out` werden geparst, aber im
+-Client-Spielpfad nicht weitergereicht oder gerendert. Diese Quellcodebilanz
+-bestätigt keine sichtbare HD-Wirkung; der Paket-/Renderlauf bleibt offen.
++Für Sterne übernimmt `GameItemDb.InitStars()` 6 der 11 Schlüssel:
++`nickname`, `radius`, `star_glow`, `star_center`, `spines` und die Referenz
++`lens_glow`. `SunRenderer` zeichnet Radius, Glow, Center, Spines und den
++Lens-Glow. Die fünf Schlüssel `lens_flare`, `intensity_fade_in`,
++`intensity_fade_out`, `zone_occlusion_fade_in` und `zone_occlusion_fade_out`
++werden geparst, aber nicht im Client-Spielpfad verwendet. Die Fade-Zeiten des
++separaten `[LensGlow]`-Abschnitts sind angebunden, aber noch nicht visuell gegen
++das Original abgenommen. Die aktuelle NAP-Referenz liegt lokal nur als
++`.gitkeep` vor; ein neuer Paket-/Renderlauf ist daher offen.
+ 
+ - [ ] Fehlende und ungültige optionale Ressourcenfälle erfassen. Parser- und
+   Regressionstests nur für bestätigte Client-Grenzen ergänzen.
+--- a/docs/data-client-todo.md
++++ b/docs/data-client-todo.md
+@@ -184,11 +184,12 @@
+   `GameWorld.InAtmosphere()` verfolgt. `burn_color`/`ambient_color` werden
+   kopiert, aber im Spielquellbaum nicht verwendet.
+ - [x] `StarArch.ini` geprüft: Glow, Center und Spines erreichen `SunRenderer`;
+-  Lens-Flare-, Lens-Glow- und Fade-Felder werden geparst, aber nicht ins
+-  Laufzeitmodell übernommen. Details: [Client-Umsetzungsplan](data-client-plan.md#phase-1--parser--und-datenflussprüfung).
++  Lens-Glow-Form, Farbe, Radius und Fade-Zeiten sind nun ebenfalls angebunden.
++  `lens_flare` sowie die Stern-Intensitäts- und Zonen-Fades bleiben Parser-only;
++  der visuelle Originalabgleich ist offen. Details: [Client-Umsetzungsplan](data-client-plan.md#phase-1--parser--und-datenflussprüfung).
+ - [x] Schlüssel-zu-Code-Abgleich vervollständigt: 14 von 28 `SolarArch.ini`-
+   Schlüsseln werden in das Solar-Laufzeitmodell übernommen; bei `StarArch.ini`
+-  erreichen 5 von 11 Schlüsseln den Renderer. Die geparsten, aber im Solar-/Stern-
++  erreichen 6 von 11 Schlüsseln den Renderer. Die geparsten, aber im Solar-/Stern-
+   pfad nicht angebundenen Schlüssel und getrennte Schiffverbraucher sind im
+   [Client-Umsetzungsplan](data-client-plan.md#phase-1--parser--und-datenflussprüfung)
+   dokumentiert.

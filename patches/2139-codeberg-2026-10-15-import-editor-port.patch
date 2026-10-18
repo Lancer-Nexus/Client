@@ -1,0 +1,1023 @@
+diff --git a/src/LibreLancer/Utf/Mat/TextureData.cs b/src/LibreLancer/Utf/Mat/TextureData.cs
+index 8a3efd452..4578b8139 100644
+--- a/src/LibreLancer/Utf/Mat/TextureData.cs
++++ b/src/LibreLancer/Utf/Mat/TextureData.cs
+@@ -39,45 +39,54 @@ namespace LibreLancer.Utf.Mat
+             return null;
+         }
+ 
+-		public void Initialize (RenderContext context)
+-		{
+-			if (data != null && data.Value.Count > 0 && Texture == null)
++        public void Initialize(RenderContext context)
++        {
++            try
+             {
+-				using (Stream stream = data.Value.GetReadStream()) {
+-					if (type.Equals ("mips", StringComparison.OrdinalIgnoreCase))
++                if (data != null && data.Value.Count > 0 && Texture == null)
++                {
++                    using Stream stream = data.Value.GetReadStream();
++                    if (type.Equals ("mips", StringComparison.OrdinalIgnoreCase))
+                     {
+                         Texture = ImageLib.DDS.FromStream(context, stream);
+-					}
++                    }
+                     else if (type.StartsWith ("mip", StringComparison.OrdinalIgnoreCase))
+                     {
+-						var tga = ImageLib.TGA.TextureFromStream(context, stream, levels != null);
++                        var tga = ImageLib.TGA.TextureFromStream(context, stream, levels != null);
+                         if(tga == null) {
+                             FLLog.Error("Mat","Texture " + texname + "\\MIP0" + " is bad");
+                             Texture = null;
+                             return;
+                         }
+-						if (levels != null)
+-						{
+-							foreach (var lv in levels)
++                        if (levels != null)
++                        {
++                            foreach (var lv in levels)
+                             {
+                                 using var s2 = new MemoryStream(lv.Value);
+                                 ImageLib.TGA.TextureFromStream(context, s2, true, tga, lv.Key);
+-
+                             }
+-						}
+-						Texture = tga;
+-						levels = null;
+-					}
++                        }
++                        Texture = tga;
++                        levels = null;
++                    }
+                     else if (type.Equals ("cube", StringComparison.OrdinalIgnoreCase))
+                     {
+-						Texture = ImageLib.DDS.FromStream (context, stream);
+-					}
+-				}
+-			} else
+-				FLLog.Error ("Texture " + texname, "data == null");
+-		}
++                        Texture = ImageLib.DDS.FromStream (context, stream);
++                    }
++                }
++                else
++                {
++                    FLLog.Error ("Texture " + texname, "data == null");
++                }
++            }
++            catch (Exception e)
++            {
++                FLLog.Error("Texture", $"Error loading {texname}");
++                FLLog.Error("Texture", e.ToString());
++            }
++        }
+ 
+-		public void SetLevel(Node node)
++        public void SetLevel(Node node)
+ 		{
+             if (node is not LeafNode n)
+             {
+diff --git a/src/Editor/LibreLancer.ContentEdit/Model/ModelExporter.cs b/src/Editor/LibreLancer.ContentEdit/Model/ModelExporter.cs
+index adc9657cb..e7db404fc 100644
+--- a/src/Editor/LibreLancer.ContentEdit/Model/ModelExporter.cs
++++ b/src/Editor/LibreLancer.ContentEdit/Model/ModelExporter.cs
+@@ -17,7 +17,8 @@ namespace LibreLancer.ContentEdit.Model;
+ 
+ public static class ModelExporter
+ {
+-    public static EditResult<SimpleMesh.Model> Export(CmpFile cmp, SurFile sur, ModelExporterSettings settings, ResourceManager resources)
++    public static EditResult<SimpleMesh.Model> Export(CmpFile cmp, SurFile sur, ModelExporterSettings settings,
++        ResourceManager resources)
+     {
+         //Build tree
+         ExportModelNode? rootModel = null;
+@@ -27,7 +28,7 @@ public static class ModelExporter
+             {
+                 rootModel = new ExportModelNode(p.ObjectName)
+                 {
+-                    Model = p.Model!,
++                    Model = p.Model, Camera = p.Camera
+                 };
+                 break;
+             }
+@@ -51,7 +52,8 @@ public static class ModelExporter
+                     var child = new ExportModelNode(mdl.Name)
+                     {
+                         Construct = part.Construct,
+-                        Model = part.Model!,
++                        Model = part.Model,
++                        Camera = part.Camera,
+                         Name = part.ObjectName,
+                     };
+                     mdl.Children.Add(child);
+@@ -65,8 +67,9 @@ public static class ModelExporter
+             infiniteDetect++;
+             if (infiniteDetect > 100000) return EditResult<SimpleMesh.Model>.Error("Infinite cmp loop detected");
+         }
++
+         //Export model
+-        var output = new SimpleMesh.Model() {Materials = new Dictionary<string, Material>()};
++        var output = new SimpleMesh.Model() { Materials = new Dictionary<string, Material>() };
+         var ag = new List<Geometry>();
+         var processed = ProcessNode(rootModel, output, settings, resources, sur, ag, false);
+         if (processed.IsError)
+@@ -76,22 +79,27 @@ public static class ModelExporter
+         if (cmp.Animation != null && settings.IncludeAnimations)
+         {
+             var animations = new List<Animation>();
+-            if (cmp.Animation.Scripts.Count > 0) {
++            if (cmp.Animation.Scripts.Count > 0)
++            {
+                 animations.Add(AnimationConversion.DefaultAnimation(cmp));
+             }
++
+             foreach (var anm in cmp.Animation.Scripts.Values)
+             {
+                 animations.Add(AnimationConversion.ExportAnimation(cmp, anm));
+             }
++
+             output.Animations = animations.ToArray();
+         }
+-        if(settings.IncludeTextures)
++
++        if (settings.IncludeTextures)
+             output.Images = MaterialExporter.ExportImages(resources, output.Materials);
+         return output.AsResult();
+     }
+ 
+ 
+-    public static EditResult<SimpleMesh.Model> Export(ModelFile mdl, SurFile sur, ModelExporterSettings settings, ResourceManager resources)
++    public static EditResult<SimpleMesh.Model> Export(ModelFile mdl, SurFile sur, ModelExporterSettings settings,
++        ResourceManager resources)
+     {
+         var exportNode = new ExportModelNode("Root")
+         {
+@@ -99,13 +107,13 @@ public static class ModelExporter
+             Construct = null,
+         };
+         var ag = new List<Geometry>();
+-        var output = new SimpleMesh.Model() {Materials = new Dictionary<string, Material>()};
++        var output = new SimpleMesh.Model() { Materials = new Dictionary<string, Material>() };
+         var processed = ProcessNode(exportNode, output, settings, resources, sur, ag, true);
+         if (processed.IsError)
+             return new EditResult<SimpleMesh.Model>(null, processed.Messages);
+         output.Geometries = ag.ToArray();
+         output.Roots = new[] { processed.Data };
+-        if(settings.IncludeTextures)
++        if (settings.IncludeTextures)
+             output.Images = MaterialExporter.ExportImages(resources, output.Materials);
+         return output.AsResult();
+     }
+@@ -147,6 +155,7 @@ public static class ModelExporter
+                 {
+                     geo.Vertices.Position[j] = Vector3.Transform(geo.Vertices.Position[j], inverse);
+                 }
++
+                 var hn = new ModelNode();
+                 hn.Geometry = geo;
+                 hn.Name = $"{def.Name}.{i}$hull";
+@@ -155,10 +164,12 @@ public static class ModelExporter
+                 n.Children.Add(hn);
+             }
+         }
++
+         return n;
+     }
+ 
+-    static EditResult<ModelNode> ProcessNode(ExportModelNode node, SimpleMesh.Model dest, ModelExporterSettings settings, ResourceManager res, SurFile? sur, List<Geometry> allGeos, bool is3db)
++    static EditResult<ModelNode> ProcessNode(ExportModelNode node, SimpleMesh.Model dest,
++        ModelExporterSettings settings, ResourceManager res, SurFile? sur, List<Geometry> allGeos, bool is3db)
+     {
+         var sm = new ModelNode();
+         sm.Name = node.Name;
+@@ -166,10 +177,12 @@ public static class ModelExporter
+         {
+             sm.Transform = new Transform3D(node.Construct.Origin, node.Construct.Rotation).Matrix();
+         }
++
+         if (node.Construct is FixConstruct)
+         {
+             sm.Properties["construct"] = "fix";
+         }
++
+         if (node.Construct is RevConstruct rev)
+         {
+             sm.Properties["construct"] = "rev";
+@@ -178,6 +191,7 @@ public static class ModelExporter
+             sm.Properties["offset"] = rev.Offset;
+             sm.Properties["axis_rotation"] = rev.AxisRotation;
+         }
++
+         if (node.Construct is PrisConstruct pris)
+         {
+             sm.Properties["construct"] = "pris";
+@@ -186,6 +200,7 @@ public static class ModelExporter
+             sm.Properties["offset"] = pris.Offset;
+             sm.Properties["axis_translation"] = pris.AxisTranslation;
+         }
++
+         if (node.Construct is SphereConstruct sphere)
+         {
+             sm.Properties["construct"] = "sphere";
+@@ -193,66 +208,85 @@ public static class ModelExporter
+             sm.Properties["max"] = new Vector3(sphere.Max1, sphere.Max2, sphere.Max3);
+             sm.Properties["offset"] = sphere.Offset;
+         }
++
+         if (node.Construct is LooseConstruct)
+         {
+             sm.Properties["construct"] = "loose";
+         }
+-        var l0 = GeometryFromRef(node.Name, 0, node.Model!.Levels[0]!, dest.Materials, allGeos, res);
+-        if (l0.IsError)
+-            return EditResult<ModelNode>.Error($"Unable to export node {node.Name} (Level 0)", l0.Messages);
+-        sm.Geometry = l0.Data;
+-        if (settings.IncludeLods)
++
++        if (node.Camera != null)
+         {
+-            for (int i = 1; i < node.Model.Levels.Length; i++)
+-            {
+-                var lod = new ModelNode() {Name = node.Name + "$lod" + i};
+-                var lodRes = GeometryFromRef(node.Name, i, node.Model.Levels[i]!, dest.Materials, allGeos, res);
+-                if (lodRes.IsError)
+-                    return EditResult<ModelNode>.Error($"Unable to export node {node.Name} (Level {i})",
+-                        lodRes.Messages);
+-                lod.Geometry = lodRes.Data;
+-                sm.Children.Add(lod);
+-            }
++            sm.Properties["camera"] = true;
++            sm.Properties["fovx"] = node.Camera.Fovx;
++            sm.Properties["fovy"] = node.Camera.Fovy;
++            sm.Properties["znear"] = node.Camera.Znear;
++            sm.Properties["zfar"] = node.Camera.Zfar;
+         }
+-        if (settings.IncludeHardpoints)
++        else if (node.Model != null)
+         {
+-            var id = is3db ? 0 : CrcTool.FLModelCrc(node.Name);
+-            foreach (var hp in node.Model.Hardpoints)
++            var l0 = GeometryFromRef(node.Name, 0, node.Model!.Levels[0]!, dest.Materials, allGeos, res);
++            if (l0.IsError)
++                return EditResult<ModelNode>.Error($"Unable to export node {node.Name} (Level 0)", l0.Messages);
++            sm.Geometry = l0.Data;
++            if (settings.IncludeLods)
+             {
+-                sm.Children.Add(FromHardpoint(hp, id, res, dest.Materials, allGeos, settings.IncludeHulls ? sur : null));
++                for (int i = 1; i < node.Model.Levels.Length; i++)
++                {
++                    var lod = new ModelNode() { Name = node.Name + "$lod" + i };
++                    var lodRes = GeometryFromRef(node.Name, i, node.Model.Levels[i]!, dest.Materials, allGeos, res);
++                    if (lodRes.IsError)
++                        return EditResult<ModelNode>.Error($"Unable to export node {node.Name} (Level {i})",
++                            lodRes.Messages);
++                    lod.Geometry = lodRes.Data;
++                    sm.Children.Add(lod);
++                }
+             }
+-        }
+-        if (settings.IncludeHulls && sur != null)
+-        {
+-            var hulls = sur.GetMesh(new ConvexShapeId(is3db ? 0 : CrcTool.FLModelCrc(node.Name), 0));
+-            for (int i = 0; i < hulls.Length; i++)
++
++            if (settings.IncludeHardpoints)
+             {
+-                var surnode = new ModelNode
++                var id = is3db ? 0 : CrcTool.FLModelCrc(node.Name);
++                foreach (var hp in node.Model.Hardpoints)
+                 {
+-                    Geometry = GeometryFromSur(node.Name + "." + i + "$hull", hulls[i], res, dest.Materials, allGeos),
+-                    Name = node.Name + "." + i + "$hull",
+-                    Properties =
++                    sm.Children.Add(FromHardpoint(hp, id, res, dest.Materials, allGeos,
++                        settings.IncludeHulls ? sur : null));
++                }
++            }
++
++            if (settings.IncludeHulls && sur != null)
++            {
++                var hulls = sur.GetMesh(new ConvexShapeId(is3db ? 0 : CrcTool.FLModelCrc(node.Name), 0));
++                for (int i = 0; i < hulls.Length; i++)
++                {
++                    var surnode = new ModelNode
+                     {
+-                        ["hull"] = true
+-                    }
+-                };
+-                sm.Children.Add(surnode);
++                        Geometry = GeometryFromSur(node.Name + "." + i + "$hull", hulls[i], res, dest.Materials,
++                            allGeos),
++                        Name = node.Name + "." + i + "$hull",
++                        Properties =
++                        {
++                            ["hull"] = true
++                        }
++                    };
++                    sm.Children.Add(surnode);
++                }
+             }
+-        }
+ 
+-        if (node.Model.VMeshWire != null && settings.IncludeWireframes)
+-        {
+-            var geo = GeometryFromVMeshWire(node.Name, node.Model.VMeshWire, res, dest.Materials, allGeos);
+-            if (geo != null)
++            if (node.Model.VMeshWire != null && settings.IncludeWireframes)
+             {
+-                var meshNode = new ModelNode
++                var geo = GeometryFromVMeshWire(node.Name, node.Model.VMeshWire, res, dest.Materials, allGeos);
++                if (geo != null)
+                 {
+-                    Geometry = GeometryFromVMeshWire(node.Name, node.Model.VMeshWire, res, dest.Materials, allGeos),
+-                    Name = node.Name + ".vmeshwire"
+-                };
+-                sm.Children.Add(meshNode);
++                    var meshNode = new ModelNode
++                    {
++                        Geometry = GeometryFromVMeshWire(node.Name, node.Model.VMeshWire, res, dest.Materials, allGeos),
++                        Name = node.Name + ".vmeshwire"
++                    };
++                    sm.Children.Add(meshNode);
++                }
+             }
+         }
++
++
+         foreach (var n in node.Children)
+         {
+             var child = ProcessNode(n, dest, settings, res, sur, allGeos, is3db);
+@@ -260,18 +294,23 @@ public static class ModelExporter
+                 return child;
+             sm.Children.Add(child.Data);
+         }
++
+         return sm.AsResult();
+     }
+ 
+ 
+-    static Geometry GeometryFromSur(string name, ConvexMesh ms, ResourceManager resources, Dictionary<string, Material> materials, List<Geometry> geometries)
++    static Geometry GeometryFromSur(string name, ConvexMesh ms, ResourceManager resources,
++        Dictionary<string, Material> materials, List<Geometry> geometries)
+     {
+         var va = new VertexArray(VertexAttributes.None, ms.Vertices.Length);
+         for (int i = 0; i < ms.Vertices.Length; i++)
+             va.Position[i] = ms.Vertices[i];
+         var geo = new Geometry(va, Indices.FromBuffer(ms.Indices.Select(x => (uint)x).ToArray()));
+         geo.Name = name;
+-        geo.Groups = [new TriangleGroup(MaterialExporter.GetMaterial(0, resources, materials)) { IndexCount = ms.Indices.Length }];
++        geo.Groups =
++        [
++            new TriangleGroup(MaterialExporter.GetMaterial(0, resources, materials)) { IndexCount = ms.Indices.Length }
++        ];
+         return geo;
+     }
+ 
+@@ -286,12 +325,14 @@ public static class ModelExporter
+             FLLog.Error("Exporter", $"Could not find VMeshData for VMeshWire {name}");
+             return null;
+         }
++
+         for (int i = 0; i < wire.NumIndices; i++)
+         {
+             var idx = wire.VertexOffset + wire.Indices[i];
+-            var vert = new Vertex() {Position = mesh.GetPosition(idx)};
++            var vert = new Vertex() { Position = mesh.GetPosition(idx) };
+             gb.Add(ref vert);
+         }
++
+         gb.AddGroup(MaterialExporter.GetMaterial(0, resources, materials));
+         var geo = gb.Finish();
+         geo.Name = $"{name}.wire.mesh";
+@@ -301,7 +342,8 @@ public static class ModelExporter
+     }
+ 
+     // Get just the referenced geometry from the VMeshData
+-    static EditResult<Geometry?> GeometryFromRef(string name, int level, VMeshRef vms, Dictionary<string,Material> materials, List<Geometry> geometries, ResourceManager resources)
++    static EditResult<Geometry?> GeometryFromRef(string name, int level, VMeshRef vms,
++        Dictionary<string, Material> materials, List<Geometry> geometries, ResourceManager resources)
+     {
+         var mesh = resources.FindMeshData(vms.MeshCrc);
+         if (vms.MeshCrc == 0)
+@@ -342,10 +384,13 @@ public static class ModelExporter
+                 {
+                     vert.Texture1 = mesh.GetTexCoord(idx, 0);
+                 }
++
+                 gb.Add(ref vert);
+             }
++
+             gb.AddGroup(MaterialExporter.GetMaterial(m.MaterialCrc, resources, materials));
+         }
++
+         var geo = gb.Finish();
+         geo.Name = $"{name}.{(int)mesh.VertexFormat.FVF}.level{level}";
+         geometries.Add(geo);
+@@ -357,6 +402,7 @@ public static class ModelExporter
+         public string Name = name;
+         public List<ExportModelNode> Children = new();
+         public ModelFile? Model;
++        public CmpCameraInfo? Camera;
+         public AbstractConstruct? Construct;
+     }
+ }
+diff --git a/src/LibreLancer/Utf/Cmp/CmpCameraInfo.cs b/src/LibreLancer/Utf/Cmp/CmpCameraInfo.cs
+index 659f607de..21700aed6 100644
+--- a/src/LibreLancer/Utf/Cmp/CmpCameraInfo.cs
++++ b/src/LibreLancer/Utf/Cmp/CmpCameraInfo.cs
+@@ -8,10 +8,11 @@ namespace LibreLancer.Utf.Cmp
+ {
+     public class CmpCameraInfo
+     {
+-        public float Fovx;
+-        public float Fovy;
+-        public float Znear;
+-        public float Zfar;
++        // Some defaults just in case.
++        public float Fovx = 0.6451778f;
++        public float Fovy = 0.514412f;
++        public float Znear = 0.1f;
++        public float Zfar = 6f;
+ 
+         public CmpCameraInfo(IntermediateNode node)
+         {
+diff --git a/src/LibreLancer/Utf/Cmp/Part.cs b/src/LibreLancer/Utf/Cmp/Part.cs
+index 57cd546d5..a233605d8 100644
+--- a/src/LibreLancer/Utf/Cmp/Part.cs
++++ b/src/LibreLancer/Utf/Cmp/Part.cs
+@@ -32,24 +32,23 @@ namespace LibreLancer.Utf.Cmp
+         {
+             get
+             {
+-                field ??= models[fileName];
++                if (field == null)
++                {
++                    models.TryGetValue(fileName, out field);
++                }
+                 return field;
+             }
+         }
+ 
+-        private bool cameraTried = false;
+         public CmpCameraInfo? Camera
+         {
+             get
+             {
+-                if (field != null || cameraTried)
++                if (field == null)
+                 {
+-                    return field;
++                    cameras.TryGetValue(fileName, out field);
+                 }
+ 
+-                cameraTried = true;
+-                cameras.TryGetValue(fileName, out field);
+-
+                 return field;
+             }
+         }
+diff --git a/src/Editor/LancerEdit/GameContent/Popups/IdsSearch.cs b/src/Editor/LancerEdit/GameContent/Popups/IdsSearch.cs
+index b623c376e..efa7f96a5 100644
+--- a/src/Editor/LancerEdit/GameContent/Popups/IdsSearch.cs
++++ b/src/Editor/LancerEdit/GameContent/Popups/IdsSearch.cs
+@@ -221,7 +221,8 @@ public class IdsSearch : PopupWindow
+ 
+     private string EllipseIfNeeded(string s)
+     {
+-        if (s.Length > MAX_PREV_LEN) s = s.Substring(0, MAX_PREV_LEN) + "...";
+-        return s.Replace("%", "%%");
++        if (s.Length > MAX_PREV_LEN)
++            return s.Substring(0, MAX_PREV_LEN) + "...";
++        return s;
+     }
+ }
+diff --git a/src/Editor/LancerEdit/ScriptRunner.cs b/src/Editor/LancerEdit/ScriptRunner.cs
+index 5a099da95..907dc4346 100644
+--- a/src/Editor/LancerEdit/ScriptRunner.cs
++++ b/src/Editor/LancerEdit/ScriptRunner.cs
+@@ -264,14 +264,13 @@ namespace LancerEdit
+             var proc = Process.Start(pi);
+             proc.EnableRaisingEvents = true;
+             doUpdate = true;
+-            static string S(string s) => s?.Replace("%", "%%") ?? "";
+             proc.OutputDataReceived += (sender, eventArgs) =>
+             {
+-                main.QueueUIThread(() => lines.Add(S(eventArgs.Data)));
++                main.QueueUIThread(() => lines.Add(eventArgs.Data));
+             };
+             proc.ErrorDataReceived += (sender, eventArgs) =>
+             {
+-                main.QueueUIThread(() => lines.Add(S(eventArgs.Data)));
++                main.QueueUIThread(() => lines.Add(eventArgs.Data));
+             };
+             proc.Exited += (sender, eventArgs) =>
+             {
+diff --git a/src/Editor/LibreLancer.ContentEdit/BlenderExport.py b/src/Editor/LibreLancer.ContentEdit/BlenderExport.py
+index 40f59ca2e..3ce6c2a7c 100644
+--- a/src/Editor/LibreLancer.ContentEdit/BlenderExport.py
++++ b/src/Editor/LibreLancer.ContentEdit/BlenderExport.py
+@@ -77,5 +77,5 @@ bpy.context.view_layer.layer_collection.children["Hardpoints"].exclude = True
+ bpy.context.view_layer.layer_collection.children["LODs"].exclude = True
+ bpy.context.view_layer.layer_collection.children["Hulls"].exclude = True
+ bpy.context.view_layer.layer_collection.children["Wireframes"].exclude = True
+-bpy.context.scene.view_settings.view_transform = 'Filmic'
++#bpy.context.scene.view_settings.view_transform = 'Filmic' No longer valid enum (tested 5.2)
+ bpy.ops.wm.save_as_mainfile(filepath=BLEND_FILEPATH)
+\ No newline at end of file
+diff --git a/src/Editor/LancerEdit/Model/AnimationImportPopup.cs b/src/Editor/LancerEdit/Model/AnimationImportPopup.cs
+new file mode 100644
+index 000000000..fd88c3320
+--- /dev/null
++++ b/src/Editor/LancerEdit/Model/AnimationImportPopup.cs
+@@ -0,0 +1,201 @@
++using System;
++using System.Collections.Generic;
++using System.Linq;
++using System.Numerics;
++using ImGuiNET;
++using LancerEdit.GameContent.Lookups;
++using LibreLancer.ContentEdit.Model;
++using LibreLancer.ImUI;
++using LibreLancer.Utf;
++using LibreLancer.Utf.Anm;
++
++namespace LancerEdit;
++
++public class AnimationImportPopup : PopupWindow
++{
++    public override string Title { get; set;  } = "Add Animations from File";
++
++    public override Vector2 InitSize => new Vector2(500,300) * ImGuiHelper.Scale;
++
++    class SelectedScript(Script sc)
++    {
++        public bool Selected = true;
++        public Script Script = sc;
++    }
++
++    class ConstructMap(string con)
++    {
++        public string Construct = con;
++        public AbstractConstruct? Target;
++    }
++
++    private List<SelectedScript> scripts = new();
++    private List<ConstructMap> allMapped = new();
++    private List<ConstructMap> selectedMapped = new();
++    private ObjectLookup<AbstractConstruct> targets;
++    private bool canImport = true;
++    private int selectionCount;
++    private Action<Script[]> onAdd;
++
++
++    public AnimationImportPopup(AnmFile source, AbstractConstruct[] tgtConstructs, Action<Script[]> onAdd)
++    {
++        this.onAdd = onAdd;
++
++        HashSet<string> allCons = new(StringComparer.OrdinalIgnoreCase);
++        foreach (var sc in source.Scripts.Values)
++        {
++            foreach (var jm in sc.JointMaps)
++            {
++                allCons.Add(jm.ChildName);
++            }
++            scripts.Add(new(sc));
++        }
++        foreach (var c in allCons)
++        {
++            var mapping = new ConstructMap(c);
++            mapping.Target =
++                tgtConstructs.FirstOrDefault(x => x.ChildName.Equals(c, StringComparison.OrdinalIgnoreCase));
++            allMapped.Add(mapping);
++        }
++        allMapped.Sort((x, y) => string.Compare(x.Construct, y.Construct, StringComparison.Ordinal));
++        selectedMapped.AddRange(allMapped);
++        targets = new(tgtConstructs, x => x.ChildName);
++        selectionCount = scripts.Count;
++        ComputeAllowed();
++    }
++
++    void ComputeAllowed()
++    {
++        canImport = true;
++        foreach (var m in selectedMapped)
++        {
++            if (m.Target == null)
++            {
++                canImport = false;
++                return;
++            }
++        }
++    }
++
++    void ReloadConstructMap()
++    {
++        selectionCount = 0;
++        selectedMapped = new();
++        HashSet<string> allCons = new(StringComparer.OrdinalIgnoreCase);
++        foreach (var sc in scripts)
++        {
++            if (!sc.Selected)
++                continue;
++            selectionCount++;
++            foreach (var jm in sc.Script.JointMaps)
++            {
++                allCons.Add(jm.ChildName);
++            }
++        }
++        foreach (var m in allMapped)
++        {
++            if(allCons.Contains(m.Construct))
++                selectedMapped.Add(m);
++        }
++        ComputeAllowed();
++    }
++
++    void ScriptsColumn()
++    {
++        foreach (var sc in scripts)
++        {
++            if (ImGui.Checkbox(sc.Script.Name, ref sc.Selected))
++            {
++                ReloadConstructMap();
++            }
++        }
++    }
++
++    void ConstructsColumn()
++    {
++        if (ImGui.BeginTable("##cons", 2, ImGuiTableFlags.BordersInner | ImGuiTableFlags.Resizable | ImGuiTableFlags.SizingFixedFit))
++        {
++            ImGui.TableSetupColumn("Source");
++            ImGui.TableSetupColumn("Target", ImGuiTableColumnFlags.WidthStretch);
++            ImGui.TableHeadersRow();
++            foreach (var sc in selectedMapped)
++            {
++                ImGui.PushID(sc.Construct);
++                ImGui.TableNextRow();
++                ImGui.TableNextColumn();
++                ImGui.Text(sc.Construct);
++                ImGui.TableNextColumn();
++                ImGui.SetNextItemWidth(-1);
++                targets.Draw("##tgt", ref sc.Target, (_, _) => ComputeAllowed());
++                ImGui.PopID();
++            }
++            ImGui.EndTable();
++        }
++    }
++
++    Script[] CreateScripts()
++    {
++        List<Script> newScripts = new();
++        var mapping = new Dictionary<string, AbstractConstruct>(StringComparer.OrdinalIgnoreCase);
++        foreach (var m in selectedMapped)
++        {
++            mapping[m.Construct] = m.Target!;
++        }
++        foreach (var sc in scripts)
++        {
++            if (!sc.Selected)
++                continue;
++            var ns = new Script(sc.Script.Name);
++            foreach (var jm in sc.Script.JointMaps)
++            {
++                var njm = new JointMap();
++                var mapped = mapping[jm.ChildName];
++                njm.ChildName = mapped.ChildName;
++                njm.ParentName = mapped.ParentName;
++                njm.Channel = jm.Channel;
++                var buf = new EditableAnmBuffer(ref njm.Channel);
++                njm.Channel.SetBuffer(buf);
++                ns.JointMaps.Add(njm);
++            }
++            newScripts.Add(ns);
++        }
++        return newScripts.ToArray();
++    }
++
++    public override void Draw(bool appearing)
++    {
++        if (ImGuiExt.Button("Add Selected", canImport && selectionCount > 0))
++        {
++            onAdd(CreateScripts());
++            ImGui.CloseCurrentPopup();
++        }
++        if(!canImport)
++            ImGui.SetItemTooltip("Not all constructs mapped.");
++        else if (selectionCount <= 0)
++            ImGui.SetItemTooltip("No scripts selected.");
++        if (ImGui.BeginTable("##items", 2, ImGuiTableFlags.Borders | ImGuiTableFlags.SizingStretchProp | ImGuiTableFlags.Resizable))
++        {
++            ImGui.TableSetupColumn("Scripts", 0, 0.35f);
++            ImGui.TableSetupColumn("Constructs", ImGuiTableColumnFlags.WidthStretch, 0.65f);
++            ImGui.TableHeadersRow();
++            ImGui.TableNextRow();
++            ImGui.TableNextColumn();
++            if (ImGui.BeginChild("Scripts"))
++            {
++                ScriptsColumn();
++            }
++            ImGui.EndChild();
++            ImGui.TableNextColumn();
++            if (selectionCount > 0)
++            {
++                if (ImGui.BeginChild("Constructs"))
++                {
++                    ConstructsColumn();
++                }
++                ImGui.EndChild();
++            }
++            ImGui.EndTable();
++        }
++    }
++}
+diff --git a/src/Editor/LancerEdit/Model/ModelViewer.Animations.cs b/src/Editor/LancerEdit/Model/ModelViewer.Animations.cs
+index 9abf23838..bb58f0191 100644
+--- a/src/Editor/LancerEdit/Model/ModelViewer.Animations.cs
++++ b/src/Editor/LancerEdit/Model/ModelViewer.Animations.cs
+@@ -1,11 +1,13 @@
+ using System;
+ using System.Collections.Generic;
++using System.IO;
+ using System.Linq;
+ using System.Numerics;
+ using ImGuiNET;
+ using LibreLancer;
+ using LibreLancer.ContentEdit;
+ using LibreLancer.ContentEdit.Model;
++using LibreLancer.Dialogs;
+ using LibreLancer.ImUI;
+ using LibreLancer.Utf;
+ using LibreLancer.Utf.Anm;
+@@ -36,8 +38,10 @@ partial class ModelViewer
+         var isOpen = ImGui.CollapsingHeader("##Header", ImGuiTreeNodeFlags.AllowOverlap);
+         ImGui.SameLine();
+         if (ImGui.Button($"{Icons.Play}")) act = AnimEditAction.Play;
++        ImGui.SetItemTooltip("Play");
+         ImGui.SameLine();
+         if (ImGui.Button($"{Icons.Backward}")) act = AnimEditAction.Backwards;
++        ImGui.SetItemTooltip("Reverse");
+         ImGui.PopStyleVar();
+         ImGui.SameLine();
+         ImGui.Text(name);
+@@ -78,9 +82,9 @@ partial class ModelViewer
+     void AnimationPanel()
+     {
+         var anm = ((CmpFile)drawable).Animation;
+-        if (ImGui.Button("Reset")) animator.ResetAnimations();
++        if (ImGui.Button($"{Icons.SyncAlt} Reset")) animator.ResetAnimations();
+         ImGui.SameLine();
+-        if (ImGui.Button("New"))
++        if (ImGui.Button($"{Icons.PlusCircle} New"))
+         {
+             var c = NameInputConfig.Nickname("New Animation", x => anm.Scripts.ContainsKey(x.Trim()));
+             c.Filter = AnimNameFilter;
+@@ -93,12 +97,69 @@ partial class ModelViewer
+         }
+ 
+         ImGui.SameLine();
+-        if (ImGuiExt.Button("Apply", _isDirtyAnm))
++        if (ImGuiExt.Button($"{Icons.Check} Apply", _isDirtyAnm))
+         {
+             SaveAnimations();
+             _isDirtyAnm = false;
+             parent.DirtyCountAnm--;
+         }
++
++        if (ImGui.Button($"{Icons.FileImport} Add From File"))
++        {
++            FileDialog.Open(x =>
++            {
++                if (x != null)
++                {
++                    try
++                    {
++                        using var stream = File.OpenRead(x);
++                        var anmFile = new AnmFile(x, stream);
++                        if (anmFile.Scripts.Count == 0)
++                        {
++                            popups.MessageBox("Empty File", "File contains no animation data.");
++                            return;
++                        }
++                        anmFile.Buffer.Commit();
++
++                        popups.OpenPopup(new AnimationImportPopup(anmFile, IterateConstructs().ToArray(), scripts =>
++                        {
++                            foreach (var sc in scripts)
++                            {
++                                string n = sc.Name;
++                                int i = 1;
++                                while (anm.Scripts.ContainsKey(n))
++                                {
++                                    n = $"{sc.Name}.{i++}";
++                                }
++                                sc.Name = n;
++                                anm!.Scripts[sc.Name] = sc;
++                            }
++                            OnDirtyAnm();
++                        }));
++                    }
++                    catch (Exception e)
++                    {
++                        popups.MessageBox("Error", e.ToString());
++                    }
++                }
++            }, AppFilters.UtfFilters);
++        }
++        ImGui.SameLine();
++        if (ImGuiExt.Button($"{Icons.FileExport} Save .anm", (anm?.Scripts.Count ?? 0) > 0))
++        {
++            FileDialog.Save(x =>
++            {
++                if (x != null)
++                {
++                    var output = new EditableUtf();
++                    var destNode = new LUtfNode() { Name = "Animation", Parent = output.Root };
++                    output.Root.Children!.Add(destNode);
++                    AnimationWriter.WriteAnimations(destNode, anm!);
++                    var res = output.Save(x);
++                    _window.ResultMessages(res);
++                }
++            }, AppFilters.AnmFilters);
++        }
+         ImGui.Separator();
+         int uniqueid = 0;
+         foreach (var sc in anm.Scripts)
+diff --git a/src/Editor/LibreLancer.ContentEdit/AppFilters.cs b/src/Editor/LibreLancer.ContentEdit/AppFilters.cs
+index 506fadb20..3d346d651 100644
+--- a/src/Editor/LibreLancer.ContentEdit/AppFilters.cs
++++ b/src/Editor/LibreLancer.ContentEdit/AppFilters.cs
+@@ -22,6 +22,10 @@ public class AppFilters
+             new FileFilter("Ale Files", "ale")
+         );
+ 
++        public static readonly FileDialogFilters AnmFilters = new(
++            new FileFilter("Anm Files", "anm")
++        );
++
+         public static readonly FileDialogFilters IniFilters = new FileDialogFilters(
+             new FileFilter("Ini Files", "ini")
+         );
+diff --git a/src/LibreLancer/Utf/AbstractConstruct.cs b/src/LibreLancer/Utf/AbstractConstruct.cs
+index d14739383..848e39f0e 100644
+--- a/src/LibreLancer/Utf/AbstractConstruct.cs
++++ b/src/LibreLancer/Utf/AbstractConstruct.cs
+@@ -61,5 +61,15 @@ namespace LibreLancer.Utf
+         }
+         public abstract void Reset();
+         public abstract void Update(ChannelFloat distance, Quaternion quat);
++
++        private bool usedError = false;
++
++        protected void UpdateError()
++        {
++            if (usedError)
++                return;
++            usedError = true;
++            FLLog.Error("Cmp", $"Tried to move construct {ChildName} with unsupported animation");
++        }
+     }
+ }
+diff --git a/src/LibreLancer/Utf/Anm/AnmFile.cs b/src/LibreLancer/Utf/Anm/AnmFile.cs
+index c5a0b18ad..b202259db 100644
+--- a/src/LibreLancer/Utf/Anm/AnmFile.cs
++++ b/src/LibreLancer/Utf/Anm/AnmFile.cs
+@@ -28,7 +28,6 @@ namespace LibreLancer.Utf.Anm
+                     case "animation":
+                         anm.Load(node, strings);
+                         break;
+-                    default: throw new Exception("Invalid Node in anm root: " + node.Name);
+                 }
+             }
+         }
+@@ -44,7 +43,6 @@ namespace LibreLancer.Utf.Anm
+                     case "animation":
+                         Load(node, table);
+                         break;
+-                    default: throw new Exception("Invalid Node in anm root: " + node.Name);
+                 }
+             }
+         }
+diff --git a/src/LibreLancer/Utf/FixConstruct.cs b/src/LibreLancer/Utf/FixConstruct.cs
+index 7b660d0b6..cdea0ed1c 100644
+--- a/src/LibreLancer/Utf/FixConstruct.cs
++++ b/src/LibreLancer/Utf/FixConstruct.cs
+@@ -40,9 +40,11 @@ namespace LibreLancer.Utf
+         {
+             fixtransform = new Transform3D(Origin, Rotation);
+         }
++
++
+         public override void Update(ChannelFloat distance, Quaternion quat)
+         {
+-            throw new NotImplementedException();
++            UpdateError();
+         }
+     }
+ }
+diff --git a/src/LibreLancer/Utf/LooseConstruct.cs b/src/LibreLancer/Utf/LooseConstruct.cs
+index f390d4af7..2692cb388 100644
+--- a/src/LibreLancer/Utf/LooseConstruct.cs
++++ b/src/LibreLancer/Utf/LooseConstruct.cs
+@@ -33,7 +33,7 @@ namespace LibreLancer.Utf
+         }
+         public override void Update(ChannelFloat distance, Quaternion quat)
+         {
+-            throw new NotImplementedException();
++            UpdateError();
+         }
+     }
+ }
+diff --git a/src/Editor/LibreLancer.ContentEdit/Model/ImportedModel.cs b/src/Editor/LibreLancer.ContentEdit/Model/ImportedModel.cs
+index e7c169266..eccae2a52 100644
+--- a/src/Editor/LibreLancer.ContentEdit/Model/ImportedModel.cs
++++ b/src/Editor/LibreLancer.ContentEdit/Model/ImportedModel.cs
+@@ -194,6 +194,14 @@ public class ImportedModel(string name, string copyright, ImportedModelNode root
+         return true;
+     }
+ 
++    static bool TryGetVector3(ModelNode node, string name, out Vector3 val)
++    {
++        val = Vector3.Zero;
++        if (!node.Properties.TryGetValue(name, out var pv))
++            return false;
++        return pv.AsVector3(out val);
++    }
++
+     static (AbstractConstruct, bool) GetConstruct(ModelNode node, string childName, string parentName)
+     {
+         var rot = node.Transform.ExtractRotation();
+@@ -217,7 +225,8 @@ public class ImportedModel(string name, string copyright, ImportedModelNode root
+             {
+ 
+                 if(node.Properties.TryGetValue("offset", out pv))  pv.AsVector3(out offset);
+-                if (!node.Properties.TryGetValue("axis_rotation", out pv) || !pv.AsVector3(out axis))
++                if (!TryGetVector3(node, "axis_rotation", out axis) &&
++                    !TryGetVector3(node, "axis", out axis))
+                     axis = Vector3.UnitY;
+                 else
+                     propsSet = true;
+@@ -249,7 +258,8 @@ public class ImportedModel(string name, string copyright, ImportedModelNode root
+                     propsSet = true;
+                     pv.AsVector3(out offset);
+                 }
+-                if (!node.Properties.TryGetValue("axis_translation", out pv) || !pv.AsVector3(out axis))
++                if (!TryGetVector3(node, "axis_translation", out axis) &&
++                    !TryGetVector3(node, "axis", out axis))
+                     axis = Vector3.UnitY;
+                 else
+                     propsSet = true;
+--- a/docs/upstream-sync-status-2026-10-15.md
++++ b/docs/upstream-sync-status-2026-10-15.md
+@@ -8,7 +8,7 @@
+ 
+ ## Status
+ 
+-Der aktuelle Codeberg-Branch wurde per Git eingelesen und mit dem Client-Branch verglichen. Es wurden noch keine Upstream-Commits in den Client integriert. Die Client-Änderungen liegen weiterhin im bestehenden, stark veränderten Arbeitsbaum; für die eigentliche Übernahme ist ein isolierter sauberer Arbeitsbaum erforderlich.
++Der aktuelle Codeberg-Branch wurde per Git eingelesen und mit dem Client-Branch verglichen. Sechs der 23 Upstream-Commits wurden als fokussierter Patch `2139` in den Client-Overlay portiert. Es gab keinen Merge, Rebase oder Cherry-pick; der vorhandene Arbeitsbaum und die Fork-Basis blieben erhalten.
+ 
+ Seit dem gemeinsamen Vorfahren enthält Codeberg 23 Commits, der Client 183 nur lokal vorhandene Commits. Die Historien sind damit deutlich auseinander gelaufen. Ein direktes Merge oder Rebase in den bestehenden Client-Arbeitsbaum wäre nicht vertretbar. Änderungen müssen nach Funktion und Konflikten geprüft und in die Client-Patchstruktur portiert werden.
+ 
+@@ -44,20 +44,19 @@
+ 
+ ## Portierungsbewertung
+ 
+-- **Zuerst gezielt prüfen:** SDL3-Lebensdauerfixes (`709ce418b`, `11221f323`), beschädigte Texturen (`2695f4c2f`), Build-Abhängigkeit (`803fd40c6`), Blender-Export und ScriptRunner. Diese Änderungen können konkrete Stabilitäts- oder Buildfehler beheben, müssen aber gegen die bereits geänderten Client-Dateien geprüft werden.
+-- **Editor-Änderungen einzeln portieren:** Model-Editor Undo/Modi, Animationen, DefaultMaterialMap und Kameraexport betreffen LancerEdit und haben voraussichtlich Konflikte mit den lokalen Editor-Erweiterungen.
++- **Portiert in `2139-codeberg-2026-10-15-import-editor-port.patch`:** `2695f4c2f` (beschädigte Texturen), `8ae9b66db` (Kameraeigenschaften im ModelExporter), `520f28f86` (Formatzeichen in LancerEdit), `03fc55937` (Blender-View-Transform), `6e17cb2da` (Animationsimport mit Retargeting) und `1dc5b39b2` (Importer-`axis`). Die sechs Commits ließen sich in ihrer Upstream-Diff-Form gemeinsam auf den bestehenden Overlay-Stand anwenden.
++- **Noch manuell zu portieren oder abzugleichen:** SDL3-Lebensdauerfixes (`709ce418b`, `11221f323`), ScriptRunner-Null-Logging (`edd48c878`), NuGet-Buildfix (`803fd40c6`), Model-Editor Undo/Modi und DefaultMaterialMap (`80632b5d3`, `078f9c5e6`). Die direkten Upstream-Patches passen nicht sauber auf den aktuellen Overlay-Stand; Kompatibilität und bestehende lokale Änderungen müssen geprüft werden.
+ - **Netzwerkänderungen separat bewerten:** Die Login-Handshake- und Begrenzungsänderungen (`7c20faf24` bis `fa3cc93bd`) greifen in Anmeldung und Netzwerkprotokoll ein. Vor einer Portierung müssen sie mit Gateway-Authentifizierung, Clusterbetrieb und den lokalen Protokollverträgen abgeglichen werden.
+ - **Trade-Planner vergleichen:** Die zwei älteren Commits müssen gegen den bereits lokal portierten und angepassten Trade-Planner geprüft werden; nicht blind übernehmen.
+ - **Dokumentations-/Repository-Metadaten:** README-Einladungslink und Submodul-URLs sind vor Übernahme auf Relevanz für den Lancer-Nexus-Fork zu prüfen.
+ 
+ ## Nächste Schritte
+ 
+-1. Einen sauberen isolierten Vergleichs-Worktree auf Basis des gemeinsamen Vorfahren anlegen; den aktuellen Client-Arbeitsbaum unverändert lassen.
+-2. Die 23 Commits datei- und funktionsbezogen gegen die lokalen Änderungen prüfen und bereits äquivalente Änderungen markieren.
+-3. Geeignete Änderungen einzeln in neue oder bestehende fokussierte Client-Patches portieren und in `patches/series` registrieren.
+-4. Overlay-Rekonstruktion ausführen; anschließend die betroffenen Builds, Tests und Laufzeitpfade prüfen.
+-5. Diesen Bericht nach jeder Portierungsrunde mit Commit, Patch, Prüfergebnis und offenen Punkten aktualisieren.
++1. Die verbleibenden Commits einzeln gegen Overlay und Gateway-/Clusterverträge prüfen; Konflikte manuell auflösen statt Upstream-Dateien blind zu übernehmen.
++2. Geeignete Änderungen in fokussierten Client-Patches portieren und in `patches/series` registrieren.
++3. Overlay-Rekonstruktion ausführen; anschließend betroffene Builds, Tests und Laufzeitpfade prüfen.
++4. Den Bericht nach jeder Portierungsrunde mit Commit, Patch, Prüfergebnis und offenen Punkten aktualisieren.
+ 
+ ## Prüfumfang und Grenzen
+ 
+-Geprüft wurden die Git-Referenzen, der gemeinsame Vorfahr, die Commit-Anzahl und die Commitliste von Codeberg `main`. Es fand in diesem Schritt kein Merge, Rebase, Cherry-pick, Quellcodeport oder Build/Test statt. Der Bericht sagt daher nichts darüber aus, ob eine einzelne Änderung bereits funktional im Client vorhanden ist; das muss der Datei- und Verhaltenvergleich klären.
++Geprüft wurden die Git-Referenzen, der gemeinsame Vorfahr, die Commit-Anzahl und die Commitliste von Codeberg `main`. Für die sechs portierten Commits bestanden `git apply --check` und anschließend die vollständige Overlay-Rekonstruktion. Ein Build, automatisierte Tests und Laufzeitprüfungen für Patch 2139 wurden noch nicht ausgeführt; die funktionale Verifikation bleibt offen.
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -139,3 +139,4 @@
+ | 2135 | Add a live in-game toggle for sun-colored ambient lighting |
+ | 2136 | Apply sun ambient toggle immediately while paused for controlled A/B captures |
+ | 2137 | Record same-session HI02 sun ambient live-toggle evidence and remaining calibration work |
++| 2139 | Port six Codeberg updates for texture safety, model import/export and editor tooling |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -140,1 +140,2 @@
+ client 2138-document-codeberg-upstream-sync-status.patch
++client 2139-codeberg-2026-10-15-import-editor-port.patch

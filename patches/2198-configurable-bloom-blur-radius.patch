@@ -1,0 +1,228 @@
+--- a/src/LibreLancer.Base/Graphics/BloomPass.cs
++++ b/src/LibreLancer.Base/Graphics/BloomPass.cs
+@@ -16,8 +16,9 @@
+ 
+     public BloomPass(RenderContext context) => this.context = context;
+ 
+-    public Texture2D? Process(Texture2D source, float threshold)
++    public Texture2D? Process(Texture2D source, float threshold, float radius)
+     {
++        radius = float.IsFinite(radius) ? System.Math.Clamp(radius, 0.25f, 4f) : 1f;
+         if (failed)
+             return null;
+         var targetWidth = System.Math.Max(1, source.Width / 4);
+@@ -46,8 +47,8 @@
+         {
+             Draw(context.BloomExtractShader, source, extracted!, new Vector4(
+                 1f / source.Width, 1f / source.Height, threshold, 0.5f));
+-            Draw(context.BloomBlurShader, extracted!.Texture, horizontal!, new Vector4(1f / width, 0, 0, 0));
+-            Draw(context.BloomBlurShader, horizontal!.Texture, blurred!, new Vector4(0, 1f / height, 0, 0));
++            Draw(context.BloomBlurShader, extracted!.Texture, horizontal!, new Vector4(1f / width, 0, radius, 0));
++            Draw(context.BloomBlurShader, horizontal!.Texture, blurred!, new Vector4(0, 1f / height, radius, 0));
+         }
+         catch (System.Exception ex) when (ex is System.InvalidOperationException or System.NotSupportedException)
+         {
+--- a/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
++++ b/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
+@@ -17,6 +17,7 @@
+     public bool BloomEnabled { get; set; }
+     public float BloomThreshold { get; set; } = 1f;
+     public float BloomStrength { get; set; } = 0.18f;
++    public float BloomRadius { get; set; } = 1f;
+     public Action<SystemRenderSubpass, bool>? GpuSubpassMarker { get; set; }
+     public int Samples => msaa?.Samples ?? 1;
+     public SystemRenderAttachmentFormat MultisampleStorageFormat => msaa?.RequestedColorFormat switch
+@@ -378,7 +379,7 @@
+ 
+     private void ToneMap(Texture2D source, RenderTarget? target, int width, int height, Point offset)
+     {
+-        var bloomTexture = BloomEnabled && bloom != null ? bloom.Process(source, BloomThreshold) : null;
++        var bloomTexture = BloomEnabled && bloom != null ? bloom.Process(source, BloomThreshold, BloomRadius) : null;
+         TonemapPass.Draw(renderContext, source, target, width, height, offset, bloomTexture,
+             bloomTexture != null ? BloomStrength : 0f);
+     }
+--- a/src/LibreLancer.Base/Shaders/BloomBlur.frag.hlsl
++++ b/src/LibreLancer.Base/Shaders/BloomBlur.frag.hlsl
+@@ -4,7 +4,7 @@
+ 
+ float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target0
+ {
+-    float2 stepUv = BlurParameters.xy;
++    float2 stepUv = BlurParameters.xy * BlurParameters.z;
+     float4 color = SourceTexture.Sample(SourceSampler, uv) * 0.2270270270;
+     color += SourceTexture.Sample(SourceSampler, uv + stepUv * 1.3846153846) * 0.3162162162;
+     color += SourceTexture.Sample(SourceSampler, uv - stepUv * 1.3846153846) * 0.3162162162;
+--- a/src/LibreLancer/Render/IRendererSettings.cs
++++ b/src/LibreLancer/Render/IRendererSettings.cs
+@@ -22,6 +22,7 @@
+     bool RenderShadows => false;
+     float BloomThreshold => 1f;
+     float BloomStrength => 0.18f;
++    float BloomRadius => 1f;
+     bool RenderProjectileBeams => true;
+     bool RenderParticleEffects => true;
+     bool RenderTransientEffectLights => true;
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -492,6 +492,7 @@
+                     msaa.BloomEnabled = hdrRequested && Settings.RenderBloom;
+                     msaa.BloomThreshold = Settings.BloomThreshold;
+                     msaa.BloomStrength = Settings.BloomStrength;
++                    msaa.BloomRadius = Settings.BloomRadius;
+                     rstate.PushViewport(new Rectangle(0, 0, renderWidth, renderHeight));
+                     aaViewportPushed = true;
+                     aaScissorPushed = rstate.PushScissor(new Rectangle(0, 0, renderWidth, renderHeight), false);
+--- a/src/LibreLancer/GameSettings.cs
++++ b/src/LibreLancer/GameSettings.cs
+@@ -69,6 +69,8 @@
+         public float BloomThreshold = 1f;
+         [Entry("render_bloom_strength")]
+         public float BloomStrength = 0.18f;
++        [Entry("render_bloom_radius")]
++        public float BloomRadius = 1f;
+         [Entry("render_projectile_beams")]
+         public bool RenderProjectileBeams = true;
+         [Entry("render_particle_effects")]
+@@ -129,6 +131,7 @@
+         bool IRendererSettings.RenderShadows => RenderShadows;
+         float IRendererSettings.BloomThreshold => BloomThreshold;
+         float IRendererSettings.BloomStrength => BloomStrength;
++        float IRendererSettings.BloomRadius => BloomRadius;
+         bool IRendererSettings.RenderProjectileBeams => RenderProjectileBeams;
+         bool IRendererSettings.RenderParticleEffects => RenderParticleEffects;
+         bool IRendererSettings.RenderTransientEffectLights => RenderTransientEffectLights;
+@@ -180,6 +183,7 @@
+             writer.WriteLine($"render_shadows = {RenderShadows.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_bloom_threshold = {Fmt(BloomThreshold)}");
+             writer.WriteLine($"render_bloom_strength = {Fmt(BloomStrength)}");
++            writer.WriteLine($"render_bloom_radius = {Fmt(BloomRadius)}");
+             writer.WriteLine($"render_projectile_beams = {RenderProjectileBeams.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_particle_effects = {RenderParticleEffects.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_jump_gate_effects = {RenderJumpGateEffects.ToString().ToLowerInvariant()}");
+@@ -226,6 +230,7 @@
+                 RenderShadows = RenderShadows,
+                 BloomThreshold = BloomThreshold,
+                 BloomStrength = BloomStrength,
++                BloomRadius = BloomRadius,
+                 RenderProjectileBeams = RenderProjectileBeams,
+                 RenderParticleEffects = RenderParticleEffects,
+                 RenderJumpGateEffects = RenderJumpGateEffects,
+@@ -270,6 +275,7 @@
+             RenderShadows = other.RenderShadows;
+             BloomThreshold = other.BloomThreshold;
+             BloomStrength = other.BloomStrength;
++            BloomRadius = other.BloomRadius;
+             RenderProjectileBeams = other.RenderProjectileBeams;
+             RenderParticleEffects = other.RenderParticleEffects;
+             RenderJumpGateEffects = other.RenderJumpGateEffects;
+@@ -299,6 +305,11 @@
+                 FLLog.Info("Config", $"Bloom strength {BloomStrength} is unsupported; using 0.18.");
+                 BloomStrength = 0.18f;
+             }
++            if (!float.IsFinite(BloomRadius) || BloomRadius is < 0.25f or > 4f)
++            {
++                FLLog.Info("Config", $"Bloom radius {BloomRadius} is unsupported; using 1.");
++                BloomRadius = 1f;
++            }
+             var mode = (AntialiasMode)Antialias;
+             if (mode > RenderContext.MaxAntialias)
+             {
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -40,6 +40,7 @@
+             Console.WriteLine("         --render-depth-prepass=on|off");
+             Console.WriteLine("         --render-bloom-threshold=0..8");
+             Console.WriteLine("         --render-bloom-strength=0..2");
++            Console.WriteLine("         --render-bloom-radius=0.25..4");
+             Console.WriteLine("         --render-projectile-beams=on|off");
+             Console.WriteLine("         --render-particle-effects=on|off");
+             Console.WriteLine("         --render-transient-effect-lights=on|off");
+@@ -231,6 +232,7 @@
+         private bool? shadows;
+         private float? bloomThreshold;
+         private float? bloomStrength;
++        private float? bloomRadius;
+         private bool? projectileBeams;
+         private bool? particleEffects;
+         private bool? jumpGateEffects;
+@@ -325,6 +327,15 @@
+                         return true;
+                     }
+                     error = $"{name} accepts a finite number from 0 through 2.";
++                    return false;
++                case "--render-bloom-radius":
++                    if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var radius) &&
++                        float.IsFinite(radius) && radius is >= 0.25f and <= 4f)
++                    {
++                        bloomRadius = radius;
++                        return true;
++                    }
++                    error = $"{name} accepts a finite number from 0.25 through 4.";
+                     return false;
+                 case "--render-dynamic-light-budget":
+                     if (int.TryParse(value, out var lightBudget) && lightBudget is 0 or 8 or 16 or 24 or 32)
+@@ -426,6 +437,7 @@
+             if (shadows.HasValue) settings.RenderShadows = shadows.Value;
+             if (bloomThreshold.HasValue) settings.BloomThreshold = bloomThreshold.Value;
+             if (bloomStrength.HasValue) settings.BloomStrength = bloomStrength.Value;
++            if (bloomRadius.HasValue) settings.BloomRadius = bloomRadius.Value;
+             if (projectileBeams.HasValue) settings.RenderProjectileBeams = projectileBeams.Value;
+             if (particleEffects.HasValue) settings.RenderParticleEffects = particleEffects.Value;
+             if (jumpGateEffects.HasValue) settings.RenderJumpGateEffects = jumpGateEffects.Value;
+--- a/uixml/options.xml
++++ b/uixml/options.xml
+@@ -18,7 +18,7 @@
+                 <Checkbox id="vulkan" X="18" Y="146" Width="340" Text="VULKAN / SDL_GPU" Enabled="false"/>
+                 <TextBlock X="18" Y="180" Width="350" Height="30" Text="VULKAN IS NOT AVAILABLE YET" TextColor="text" TextShadow="black" TextSize="10"/>
+             </Panel>
+-            <Panel Width="390" Height="450" ID="win_effects" Visible="false">
++            <Panel Width="390" Height="490" ID="win_effects" Visible="false">
+                 <TextBlock Text="AVAILABLE GRAPHICS EFFECTS" Width="390" Height="22" Y="-22" Anchor="TopCenter" TextColor="text" TextShadow="black" TextSize="13"/>
+                 <Checkbox id="dynamic_lighting" X="18" Y="12" Width="350" Text="DYNAMIC LIGHTING"/>
+                 <TextBlock X="18" Y="40" Width="170" Height="22" Text="FRAME LIGHT BUDGET" TextColor="text" TextShadow="black" TextSize="11"/>
+@@ -43,6 +43,8 @@
+                 <HSlider id="bloom_threshold" X="200" Y="390" Width="160" Height="12"/>
+                 <TextBlock X="18" Y="416" Width="170" Height="18" Text="BLOOM STRENGTH" TextColor="text" TextShadow="black" TextSize="10"/>
+                 <HSlider id="bloom_strength" X="200" Y="418" Width="160" Height="12"/>
++                <TextBlock X="18" Y="444" Width="170" Height="18" Text="BLOOM RADIUS" TextColor="text" TextShadow="black" TextSize="10"/>
++                <HSlider id="bloom_radius" X="200" Y="446" Width="160" Height="12"/>
+             </Panel>
+             <Panel Width="390" Height="380" ID="win_audio" Visible="false">
+                 <TextBlock Text="AUDIO OPTIONS" Strid="1679" Width="390" Height="22" Y="-22"  Anchor="TopCenter" TextColor="text" TextShadow="black" TextSize="13"/>
+--- a/uixml/options.lua
++++ b/uixml/options.lua
+@@ -145,6 +145,9 @@
+         e.bloom_strength.Min = 0
+         e.bloom_strength.Max = 2
+         e.bloom_strength.Value = this.opts.BloomStrength
++        e.bloom_radius.Min = 0.25
++        e.bloom_radius.Max = 4
++        e.bloom_radius.Value = this.opts.BloomRadius
+         e.bloom.OnClick(() => {
+             this.opts.RenderBloom = e.bloom.Selected
+             local settings = Game.GetCurrentSettings()
+@@ -212,6 +215,7 @@
+         this.opts.RenderBloom = Game.GetCurrentSettings().RenderBloom
+         this.opts.BloomThreshold = e.bloom_threshold.Value
+         this.opts.BloomStrength = e.bloom_strength.Value
++        this.opts.BloomRadius = e.bloom_radius.Value
+         this.opts.RenderNebulae = e.nebulae.Selected
+         this.opts.RenderStarsphere = e.starsphere.Selected
+         this.opts.VSync = e.vsync.Selected
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -175,6 +175,7 @@
+ - [x] Erste HDR-Bloom-Stufe mit luminanzbasierter Schwelle, Viertelauflösung und horizontalem/vertikalem Gauß-Blur; separat per `render_bloom` und `--render-bloom=on|off` steuerbar, erfordert `render_hdr`.
+ - [x] Schwelle (`render_bloom_threshold`, 0–8, Standard 1) und Stärke (`render_bloom_strength`, 0–2, Standard 0,18) in der Clientkonfiguration und per CLI-Override einstellbar; Werte werden validiert.
+ - [x] Effekte-Tab-Regler für Schwelle und Stärke; Werte werden beim Bestätigen der Optionsseite übernommen und gespeichert.
++- [x] Gauß-Blur-Radius des Bloom-Passes von 0,25 bis 4,0 einstellbar gemacht; Menü, Clientkonfiguration und `--render-bloom-radius` verwenden denselben validierten Wert (Standard 1,0). Die normalisierten Fünf-Tap-Kernelgewichte bleiben konstant, nur der Abtastabstand skaliert.
+ - [ ] Bloom visuell kalibrieren und die einfache Viertelauflösung bei Bedarf durch eine mehrstufige Pyramide ersetzen.
+ - [ ] Sonnen-Lens-Glow anhand reproduzierbarer NAP-Szenen visuell abnehmen; `lens_flare` und die Stern-Intensitäts-/Zonen-Fades bleiben separate offene Datenpfade ([Parser-/Laufzeitabgleich](data-client-plan.md)).
+   - [x] `lens_flare`-Datenpfad auditiert: `StararchIni` und `Star` parsen Profile/Referenzen, aber `GameItemDb.InitStars` übernimmt nur StarGlow, LensGlow und Spines; `Sun` und `SunRenderer` haben keinen Flare-Pfad. Retail-Funktion `FUN_00511248` ruft beim Einlesen eines Star-`lens_flare`-Verweises `FUN_0050f3a0` auf und wertet deren Rückgabewert für den Parse-Status aus. Der Parser liest Shape, Min-/Max-Radius und sechs Floatwerte je Bead. `Data/NAP/World/solar/StarArch.ini` enthält 7 Profile mit 61 Beads, auf die 38 Sterne verweisen. Die Bedeutung der Bead-Komponenten und der Retail-Zeichnung ist noch nicht nachgewiesen; siehe [Retail-Stringtrace](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-15-lens-flare-trace/Freelancer-lens-flare.md>) und [Parser-Aufrufer](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-15-lens-flare-trace/Freelancer-lens-flare-loader-caller.md>).
+--- a/patches/series
++++ b/patches/series
+@@ -197,3 +197,4 @@
+ client 2195-shadow-map-diagnostics.patch
+ client 2196-clarify-hi02-shadow-probe.patch
+ client 2197-fix-aa-memory-estimate.patch
++client 2198-configurable-bloom-blur-radius.patch

@@ -1,0 +1,185 @@
+diff --git a/src/LibreLancer/Render/Materials/BasicMaterial.cs b/src/LibreLancer/Render/Materials/BasicMaterial.cs
+--- a/src/LibreLancer/Render/Materials/BasicMaterial.cs
++++ b/src/LibreLancer/Render/Materials/BasicMaterial.cs
+@@ -44,6 +44,7 @@
+         private bool surfaceTextureBound;
+         private bool roughnessTextureBound;
+         private bool metallicTextureBound;
++        private bool debugMarkerActive;
+         private float activeSurfaceNormalStrength;
+         private volatile bool surfaceNormalLoadFailed;
+         private int surfaceImageLoadState;
+@@ -432,6 +433,12 @@
+             // Set lights
+             SetLights(shader, ref lights, rstate.FrameNumber);
+             rstate.Shader = shader;
++            if (rstate.RenderDocMaterialMarkersEnabled && !debugMarkerActive)
++            {
++                rstate.PushRenderDocMaterialMarker(
++                    $"BasicMaterial type={Type}; Dt={DtSampler ?? "<white>"}; key={Key}");
++                debugMarkerActive = true;
++            }
+         }
+ 
+         private enum SurfacePbrMapKind { Roughness, Metallic }
+@@ -576,7 +583,6 @@
+ 
+         public override void AfterDraw(RenderContext rstate)
+         {
+-            if (activeSurfaceNormal == null && activeSurfaceRoughness == null && activeSurfaceMetallic == null) return;
+             try {
+                 if (surfaceTextureBound) rstate.Textures[2] = previousSurfaceTexture;
+                 if (metallicTextureBound) rstate.Textures[3] = previousMetallicTexture;
+@@ -593,6 +599,10 @@
+                 activeSurfaceRoughness?.Dispose();
+                 activeSurfaceMetallic?.Dispose();
+                 activeSurfaceNormal = activeSurfaceRoughness = activeSurfaceMetallic = null;
++                if (debugMarkerActive) {
++                    debugMarkerActive = false;
++                    rstate.PopRenderDocMaterialMarker();
++                }
+             }
+         }
+ 
+diff --git a/src/LibreLancer.Base/Graphics/Backends/IRenderContext.cs b/src/LibreLancer.Base/Graphics/Backends/IRenderContext.cs
+--- a/src/LibreLancer.Base/Graphics/Backends/IRenderContext.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/IRenderContext.cs
+@@ -66,4 +66,8 @@
+     void SetTextureSlot(int slot, Texture? texture);
+     void SetSamplerState(int slot, SamplerState state);
+     void DrawNoVertexBuffer(PrimitiveTypes type, int primitiveCount);
++
++    bool RenderDocMaterialMarkersEnabled { get; }
++    void PushRenderDocMaterialMarker(string label);
++    void PopRenderDocMaterialMarker();
+ }
+diff --git a/src/LibreLancer.Base/Graphics/Backends/Null/NullRenderContext.cs b/src/LibreLancer.Base/Graphics/Backends/Null/NullRenderContext.cs
+--- a/src/LibreLancer.Base/Graphics/Backends/Null/NullRenderContext.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/Null/NullRenderContext.cs
+@@ -13,6 +13,9 @@
+     public int AnisotropyLevel { get; set; }
+     public bool SupportsWireframe => false;
+     public bool SupportsGpuTimerQueries => false;
++    public bool RenderDocMaterialMarkersEnabled => false;
++    public void PushRenderDocMaterialMarker(string label) { }
++    public void PopRenderDocMaterialMarker() { }
+     public IGpuTimerQuery? CreateGpuTimerQuery() => null;
+     public void Init(ref GraphicsState requested)
+     {
+diff --git a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Constants.cs b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Constants.cs
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Constants.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Constants.cs
+@@ -9,6 +9,7 @@
+     //debug
+     public const int GL_DEBUG_OUTPUT_KHR = 0x92E0;
+     public const int GL_DEBUG_SOURCE_SHADER_COMPILER = 0x8248;
++    public const int GL_DEBUG_SOURCE_APPLICATION = 0x824A;
+     public const int GL_DEBUG_SOURCE_OTHER = 0x824B;
+     public const int GL_DONT_CARE = 0x1100;
+     public const int GL_DEBUG_SEVERITY_LOW = 0x9148;
+diff --git a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Functions.cs b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Functions.cs
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Functions.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Functions.cs
+@@ -14,6 +14,22 @@
+ 
+ internal static unsafe partial class GL
+ {
++    private static delegate* unmanaged<uint,uint,int,byte*,void> _glPushDebugGroup;
++    private static delegate* unmanaged<void> _glPopDebugGroup;
++    public static bool RenderDocMaterialMarkersEnabled { get; private set; }
++
++    public static void PushRenderDocMaterialMarker(string label)
++    {
++        if (!RenderDocMaterialMarkersEnabled) return;
++        var bytes = Encoding.UTF8.GetBytes(label);
++        fixed (byte* message = bytes)
++            _glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, bytes.Length, message);
++    }
++
++    public static void PopRenderDocMaterialMarker()
++    {
++        if (RenderDocMaterialMarkersEnabled) _glPopDebugGroup();
++    }
+ 
+     public static unsafe void ShaderSource(uint shader, string s)
+     {
+@@ -109,6 +125,15 @@
+         errors.Add(0x0505, "Out Of Memory");
+         errors.Add(0x0506, "Invalid Framebuffer Operation");
+         Load(getProcAddress, GLES);
++        var pushDebugGroup = getProcAddress("glPushDebugGroup");
++        if (pushDebugGroup == IntPtr.Zero) pushDebugGroup = getProcAddress("glPushDebugGroupKHR");
++        var popDebugGroup = getProcAddress("glPopDebugGroup");
++        if (popDebugGroup == IntPtr.Zero) popDebugGroup = getProcAddress("glPopDebugGroupKHR");
++        _glPushDebugGroup = (delegate* unmanaged<uint,uint,int,byte*,void>)pushDebugGroup;
++        _glPopDebugGroup = (delegate* unmanaged<void>)popDebugGroup;
++        RenderDocMaterialMarkersEnabled = !GLES &&
++            Environment.GetEnvironmentVariable("LL_RENDERDOC_MATERIAL_MARKERS") == "1" &&
++            pushDebugGroup != IntPtr.Zero && popDebugGroup != IntPtr.Zero;
+         if (GLExtensions.DebugInfo)
+         {
+             Enable(GL_DEBUG_OUTPUT_KHR);
+diff --git a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderContext.cs b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderContext.cs
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderContext.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderContext.cs
+@@ -279,6 +279,10 @@
+         if (errors != null) throw new AggregateException("GPU fence callbacks failed", errors);
+     }
+ 
++    public bool RenderDocMaterialMarkersEnabled => GL.RenderDocMaterialMarkersEnabled;
++    public void PushRenderDocMaterialMarker(string label) => GL.PushRenderDocMaterialMarker(label);
++    public void PopRenderDocMaterialMarker() => GL.PopRenderDocMaterialMarker();
++
+     public void SetTextureSlot(int slot, Texture? texture)
+     {
+         textures[slot] = texture?.Backing as GLTexture;
+diff --git a/src/LibreLancer.Base/Graphics/RenderContext.cs b/src/LibreLancer.Base/Graphics/RenderContext.cs
+--- a/src/LibreLancer.Base/Graphics/RenderContext.cs
++++ b/src/LibreLancer.Base/Graphics/RenderContext.cs
+@@ -224,6 +224,10 @@
+         set => requested.Stencil = value;
+     }
+ 
++
++    public bool RenderDocMaterialMarkersEnabled => impl.RenderDocMaterialMarkersEnabled;
++    public void PushRenderDocMaterialMarker(string label) => impl.PushRenderDocMaterialMarker(label);
++    public void PopRenderDocMaterialMarker() => impl.PopRenderDocMaterialMarker();
+ 
+     public void SetIdentityCamera() => Backend.SetIdentityCamera();
+     public void SetCamera(ICamera camera) => Backend.SetCamera(camera);
+diff --git a/AGENTS.md b/AGENTS.md
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -252,6 +252,7 @@
+ - Keep the in-game graphics Effects panel wired to these same `GameSettings`
+   fields. When adding a live renderer option, update both panel initialization
+   and its save/apply path; do not leave implemented features marked as planned.
++- For RenderDoc material-to-draw identification only, set `LL_RENDERDOC_MATERIAL_MARKERS=1`; OpenGL KHR_debug groups then label each `BasicMaterial` draw with shader type, diffuse sampler and material key. This is disabled by default and unavailable when the GL debug-group entry points are missing.
+ - Example for an isolated comparison launch:
+   `lancer client.ini --render-normal-maps=on --render-nebulae=off --render-antialias=smaa-high`.
+ 
+diff --git a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Functions.cs b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Functions.cs
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Functions.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Functions.cs
+@@ -153,6 +153,9 @@
+     private static void DebugCallbackHandler(int source, int type, uint id, int severity, int length, IntPtr message,
+         IntPtr userparam)
+     {
++        // RenderDoc's material groups are API-visible by design; avoid flooding the game log with them.
++        if (source == GL_DEBUG_SOURCE_APPLICATION && RenderDocMaterialMarkersEnabled)
++            return;
+         //higher severity = lower enum value (why khronos?)
+         if (type == GL_DEBUG_TYPE_ERROR &&
+             severity < GL_DEBUG_SEVERITY_LOW) {
+diff --git a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Functions.cs b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Functions.cs
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Functions.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Functions.cs
+@@ -134,6 +134,8 @@
+         RenderDocMaterialMarkersEnabled = !GLES &&
+             Environment.GetEnvironmentVariable("LL_RENDERDOC_MATERIAL_MARKERS") == "1" &&
+             pushDebugGroup != IntPtr.Zero && popDebugGroup != IntPtr.Zero;
++        if (RenderDocMaterialMarkersEnabled)
++            FLLog.Info("GL", "RenderDoc material debug groups enabled");
+         if (GLExtensions.DebugInfo)
+         {
+             Enable(GL_DEBUG_OUTPUT_KHR);

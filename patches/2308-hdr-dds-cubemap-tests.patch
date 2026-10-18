@@ -1,0 +1,149 @@
+diff --git a/src/LibreLancer.Tests/DdsHdrCubeTests.cs b/src/LibreLancer.Tests/DdsHdrCubeTests.cs
+new file mode 100644
+index 000000000..794ee10dd
+--- /dev/null
++++ b/src/LibreLancer.Tests/DdsHdrCubeTests.cs
+@@ -0,0 +1,87 @@
++using System;
++using System.Buffers.Binary;
++using System.IO;
++using LibreLancer.Graphics;
++using LibreLancer.ImageLib;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class DdsHdrCubeTests
++{
++    private sealed class HeadlessGame : Game
++    {
++        public HeadlessGame() : base(64, 64, false, GameConfiguration.HeadlessTest()) { }
++    }
++
++    [Fact]
++    public void LoadsDx10Rgba16fCubemapAndConsumesAllMipFaces()
++    {
++        var context = new HeadlessGame().RenderContext;
++        var bytes = CreateCube();
++        using var stream = new MemoryStream(bytes);
++
++        var cube = Assert.IsType<TextureCube>(DDS.FromStream(context, stream));
++
++        Assert.Equal(4, cube.Size);
++        Assert.Equal(SurfaceFormat.HalfVector4, cube.Format);
++        Assert.Equal(bytes.Length, stream.Position);
++    }
++
++    [Fact]
++    public void RejectsTruncatedDx10Rgba16fCubePayload()
++    {
++        var context = new HeadlessGame().RenderContext;
++        var bytes = CreateCube();
++        using var stream = new MemoryStream(bytes, 0, bytes.Length - 1, writable: false);
++
++        Assert.Throws<EndOfStreamException>(() => DDS.FromStream(context, stream));
++    }
++
++    [Theory]
++    [InlineData(11, 1)] // Not RGBA16F.
++    [InlineData(10, 2)] // Texture arrays are not supported yet.
++    public void RejectsUnsupportedDx10CubeFormats(uint dxgiFormat, uint arraySize)
++    {
++        var context = new HeadlessGame().RenderContext;
++        using var stream = new MemoryStream(CreateCube(dxgiFormat: dxgiFormat, arraySize: arraySize));
++
++        Assert.Throws<NotSupportedException>(() => DDS.FromStream(context, stream));
++    }
++
++    private static byte[] CreateCube(uint dxgiFormat = 10, uint arraySize = 1)
++    {
++        const int width = 4;
++        const int height = 4;
++        const int mipCount = 2;
++        const int headerBytes = 148;
++        var faceBytes = 0;
++        var mipSize = width;
++        for (var level = 0; level < mipCount; level++)
++        {
++            faceBytes += mipSize * mipSize * 8;
++            mipSize = Math.Max(1, mipSize / 2);
++        }
++        var result = new byte[headerBytes + faceBytes * 6];
++        "DDS "u8.CopyTo(result);
++        Write(4, 124); // DDS_HEADER size
++        Write(8, 0x1u | 0x2u | 0x4u | 0x1000u | 0x20000u); // caps, dimensions, pixel format, mip count
++        Write(12, (uint)height);
++        Write(16, (uint)width);
++        Write(20, (uint)(width * height * 8));
++        Write(28, (uint)mipCount);
++        Write(76, 32); // DDS_PIXELFORMAT size
++        Write(80, 0x4); // FOURCC
++        Write(84, 0x30315844); // DX10
++        Write(108, 0x1000u | 0x8u | 0x400000u); // texture, complex, mipmap
++        Write(128, dxgiFormat);
++        Write(132, 3); // D3D10_RESOURCE_DIMENSION_TEXTURE2D
++        Write(136, 0x4); // D3D11_RESOURCE_MISC_TEXTURECUBE
++        Write(140, arraySize);
++        for (var i = headerBytes; i < result.Length; i += 2)
++            BinaryPrimitives.WriteUInt16LittleEndian(result.AsSpan(i, 2), 0x3C00); // Half-float 1.0
++        return result;
++
++        void Write(int offset, uint value) => BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(offset, 4), value);
++    }
++}
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+index 8d858c2db..242df6e01 100644
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -34,8 +34,10 @@ der Vergleich derselben Szene mit dem Retail-Client. Aufnahmen und Optionen:
+ 
+ `DDS.FromStream` akzeptiert für Cubemaps nun DX10 `R16G16B16A16_FLOAT` mit
+ einer 2D-Cube-Arrayebene. Die HalfVector4-Texturen bleiben linear; Basic- und
+-PBR-Shader überspringen für diese Texturen die sRGB-Decodierung. Die
+-Cubemap-Generatoroption `--hdr-cubes` erzeugt Werte oberhalb 1 ohne LDR-Clipping.
++PBR-Shader überspringen für diese Texturen die sRGB-Decodierung. Vier headless
++DDS-Regressionstests decken Mipfaces, abgeschnittene Nutzdaten und nicht
++unterstützte DX10-Formate ab. Die Cubemap-Generatoroption `--hdr-cubes` erzeugt
++Werte oberhalb 1 ohne LDR-Clipping.
+ Lancer und LancerEdit bauen mit diesem Pfad. Ein 256-Pixel-HDR-Cube belegt mit
+ Mips ungefähr 4,2 MB statt rund 2,1 MB für RGBA8; das Budget für gleichzeitig
+ resident gehaltene Cubes muss noch gemessen und begrenzt werden.
+diff --git a/docs/surface-maps.md b/docs/surface-maps.md
+index c12d94d5d..15174163e 100644
+--- a/docs/surface-maps.md
++++ b/docs/surface-maps.md
+@@ -269,7 +269,7 @@ Rendering:
+ Prüfung:
+ 
+ - [x] Test: generierter Cube (`envcube_space.mat`) wird von `DDS.GetTextureCube` mit sechs Flächen und Mips gelesen; die Flächen-/Mip-Readbacks und geladenen LI_ELITE-Bilder stehen im Cubemap-Probebericht und der [Vergleichsgalerie](renderer-comparison-gallery.md).
+-- [x] DDS-Lader unterstützt zusätzlich DX10 `R16G16B16A16_FLOAT`-Cubemaps und reicht sie als lineare HalfVector4-Texturen an Basic- und PBR-Shader weiter. Client und LancerEdit bauen; NAP-only-Datenstart und Laden der Freelancer-Daten gelingen. Der visuelle ModelViewer-Nachweis mit dieser HDR-Cubemap fehlt weiterhin.
++- [x] DDS-Lader unterstützt zusätzlich DX10 `R16G16B16A16_FLOAT`-Cubemaps und reicht sie als lineare HalfVector4-Texturen an Basic- und PBR-Shader weiter. Vier headless Tests prüfen Cubemap/Mips, abgeschnittene Nutzdaten und nicht unterstützte Formate. Client und LancerEdit bauen; der visuelle ModelViewer-Nachweis mit dieser HDR-Cubemap fehlt weiterhin.
+ - [ ] Test: Die vier `normalmaps_*.txm` liefern zusammen 55 Texturen 1024 × 1024 im Format `Rgtc2` mit 9 Mips; Test der BC5-Dekodierung im `DDS`-Pfad (`ATI2N`).
+ - [ ] Sichttest mit einem Schiff (`li_fighter`), einer Station (`bw_pygar_airlock`) und einem Planeten mit Detailkarte; je mit und ohne Karte, Vergleich der Aufnahmen. Das Liberty-Stadtbild/full-Profil wurde nach dem Room-Lighting-Fix erneut verglichen; übrige Szenen und Materialtreue sind offen.
+ - [ ] Verhalten bei fehlender Datei, fehlender Karte und fehlerhaftem DDS (kein Absturz).
+diff --git a/patches/README.md b/patches/README.md
+index e23790b9c..227ba8d3f 100644
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 306 Client bundles and two native bundles. Each
++The active series contains 307 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -262,3 +262,4 @@ jump-gate route.
+ | 2305 | Record NAP-only PBR map, normal-map and cubemap ModelViewer A/B evidence |
+ | 2306 | Add HDR DX10 RGBA16F cubemap loading and linear shader sampling |
+ | 2307 | Clarify cubemap preview residency and switch ModelViewer into Lit mode |
++| 2308 | Add headless HDR RGBA16F DDS cubemap regression tests |
+diff --git a/patches/series b/patches/series
+index 8a0ec47cf..0598e9e83 100644
+--- a/patches/series
++++ b/patches/series
+@@ -307,3 +307,4 @@ client 2304-share-srgb-linearization.patch
+ client 2305-pbr-live-nap-ab-evidence.patch
+ client 2306-hdr-ibl-cubemap-support.patch
+ client 2307-lanceredit-cubemap-lit-preview.patch
++client 2308-hdr-dds-cubemap-tests.patch

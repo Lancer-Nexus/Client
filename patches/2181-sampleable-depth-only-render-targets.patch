@@ -1,0 +1,267 @@
+--- a/src/LibreLancer.Base/Graphics/RenderTarget2D.cs
++++ b/src/LibreLancer.Base/Graphics/RenderTarget2D.cs
+@@ -2,6 +2,7 @@
+ // This file is subject to the terms and conditions defined in
+ // LICENSE, which is part of this source code package
+ 
++using System;
+ using LibreLancer.Graphics.Backends;
+ 
+ namespace LibreLancer.Graphics;
+@@ -19,6 +20,8 @@
+     public RenderTarget2D (RenderContext context, int width, int height, DepthBuffer? depth, bool disposeDepth,
+         SurfaceFormat format = SurfaceFormat.Bgra8)
+     {
++        if (format == SurfaceFormat.Depth && depth != null)
++            throw new ArgumentException("A depth-texture render target cannot also own a separate depth buffer.", nameof(depth));
+         Texture = new Texture2D(context, width, height, format: format);
+         DepthBuffer = depth;
+         try
+@@ -41,8 +44,11 @@
+     {
+     }
+ 
++    /// <summary>Creates a color target, or a sampleable depth-only target when <paramref name="format"/> is <see cref="SurfaceFormat.Depth"/>.</summary>
+     public RenderTarget2D(RenderContext context, int width, int height, SurfaceFormat format)
+-        : this(context, width, height, new DepthBuffer(context, width, height), true, format)
++        : this(context, width, height,
++            format == SurfaceFormat.Depth ? null : new DepthBuffer(context, width, height),
++            format != SurfaceFormat.Depth, format)
+     {
+     }
+ 
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderTarget2D.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderTarget2D.cs
+@@ -29,18 +29,27 @@
+         try
+         {
+             GL.BindFramebuffer (GL.GL_FRAMEBUFFER, FBO);
+-            //make the depth buffer
+-            if (depth != null)
++            if (texture.Format == SurfaceFormat.Depth)
+             {
+-                GL.FramebufferRenderbuffer(GL.GL_FRAMEBUFFER,
+-                    depth.HasStencil ? GL.GL_DEPTH_STENCIL_ATTACHMENT : GL.GL_DEPTH_ATTACHMENT,
+-                    GL.GL_RENDERBUFFER, depth.ID);
+-                stencil = depth.HasStencil;
++                if (depth != null)
++                    throw new ArgumentException("A depth-texture render target cannot also attach a depth renderbuffer.", nameof(depth));
++                GL.FramebufferTexture2D(GL.GL_FRAMEBUFFER, GL.GL_DEPTH_ATTACHMENT,
++                    GL.GL_TEXTURE_2D, texture.ID, 0);
++                GL.DrawBuffer(GL.GL_NONE);
++                GL.ReadBuffer(GL.GL_NONE);
++            }
++            else
++            {
++                if (depth != null)
++                {
++                    GL.FramebufferRenderbuffer(GL.GL_FRAMEBUFFER,
++                        depth.HasStencil ? GL.GL_DEPTH_STENCIL_ATTACHMENT : GL.GL_DEPTH_ATTACHMENT,
++                        GL.GL_RENDERBUFFER, depth.ID);
++                    stencil = depth.HasStencil;
++                }
++                GL.FramebufferTexture2D(GL.GL_FRAMEBUFFER, GL.GL_COLOR_ATTACHMENT0,
++                    GL.GL_TEXTURE_2D, texture.ID, 0);
+             }
+-            //bind the texture
+-            GL.FramebufferTexture2D (GL.GL_FRAMEBUFFER,
+-                GL.GL_COLOR_ATTACHMENT0,
+-                GL.GL_TEXTURE_2D, texture.ID, 0);
+             EnsureFramebufferComplete();
+         }
+         catch
+@@ -75,6 +84,7 @@
+ 
+     public void BlitToScreen(Point offset)
+     {
++        ThrowIfDepthTarget();
+         if (isDisposed)
+         {
+             throw new ObjectDisposedException("RenderTarget2D");
+@@ -92,6 +102,8 @@
+ 
+     public void BlitToBuffer(RenderTarget2D other, Point offset)
+     {
++        if ((texture.Format == SurfaceFormat.Depth) != (other.Texture.Format == SurfaceFormat.Depth))
++            throw new InvalidOperationException("Blitting between color and depth render targets is not supported.");
+         if (isDisposed)
+         {
+             throw new ObjectDisposedException("RenderTarget2D");
+@@ -104,12 +116,13 @@
+         GL.BindFramebuffer(GL.GL_READ_FRAMEBUFFER, FBO);
+         GL.BindFramebuffer(GL.GL_DRAW_FRAMEBUFFER, ((GLRenderTarget2D)other.Backing).FBO);
+         GL.BlitFramebuffer(0, 0, texture.Width, texture.Height, offset.X, Y - offset.Y, offset.X + texture.Width, Y - (offset.Y + texture.Height),
+-            GL.GL_COLOR_BUFFER_BIT, GL.GL_NEAREST);
++            texture.Format == SurfaceFormat.Depth ? GL.GL_DEPTH_BUFFER_BIT : GL.GL_COLOR_BUFFER_BIT, GL.GL_NEAREST);
+         GL.BindFramebuffer(GL.GL_READ_FRAMEBUFFER, 0);
+     }
+ 
+     public void BlitToScreen()
+     {
++        ThrowIfDepthTarget();
+         if (isDisposed)
+         {
+             throw new ObjectDisposedException("RenderTarget2D");
+@@ -122,6 +135,12 @@
+         GL.BindFramebuffer(GL.GL_READ_FRAMEBUFFER, 0);
+     }
+ 
++    private void ThrowIfDepthTarget()
++    {
++        if (texture.Format == SurfaceFormat.Depth)
++            throw new InvalidOperationException("A depth-only render target cannot be blitted to the color backbuffer.");
++    }
++
+     public override void Dispose ()
+     {
+         if (isDisposed)
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Constants.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Constants.cs
+@@ -144,6 +144,7 @@
+     public const int GL_EXTENSIONS = 0x1F03;
+ 
+     public const int GL_FRAMEBUFFER = 0x8D40;
++    public const int GL_NONE = 0;
+     public const int GL_READ_FRAMEBUFFER = 0x8CA8;
+     public const int GL_DRAW_FRAMEBUFFER = 0x8CA9;
+     public const int GL_RENDERBUFFER = 0x8D41;
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLTexture2D.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLTexture2D.cs
+@@ -130,10 +130,11 @@
+         var pbo = GL.GenBuffer();
+         var fbo = GL.GenFramebuffer();
+         GL.BindFramebuffer(GL.GL_FRAMEBUFFER, fbo);
+-        GL.FramebufferTexture2D(GL.GL_FRAMEBUFFER, GL.GL_COLOR_ATTACHMENT0, GL.GL_TEXTURE_2D, ID, 0);
++        AttachForReadback();
+         GL.BindBuffer(GL.GL_PIXEL_PACK_BUFFER, pbo);
+         GL.BufferData(GL.GL_PIXEL_PACK_BUFFER, (IntPtr)sz, IntPtr.Zero, GL.GL_STREAM_READ);
+         GL.ReadPixels(0,0, Width, Height, glFormat, glType, IntPtr.Zero);
++        RestoreFramebuffer();
+         GL.DeleteFramebuffer(fbo);
+         GL.BindBuffer(GL.GL_PIXEL_PACK_BUFFER, 0);
+         var ts = new TaskCompletionSource<byte[]>();
+@@ -174,12 +175,9 @@
+             {
+                 var fbo = GL.GenFramebuffer();
+                 GL.BindFramebuffer(GL.GL_FRAMEBUFFER, fbo);
+-                GL.FramebufferTexture2D(GL.GL_FRAMEBUFFER, GL.GL_COLOR_ATTACHMENT0, GL.GL_TEXTURE_2D, ID, 0);
++                AttachForReadback();
+                 GL.ReadPixels(0,0,Width,Height, glFormat, glType, handle.AddrOfPinnedObject());
+-                if (rc.CurrentTarget != null)
+-                    ((GLRenderTarget)rc.CurrentTarget).BindFramebuffer();
+-                else
+-                    GL.BindFramebuffer(GL.GL_FRAMEBUFFER, 0);
++                RestoreFramebuffer();
+                 GL.DeleteFramebuffer(fbo);
+             }
+             else
+@@ -198,6 +196,28 @@
+         }
+     }
+ 
++    private void AttachForReadback()
++    {
++        if (Format == SurfaceFormat.Depth)
++        {
++            GL.FramebufferTexture2D(GL.GL_FRAMEBUFFER, GL.GL_DEPTH_ATTACHMENT, GL.GL_TEXTURE_2D, ID, 0);
++            GL.DrawBuffer(GL.GL_NONE);
++            GL.ReadBuffer(GL.GL_NONE);
++        }
++        else
++        {
++            GL.FramebufferTexture2D(GL.GL_FRAMEBUFFER, GL.GL_COLOR_ATTACHMENT0, GL.GL_TEXTURE_2D, ID, 0);
++        }
++    }
++
++    private void RestoreFramebuffer()
++    {
++        if (rc.CurrentTarget != null)
++            ((GLRenderTarget)rc.CurrentTarget).BindFramebuffer();
++        else
++            GL.BindFramebuffer(GL.GL_FRAMEBUFFER, 0);
++    }
++
+     public unsafe void SetData<T>(int level, Rectangle? rect, T[] data, int start, int count) where T: unmanaged
+     {
+         maxLevel = Math.Max(level, maxLevel);
+--- a/src/LibreLancer.Base/Graphics/Backends/Null/NullTexture2D.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/Null/NullTexture2D.cs
+@@ -7,6 +7,8 @@
+ {
+     public NullTexture2D(int width, int height, bool mipMaps, SurfaceFormat format, int levelCount) : base(format, levelCount, width * height * 4)
+     {
++        Width = width;
++        Height = height;
+     }
+ 
+     public int Width { get; set; }
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -578,7 +578,9 @@
+ - [ ] Soft Particles und volumetrischer Nebel/Lichtstrahlen: lineare Tiefe,
+   Transparenz und bestehende Freelancer-Nebelparameter erhalten.
+ - [ ] Gerichtete Schatten zuerst mit Kaskaden/PCF, anschließend zusätzliche
+-  Lichttypen; Shadow-Depth-Targets und Comparison-Sampler abstrahieren.
++  Lichttypen.
++  - [x] Sampleable Depth-only-Renderziele über `RenderTarget2D(..., SurfaceFormat.Depth)` ergänzt. OpenGL bindet die Textur als Depth-Attachment ohne Color-Read-/Write-Buffer; der Null-Backend-Pfad behält Rendermaß und no-op-Verhalten. GL/GLES-Readback und Depth-to-Depth-Blit nutzen den Depth-Puffer; Color-to-Depth-Blits werden abgewiesen. Der Release-Build und ein OpenGL-4.6/Mesa-NAP-Smoke-Lauf bestehen: FBO-Erzeugung, Depth-Clear und float-Readback liefern min/max 1..1. GLES, Shader-Sampling und PCF sind nicht geprüft; siehe [Depth-only-Smoke](evidence/renderer/depth-only-target-smoke-20261017/README.md).
++  - [ ] Shadow-Caster-Draws, Lichtmatrizen, PCF-Vergleich und Receiver-Shading in den beleuchteten Materialpfaden ergänzen und mit Szenenbildern abnehmen.
+ - [ ] Kurzlebige Effektlichter vervollständigen und messen: Mündungslichter aus `Gun.light_anim` sowie Explosionslichter aus `lgt_effect`/`lgt_radius` und `lgt_time_scale` sind vorhanden. Per-Objekt-Auswahl und Frame-Pool priorisieren nach geschätztem attenuiertem Lichtbeitrag; der Frame-Pool verwirft Quellen außerhalb ihrer Reichweite und ohne positiven Beitrag. Die maximale Zahl zugelassener transienter Frame-Lichter ist mit `dynamic_light_budget` auf 0, 8, 16, 24 oder 32 begrenzbar. Die maximale Zahl aktiver Effektlicht-Ereignisse ist mit `transient_effect_light_budget` auf 0, 32, 64 oder 128 einstellbar; beim Absenken werden die schwächsten aktiven Kandidaten entfernt. `lgt_range_scale` wird bis zum transienten Lichtobjekt durchgereicht, bleibt aber bis zur Semantikklärung ohne Laufzeitwirkung. Offen sind explizite Lichtdaten und hardpointgebundene Lebenszyklen für persistentes Feuer, allgemeine Sichtbarkeits-/Occlusion-Priorisierung und reproduzierbare NAP-Szenenmessungen. Siehe [Feuerinventar](evidence/effect-fire-light-input-inventory-20261014.json).
+   - [x] Negative oder nichtendliche Frame-Deltas werden in `SystemRenderer.Update` auf null normalisiert, bevor Nebel, Partikeleffekte und transiente Lichter aktualisiert werden.
+ - [ ] Danach Laser-, Projektil- und Explosionseffekte überarbeiten: Beam- und Trefferdarstellung, Trails, Partikel, Farbverläufe sowie Größen-/Zeitverhalten aufeinander abstimmen und mit dynamischer Beleuchtung integrieren. Originaleffekte und einzeln abschaltbare Qualitätsoptionen erhalten; NAP-Referenzszenen mit Vergleichsbildern und CPU-/GPU-Zeit abnehmen.
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -204,6 +204,8 @@
+   - [ ] NAP-A/B für weiße, rote, grüne und mehrfach vorhandene Sonnen mit der luminanzerhaltenden Mischung aufnehmen; Effektstärke, Wertebegrenzung und distanzgewichtete Farbmischung visuell kalibrieren. Nebelüberschreibung und Legacy-Ausgabe bei ausgeschaltetem Schalter in der Laufzeit prüfen.
+ - [ ] Screen-Space Ambient Occlusion als optionale Ergänzung bewerten; Geometrie- und Nebelartefakte gegen Vanilla-Szenen abgleichen.
+ - [ ] Echtzeit-Schatten (zunächst gerichtete Lichter, Kaskaden und PCF) anhand vorhandener Freelancer-Lichtdaten und der GPU-Kosten bewerten.
++  - [x] Sampleable Depth-only-Renderziele im OpenGL-Backend und no-op-Ziele im Null-Backend bereitgestellt; Release-Build sowie OpenGL-4.6/Mesa-NAP-Smoke für FBO, Clear und Depth-Readback bestanden. GLES, Shader-Sampling und PCF bleiben offen; siehe [Depth-only-Smoke](evidence/renderer/depth-only-target-smoke-20261017/README.md).
++  - [ ] GL/GLES-FBO-Laufzeit prüfen, danach Caster-Draws, Lichtmatrizen, PCF und Receiver-Shading in den beleuchteten Materialpfaden implementieren.
+ - [ ] Screen-Space-Reflections als optionale Ergänzung prüfen; fehlende Bildinformation an Bildschirmrändern und bei verdeckten Objekten muss über den bestehenden PBR-Fallback abgefangen werden.
+ - [ ] Volumetrischen Nebel und volumetrische Lichtstrahlen als eigenständige, skalierbare Qualitätstufe evaluieren; vorhandene Freelancer-Nebelparameter und Transparenzreihenfolge als Referenz verwenden.
+ - [ ] Forward+/Clustered Lighting gegen die aktuelle Beleuchtungsarchitektur und typische Freelancer-Szenen mit vielen Lichtern benchmarken, bevor ein Renderer-Umbau geplant wird.
+diff --git a/docs/evidence/renderer/depth-only-target-smoke-20261017/README.md b/docs/evidence/renderer/depth-only-target-smoke-20261017/README.md
+new file mode 100644
+index 000000000..d194c1ed2
+--- /dev/null
++++ b/docs/evidence/renderer/depth-only-target-smoke-20261017/README.md
+@@ -0,0 +1,24 @@
++# Depth-only-Ziel Smoke-Nachweis (2026-10-17)
++
++Der Release-Client wurde mit OpenGL 4.6 auf Mesa 23.2.1 / Intel HD Graphics
++4600 und den 13 NAP-Archiven aus `Data/NAP/.runtime-test-stage/package-inputs-20261016`
++kurz gestartet. `packages/active.json` identifizierte
++`lancer-render-20261016-data-nap-only`; Größe und SHA-256 aller 13 Archive
++wurden direkt vor dem Lauf gegen das Manifest geprüft.
++
++Ein nur für diesen Smoke-Lauf eingebauter Diagnoseaufruf erzeugte ein
++64×64-`RenderTarget2D` mit `SurfaceFormat.Depth`, setzte es als aktives Ziel,
++leerte den Depth-Puffer und las die Depth-Textur anschließend als `float[]`
++aus. Der Client protokollierte:
++
++```text
++Graphics: Sampleable depth-only target FBO created, cleared and read back (1..1).
++```
++
++Damit sind auf dieser OpenGL-Konfiguration FBO-Vollständigkeit, Depth-Attachment,
++Clear und `GetTexImage`-Readback belegt. Der Diagnosecode wurde nach dem Lauf
++entfernt und ist nicht Teil der Patch-Serie.
++
++Nicht geprüft sind Shader-Sampling/PCF, GLES, das Null-Backend zur Laufzeit,
++andere GPUs sowie Shadow-Caster- und Receiver-Pässe. Der Nachweis belegt nur
++das Depth-Target-Fundament.
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -180,3 +180,4 @@
+ client 2178-record-fixed-hdr-bloom-runtime-evidence.patch
+ client 2179-document-hdr-default-bloom-runtime-check.patch
+ client 2180-document-bloom-startup-controls.patch
++client 2181-sampleable-depth-only-render-targets.patch
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -172,3 +172,4 @@
+ | 2178 | Record fixed HDR and Bloom NAP runtime evidence |
+ | 2179 | Document HDR and default-strength Bloom runtime check |
+ | 2180 | Document Bloom startup controls |
++| 2181 | Add sampleable depth-only render targets |

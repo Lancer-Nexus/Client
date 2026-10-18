@@ -1,0 +1,114 @@
+diff --git a/src/LibreLancer/Fx/Emitters/FxCubeEmitter.cs b/src/LibreLancer/Fx/Emitters/FxCubeEmitter.cs
+--- a/src/LibreLancer/Fx/Emitters/FxCubeEmitter.cs
++++ b/src/LibreLancer/Fx/Emitters/FxCubeEmitter.cs
+@@ -59,7 +59,7 @@
+                 FxRandom.NextFloat(-h, h),
+                 FxRandom.NextFloat(-d, d)
+             );
+-            var n = RandomInCone(s_min, s_max);
++            var n = RandomCube(s_min, s_max);
+ 
+             ref Matrix4x4 particleSpawnTransform = ref instance.EmitterParticleSpawnTransforms[reference.EmitterNodeIdx];
+             if (!particleSpawnTransform.IsIdentity)
+@@ -75,30 +75,13 @@
+             particle.Velocity = n * Pressure!.GetValue(sparam, 0);
+         }
+ 
+-        // Different direction to FxCubeEmitter
+-        private static Vector3 RandomInCone(float minspread, float maxspread)
+-        {
+-            return Vector3.UnitY;
+-            /*
+-            var direction = Vector3.UnitY;
+-            var axis = Vector3.UnitZ;
+-
+-            var angle = FxRandom.NextFloat(minspread, maxspread);
+-            var rotation = Quaternion.CreateFromAxisAngle(axis, angle);
+-            Vector3 output = Vector3.Transform(direction, rotation);
+-            var random = FxRandom.NextFloat(-MathF.PI, MathF.PI);
+-            rotation = Quaternion.CreateFromAxisAngle(direction, random);
+-            output = Vector3.Transform(output, rotation);
+-            return output;
+-            */
+-        }
+-
+         private static Vector3 RandomCube(float minspread, float maxspread)
+         {
+             //(sqrt(1 - z^2) * cosϕ, sqrt(1 - z^2) * sinϕ, z)
+             var halfspread = maxspread / 2;
+ 
+-            float z = FxRandom.NextFloat((float) Math.Cos(halfspread), 1 - (minspread / 2));
++            var minHalfSpread = minspread / 2;
++            float z = FxRandom.NextFloat((float) Math.Cos(halfspread), (float) Math.Cos(minHalfSpread));
+             float t = FxRandom.NextFloat(0, (float) (Math.PI * 2));
+             return new Vector3(
+                 (float) (Math.Sqrt(1 - z * z) * Math.Cos(t)),
+
+diff --git a/docs/evidence/renderer/tradelane-cube-emitter-spread-20261015.md b/docs/evidence/renderer/tradelane-cube-emitter-spread-20261015.md
+new file mode 100644
+--- /dev/null
++++ b/docs/evidence/renderer/tradelane-cube-emitter-spread-20261015.md
+@@ -0,0 +1,30 @@
++# Tradelane-Effekt: ALE-Emission und Cube-Emitter (15.10.2026)
++
++## ALE-Befund
++
++`Data/NAP/Effects/fx/misc/gf_tradelaneinship01.ale` wurde mit LibreLancers eigenem `AleFile`-Parser ausgelesen. Die Datei enthält 15 Referenzen im Haupteffekt `tradelaneinship01`, acht Verbindungen und insgesamt drei Effekte. Die Referenzen verwenden `FxRectAppearance`, `FxConeEmitter`, `FxAirField`, `FxCubeEmitter` und `FxParticleAppearance`; diese Klassen sind im `ParticleLibrary.NodeFromAle` registriert. Der CRC `ee223b51` bezeichnet den erwarteten Attachment-Knoten (`CRC_ATTACHMENT_NODE`), nicht eine fehlende Effektklasse.
++
++Der Effekt `tradelanedonutshooter` enthält einen `FxCubeEmitter`, der über `FxParticleAppearance.LifeName` den Effekt `tradelaneship01donut` für seine Partikel startet. Die NAP-Emitterdaten setzen `CubeEmitter_MinSpread=0` und `CubeEmitter_MaxSpread=15` (Grad), neben einem Druckwert von 10. Die Zufallskomponente des Spread-Winkels ist damit für diese Originalressource relevant.
++
++## Eingrenzte Clientabweichung
++
++`FxCubeEmitter.SetParticle` verwendete bisher `RandomInCone`, dessen Implementierung sofort `Vector3.UnitY` zurückgab. Die darunterliegende zufällige Spread-Berechnung war auskommentiert. Dadurch wurden die NAP-Min-/MaxSpread-Werte für Würfelemittoren ignoriert und deren Partikel alle in derselben lokalen Richtung gestartet.
++
++Der Client besaß bereits eine frühere zufällige `RandomCube`-Berechnung, die Min-/MaxSpread auswertet, wurde aber nicht mehr aufgerufen. Patch 2102 aktiviert diesen vorhandenen Pfad und korrigiert seine Winkelgrenzen auf `z ∈ [cos(maxSpread/2), cos(minSpread/2)]`. Die frühere lineare Obergrenze `1 - minSpread/2` konnte bei positivem Minimum unter der Untergrenze liegen; dann wurden keine gültigen Winkel aus dem beabsichtigten Bereich gezogen. Die Halbwinkel-Konvention des vorhandenen Codes bleibt erhalten. Eine Retail-/Client-Bildabnahme der kompletten Trade-Lane-Sequenz bleibt offen.
++
++## Prüfumfang
++
++- NAP-INI- und ALE-Dateivorkommen sowie die konkreten Emissionswerte wurden direkt gelesen.
++- Knotenauflösung wurde mit LibreLancers `AleFile`-Parser geprüft.
++- `LibreLancer.csproj` wurde mit .NET 10 im Release-Modus gebaut: 0 Fehler,
++  177 Warnungen. Die Warnungen stammen aus dem bestehenden Projektbestand.
++- Die vollständige Client-Patchserie rekonstruiert einschließlich Patch 2102
++  jetzt 614 Dateien unverändert zum angewendeten Overlay.
++- Ein synchroner visueller Eintritts-/Fahrt-/Austrittvergleich wurde nicht durchgeführt; Screenshot-Aufruf in der GNOME-Sitzung endet mit `AccessDenied`.
++- Ein LancerEdit-Start mit `--data` auf die isolierte NAP-Testinstallation lud
++  alle 53 Systeme und meldete `Finished loading game data`; die Testinstallation
++  bezog ihre 13 Archive aus denselben zuvor verifizierten NAP-Paketen und hatte
++  kein loses `DATA`-Verzeichnis. Der Editor blieb im GUI-Lauf aktiv, jedoch
++  verweigert die GNOME-Sitzung den Screenshot-Aufruf (`AccessDenied`). Damit
++  sind Paket-Mount und Datenladen bestätigt, nicht das Öffnen oder die sichtbare
++  Darstellung der ALE-Vorschau. Der Bildvergleich bleibt offen.
+
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -160,6 +160,7 @@
+   - [ ] Tunnel und Ringe mit einer NAP-Laufzeitaufnahme für Eintritt, Fahrt und Austritt visuell gegen das Original abnehmen. Die aktuellen Belege umfassen Datenpfadprüfung und erfolgreichen Client-Build, noch keine Laufzeitbilder.
+ - [ ] Tradelane-Reiseeffekt gegen das Original vergleichen und die vereinfachte Darstellung korrigieren. Der Client hängt `PlayerTravel` als `ParticleEffectRenderer` an; anhand von `basic_tl_player_travel`/`EFT_LANE_SHIP_TRAVEL` und `tradelaneinship01` prüfen, welche ALE-Geometrie, Partikel, Bewegung, Skalierung oder Schichtung für die originale Tunnelansicht fehlen. Mit NAP-Referenzbildern für Eintritt, Fahrt und Austritt abnehmen.
+   - [x] Daten- und Laufzeitpfad auditiert: `tl_player_travel` lädt `basic_tl_player_travel`/`tradelaneinship01` als normale `ParticleEffectRenderer`-Instanz am Spielerschiff; `tl_ship_travel` läuft separat über den serverseitigen Netzwerk-FX-Pfad. Beide referenzierten INI-/ALE-Dateien sind in `Data/NAP/` vorhanden. Die statische Prüfung bestätigt die Datenauflösung, aber keine optische Gleichheit. Details: [Tradelane-FX-Audit](evidence/renderer/tradelane-effect-dataflow-audit-20261015.md).
++  - [x] ALE-Auswertung fand im `tradelanedonutshooter` einen `FxCubeEmitter` mit NAP-Spread 0–15 Grad, dessen Clientcode zuvor stets `UnitY` zurückgab. Patch 2102 reaktiviert die vorhandene zufällige Spread-Berechnung. Das grenzt einen konkreten Unterschied ein; der vollständige Bildvergleich mit dem Original bleibt offen. Details: [Cube-Emitter-Audit](evidence/renderer/tradelane-cube-emitter-spread-20261015.md).
+ - [ ] Laser-, Projektil- und Explosionseffekte visuell überarbeiten: Beam- und Trefferdarstellung, Trails, Partikel, Farbverläufe, Größen- und Zeitverhalten sowie Zusammenspiel mit dynamischem Licht. Originale Freelancer-Effekte müssen weiter funktionieren; neue Qualitätseinstellungen sollen einzeln abschaltbar bleiben. Mit reproduzierbaren NAP-Kampfszenen, Vergleichsbildern und GPU-/CPU-Messungen abnehmen.
+   - [x] `vis_beam`-Geometrie gegen parallele/degenerierte Richtungen absichern und Schreibzugriffe auf den 500-Beam-Streamingpuffer begrenzen; vier Geometrietests bestehen.
+   - [x] Partikel- und Beam-Punkte gegen den 30.000-Einträge-Pool begrenzen und leere Beam-Chunks ohne ungültigen Draw überspringen; vier Grenztests bestehen.
+
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -75,6 +75,7 @@
+ | 2099 | Parse and render timed jump gate ring effects |
+ | 2100 | Render profile-driven gate tunnel geometry and preserve arrival transitions |
+ | 2101 | Audit Tradelane effect dataflow and asset presence |
++| 2102 | Restore randomized particle spread for the Tradelane cube emitter |
+ | 2011 (`lancerdecode`) | Native Vorbis EOF/reset handling |
+ | 2012 (`blurgtext`) | System FreeType without OT-SVG hooks |
+ 
+
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -101,3 +101,4 @@
+ client 2099-jump-gate-ring-effects.patch
+ client 2100-jump-gate-tunnel-geometry-and-arrival.patch
+ client 2101-document-tradelane-effect-dataflow-audit.patch
++client 2102-restore-tradelane-cube-emitter-spread.patch

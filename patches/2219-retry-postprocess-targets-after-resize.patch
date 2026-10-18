@@ -1,0 +1,65 @@
+--- a/src/LibreLancer.Base/Graphics/BloomPass.cs
++++ b/src/LibreLancer.Base/Graphics/BloomPass.cs
+@@ -33,10 +33,12 @@
+         int kernelPairs)
+     {
+         radius = float.IsFinite(radius) ? System.Math.Clamp(radius, 0.25f, 4f) : 1f;
++        var targetWidth = System.Math.Max(1, source.Width / 4);
++        var targetHeight = System.Math.Max(1, source.Height / 4);
++        if (failed && (width != targetWidth || height != targetHeight))
++            failed = false;
+         if (failed)
+             return null;
+-        var targetWidth = System.Math.Max(1, source.Width / 4);
+-        var targetHeight = System.Math.Max(1, source.Height / 4);
+         if (width != targetWidth || height != targetHeight)
+         {
+             DisposeTargets();
+--- a/src/LibreLancer.Base/Graphics/SeparableGaussianBlurPass.cs
++++ b/src/LibreLancer.Base/Graphics/SeparableGaussianBlurPass.cs
+@@ -30,13 +30,17 @@
+         radius = float.IsFinite(radius) ? Math.Clamp(radius, 0.25f, 4f) : 1f;
+         resolutionScale = float.IsFinite(resolutionScale) ? Math.Clamp(resolutionScale, 0.125f, 1f) : 1f;
+         kernelPairs = Math.Clamp(kernelPairs, 1, 4);
+-        if (failed || source.Width <= 0 || source.Height <= 0)
++        if (source.Width <= 0 || source.Height <= 0)
+             return null;
+ 
+         // Sampling a full-resolution source into smaller targets gives callers
+         // a controllable quality/performance trade-off without another pass.
+         var targetWidth = Math.Max(1, (int)MathF.Round(source.Width * resolutionScale));
+         var targetHeight = Math.Max(1, (int)MathF.Round(source.Height * resolutionScale));
++        if (failed && (width != targetWidth || height != targetHeight || format != targetFormat))
++            failed = false;
++        if (failed)
++            return null;
+ 
+         if (width != targetWidth || height != targetHeight || format != targetFormat ||
+             horizontal == null || blurred == null)
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -63,6 +63,7 @@
+   - [x] `SystemRenderer.Draw()` überspringt Frames mit Breite/Höhe 0. Bei geändertem Rendermaß oder AA-Modus gibt es das vorhandene MSAA-Target frei und erstellt es neu. Das belegt nur diesen System-Renderer-Pfad; Editor-/Offscreen-Targets, Wiederherstellungstests und Geräteverlust bleiben offen.
+   - [x] `SystemRenderer.Draw()` und `AntialiasTarget.SMAABlit()` stellen RenderTarget, Viewport-/Scissor-Stacks und ihre geänderten RenderContext-Zustände in `finally` wieder her. `SystemRenderer` stellt auch `ThnCamera.DefaultZ()` zurück und leert die Frame-Objektliste nach Fehlern. Fehler-Injektion und reguläre Resize-/Minimize-/Restore-Läufe bleiben als Laufzeitprüfung offen. Details im [Fehlerpfad-Audit](evidence/renderer/render-target-exception-path-audit-20261015.md).
+   - [x] OpenGL prüft die Vollständigkeit normaler, multisample- und resolve Framebuffer beim Anlegen. Bei unvollständigen Zielen werden die erzeugten GL-Objekte freigegeben und der Statushexwert in der Exception ausgegeben; Laufzeitprüfung auf mehreren Treibern bleibt offen.
++  - [x] Bloom und der separable Blur versuchen fehlgeschlagene Target-Erstellung nach einer Änderung der Zielgröße oder des Blur-Formats erneut. Ein Fehler bei unveränderter Konfiguration bleibt bis zur nächsten Größen-/Formatänderung gedrosselt; Wiederherstellung nach Geräteverlust ist damit nicht abgedeckt.
+ - [ ] GPU-Zeit und Speicherverbrauch pro Pass messbar machen; Effekte müssen einzeln abschaltbar und nach Hardwareprofil skalierbar sein.
+   - [x] Bereitschaftsaudit abgeschlossen: Timer-Query-API und Query-Aufruf fehlen in OpenGL-/RenderContext-Abstraktion; die lokale Mesa-Laufzeit meldet `GL_ARB_timer_query`. Passgrenzen und eine nicht blockierende Abfragefolge sind dokumentiert. Speicherwerte sind noch nicht als Messung verfügbar. Siehe [GPU-Timer-Query-Audit](evidence/renderer/gpu-timer-query-readiness-audit-20261015.md).
+   - [x] OpenGL-Timer-Queries für Depth, Opaque, Sterne/Nebel, Transparenz und AA-Resolve eingebaut. Vier Query-Slots pro Pass werden ohne blockierendes Ergebnis-Polling wiederverwendet; das Debug-Overlay zeigt Messwert und Sample-Alter. CSV-Zeilen erfassen den zuletzt verfügbaren GPU-Messwert samt fortlaufend aktualisiertem Alter; nicht verfügbare Samples bleiben leer. Das Alter zählt Aufrufe von `SystemRenderer.Draw()` und hängt nicht von `RenderContext.FrameNumber`/`ClearAll()` ab; ein Regressionstest prüft das Weiterzählen. Die Abfrage läuft nur bei geöffnetem Debug-Overlay. Null und OpenGL ohne Timer-Query melden keine Unterstützung. Das Debug-Overlay zeigt geschätzte geladene Texturbytes, Surface-Map- und Tangentenbytes; das Spiel-Debugfenster zusätzlich die geschätzten Bytes des aktiven System-AA-Ziels. Diese Werte sind unvollständig und keiner Render-Pass-Attribution zugeordnet; Editor-/Offscreen-Targets, beliebige Buffer und Treiberallokationen bleiben offen.
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -126,6 +126,7 @@
+ | 2216 | Use linear Rec. 709 luminance for the Bloom extraction threshold |
+ | 2217 | Show estimated Bloom and tone-map target memory separately in the debug overlay |
+ | 2218 | Export per-frame AA, Bloom and tone-map target memory estimates in frame profiles |
++| 2219 | Retry failed Bloom and blur targets after render-size changes |
+ | 2116 | Estimate active SMAA and MSAA render-target memory |
+ | 2117 | Record the M01A dark station and ship lighting report |
+ | 2118 | Apply THN ambient and dynamic lights to shared gameplay lighting, then remove them on cleanup |
+--- a/patches/series
++++ b/patches/series
+@@ -218,3 +218,4 @@
+ client 2216-bloom-rec709-luminance-threshold.patch
+ client 2217-postprocess-memory-attribution.patch
+ client 2218-export-postprocess-memory-profile.patch
++client 2219-retry-postprocess-targets-after-resize.patch

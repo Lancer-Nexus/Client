@@ -1,0 +1,190 @@
+--- a/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
++++ b/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
+@@ -105,6 +105,8 @@
+     private int lastOrder = -1;
+     private uint completedMask;
+ 
++    public SystemRenderResource AvailableResources => available;
++
+     private bool IsCompleted(SystemRenderPass pass) =>
+         (completedMask & (1u << (int)pass)) != 0;
+ 
+@@ -221,7 +223,56 @@
+     SystemRenderAttachmentContract? Stencil,
+     bool Conditional = true,
+     SystemRenderAttachmentContract? SourceColor = null,
+-    SystemRenderAttachmentContract? SourceDepth = null);
++    SystemRenderAttachmentContract? SourceDepth = null,
++    SystemRenderResource OptionalReads = SystemRenderResource.None);
++
++/// <summary>Checks resource dependencies between post-process passes in one frame.</summary>
++public sealed class SystemRenderSubpassExecution
++{
++    private SystemRenderResource available;
++    private SystemRenderSubpass? activePass;
++
++    public void Reset(SystemRenderResource externalResources) =>
++        (available, activePass) = (externalResources, null);
++
++    public void Begin(SystemRenderSubpass pass)
++    {
++        if (activePass != null)
++            throw new InvalidOperationException(
++                $"Render subpass '{SystemRenderPasses.GetSubpass(activePass.Value).Name}' is still active.");
++
++        var descriptor = SystemRenderPasses.GetSubpass(pass);
++        var required = descriptor.Reads & ~descriptor.OptionalReads;
++        var missing = required & ~available;
++        if (missing != SystemRenderResource.None)
++            throw new InvalidOperationException(
++                $"Render subpass '{descriptor.Name}' reads unavailable frame resources {missing}.");
++
++        activePass = pass;
++    }
++
++    public void End(SystemRenderSubpass pass)
++    {
++        if (activePass != pass)
++            throw new InvalidOperationException(
++                $"Render subpass '{SystemRenderPasses.GetSubpass(pass).Name}' ended without a matching begin.");
++        available |= SystemRenderPasses.GetSubpass(pass).Writes;
++        activePass = null;
++    }
++
++    public void Abort(SystemRenderSubpass pass)
++    {
++        if (activePass == pass)
++            activePass = null;
++    }
++
++    public void CompleteFrame()
++    {
++        if (activePass != null)
++            throw new InvalidOperationException(
++                $"Render frame ended while subpass '{SystemRenderPasses.GetSubpass(activePass.Value).Name}' was active.");
++    }
++}
+ 
+ public static class SystemRenderPasses
+ {
+@@ -392,7 +443,9 @@
+                 SystemRenderLoadOperation.DontCare, SystemRenderStoreOperation.Store), null, null,
+             Conditional: true,
+             SourceColor: new(SystemRenderResource.SceneColor, SystemRenderAttachmentFormat.HdrBlendable,
+-                SystemRenderLoadOperation.Load, SystemRenderStoreOperation.None)),
++                SystemRenderLoadOperation.Load, SystemRenderStoreOperation.None),
++            OptionalReads: SystemRenderResource.BloomBlurredColor |
++                SystemRenderResource.BloomMediumBlurredColor | SystemRenderResource.BloomWideBlurredColor),
+         new(SystemRenderSubpass.ScreenSpaceAmbientOcclusion, "SSAO",
+             SystemRenderTargetRole.PostProcess,
+             SystemRenderResource.SceneColor | SystemRenderResource.SampleableSceneDepth,
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -71,6 +71,8 @@
+         private ResourceManager resman;
+         private IGpuTimerQuery?[]? gpuPassQueries;
+         private readonly SystemRenderPassExecution activeFramePasses = new();
++        private readonly SystemRenderSubpassExecution activeFrameSubpasses = new();
++        private bool subpassResourcesInitialized;
+         private long nextGpuProfileFrame;
+         private long currentGpuProfileFrame;
+         private const int ShadowMapResolution = 1024;
+@@ -585,6 +587,7 @@
+                 // the caller's current target (which may be the screen).
+                 RenderTarget? sceneTarget = rstate.RenderTarget;
+                 activeFramePasses.Reset();
++                subpassResourcesInitialized = false;
+                 if (Settings.RenderSoftParticles && Settings.RenderParticleEffects &&
+                     (msaa?.SsaoDepthTarget != null || softParticleDepthTarget != null))
+                     activeFramePasses.RequireBeforeTransparent(SystemRenderResource.SampleableSceneDepth);
+@@ -943,6 +946,8 @@
+                     rstate.RenderTarget = restoreTarget;
+                 }
+ 
++                if (subpassResourcesInitialized)
++                    activeFrameSubpasses.CompleteFrame();
+                 rstate.DepthEnabled = true;
+             }
+             finally
+@@ -1247,14 +1252,31 @@
+             var index = GpuPassProfile.GetQueryIndex(pass);
+             if (begin)
+             {
+-                rstate.PushRenderDocMaterialMarker(SystemRenderPasses.GetSubpass(pass).Name);
++                if (!subpassResourcesInitialized)
++                {
++                    activeFrameSubpasses.Reset(activeFramePasses.AvailableResources |
++                        SystemRenderResource.PresentationColor | SystemRenderResource.SmaaLookupTextures);
++                    subpassResourcesInitialized = true;
++                }
++                activeFrameSubpasses.Begin(pass);
++                var markerPushed = false;
+                 try
+                 {
++                    rstate.PushRenderDocMaterialMarker(SystemRenderPasses.GetSubpass(pass).Name);
++                    markerPushed = true;
+                     gpuPassQueries?[index]?.Begin(currentGpuProfileFrame);
+                 }
+                 catch
+                 {
+-                    rstate.PopRenderDocMaterialMarker();
++                    try
++                    {
++                        if (markerPushed)
++                            rstate.PopRenderDocMaterialMarker();
++                    }
++                    finally
++                    {
++                        activeFrameSubpasses.Abort(pass);
++                    }
+                     throw;
+                 }
+             }
+@@ -1266,7 +1288,14 @@
+                 }
+                 finally
+                 {
+-                    rstate.PopRenderDocMaterialMarker();
++                    try
++                    {
++                        activeFrameSubpasses.End(pass);
++                    }
++                    finally
++                    {
++                        rstate.PopRenderDocMaterialMarker();
++                    }
+                 }
+             }
+         }
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -61,6 +61,7 @@
+   - [x] Bestehende Forward-Aufrufreihenfolge, Opaque-/Transparent-Kommandos, Sterne, Nebel und AA-Resolve im Quellcode erfasst. Der Depth-Prepass-Metadatavertrag ist als optional markiert und liest/schreibt nur SceneDepth; er beansprucht keinen Szenenfarb-Read oder Color-Attachment. Die Metadaten sind noch kein ausführbarer Render Graph. Siehe [Pass-Reihenfolge-Audit](evidence/renderer/forward-pass-order-audit-20261015.md).
+   - [x] Samplebare Tiefentextur als eigenen Graph-Ressourcentyp vom aktiven Szenen-Tiefenattachment getrennt. SSAO und Soft Particles deklarieren und validieren den DepthTexture-Passausgang beim realen Target-Binding; SSAO deklariert dieselbe Ressource als Quelle. Der restliche Main-Pass-Ablauf ist weiterhin manuell gesteuert.
+   - [x] Laufzeitvalidierung an die tatsächlichen Hauptpass-Aufrufe gebunden: pro Frame werden Reihenfolge, doppelte/fehlende Begin-End-Paare und Pflichtressourcen geprüft; optionale Szene-Tiefe und Schatten bleiben ausdrücklich optional. Der wiederverwendete Validator speichert ausgeführte Pässe als Bitmaske. Render-Befehle und Targetwechsel werden weiterhin manuell ausgeführt, also noch kein ausführbarer Render Graph.
++  - [x] Laufzeitvalidierung für Postprocess-Subpasses ergänzt: SMAA, SSAO, Bloom und Tonemapping prüfen an ihren tatsächlichen Begin-/End-Aufrufen die Ressourcenabhängigkeiten. Verfügbare Hauptpass-Ressourcen und externe Lookup-/Ausgabeziele bilden den Frame-Anfang; optionale Bloom-Eingaben bleiben für Tonemapping optional. Der Frameabschluss stellt zusätzlich sicher, dass kein Subpass offen blieb. Das prüft Read-before-write und Passpaarung, steuert aber weiterhin keine Befehle oder Targetwechsel. Build- und Laufzeitabnahme stehen aus.
+   - [x] Gebundene Backend-Renderziele stellen Farb-/Tiefen-/Stencil-Präsenz und ein bekanntes Farbformat bereit. `SystemRenderer` weist Wrapperziele ohne Farbe oder Tiefe zurück; GL-MSAA meldet das Farbformat nur für bekannte sized-Formate. Swapchainformat und Desktop-GLs unsized-MSAA-Storage bleiben unbekannt.
+   - [x] `AntialiasTarget` prüft beim Erzeugen die tatsächlichen aktiven Farb-/Tiefenattachments und für SMAA auch Stencil an Kanten- und Gewichtsziel; bekannte Zielformate müssen dem gewählten LDR-/HDR-Pfad entsprechen. Unbekanntes Desktop-MSAA-Format bleibt zulässig und wird nicht geraten.
+ - [ ] Render-Target-Resize, minimierte Fenster, Scissor-/Viewport-Wechsel und Geräteverlust für zusätzliche Pässe absichern.
+--- a/patches/series
++++ b/patches/series
+@@ -264,3 +264,4 @@
+ client 2262-correct-pbr-ibl-roadmap-status.patch
+ client 2263-record-diffuse-ibl-kufighter-runtime-ab.patch
+ client 2264-restore-billboard-state-on-draw-failure.patch
++client 2265-validate-postprocess-subpass-resources.patch
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 263 Client bundles and two native bundles. Each
++The active series contains 264 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -226,3 +226,4 @@
+ | 2262 | Correct the documented diffuse IBL implementation status |
+ | 2263 | Record NAP-backed diffuse IBL A/B on Kusari Fighter |
+ | 2264 | Restore billboard render state if a draw fails |
++| 2265 | Validate post-process subpass resource dependencies at runtime |

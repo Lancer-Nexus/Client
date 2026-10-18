@@ -1,0 +1,237 @@
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -231,6 +231,7 @@
+   - `--render-surface-profile=original|minimal|standard|full` → `surface_profile`.
+   - `--render-per-pixel-lighting=on|off` → `per_pixel_lighting`.
+   - `--render-dynamic-lighting=on|off` → `dynamic_lighting`.
++  - `--render-dynamic-light-budget=0|8|16|24|32` → `dynamic_light_budget` (maximum transient local lights admitted per frame; persistent system lights are unaffected).
+   - `--render-nebulae=on|off` → `render_nebulae`.
+   - `--render-starsphere=on|off` → `render_starsphere`.
+   - `--render-sun-lens-glow=on|off` → `render_sun_lens_glow`.
+@@ -243,7 +244,8 @@
+ - Boolean controls accept only `on` or `off`. Surface profile selects the
+   material-map quality preset; anti-aliasing and anisotropy remain subject to
+   backend and hardware support. Do not document controls without a runtime
+-  setting and parser entry.
++  setting and parser entry. The dynamic-light budget accepts only its listed
++  integer levels.
+ - Example for an isolated comparison launch:
+   `lancer client.ini --render-normal-maps=on --render-nebulae=off --render-antialias=smaa-high`.
+ 
+--- a/docs/dynamic-lighting-audit.md
++++ b/docs/dynamic-lighting-audit.md
+@@ -23,6 +23,10 @@
+   keine entsprechende allgemeine Sichtbarkeits-/Occlusion-Priorisierung.
+ - `Settings.DynamicLighting` schaltet den bestehenden Beleuchtungspfad global
+   ein oder aus.
++- `Settings.DynamicLightBudget` begrenzt die pro Frame zugelassenen lokalen
++  transienten Quellen auf 0, 8, 16, 24 oder 32. Die Startoption
++  `--render-dynamic-light-budget` überschreibt diesen Wert; persistente
++  Systemlichter zählen nicht zu diesem Budget.
+ - `LightEquipment.EmitRange` und `EmitAttenuation` werden geparst und vom
+   `LightEquipRenderer` als lokale Frame-Lichtquelle registriert. `PrepareRender`
+   prüft Sichtkegel, Kamerafrustrum und Physik-Occlusion, bevor die Quelle
+@@ -88,7 +92,7 @@
+    Farbverlauf, Reichweite und Dauer. Persistente Fuse-Effekte brauchen zudem
+    ein an Objekt/Hardpoint und `SpawnedEffect`-Lebenszyklus gebundenes Licht;
+    der bestehende positionsbasierte Transient-Pool reicht dafür nicht.
+-4. Lebensdauer, Ausschalter, Budgetauswahl, Lichtgruppen und deterministische
++4. Lebensdauer, Ausschalter, die auswählbare Frame-Budgetstufe, Lichtgruppen und deterministische
+    Überlastfälle mit Tests abdecken. Danach typische Kampf- und Stationsszenen
+    messen und mit NAP-Daten visuell abnehmen.
+ 
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -508,7 +508,7 @@
+   Transparenz und bestehende Freelancer-Nebelparameter erhalten.
+ - [ ] Gerichtete Schatten zuerst mit Kaskaden/PCF, anschließend zusätzliche
+   Lichttypen; Shadow-Depth-Targets und Comparison-Sampler abstrahieren.
+-- [ ] Kurzlebige Effektlichter vervollständigen und messen: Mündungslichter aus `Gun.light_anim` sowie Explosionslichter aus `lgt_effect`/`lgt_radius` und `lgt_time_scale` sind vorhanden. Per-Objekt-Auswahl und Frame-Pool priorisieren nach geschätztem attenuiertem Lichtbeitrag; der Frame-Pool verwirft Quellen außerhalb ihrer Reichweite und ohne positiven Beitrag, bevor sie einen der 32 transienten Slots belegen. Bei voller 128er-Ereignisliste ersetzt ein stärker beitragendes neues Licht den derzeit schwächsten aktiven Kandidaten; die Animation wird für beide zum aktuellen Zeitpunkt bewertet. `lgt_range_scale` wird nun bis zum transienten Lichtobjekt durchgereicht, bleibt aber bis zur Semantikklärung ohne Laufzeitwirkung. Offen sind explizite Lichtdaten und hardpointgebundene Lebenszyklen für persistentes Feuer, allgemeine Sichtbarkeits-/Occlusion-Priorisierung, Qualitätsbudgets und reproduzierbare NAP-Szenenmessungen. Siehe [Feuerinventar](evidence/effect-fire-light-input-inventory-20261014.json).
++- [ ] Kurzlebige Effektlichter vervollständigen und messen: Mündungslichter aus `Gun.light_anim` sowie Explosionslichter aus `lgt_effect`/`lgt_radius` und `lgt_time_scale` sind vorhanden. Per-Objekt-Auswahl und Frame-Pool priorisieren nach geschätztem attenuiertem Lichtbeitrag; der Frame-Pool verwirft Quellen außerhalb ihrer Reichweite und ohne positiven Beitrag. Die maximale Zahl zugelassener transienter Frame-Lichter ist mit `dynamic_light_budget` nun auf 0, 8, 16, 24 oder 32 begrenzbar; die 128er-Ereignisliste bleibt eine feste Obergrenze. `lgt_range_scale` wird bis zum transienten Lichtobjekt durchgereicht, bleibt aber bis zur Semantikklärung ohne Laufzeitwirkung. Offen sind explizite Lichtdaten und hardpointgebundene Lebenszyklen für persistentes Feuer, allgemeine Sichtbarkeits-/Occlusion-Priorisierung, eine konfigurierbare Ereignisobergrenze und reproduzierbare NAP-Szenenmessungen. Siehe [Feuerinventar](evidence/effect-fire-light-input-inventory-20261014.json).
+   - [x] Negative oder nichtendliche Frame-Deltas werden in `SystemRenderer.Update` auf null normalisiert, bevor Nebel, Partikeleffekte und transiente Lichter aktualisiert werden.
+ - [ ] Danach Laser-, Projektil- und Explosionseffekte überarbeiten: Beam- und Trefferdarstellung, Trails, Partikel, Farbverläufe sowie Größen-/Zeitverhalten aufeinander abstimmen und mit dynamischer Beleuchtung integrieren. Originaleffekte und einzeln abschaltbare Qualitätsoptionen erhalten; NAP-Referenzszenen mit Vergleichsbildern und CPU-/GPU-Zeit abnehmen.
+   - [x] `vis_beam`-Querschnittsbasis bleibt bei vertikaler oder ungültiger Richtung endlich und orthonormal; Zugriffe auf den Beam-Puffer sind auf seine Kapazität begrenzt. Vier fokussierte Tests bestehen.
+@@ -789,7 +789,8 @@
+ `--render-generated-tangents=on|off`,
+ `--render-surface-profile=original|minimal|standard|full`,
+ `--render-per-pixel-lighting=on|off`,
+-`--render-dynamic-lighting=on|off`, `--render-nebulae=on|off` und
++`--render-dynamic-lighting=on|off`, `--render-dynamic-light-budget=0|8|16|24|32`,
++`--render-nebulae=on|off` und
+ `--render-starsphere=on|off`,
+ `--render-antialias=none|smaa-low|smaa-medium|smaa-high|smaa-ultra|msaa-2x|msaa-4x|msaa-8x`
+ und `--render-anisotropy=0|2|4|8|16`. Nicht unterstützte AA- und
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -138,7 +138,7 @@
+ - [ ] Screen-Space-Reflections als optionale Ergänzung prüfen; fehlende Bildinformation an Bildschirmrändern und bei verdeckten Objekten muss über den bestehenden PBR-Fallback abgefangen werden.
+ - [ ] Volumetrischen Nebel und volumetrische Lichtstrahlen als eigenständige, skalierbare Qualitätstufe evaluieren; vorhandene Freelancer-Nebelparameter und Transparenzreihenfolge als Referenz verwenden.
+ - [ ] Forward+/Clustered Lighting gegen die aktuelle Beleuchtungsarchitektur und typische Freelancer-Szenen mit vielen Lichtern benchmarken, bevor ein Renderer-Umbau geplant wird.
+-- [ ] Kurzlebige dynamische Lichter für Effekte, Waffenfeuer/Mündungsblitze, Feuer und Explosionen vervollständigen. Vorhanden sind `Gun.light_anim`-Mündungslichter sowie datengetriebene Explosionslichter aus `lgt_effect`/`lgt_radius` einschließlich `lgt_time_scale`; der Effektpool begrenzt aktive Ereignisse auf 128 und der Frame-Pool lokale Lichtquellen auf 32. Die per-Objekt-Auswahl und der Frame-Pool priorisieren nun nach geschätzter attenuierter Lichtwirkung; der Frame-Pool verwirft lokale Quellen außerhalb ihrer Reichweite und cached die Scores für den aktuellen Frame. `lgt_range_scale` wird geparst und nach `ResolvedFx` übernommen, aber `GameWorld.SpawnTempFx` reicht es nicht an den Renderer weiter. Beide SDK-Dateien `EffectsExplosion.ini` und `EffectsExplosionNew.ini` enthalten jeweils 25 passende Effekte, bei denen `lgt_range_scale` gleich `lgt_radius` ist; die eigenständige Semantik bleibt damit ungeklärt. Ebenfalls offen sind explizite Lichtdaten und hardpointgebundene Lichtlebenszyklen für persistentes Feuer, Sichtbarkeits-/Occlusion-Priorisierung, konfigurierbares Qualitätsbudget und visuelle Messungen in typischen NAP-Szenen ([Feuerinventar](evidence/effect-fire-light-input-inventory-20261014.json)).
++- [ ] Kurzlebige dynamische Lichter für Effekte, Waffenfeuer/Mündungsblitze, Feuer und Explosionen vervollständigen. Vorhanden sind `Gun.light_anim`-Mündungslichter sowie datengetriebene Explosionslichter aus `lgt_effect`/`lgt_radius` einschließlich `lgt_time_scale`; der Effektpool begrenzt aktive Ereignisse auf 128 und der Frame-Pool lokale Lichtquellen auf maximal 32. Die Frame-Obergrenze ist nun per `dynamic_light_budget` beziehungsweise `--render-dynamic-light-budget=0|8|16|24|32` absenkbar. Die per-Objekt-Auswahl und der Frame-Pool priorisieren nach geschätzter attenuierter Lichtwirkung; der Frame-Pool verwirft lokale Quellen außerhalb ihrer Reichweite und cached die Scores für den aktuellen Frame. `lgt_range_scale` wird bis zum transienten Lichtobjekt durchgereicht, bleibt aber bis zur Semantikklärung ohne Laufzeitwirkung. Offen sind explizite Lichtdaten und hardpointgebundene Lichtlebenszyklen für persistentes Feuer, Sichtbarkeits-/Occlusion-Priorisierung, eine konfigurierbare Ereignisobergrenze und visuelle Messungen in typischen NAP-Szenen ([Feuerinventar](evidence/effect-fire-light-input-inventory-20261014.json)).
+ 
+ ### 5. Effektüberarbeitung nach Renderer und dynamischer Beleuchtung
+ 
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -52,6 +52,7 @@
+ | 2076 | Distinguish Surface Maps sampler support from pending visual filter-quality checks |
+ | 2077 | Preserve lgt_range_scale through transient effect light creation without applying unknown semantics |
+ | 2078 | Mark CubeMap catalog strength integration complete in the renderer plan |
++| 2079 | Add a configurable per-frame dynamic-light budget |
+ | 2011 (`lancerdecode`) | Native Vorbis EOF/reset handling |
+ | 2012 (`blurgtext`) | System FreeType without OT-SVG hooks |
+ 
+--- a/patches/series
++++ b/patches/series
+@@ -78,3 +78,4 @@
+ client 2076-surface-map-filter-status.patch
+ client 2077-preserve-effect-light-range-scale.patch
+ client 2078-document-cubemap-strength-complete.patch
++client 2079-configurable-dynamic-light-budget.patch
+--- a/src/LibreLancer/GameSettings.cs
++++ b/src/LibreLancer/GameSettings.cs
+@@ -45,6 +45,8 @@
+         public bool PerPixelLighting = true;
+         [Entry("dynamic_lighting")]
+         public bool DynamicLighting = true;
++        [Entry("dynamic_light_budget")]
++        public int DynamicLightBudget = 32;
+         [Entry("render_nebulae")]
+         public bool RenderNebulae = true;
+         [Entry("render_starsphere")]
+@@ -97,6 +99,7 @@
+         float IRendererSettings.LodMultiplier => LodMultiplier;
+         bool IRendererSettings.PerPixelLighting => PerPixelLighting;
+         bool IRendererSettings.DynamicLighting => DynamicLighting;
++        int IRendererSettings.DynamicLightBudget => DynamicLightBudget;
+         bool IRendererSettings.RenderNebulae => RenderNebulae;
+         bool IRendererSettings.RenderStarsphere => RenderStarsphere;
+         bool IRendererSettings.RenderSunLensGlow => RenderSunLensGlow;
+@@ -139,6 +142,7 @@
+             writer.WriteLine($"debug = {(Debug ? "true" : "false")}");
+             writer.WriteLine($"per_pixel_lighting = {(PerPixelLighting ? "true" : "false")}");
+             writer.WriteLine($"dynamic_lighting = {(DynamicLighting ? "true" : "false")}");
++            writer.WriteLine($"dynamic_light_budget = {DynamicLightBudget}");
+             writer.WriteLine($"render_nebulae = {(RenderNebulae ? "true" : "false")}");
+             writer.WriteLine($"render_starsphere = {(RenderStarsphere ? "true" : "false")}");
+             writer.WriteLine($"render_sun_lens_glow = {RenderSunLensGlow.ToString().ToLowerInvariant()}");
+@@ -175,6 +179,7 @@
+                 SurfaceGeneratedTangentsEnabled = SurfaceGeneratedTangentsEnabled,
+                 PerPixelLighting = PerPixelLighting,
+                 DynamicLighting = DynamicLighting,
++                DynamicLightBudget = DynamicLightBudget,
+                 RenderNebulae = RenderNebulae,
+                 RenderStarsphere = RenderStarsphere,
+                 RenderSunLensGlow = RenderSunLensGlow,
+@@ -209,6 +214,7 @@
+             SurfaceGeneratedTangentsEnabled = other.SurfaceGeneratedTangentsEnabled;
+             PerPixelLighting = other.PerPixelLighting;
+             DynamicLighting = other.DynamicLighting;
++            DynamicLightBudget = other.DynamicLightBudget;
+             RenderNebulae = other.RenderNebulae;
+             RenderStarsphere = other.RenderStarsphere;
+             RenderSunLensGlow = other.RenderSunLensGlow;
+@@ -220,6 +226,11 @@
+ 
+         public void Validate()
+         {
++            if (DynamicLightBudget is not (0 or 8 or 16 or 24 or 32))
++            {
++                FLLog.Info("Config", $"Dynamic light budget {DynamicLightBudget} is unsupported; using 32.");
++                DynamicLightBudget = 32;
++            }
+             var mode = (AntialiasMode)Antialias;
+             if (mode > RenderContext.MaxAntialias)
+             {
+--- a/src/LibreLancer/Render/IRendererSettings.cs
++++ b/src/LibreLancer/Render/IRendererSettings.cs
+@@ -10,6 +10,7 @@
+     float LodMultiplier { get; }
+     bool PerPixelLighting { get; }
+     bool DynamicLighting => true;
++    int DynamicLightBudget => 32;
+     bool RenderNebulae => true;
+     bool RenderStarsphere => true;
+     bool RenderSunLensGlow => true;
+--- a/src/LibreLancer/Render/SystemLighting.cs
++++ b/src/LibreLancer/Render/SystemLighting.cs
+@@ -11,7 +11,7 @@
+ {
+ 	public class SystemLighting
+ 	{
+-        public const int MaxFrameLights = 32;
++        public int MaxFrameLights { get; set; } = 32;
+ 
+         public int ID = Environment.TickCount;
+ 		public Color4 Ambient = Color4.Black;
+@@ -63,6 +63,9 @@
+         {
+             if (!DynamicLightsEnabled || !light.Active)
+                 return false;
++            var maxTransientLights = Math.Clamp(MaxFrameLights, 0, 32);
++            if (maxTransientLights == 0)
++                return false;
+ 
+             if (!frameStarted)
+                 BeginFrame(frameCameraPosition);
+@@ -75,7 +78,7 @@
+                 return false;
+ 
+             var transientCount = frameLights.Count - transientStart;
+-            if (transientCount < MaxFrameLights)
++            if (transientCount < maxTransientLights)
+             {
+                 frameLights.Add(light);
+                 frameLightPriorities.Add(priority);
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -399,6 +399,7 @@
+             rstate.AnisotropyLevel = Settings.SelectedAnisotropy;
+             var nr = CheckNebulae(); // are we in a nebula?
+             SystemLighting.DynamicLightsEnabled = Settings.DynamicLighting;
++            SystemLighting.MaxFrameLights = Settings.DynamicLightBudget;
+             SystemLighting.BeginFrame(camera.Position);
+             if (Settings.RenderTransientEffectLights)
+             {
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -27,6 +27,7 @@
+             Console.WriteLine("         --render-surface-profile=original|minimal|standard|full");
+             Console.WriteLine("         --render-per-pixel-lighting=on|off");
+             Console.WriteLine("         --render-dynamic-lighting=on|off");
++            Console.WriteLine("         --render-dynamic-light-budget=0|8|16|24|32");
+             Console.WriteLine("         --render-nebulae=on|off");
+             Console.WriteLine("         --render-starsphere=on|off");
+             Console.WriteLine("         --render-sun-lens-glow=on|off");
+@@ -178,6 +179,7 @@
+         private SurfaceMapProfile? surfaceProfile;
+         private bool? perPixelLighting;
+         private bool? dynamicLighting;
++        private int? dynamicLightBudget;
+         private bool? nebulae;
+         private bool? starsphere;
+         private bool? sunLensGlow;
+@@ -237,6 +239,14 @@
+                     if (!ParseToggle(out var dynamicLights)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
+                     dynamicLighting = dynamicLights;
+                     return true;
++                case "--render-dynamic-light-budget":
++                    if (int.TryParse(value, out var lightBudget) && lightBudget is 0 or 8 or 16 or 24 or 32)
++                    {
++                        dynamicLightBudget = lightBudget;
++                        return true;
++                    }
++                    error = $"{name} accepts 0, 8, 16, 24 or 32.";
++                    return false;
+                 case "--render-nebulae":
+                     if (!ParseToggle(out var drawNebulae)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
+                     nebulae = drawNebulae;
+@@ -305,6 +315,7 @@
+             if (surfaceProfile.HasValue) settings.SurfaceProfile = surfaceProfile.Value;
+             if (perPixelLighting.HasValue) settings.PerPixelLighting = perPixelLighting.Value;
+             if (dynamicLighting.HasValue) settings.DynamicLighting = dynamicLighting.Value;
++            if (dynamicLightBudget.HasValue) settings.DynamicLightBudget = dynamicLightBudget.Value;
+             if (nebulae.HasValue) settings.RenderNebulae = nebulae.Value;
+             if (starsphere.HasValue) settings.RenderStarsphere = starsphere.Value;
+             if (sunLensGlow.HasValue) settings.RenderSunLensGlow = sunLensGlow.Value;

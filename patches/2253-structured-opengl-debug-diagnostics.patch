@@ -1,0 +1,147 @@
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+index f7dbd94..af41e1b 100644
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -288,6 +288,7 @@ Diese Liste plant moderne Renderer-Erweiterungen für LibreLancer. Sie ist eine
+   ohne Absturz oder GL-Fehler. Ein RenderDoc-Capture ist noch nicht erstellt;
+   Bedingungen und Grenzen: [Laufzeit-Smoke](evidence/renderer/renderdoc-markers-nap-20261017/README.md).
+ - [ ] Lesbare GPU-Fehlerdiagnostik für reproduzierbare Grafikfehler vorsehen.
++  - [x] OpenGL `KHR_debug` protokolliert Treiberfehler mit Meldungs-ID, Quelle, Typ und Schweregrad als Fehler/Warnung; unbekannte Enumwerte bleiben hexadezimal sichtbar. Andere Backendfehler, Debugkontextzuordnung zu Render-Pässen und ein Laufzeitfehler-Injektionsnachweis bleiben offen.
+ 
+ ### 7. Zeitliche und räumliche Rekonstruktion
+ 
+diff --git a/patches/README.md b/patches/README.md
+index 474ba4a..9a39f5e 100644
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 251 Client bundles and two native bundles. Each
++The active series contains 252 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -218,3 +218,4 @@ jump-gate route.
+ | 2250 | Fit the SSAO quality controls in the visible Performance options panel and record runtime proof |
+ | 2251 | Verify live SSAO radius adjustment and persistence from the Performance options |
+ | 2252 | Validate post-process resource dependencies and pass lifetimes |
++| 2253 | Log structured OpenGL driver diagnostics for renderer failures |
+diff --git a/patches/series b/patches/series
+index 98fbc71..2bfbbea 100644
+--- a/patches/series
++++ b/patches/series
+@@ -252,3 +252,4 @@ client 2249-ssao-live-quality-options.patch
+ client 2250-ssao-options-layout-runtime-proof.patch
+ client 2251-ssao-live-radius-persistence-evidence.patch
+ client 2252-executable-postprocess-dependency-plan.patch
++client 2253-structured-opengl-debug-diagnostics.patch
+diff --git a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Constants.cs b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Constants.cs
+index a8e0ada..f18c421 100644
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Constants.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Constants.cs
+@@ -1,4 +1,4 @@
+-﻿// MIT License - Copyright (c) Callum McGing
++// MIT License - Copyright (c) Callum McGing
+ // This file is subject to the terms and conditions defined in
+ // LICENSE, which is part of this source code package
+ 
+@@ -8,13 +8,25 @@ internal static partial class GL
+ {
+     //debug
+     public const int GL_DEBUG_OUTPUT_KHR = 0x92E0;
++    public const int GL_DEBUG_SOURCE_API = 0x8246;
++    public const int GL_DEBUG_SOURCE_WINDOW_SYSTEM = 0x8247;
+     public const int GL_DEBUG_SOURCE_SHADER_COMPILER = 0x8248;
++    public const int GL_DEBUG_SOURCE_THIRD_PARTY = 0x8249;
+     public const int GL_DEBUG_SOURCE_APPLICATION = 0x824A;
+     public const int GL_DEBUG_SOURCE_OTHER = 0x824B;
+     public const int GL_DONT_CARE = 0x1100;
++    public const int GL_DEBUG_SEVERITY_HIGH = 0x9146;
++    public const int GL_DEBUG_SEVERITY_MEDIUM = 0x9147;
+     public const int GL_DEBUG_SEVERITY_LOW = 0x9148;
+-    public const int GL_DEBUG_TYPE_PERFORMANCE = 0x8250;
++    public const int GL_DEBUG_SEVERITY_NOTIFICATION = 0x826B;
+     public const int GL_DEBUG_TYPE_ERROR = 0x824C;
++    public const int GL_DEBUG_TYPE_DEPRECATED_BEHAVIOR = 0x824D;
++    public const int GL_DEBUG_TYPE_UNDEFINED_BEHAVIOR = 0x824E;
++    public const int GL_DEBUG_TYPE_PORTABILITY = 0x824F;
++    public const int GL_DEBUG_TYPE_PERFORMANCE = 0x8250;
++    public const int GL_DEBUG_TYPE_MARKER = 0x8268;
++    public const int GL_DEBUG_TYPE_PUSH_GROUP = 0x8269;
++    public const int GL_DEBUG_TYPE_POP_GROUP = 0x826A;
+     public const int GL_TIME_ELAPSED = 0x88BF;
+     public const int GL_QUERY_RESULT = 0x8866;
+     public const int GL_QUERY_RESULT_AVAILABLE = 0x8867;
+diff --git a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Functions.cs b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Functions.cs
+index 5abd54d..a8e68e9 100644
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Functions.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Functions.cs
+@@ -1,4 +1,4 @@
+-﻿// MIT License - Copyright (c) Callum McGing
++// MIT License - Copyright (c) Callum McGing
+ // This file is subject to the terms and conditions defined in
+ // LICENSE, which is part of this source code package
+ 
+@@ -158,16 +158,53 @@ internal static unsafe partial class GL
+         // RenderDoc's material groups are API-visible by design; avoid flooding the game log with them.
+         if (source == GL_DEBUG_SOURCE_APPLICATION && RenderDocMaterialMarkersEnabled)
+             return;
+-        //higher severity = lower enum value (why khronos?)
+-        if (type == GL_DEBUG_TYPE_ERROR &&
+-            severity < GL_DEBUG_SEVERITY_LOW) {
+-            FLLog.Info("GL_KHR_debug", $"{Marshal.PtrToStringUTF8(message)}");
+-        }
+-        else {
+-            FLLog.Debug("GL_KHR_debug", $"{Marshal.PtrToStringUTF8(message)}");
+-        }
++        var sourceName = DebugSourceName(source);
++        var typeName = DebugTypeName(type);
++        var severityName = DebugSeverityName(severity);
++        var text = Marshal.PtrToStringUTF8(message, Math.Max(0, length)) ?? "<empty>";
++        var diagnostic = $"id={id} source={sourceName} type={typeName} severity={severityName}: {text}";
++
++        if (type == GL_DEBUG_TYPE_ERROR)
++            FLLog.Error("GL_KHR_debug", diagnostic);
++        else if (severity == GL_DEBUG_SEVERITY_HIGH || severity == GL_DEBUG_SEVERITY_MEDIUM)
++            FLLog.Warning("GL_KHR_debug", diagnostic);
++        else
++            FLLog.Debug("GL_KHR_debug", diagnostic);
+     }
+ 
++    private static string DebugSourceName(int source) => source switch
++    {
++        GL_DEBUG_SOURCE_API => "API",
++        GL_DEBUG_SOURCE_WINDOW_SYSTEM => "WindowSystem",
++        GL_DEBUG_SOURCE_SHADER_COMPILER => "ShaderCompiler",
++        GL_DEBUG_SOURCE_THIRD_PARTY => "ThirdParty",
++        GL_DEBUG_SOURCE_APPLICATION => "Application",
++        GL_DEBUG_SOURCE_OTHER => "Other",
++        _ => $"Unknown(0x{source:X})"
++    };
++
++    private static string DebugTypeName(int type) => type switch
++    {
++        GL_DEBUG_TYPE_ERROR => "Error",
++        GL_DEBUG_TYPE_DEPRECATED_BEHAVIOR => "DeprecatedBehavior",
++        GL_DEBUG_TYPE_UNDEFINED_BEHAVIOR => "UndefinedBehavior",
++        GL_DEBUG_TYPE_PORTABILITY => "Portability",
++        GL_DEBUG_TYPE_PERFORMANCE => "Performance",
++        GL_DEBUG_TYPE_MARKER => "Marker",
++        GL_DEBUG_TYPE_PUSH_GROUP => "PushGroup",
++        GL_DEBUG_TYPE_POP_GROUP => "PopGroup",
++        _ => $"Unknown(0x{type:X})"
++    };
++
++    private static string DebugSeverityName(int severity) => severity switch
++    {
++        GL_DEBUG_SEVERITY_HIGH => "High",
++        GL_DEBUG_SEVERITY_MEDIUM => "Medium",
++        GL_DEBUG_SEVERITY_LOW => "Low",
++        GL_DEBUG_SEVERITY_NOTIFICATION => "Notification",
++        _ => $"Unknown(0x{severity:X})"
++    };
++
+ 
+     public static bool CheckStringSDL(bool checkGles = false)
+     {

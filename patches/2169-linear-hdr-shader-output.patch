@@ -1,0 +1,589 @@
+diff --git a/docs/evidence/renderer/hdr-linear-output-implementation-20261016.md b/docs/evidence/renderer/hdr-linear-output-implementation-20261016.md
+new file mode 100644
+index 0000000..8d0821a
+--- /dev/null
++++ b/docs/evidence/renderer/hdr-linear-output-implementation-20261016.md
+@@ -0,0 +1,36 @@
++# HDR lineare Szenenausgabe (2026-10-16)
++
++## Umsetzung
++
++- `RenderContext` erkennt das aktive HDR-`AntialiasTarget` und bindet dessen
++  Zustand über Uniformblock 6 an jeden Shader, der den gemeinsamen
++  `OutputColor.hlsl`-Vertrag verwendet. Der Zustandswert wird pro Shader nur
++  beim Wechsel zwischen HDR- und LDR-Ziel aktualisiert.
++- Alle 18 Client-Fragmentshader, die Farbwerte in die Szene schreiben, verwenden
++  `OutputColor.hlsl`. Die 17 Legacy-Shader geben mit `ToSceneOutput` im HDR-Ziel
++  RGB-Werte per sRGB-EOTF linear aus, bevor Fixed-Function-Blending stattfindet;
++  der LDR-Pfad lässt sie unverändert. PBR benutzt `ToDisplayOutput`, um seine
++  lineare Beleuchtungsfarbe abhängig vom aktiven Ziel linear oder legacy-kodiert
++  auszugeben.
++- Der PBR-Shader berechnet bereits lineare Beleuchtungswerte. Er schreibt diese
++  ohne Gamma-Kodierung in HDR-Ziele und behält für das normale LDR-Ziel die bisherige
++  Gamma-2.2-Ausgabe bei.
++- `ClearAll` und `ClearColorOnly` dekodieren die eingestellte Clear-Farbe für ein
++  aktives HDR-Ziel und stellen danach den ursprünglichen Renderzustand wieder her.
++- `Tonemap.frag.hlsl` nimmt nun lineare RGB-Werte an, wendet Belichtung und ACES
++  an und kodiert das Ergebnis mit der sRGB-OETF. SMAA erhält weiterhin das bereits
++  tonemappte LDR-Bild; MSAA löst vor dem Tonemapping in ein Half-Float-Ziel auf.
++- `SpaceGameplay.Draw` rendert zuerst den `SystemRenderer`, danach HUD und UI. Die
++  bestehende Reihenfolge setzt UI und Typewriter nach dem Tone-Map-Pass zusammen.
++
++## Grenzen und Prüfung
++
++Legacy-Lichtberechnung und Farbmultiplikation verwenden an einigen Stellen weiterhin
++kodierte Diffuse-, Material- und Vertexfarben. Diese Änderung macht Shader-Ausgabe,
++Clear und Zielblending linear; sie konvertiert noch nicht alle Eingaben vor der
++Beleuchtungsrechnung. Das ist deshalb kein vollständiger linearer Beleuchtungsweg.
++
++Der Release-Build mit .NET 10 (`/opt/dotnet-10`) lief erfolgreich mit 0 Fehlern
++und 163 Warnungen aus dem bestehenden Projekt. Die frische Patch-Rekonstruktion wird
++nach Registrierung des Bundles erneut geprüft. Es gibt derzeit keine NAP-Archive unter `Data/NAP`, daher wurde kein visueller
++HDR-Lauf und keine Screenshot-Abnahme ausgeführt.
+diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
+index 58d6d23..aa80827 100644
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -494,14 +494,21 @@ offen. Orientierung, Materialqualität, GGX-IBL und Performance bleiben offen.
+ - [ ] Pass-Ein-/Ausgaben, Farb-/Tiefen-/Stencil-Lebensdauer, Clears, Resolve,
+   Resize und minimierte Fenster explizit machen; Debug-Marker und Timings
+   hinzufügen. Offscreen-Widgets und Editor-Viewports einbeziehen.
+-- [x] Opt-in HDR-Zwischenziel und ACES-Tonemapping als erste GL-Ausgabestufe
+-  ergänzen. `render_hdr`, CLI-Override und Effects-Checkbox steuern den Pfad;
+-  Half-Float-Ziele werden für SMAA und MSAA verwendet. Bei nicht unterstütztem
+-  Floatziel bleibt der LDR-Pfad aktiv.
+-- [ ] Vollständiges lineares/sRGB-Farbmanagement für Legacy- und PBR-Ausgaben,
+-  transparente Mischungen und UI-Komposition nach Tonemapping umsetzen. Die
+-  aktuelle Übergangsstufe decodiert den fertig komponierten display-referred
+-  Szenenwert vor ACES und ist noch nicht visuell abgenommen.
++- [x] Opt-in HDR-Zwischenziel und ACES-Tonemapping im GL-Pfad. `render_hdr`,
++  CLI-Override und Effects-Checkbox steuern den Pfad; Half-Float-Ziele werden
++  für SMAA und MSAA verwendet. Bei nicht unterstütztem Floatziel bleibt LDR aktiv.
++- [x] HDR-Szenen-Fragmentausgaben und Clear-Farben vor dem Blending nach linear
++  überführen. PBR schreibt seine lineare Beleuchtungsfarbe direkt; die 18 übrigen
++  Fragmentshader verwenden einen gemeinsamen HDR-Schalter für sRGB-EOTF. Die
++  UI wird nach dem `SystemRenderer` und somit nach dessen Tone-Map-Ausgabe gezeichnet.
++  Shader- und RenderContext-Verknüpfung ist in
++  [HDR-Linear-Ausgabe](evidence/renderer/hdr-linear-output-implementation-20261016.md)
++  dokumentiert. Ein visueller NAP-Lauf war mangels NAP-Archiven nicht möglich.
++- [ ] Legacy-Texturen, Materialfarben, Vertexlicht und Nebel bereits vor der
++  Beleuchtungsrechnung in lineare Werte überführen; Ein-/Ausgabe-Farbräume aller
++  Effekte und Übergänge anhand fester NAP-Szenen visuell abnehmen. Die aktuelle
++  Stufe linearisiert Legacy-Shader-Ausgaben für korrektes Zielblending, nicht
++  alle vorhergehenden Farbrechnungen.
+ - [ ] Bloom mit Downsample-Pyramide, konfigurierbaren Schwellen und
+   separablem Blur liefern. UI-Blur, Tiefenunschärfe und Cutscene-Radialblur
+   bekommen eigene begrenzte Einsatzfälle und Qualitätsschalter.
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+index d8f6d7c..fb98f6d 100644
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -170,7 +170,7 @@ Diese Liste plant moderne Renderer-Erweiterungen für LibreLancer. Sie ist eine
+   `BasicMaterial`-Pfad opak; transparente Rumpfteile sind als Ursache nicht
+   belegt. Die THN-Kamera folgt `Path_shot1` 35 Sekunden; Details der offenen
+   Reproduktion stehen in [ship-light-occlusion.md](ship-light-occlusion.md).
+-- [x] Erste opt-in HDR-Ausgabestufe im bestehenden GL-Pfad ergänzt: Half-Float-Szenenziel, float MSAA/SMAA-Eingang und ACES-Tonemapping; per `render_hdr`, `--render-hdr=on|off` und Effects-Checkbox schaltbar. Dies ist eine Übergangsstufe: der aktuelle Renderer komponiert weiter display-referred Farben und decodiert sie erst vor dem Tonemapping. Vollständig lineares/sRGB-Farbmanagement, korrekte transparente Mischungen, UI-Komposition nach Tonemapping und eine visuelle Laufzeitabnahme sind noch offen.
++- [x] Opt-in HDR-Ausgabestufe mit Half-Float-Szenenziel, float MSAA/SMAA-Eingang und ACES-Tonemapping; per `render_hdr`, `--render-hdr=on|off` und Effects-Checkbox schaltbar. Alle 18 aktuellen Client-Fragmentshader schreiben im HDR-Ziel lineare RGB-Werte, PBR bleibt nativ linear, und Clear-Farben werden nach sRGB-EOTF dekodiert. Dadurch erfolgt auch transparentes Blending im linearen Ziel. Die UI folgt im Spielzustand nach `SystemRenderer.Draw()` und damit nach dem Tonemapping. Legacy-Lichtberechnung und Farbmultiplikation arbeiten weiterhin teilweise mit kodierten Textur-/Materialwerten; vollständige lineare Beleuchtungsinputs und visuelle Laufzeitabnahme bleiben offen. Details: [HDR-Linear-Ausgabe](evidence/renderer/hdr-linear-output-implementation-20261016.md).
+ - [ ] Bloom als nachgelagerten Effekt mit Threshold, Downsampling-Pyramide und konfigurierbarer Intensität untersuchen.
+ - [ ] Sonnen-Lens-Glow anhand reproduzierbarer NAP-Szenen visuell abnehmen; `lens_flare` und die Stern-Intensitäts-/Zonen-Fades bleiben separate offene Datenpfade ([Parser-/Laufzeitabgleich](data-client-plan.md)).
+   - [x] `lens_flare`-Datenpfad auditiert: `StararchIni` und `Star` parsen Profile/Referenzen, aber `GameItemDb.InitStars` übernimmt nur StarGlow, LensGlow und Spines; `Sun` und `SunRenderer` haben keinen Flare-Pfad. Retail-Funktion `FUN_00511248` ruft beim Einlesen eines Star-`lens_flare`-Verweises `FUN_0050f3a0` auf und wertet deren Rückgabewert für den Parse-Status aus. Der Parser liest Shape, Min-/Max-Radius und sechs Floatwerte je Bead. `Data/NAP/World/solar/StarArch.ini` enthält 7 Profile mit 61 Beads, auf die 38 Sterne verweisen. Die Bedeutung der Bead-Komponenten und der Retail-Zeichnung ist noch nicht nachgewiesen; siehe [Retail-Stringtrace](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-15-lens-flare-trace/Freelancer-lens-flare.md>) und [Parser-Aufrufer](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-15-lens-flare-trace/Freelancer-lens-flare-loader-caller.md>).
+diff --git a/patches/README.md b/patches/README.md
+index cb5bbad..be7f152 100644
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -160,3 +160,4 @@ jump-gate route.
+ | 2166 | Profile SMAA subpasses and MSAA resolve with asynchronous GPU timers in a NAP-only M01A run |
+ | 2167 | Audit the HDR, tonemapping, linear-color and AA transition requirements |
+ | 2168 | Add opt-in HDR scene output and tone mapping across AA paths |
++| 2169 | Linearize scene shader outputs before HDR blending and tone mapping |
+diff --git a/patches/series b/patches/series
+index 29cd13c..b23eb40 100644
+--- a/patches/series
++++ b/patches/series
+@@ -168,3 +168,4 @@ client 2165-system-render-pass-contract-and-beam-velocity-trace.patch
+ client 2166-gpu-timer-aa-subpass-runtime-profile.patch
+ client 2167-hdr-tonemapping-transition-audit.patch
+ client 2168-hdr-tonemapping-scene-output.patch
++client 2169-linear-hdr-shader-output.patch
+diff --git a/src/LibreLancer.Base/Graphics/RenderContext.cs b/src/LibreLancer.Base/Graphics/RenderContext.cs
+index c018e18..eaa961f 100644
+--- a/src/LibreLancer.Base/Graphics/RenderContext.cs
++++ b/src/LibreLancer.Base/Graphics/RenderContext.cs
+@@ -25,6 +25,8 @@ public class RenderContext
+     private readonly HashSet<Shader> ownedShaders = new();
+     private bool shaderScopeClosed;
+     private readonly GpuFrameRetirement gpuRetirement;
++    private const int RenderColorSpaceUniformBlock = 6;
++    private const ulong RenderColorSpaceTagBase = 0x100;
+     public int PendingGpuReleaseCount => gpuRetirement.PendingCount;
+     public void RetireAfterFrame(Action release) => gpuRetirement.Defer(release);
+     public int OwnedShaderCount => ownedShaders.Count;
+@@ -192,9 +194,27 @@ public class RenderContext
+         {
+             requestedRenderTarget = value;
+             requested.RenderTarget = requestedRenderTarget?.Target;
++            UpdateRenderColorSpace(requestedShader);
+         }
+     }
+ 
++    internal bool HdrOutputActive => requestedRenderTarget is AntialiasTarget { HdrOutputEnabled: true };
++
++    private void UpdateRenderColorSpace(Shader? shader)
++    {
++        if (shader == null || !shader.HasUniformBlock(RenderColorSpaceUniformBlock))
++            return;
++
++        var hdrOutput = HdrOutputActive;
++        var tag = RenderColorSpaceTagBase | (hdrOutput ? 1UL : 0UL);
++        if (shader.UniformBlockTag(RenderColorSpaceUniformBlock) == tag)
++            return;
++
++        var parameters = new Vector4(hdrOutput ? 1f : 0f, 0f, 0f, 0f);
++        shader.SetUniformBlock(RenderColorSpaceUniformBlock, ref parameters);
++        shader.UniformBlockTag(RenderColorSpaceUniformBlock) = tag;
++    }
++
+     private Shader? requestedShader;
+     public Shader? Shader
+     {
+@@ -204,6 +224,7 @@ public class RenderContext
+             value?.ThrowIfDisposed();
+             requestedShader = value;
+             requested.Shader = value?.Backing;
++            UpdateRenderColorSpace(value);
+         }
+     }
+ 
+@@ -381,15 +402,46 @@ public class RenderContext
+ 
+     public void ClearAll()
+     {
+-        Apply();
+-        impl.ClearAll();
+-        frameNumber++;
++        var originalClearColor = requested.ClearColor;
++        try
++        {
++            if (HdrOutputActive)
++                requested.ClearColor = ToLinearClearColor(originalClearColor);
++            Apply();
++            impl.ClearAll();
++            frameNumber++;
++        }
++        finally
++        {
++            requested.ClearColor = originalClearColor;
++        }
+     }
+ 
+     public void ClearColorOnly()
+     {
+-        Apply();
+-        impl.ClearColorOnly();
++        var originalClearColor = requested.ClearColor;
++        try
++        {
++            if (HdrOutputActive)
++                requested.ClearColor = ToLinearClearColor(originalClearColor);
++            Apply();
++            impl.ClearColorOnly();
++        }
++        finally
++        {
++            requested.ClearColor = originalClearColor;
++        }
++    }
++
++    private static Color4 ToLinearClearColor(Color4 color) => new(
++        SRgbToLinear(color.R), SRgbToLinear(color.G), SRgbToLinear(color.B), color.A);
++
++    private static float SRgbToLinear(float value)
++    {
++        value = MathF.Max(value, 0f);
++        return value <= 0.04045f
++            ? value / 12.92f
++            : MathF.Pow((value + 0.055f) / 1.055f, 2.4f);
+     }
+ 
+     public void ClearDepth()
+diff --git a/src/LibreLancer.Base/Shaders/Tonemap.frag.hlsl b/src/LibreLancer.Base/Shaders/Tonemap.frag.hlsl
+index 9df54cd..f7cde81 100644
+--- a/src/LibreLancer.Base/Shaders/Tonemap.frag.hlsl
++++ b/src/LibreLancer.Base/Shaders/Tonemap.frag.hlsl
+@@ -19,10 +19,9 @@ float3 AcesFitted(float3 color)
+ float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target0
+ {
+     float4 source = SceneTexture.Sample(SceneSampler, uv);
+-    // Current Freelancer materials produce display-referred colour. Decode the
+-    // composed scene before applying exposure and the display transform.
+-    float3 linearColor = pow(max(source.rgb, 0.0), 2.2);
+-    linearColor *= exp2(ToneMapParameters.x);
+-    float3 mapped = AcesFitted(linearColor);
+-    return float4(pow(mapped, 1.0 / 2.2), source.a);
++    float3 mapped = AcesFitted(max(source.rgb, 0.0) * exp2(ToneMapParameters.x));
++    float3 displayColor = lerp(mapped * 12.92,
++        1.055 * pow(mapped, 1.0 / 2.4) - 0.055,
++        step(0.0031308, mapped));
++    return float4(displayColor, source.a);
+ }
+diff --git a/src/LibreLancer/Shaders/AsteroidBand.frag.hlsl b/src/LibreLancer/Shaders/AsteroidBand.frag.hlsl
+index 96d3939..927ebd1 100644
+--- a/src/LibreLancer/Shaders/AsteroidBand.frag.hlsl
++++ b/src/LibreLancer/Shaders/AsteroidBand.frag.hlsl
+@@ -1,5 +1,6 @@
+ #include "includes/Lighting.hlsl"
+ #include "includes/Camera.hlsl"
++#include "includes/OutputColor.hlsl"
+ 
+ Texture2D<float4> Texture : register(t0, TEXTURE_SPACE);
+ SamplerState Sampler : register(s0, TEXTURE_SPACE);
+@@ -31,7 +32,7 @@ float4 main(Input input) : SV_Target0
+     float4 tex = Texture.Sample(Sampler, input.texCoord * float2(TextureAspect, 1.0));
+     float4 dc = float4(tex.rgb * ColorShift.rgb, tex.a * alpha);
+     // These parameters may not be entirely correct
+-    return ApplyPixelLighting(
++    return ToSceneOutput(ApplyPixelLighting(
+         float4(1.0, 1.0, 1.0, 1.0),
+         float4(0.0, 0.0, 0.0, 1.0),
+         float4(1.0, 1.0, 1.0, 1.0),
+@@ -39,5 +40,5 @@ float4 main(Input input) : SV_Target0
+         input.worldPosition,
+         input.viewPosition,
+         input.normal,
+-        input.frontFacing);
++        input.frontFacing));
+ };
+diff --git a/src/LibreLancer/Shaders/Atmosphere.frag.hlsl b/src/LibreLancer/Shaders/Atmosphere.frag.hlsl
+index 9317951..b67bbcb 100644
+--- a/src/LibreLancer/Shaders/Atmosphere.frag.hlsl
++++ b/src/LibreLancer/Shaders/Atmosphere.frag.hlsl
+@@ -1,4 +1,5 @@
+ #include "includes/Lighting.hlsl"
++#include "includes/OutputColor.hlsl"
+ 
+ Texture2D<float4> DtTexture : register(t0, TEXTURE_SPACE);
+ SamplerState DtSampler : register(s0, TEXTURE_SPACE);
+@@ -47,5 +48,5 @@ float4 main(Input input) : SV_Target0
+         input.normal, input.frontFacing);
+ #endif
+ 
+-    return tex * float4(lit.rgb, Oc);
++    return ToSceneOutput(tex * float4(lit.rgb, Oc));
+ }
+diff --git a/src/LibreLancer/Shaders/Basic.frag.hlsl b/src/LibreLancer/Shaders/Basic.frag.hlsl
+index f7913f4..26db103 100644
+--- a/src/LibreLancer/Shaders/Basic.frag.hlsl
++++ b/src/LibreLancer/Shaders/Basic.frag.hlsl
+@@ -1,6 +1,7 @@
+ #include "includes/NormalMap.hlsl"
+ #include "includes/Lighting.hlsl"
+ #include "includes/Modulate.hlsl"
++#include "includes/OutputColor.hlsl"
+ 
+ Texture2D<float4> DtTexture : register(t0, TEXTURE_SPACE);
+ SamplerState DtSampler : register(s0, TEXTURE_SPACE);
+@@ -129,8 +130,8 @@ float4 main(Input input) : SV_Target0
+     //FadeRange - x: near, y: far
+     float fadeFactor = (FadeRange.y - dist) / (FadeRange.y - FadeRange.x);
+     fadeFactor = clamp(fadeFactor, 0.0, 1.0);
+-    return float4(acolor.rgb, acolor.a * fadeFactor);
++    return ToSceneOutput(float4(acolor.rgb, acolor.a * fadeFactor));
+ #else
+-    return acolor;
++    return ToSceneOutput(acolor);
+ #endif
+ }
+diff --git a/src/LibreLancer/Shaders/Color.frag.hlsl b/src/LibreLancer/Shaders/Color.frag.hlsl
+index 49fef35..7592765 100644
+--- a/src/LibreLancer/Shaders/Color.frag.hlsl
++++ b/src/LibreLancer/Shaders/Color.frag.hlsl
+@@ -1,3 +1,5 @@
++#include "includes/OutputColor.hlsl"
++
+ struct Input
+ {
+     float4 color: TEXCOORD0;
+@@ -5,5 +7,5 @@ struct Input
+ 
+ float4 main(Input input) : SV_Target0
+ {
+-    return input.color;
++    return ToSceneOutput(input.color);
+ }
+diff --git a/src/LibreLancer/Shaders/DetailMap2Dm1Msk2PassMaterial.frag.hlsl b/src/LibreLancer/Shaders/DetailMap2Dm1Msk2PassMaterial.frag.hlsl
+index 86b9a7d..4b98c63 100644
+--- a/src/LibreLancer/Shaders/DetailMap2Dm1Msk2PassMaterial.frag.hlsl
++++ b/src/LibreLancer/Shaders/DetailMap2Dm1Msk2PassMaterial.frag.hlsl
+@@ -1,5 +1,6 @@
+ #include "includes/Lighting.hlsl"
+ #include "includes/Modulate.hlsl"
++#include "includes/OutputColor.hlsl"
+ 
+ Texture2D<float4> DtTexture : register(t0, TEXTURE_SPACE);
+ SamplerState DtSampler : register(s0, TEXTURE_SPACE);
+@@ -52,5 +53,5 @@ float4 main(Input input) : SV_Target0
+ 
+     float4 masked = tex.a < 0.99 ? Mod2x(baseColor, detail) : baseColor;
+ 
+-    return float4(masked.rgb, 1.0);
++    return ToSceneOutput(float4(masked.rgb, 1.0));
+ };
+diff --git a/src/LibreLancer/Shaders/DetailMapMaterial.frag.hlsl b/src/LibreLancer/Shaders/DetailMapMaterial.frag.hlsl
+index b586468..4f21752 100644
+--- a/src/LibreLancer/Shaders/DetailMapMaterial.frag.hlsl
++++ b/src/LibreLancer/Shaders/DetailMapMaterial.frag.hlsl
+@@ -1,6 +1,7 @@
+ #include "includes/Lighting.hlsl"
+ #include "includes/Modulate.hlsl"
+ #include "includes/NormalMap.hlsl"
++#include "includes/OutputColor.hlsl"
+ 
+ Texture2D<float4> DtTexture : register(t0, TEXTURE_SPACE);
+ SamplerState DtSampler : register(s0, TEXTURE_SPACE);
+@@ -78,5 +79,5 @@ float4 main(Input input) : SV_Target0
+     baseColor = ApplyPixelLighting(Ac, 0, Dc, tex, input.worldPosition, input.viewPosition, normal, input.frontFacing);
+ #endif
+ 
+-    return Mod2x(baseColor, detail);
++    return ToSceneOutput(Mod2x(baseColor, detail));
+ };
+diff --git a/src/LibreLancer/Shaders/IllumDetailMapMaterial.frag.hlsl b/src/LibreLancer/Shaders/IllumDetailMapMaterial.frag.hlsl
+index 1e18d8a..f663a2e 100644
+--- a/src/LibreLancer/Shaders/IllumDetailMapMaterial.frag.hlsl
++++ b/src/LibreLancer/Shaders/IllumDetailMapMaterial.frag.hlsl
+@@ -1,5 +1,6 @@
+ #include "includes/Lighting.hlsl"
+ #include "includes/Modulate.hlsl"
++#include "includes/OutputColor.hlsl"
+ 
+ Texture2D<float4> DtTexture : register(t0, TEXTURE_SPACE);
+ SamplerState DtSampler : register(s0, TEXTURE_SPACE);
+@@ -61,5 +62,5 @@ float4 main(Input input) : SV_Target0
+ 
+     float4 illum = Mod2x(detail1, tex);
+ 
+-    return float4(lerp(baseColor.rgb, illum.rgb, illum.a), 1.0);
++    return ToSceneOutput(float4(lerp(baseColor.rgb, illum.rgb, illum.a), 1.0));
+ }
+diff --git a/src/LibreLancer/Shaders/Masked2DetailMapMaterial.frag.hlsl b/src/LibreLancer/Shaders/Masked2DetailMapMaterial.frag.hlsl
+index 034b026..6741e3c 100644
+--- a/src/LibreLancer/Shaders/Masked2DetailMapMaterial.frag.hlsl
++++ b/src/LibreLancer/Shaders/Masked2DetailMapMaterial.frag.hlsl
+@@ -1,5 +1,6 @@
+ #include "includes/Lighting.hlsl"
+ #include "includes/Modulate.hlsl"
++#include "includes/OutputColor.hlsl"
+ 
+ Texture2D<float4> DtTexture : register(t0, TEXTURE_SPACE);
+ SamplerState DtSampler : register(s0, TEXTURE_SPACE);
+@@ -59,5 +60,5 @@ float4 main(Input input) : SV_Target0
+ 
+     float4 detail = float4(tex.a < 0.99 ? detail0.rgb : detail1.rgb, 1.0);
+ 
+-    return Mod2x(baseColor, detail);
++    return ToSceneOutput(Mod2x(baseColor, detail));
+ };
+diff --git a/src/LibreLancer/Shaders/Navmap.frag.hlsl b/src/LibreLancer/Shaders/Navmap.frag.hlsl
+index 506ee39..245249c 100644
+--- a/src/LibreLancer/Shaders/Navmap.frag.hlsl
++++ b/src/LibreLancer/Shaders/Navmap.frag.hlsl
+@@ -1,3 +1,5 @@
++#include "includes/OutputColor.hlsl"
++
+ Texture2D<float4> Texture : register(t0, TEXTURE_SPACE);
+ SamplerState Sampler : register(s0, TEXTURE_SPACE);
+ 
+@@ -16,5 +18,5 @@ float4 main(float4 fragCoord: SV_Position) : SV_Target0
+ {
+     float2 uv = (fragCoord.xy - Rectangle.xy) / Rectangle.zw;
+     uv *= Tiling;
+-    return Texture.Sample(Sampler, uv) * Dc;
++    return ToSceneOutput(Texture.Sample(Sampler, uv) * Dc);
+ }
+diff --git a/src/LibreLancer/Shaders/NebulaExtPuff.frag.hlsl b/src/LibreLancer/Shaders/NebulaExtPuff.frag.hlsl
+index 9a61b09..8e85526 100644
+--- a/src/LibreLancer/Shaders/NebulaExtPuff.frag.hlsl
++++ b/src/LibreLancer/Shaders/NebulaExtPuff.frag.hlsl
+@@ -1,3 +1,5 @@
++#include "includes/OutputColor.hlsl"
++
+ Texture2D<float4> Texture : register(t0, TEXTURE_SPACE);
+ SamplerState Sampler : register(s0, TEXTURE_SPACE);
+ 
+@@ -16,5 +18,5 @@ cbuffer Uniform : register(b3, UNIFORM_SPACE)
+ float4 main(PSInput input) : SV_Target0
+ {
+     float4 sample = Texture.Sample(Sampler, input.texCoord) * input.innerColor;
+-    return float4(lerp(sample.rgb, input.outerColor.rgb, BlendFactor), sample.a);
++    return ToSceneOutput(float4(lerp(sample.rgb, input.outerColor.rgb, BlendFactor), sample.a));
+ }
+diff --git a/src/LibreLancer/Shaders/NebulaInterior.frag.hlsl b/src/LibreLancer/Shaders/NebulaInterior.frag.hlsl
+index e253e5d..5a887f1 100644
+--- a/src/LibreLancer/Shaders/NebulaInterior.frag.hlsl
++++ b/src/LibreLancer/Shaders/NebulaInterior.frag.hlsl
+@@ -1,3 +1,5 @@
++#include "includes/OutputColor.hlsl"
++
+ Texture2D<float4> Texture : register(t0, TEXTURE_SPACE);
+ SamplerState Sampler : register(s0, TEXTURE_SPACE);
+ 
+@@ -13,5 +15,5 @@ cbuffer MaterialParameters: register(b2, UNIFORM_SPACE)
+ 
+ float4 main(PSInput input) : SV_Target0
+ {
+-    return Texture.Sample(Sampler, input.texCoord) * Dc;
++    return ToSceneOutput(Texture.Sample(Sampler, input.texCoord) * Dc);
+ }
+diff --git a/src/LibreLancer/Shaders/NebulaMaterial.frag.hlsl b/src/LibreLancer/Shaders/NebulaMaterial.frag.hlsl
+index 9d4e401..27646f0 100644
+--- a/src/LibreLancer/Shaders/NebulaMaterial.frag.hlsl
++++ b/src/LibreLancer/Shaders/NebulaMaterial.frag.hlsl
+@@ -1,3 +1,5 @@
++#include "includes/OutputColor.hlsl"
++
+ Texture2D<float4> Texture : register(t0, TEXTURE_SPACE);
+ SamplerState Sampler : register(s0, TEXTURE_SPACE);
+ 
+@@ -14,5 +16,5 @@ cbuffer MaterialParameters : register(b3, UNIFORM_SPACE)
+ 
+ float4 main(PSInput input) : SV_Target0
+ {
+-    return Texture.Sample(Sampler, input.texCoord) * Dc * input.color;
++    return ToSceneOutput(Texture.Sample(Sampler, input.texCoord) * Dc * input.color);
+ }
+diff --git a/src/LibreLancer/Shaders/Nomad.frag.hlsl b/src/LibreLancer/Shaders/Nomad.frag.hlsl
+index 1379149..a9cbefc 100644
+--- a/src/LibreLancer/Shaders/Nomad.frag.hlsl
++++ b/src/LibreLancer/Shaders/Nomad.frag.hlsl
+@@ -1,3 +1,5 @@
++#include "includes/OutputColor.hlsl"
++
+ Texture2D<float4> DtTexture : register(t0, TEXTURE_SPACE);
+ SamplerState DtSampler : register(s0, TEXTURE_SPACE);
+ 
+@@ -24,5 +26,5 @@ float4 main(Input input) : SV_Target0
+     float4 nt = NtTexture.Sample(NtSampler, float2(ratio, 0.0));
+     float4 dt = DtTexture.Sample(DtSampler, input.texCoord);
+ 
+-    return float4(dt.rgb + nt.rgb, dt.a * nt.a * Oc);
++    return ToSceneOutput(float4(dt.rgb + nt.rgb, dt.a * nt.a * Oc));
+ }
+diff --git a/src/LibreLancer/Shaders/PBR.frag.hlsl b/src/LibreLancer/Shaders/PBR.frag.hlsl
+index a34558b..d5799c6 100644
+--- a/src/LibreLancer/Shaders/PBR.frag.hlsl
++++ b/src/LibreLancer/Shaders/PBR.frag.hlsl
+@@ -1,6 +1,7 @@
+ #include "includes/NormalMap.hlsl"
+ #include "includes/Lighting.hlsl"
+ #include "includes/Camera.hlsl"
++#include "includes/OutputColor.hlsl"
+ 
+ Texture2D<float4> DtTexture : register(t0, TEXTURE_SPACE);
+ SamplerState DtSampler : register(s0, TEXTURE_SPACE);
+@@ -299,5 +300,5 @@ float4 main(Input input) : SV_Target0
+     color += SRGBtoLinear(float4(Ec.rgb * EtTexture.Sample(EtSampler, GetTexCoord(1, input)).rgb, 1)).rgb;
+     #endif
+ 
+-    return  float4(pow(color,(float3)1.0/2.2), baseColor.a);
++    return ToDisplayOutput(float4(color, baseColor.a));
+ }
+diff --git a/src/LibreLancer/Shaders/Sprite.frag.hlsl b/src/LibreLancer/Shaders/Sprite.frag.hlsl
+index f4827e0..dbc95d2 100644
+--- a/src/LibreLancer/Shaders/Sprite.frag.hlsl
++++ b/src/LibreLancer/Shaders/Sprite.frag.hlsl
+@@ -1,3 +1,5 @@
++#include "includes/OutputColor.hlsl"
++
+ Texture2D<float4> Texture : register(t0, TEXTURE_SPACE);
+ SamplerState Sampler : register(s0, TEXTURE_SPACE);
+ 
+@@ -9,5 +11,5 @@ struct PSInput
+ 
+ float4 main(PSInput input) : SV_Target0
+ {
+-    return Texture.Sample(Sampler, input.texCoord) * input.color;
++    return ToSceneOutput(Texture.Sample(Sampler, input.texCoord) * input.color);
+ }
+diff --git a/src/LibreLancer/Shaders/SunRadial.frag.hlsl b/src/LibreLancer/Shaders/SunRadial.frag.hlsl
+index fe65b26..22d89e6 100644
+--- a/src/LibreLancer/Shaders/SunRadial.frag.hlsl
++++ b/src/LibreLancer/Shaders/SunRadial.frag.hlsl
+@@ -1,3 +1,5 @@
++#include "includes/OutputColor.hlsl"
++
+ Texture2D<float4> Texture : register(t0, TEXTURE_SPACE);
+ SamplerState Sampler : register(s0, TEXTURE_SPACE);
+ 
+@@ -21,5 +23,5 @@ float4 main(Input input) : SV_Target0
+     float dist = distance(float2(0.5, 0.5), input.texCoord) * 2.;
+     float4 outerC = float4(input.outerColor.rgb, input.outerColor.a * OuterAlpha);
+     float4 blendColor = lerp(input.innerColor, outerC, dist);
+-    return texSample * blendColor;
++    return ToSceneOutput(texSample * blendColor);
+ }
+diff --git a/src/LibreLancer/Shaders/SunSpine.frag.hlsl b/src/LibreLancer/Shaders/SunSpine.frag.hlsl
+index f1d7e3c..cd45def 100644
+--- a/src/LibreLancer/Shaders/SunSpine.frag.hlsl
++++ b/src/LibreLancer/Shaders/SunSpine.frag.hlsl
+@@ -1,3 +1,5 @@
++#include "includes/OutputColor.hlsl"
++
+ Texture2D<float4> Texture : register(t0, TEXTURE_SPACE);
+ SamplerState Sampler : register(s0, TEXTURE_SPACE);
+ 
+@@ -14,5 +16,5 @@ float4 main(Input input) : SV_Target0
+     float4 texSample = Texture.Sample(Sampler, input.texCoord);
+     float dist = distance(float2(0.5, 0.5), input.texCoord) * 2.;
+     float4 blendColor = lerp(input.innerColor, input.outerColor, dist);
+-    return texSample * blendColor;
++    return ToSceneOutput(texSample * blendColor);
+ }
+diff --git a/src/LibreLancer/Shaders/ZoneVolume.frag.hlsl b/src/LibreLancer/Shaders/ZoneVolume.frag.hlsl
+index c789c61..216292c 100644
+--- a/src/LibreLancer/Shaders/ZoneVolume.frag.hlsl
++++ b/src/LibreLancer/Shaders/ZoneVolume.frag.hlsl
+@@ -1,3 +1,5 @@
++#include "includes/OutputColor.hlsl"
++
+ struct Input
+ {
+     float3 worldPosition: TEXCOORD0;
+@@ -15,5 +17,5 @@ float4 main(Input input) : SV_Target0
+     float3 lightDir = normalize(float3(0.,-150.,0.) - input.worldPosition);
+     float diff = max(dot(norm, lightDir), 0.0);
+     float3 color = (Diffuse.rgb * diff) * 0.3;
+-    return float4(Diffuse.rgb * 0.7 + color, Diffuse.a);
++    return ToSceneOutput(float4(Diffuse.rgb * 0.7 + color, Diffuse.a));
+ }
+diff --git a/src/LibreLancer/Shaders/includes/OutputColor.hlsl b/src/LibreLancer/Shaders/includes/OutputColor.hlsl
+new file mode 100644
+index 0000000..079ddc1
+--- /dev/null
++++ b/src/LibreLancer/Shaders/includes/OutputColor.hlsl
+@@ -0,0 +1,26 @@
++cbuffer RenderColorSpace : register(b6, UNIFORM_SPACE)
++{
++    float4 RenderColorSpaceParameters;
++};
++
++float3 SRGBToLinearOutput(float3 srgb)
++{
++    float3 value = max(srgb, 0.0);
++    float3 low = value / 12.92;
++    float3 high = pow((value + 0.055) / 1.055, 2.4);
++    return lerp(low, high, step(0.04045, value));
++}
++
++float4 ToSceneOutput(float4 displayColor)
++{
++    if (RenderColorSpaceParameters.x > 0.5)
++        displayColor.rgb = SRGBToLinearOutput(displayColor.rgb);
++    return displayColor;
++}
++
++float4 ToDisplayOutput(float4 linearColor)
++{
++    if (RenderColorSpaceParameters.x < 0.5)
++        linearColor.rgb = pow(max(linearColor.rgb, 0.0), 1.0 / 2.2);
++    return linearColor;
++}

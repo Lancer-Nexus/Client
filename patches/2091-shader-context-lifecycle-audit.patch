@@ -1,0 +1,55 @@
+--- a/docs/shader-lifecycle.md
++++ b/docs/shader-lifecycle.md
+@@ -44,6 +44,25 @@
+   JSON-Beobachtungsstand. Nach begrenztem Read-Retry wurde derselbe laufende
+   Client weitergeprüft und regulär beendet; er wurde nicht neu gestartet.
+ 
++## Kontextwechsel und globale Shader-Bundles
++
++`AllShaders` hält die eingebauten `ShaderBundle`-Instanzen und den
++`iscompiled`-Status in statischen Feldern. `RenderContext.DisposeShaders()`
++schließt den Shader-Scope und gibt dessen Shader frei; `ShaderBundle.Get()`
++weist Zugriffe auf freigegebene Bundles/Shader anschließend zurück. Ein erneuter
++`AllShaders.Compile()`-Aufruf setzt den statischen Status nicht zurück und kehrt
++früh zurück. Die partiellen `CompileBillboard()`-/`CompilePhysicsDebug()`-Pfade
++verwenden `??=` und ersetzen ein bereits vorhandenes Bundle ebenfalls nicht.
++
++Damit ist ein zweiter RenderContext nach der Freigabe des ersten im selben
++Prozess über diese globalen Bundles nicht wiederverwendbar. Die aktuellen SDL2-
++und SDL3-Pfade erstellen den Context einmal pro Game-Lauf und schließen ihn
++beim Cleanup; ein Geräteverlust-/Kontext-Neuerstellungspfad ist nicht belegt.
++Das ist deshalb ein Architektur-Risiko für Kontextwiederherstellung und
++Mehrfachkontexte, keine bestätigte Störung des normalen Einzel-Context-Laufs.
++Die Bundles müssen vor einer solchen Erweiterung einem RenderContext gehören
++oder kontrolliert pro Kontext neu aufgebaut werden.
++
+ ## Grenzen
+ 
+ Keine Windows-/SDL2-/GLES-Laufzeitprüfung und kein Geräteverlust-/Crash-Test.
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -164,6 +164,7 @@
+ - [ ] Decals für Einschläge, Verschmutzung und Missionsmarkierungen untersuchen; Sortierung, Z-Fighting und DFM-/Animierungsfälle abdecken.
+ - [ ] Shader-Kompilierung und Zustandswechsel auf Start- und Szenenwechsel-Ruckler profilieren; fehlende Cachepfade gezielt ergänzen und Backend-Fehler vermeiden.
+   - [x] Eingebaute Shader-Featurevarianten werden beim `AllShaders.Compile()` in `ShaderBundle` geladen und danach per Featuremaske wiederverwendet. `GLRenderContext.ApplyState()` sendet nur geänderte GL-Zustände. Das belegt Varianten- und Zustandswiederverwendung, aber keine gemessene Ruckelfreiheit oder persistente Treiber-Binary-Caches.
++  - [x] Lifecycle-Audit: `AllShaders` speichert Bundles und Compile-Status global; nach `DisposeShaders()` ist ein neuer RenderContext im selben Prozess mit diesem Cache nicht wiederverwendbar. Kontextwechsel-/Gerätewiederherstellung ist derzeit nicht belegt; siehe [Shader-Lifecycle](shader-lifecycle.md).
+   - [ ] Start, Wechsel zwischen Raum/Basis/Editor und Wiederherstellung nach minimiertem Fenster auf Shader-Compile-Spitzen, CPU-/GPU-Zeit und Backendfehler messen.
+ - [ ] GPU-Instancing, GPU-Culling und gezieltes Batching für wiederholte Asteroiden, Schiffe, Partikel und Basisobjekte anhand CPU-/GPU-Profilen bewerten; vorhandene CPU-Frustum-/Distanz-Culling- und LOD-Pfade als Vergleichsbasis verwenden.
+ - [ ] GPU-Partikel nur dann ergänzen, wenn CPU-/GPU-Profile einen Engpass belegen; bestehende Freelancer-Effekte und CPU-Fallback erhalten.
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -64,6 +64,7 @@
+ | 2088 | Record missing exception-safe render target and stack restoration |
+ | 2089 | Add source-level render target exception-path evidence and follow-up |
+ | 2090 | Record the SystemRenderer forward-pass order and missing pass contract |
++| 2091 | Record the static AllShaders cache limit across render-context lifetimes |
+ | 2011 (`lancerdecode`) | Native Vorbis EOF/reset handling |
+ | 2012 (`blurgtext`) | System FreeType without OT-SVG hooks |
+ 
+--- a/patches/series
++++ b/patches/series
+@@ -90,3 +90,4 @@
+ client 2088-render-target-exception-safety-audit.patch
+ client 2089-render-target-exception-path-evidence.patch
+ client 2090-forward-pass-order-audit.patch
++client 2091-shader-context-lifecycle-audit.patch

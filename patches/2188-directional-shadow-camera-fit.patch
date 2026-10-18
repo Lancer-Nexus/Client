@@ -1,0 +1,165 @@
+--- /dev/null
++++ b/src/LibreLancer/Render/Cameras/DirectionalShadowCamera.cs
+@@ -0,0 +1,145 @@
++// MIT License - Copyright (c) Callum McGing
++// This file is subject to the terms and conditions defined in
++// LICENSE, which is part of this source code package
++
++using System;
++using System.Numerics;
++
++namespace LibreLancer.Render.Cameras;
++
++/// <summary>
++/// Fits an orthographic camera to the visible camera frustum for a directional
++/// light. This provides stable light-space bounds for a shadow-map pass.
++/// </summary>
++public sealed class DirectionalShadowCamera : ICamera
++{
++    private Matrix4x4 view;
++    private Matrix4x4 projection;
++    private Matrix4x4 viewProjection;
++    private BoundingFrustum frustum;
++
++    public Matrix4x4 ViewProjection => viewProjection;
++    public Matrix4x4 Projection => projection;
++    public Matrix4x4 View => view;
++    public Vector3 Position { get; private set; }
++
++    /// <summary>
++    /// Fits this camera to a distance-limited slice of <paramref name="source"/>.
++    /// <paramref name="lightDirection"/> follows the RenderLight convention:
++    /// it points from the directional light toward the scene.
++    /// </summary>
++    public bool Fit(ICamera source, Vector3 lightDirection, float maxDistance,
++        int mapResolution, float xyPadding = 0, float depthPadding = 100)
++    {
++        if (source == null || !IsFinite(lightDirection) || lightDirection.LengthSquared() < 1e-8f ||
++            !float.IsFinite(maxDistance) || maxDistance <= 0 || mapResolution <= 0 ||
++            !float.IsFinite(xyPadding) || xyPadding < 0 ||
++            !float.IsFinite(depthPadding) || depthPadding < 0)
++            return false;
++
++        if (!Matrix4x4.Invert(source.ViewProjection, out var inverseViewProjection))
++            return false;
++
++        var corners = new Vector3[8];
++        var cornerIndex = 0;
++        for (var y = -1; y <= 1; y += 2)
++        for (var x = -1; x <= 1; x += 2)
++        {
++            if (!TryUnproject(new Vector3(x, y, 0), inverseViewProjection, out var near) ||
++                !TryUnproject(new Vector3(x, y, 1), inverseViewProjection, out var far))
++                return false;
++
++            var ray = far - source.Position;
++            var rayLength = ray.Length();
++            if (!float.IsFinite(rayLength) || rayLength < 1e-5f)
++                return false;
++
++            ray /= rayLength;
++            var nearDistance = Math.Max(0, Vector3.Dot(near - source.Position, ray));
++            var farDistance = Math.Min(maxDistance, rayLength);
++            if (farDistance <= nearDistance)
++                return false;
++
++            corners[cornerIndex++] = source.Position + ray * nearDistance;
++            corners[cornerIndex++] = source.Position + ray * farDistance;
++        }
++
++        var center = Vector3.Zero;
++        foreach (var corner in corners)
++            center += corner;
++        center /= corners.Length;
++
++        var direction = Vector3.Normalize(lightDirection);
++        var radius = 0f;
++        foreach (var corner in corners)
++            radius = Math.Max(radius, Vector3.Distance(center, corner));
++        var eye = center - direction * (radius + depthPadding + 1);
++        var up = Math.Abs(Vector3.Dot(direction, Vector3.UnitY)) > 0.98f
++            ? Vector3.UnitZ
++            : Vector3.UnitY;
++        var nextView = Matrix4x4.CreateLookAt(eye, center, up);
++
++        var min = new Vector3(float.PositiveInfinity);
++        var max = new Vector3(float.NegativeInfinity);
++        foreach (var corner in corners)
++        {
++            var lightSpace = Vector3.Transform(corner, nextView);
++            min = Vector3.Min(min, lightSpace);
++            max = Vector3.Max(max, lightSpace);
++        }
++
++        var width = max.X - min.X + 2 * xyPadding;
++        var height = max.Y - min.Y + 2 * xyPadding;
++        if (!float.IsFinite(width) || !float.IsFinite(height) || width < 1e-4f || height < 1e-4f)
++            return false;
++
++        // Snapping the projection center can move it by half a texel. Reserve
++        // one texel on each side so the fitted corners remain inside the map.
++        width *= (float)(mapResolution + 2) / mapResolution;
++        height *= (float)(mapResolution + 2) / mapResolution;
++        var texelX = width / mapResolution;
++        var texelY = height / mapResolution;
++        var centerX = (min.X + max.X) * 0.5f;
++        var centerY = (min.Y + max.Y) * 0.5f;
++        centerX = MathF.Round(centerX / texelX) * texelX;
++        centerY = MathF.Round(centerY / texelY) * texelY;
++
++        var nearPlane = Math.Max(0.01f, -max.Z - depthPadding);
++        var farPlane = -min.Z + depthPadding;
++        if (!float.IsFinite(nearPlane) || !float.IsFinite(farPlane) || farPlane <= nearPlane)
++            return false;
++
++        var nextProjection = Matrix4x4.CreateOrthographicOffCenter(
++            centerX - width * 0.5f, centerX + width * 0.5f,
++            centerY - height * 0.5f, centerY + height * 0.5f,
++            nearPlane, farPlane);
++        var nextViewProjection = nextView * nextProjection;
++        var nextFrustum = new BoundingFrustum(nextViewProjection);
++
++        view = nextView;
++        projection = nextProjection;
++        viewProjection = nextViewProjection;
++        frustum = nextFrustum;
++        Position = eye;
++        return true;
++    }
++
++    public bool FrustumCheck(BoundingSphere sphere) => frustum.Intersects(sphere);
++    public bool FrustumCheck(BoundingBox box) => frustum.Intersects(box);
++
++    private static bool TryUnproject(Vector3 clip, Matrix4x4 inverseViewProjection, out Vector3 world)
++    {
++        var result = Vector4.Transform(new Vector4(clip, 1), inverseViewProjection);
++        if (!float.IsFinite(result.W) || Math.Abs(result.W) < 1e-7f)
++        {
++            world = default;
++            return false;
++        }
++
++        world = new Vector3(result.X, result.Y, result.Z) / result.W;
++        return IsFinite(world);
++    }
++
++    private static bool IsFinite(Vector3 value) =>
++        float.IsFinite(value.X) && float.IsFinite(value.Y) && float.IsFinite(value.Z);
++}
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -205,6 +205,7 @@
+ - [ ] Screen-Space Ambient Occlusion als optionale Ergänzung bewerten; Geometrie- und Nebelartefakte gegen Vanilla-Szenen abgleichen.
+ - [ ] Echtzeit-Schatten (zunächst gerichtete Lichter, Kaskaden und PCF) anhand vorhandener Freelancer-Lichtdaten und der GPU-Kosten bewerten.
+   - [x] Sampleable Depth-only-Renderziele im OpenGL-Backend und no-op-Ziele im Null-Backend bereitgestellt; Release-Build sowie OpenGL-4.6/Mesa-NAP-Smoke für FBO, Clear und Depth-Readback bestanden. GLES, Shader-Sampling und PCF bleiben offen; siehe [Depth-only-Smoke](evidence/renderer/depth-only-target-smoke-20261017/README.md).
++  - [x] `DirectionalShadowCamera` kann den aktiven Kamerafrustum bis zu einer begrenzten Sichtweite in einen Lichtfrustum überführen und die orthografische XY-Projektion auf Shadow-Map-Texel rasten. Der Build prüft die Kompilierung; ein Laufzeit- oder Schattenbildnachweis fehlt. Die Kamera wird noch nicht vom `SystemRenderer` verwendet.
+   - [x] Opake, sichtbare Model-Meshes schreiben optional im Main-Camera-Depth-Prepass mit LOD und World-Matrix; transparente Teile bleiben ausgeschlossen. `render_depth_prepass` und `--render-depth-prepass=on|off` steuern den Pass, der standardmäßig aus ist. Basic/PBR-Materialien verwenden Depth-only-Fragmentvarianten; Alpha-Test wird im Basic-Pfad beibehalten, Normal-/Emissive-/Beleuchtungsarbeit entfällt. Nicht unterstützte Materialtypen nutzen ihren vorhandenen Shader-Fallback. Der Pass wirft keine Schatten; Laufzeit- und FPS-Abnahme stehen aus.
+   - [ ] GL/GLES-FBO-Laufzeit prüfen, danach Caster-Draws, Lichtmatrizen, PCF und Receiver-Shading in den beleuchteten Materialpfaden implementieren.
+ - [ ] Screen-Space-Reflections als optionale Ergänzung prüfen; fehlende Bildinformation an Bildschirmrändern und bei verdeckten Objekten muss über den bestehenden PBR-Fallback abgefangen werden.
+--- a/patches/series
++++ b/patches/series
+@@ -187,3 +187,4 @@
+ client 2185-correct-depth-prepass-resource-contract.patch
+ client 2186-mark-depth-prepass-conditional.patch
+ client 2187-sync-depth-prepass-pipeline-status.patch
++client 2188-directional-shadow-camera-fit.patch

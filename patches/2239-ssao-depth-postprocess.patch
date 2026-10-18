@@ -1,0 +1,782 @@
+--- a/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
++++ b/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
+@@ -14,6 +14,8 @@
+     public int Height { get; private set; }
+     public AntialiasMode Mode { get; private set; }
+     public bool HdrOutputEnabled { get; }
++    public bool SsaoEnabled { get; }
++    public RenderTarget2D? SsaoDepthTarget => ssaoDepth;
+     public float HdrExposure { get; set; }
+     public bool BloomEnabled { get; set; }
+     public float BloomThreshold { get; set; } = 1f;
+@@ -38,6 +40,9 @@
+         (smaaBlend?.Texture.EstimatedTextureMemory ?? 0) +
+         (hdrScene?.EstimatedMemoryBytes ?? 0) +
+         (hdrResolve?.EstimatedMemoryBytes ?? 0) +
++        (ldrScene?.EstimatedMemoryBytes ?? 0) +
++        (ldrResolve?.EstimatedMemoryBytes ?? 0) +
++        (ssaoDepth?.EstimatedMemoryBytes ?? 0) +
+         (ldrToneMapped?.EstimatedMemoryBytes ?? 0) +
+         (smaa?.DepthBuffer?.EstimatedMemoryBytes ?? 0) +
+         (depthStencil?.EstimatedMemoryBytes ?? 0);
+@@ -51,20 +56,26 @@
+     private RenderTarget2D? hdrScene;
+     private RenderTarget2D? hdrResolve;
+     private RenderTarget2D? ldrToneMapped;
++    private RenderTarget2D? ldrScene;
++    private RenderTarget2D? ldrResolve;
++    private RenderTarget2D? ssaoDepth;
+     private PostProcessPipeline? postProcess;
+     private DepthBuffer? depthStencil;
+     private RenderContext renderContext;
+ 
+     public AntialiasTarget(RenderContext renderContext, int width, int height, AntialiasMode mode,
+-        bool hdrOutput = false)
++        bool hdrOutput = false, bool ssao = false)
+     {
+         this.renderContext = renderContext;
+         Width = width;
+         Height = height;
+         Mode = mode;
+         HdrOutputEnabled = hdrOutput;
++        SsaoEnabled = ssao;
+         try
+         {
++            if (ssao)
++                ssaoDepth = new RenderTarget2D(renderContext, width, height, SurfaceFormat.Depth);
+             if (mode == AntialiasMode.None && hdrOutput)
+             {
+                 hdrScene = new RenderTarget2D(renderContext, width, height, SurfaceFormat.HdrBlendable);
+@@ -80,11 +91,16 @@
+                 }, hdrOutput ? SurfaceFormat.HdrBlendable : SurfaceFormat.Bgra8);
+                 if (hdrOutput)
+                     hdrResolve = new RenderTarget2D(renderContext, width, height, null, false, SurfaceFormat.HdrBlendable);
++                else if (ssao)
++                    ldrResolve = new RenderTarget2D(renderContext, width, height, null, false, SurfaceFormat.Bgra8);
+                 Target = msaa;
+             }
+             else if (mode == AntialiasMode.None)
+             {
+-                throw new ArgumentException("An offscreen target is only needed for HDR when antialiasing is disabled.", nameof(mode));
++                if (!ssao)
++                    throw new ArgumentException("An offscreen target is only needed for HDR or SSAO when antialiasing is disabled.", nameof(mode));
++                ldrScene = new RenderTarget2D(renderContext, width, height);
++                Target = ldrScene.Target;
+             }
+             else
+             {
+@@ -99,12 +115,13 @@
+             }
+             ValidateAttachmentContracts();
+             var hasSmaa = mode is >= AntialiasMode.SMAALow and <= AntialiasMode.SMAAUltra;
+-            if (hdrOutput || hasSmaa)
++            if (hdrOutput || hasSmaa || ssao)
+             {
+                 var smaaPass = hasSmaa
+                     ? new SmaaPostProcessPass(renderContext, mode, width, height, smaaEdges!, smaaBlend!)
+                     : null;
+-                postProcess = new PostProcessPipeline(renderContext, hdrOutput, smaaPass);
++                postProcess = new PostProcessPipeline(renderContext, hdrOutput, smaaPass,
++                    ssao, ssaoDepth?.Texture, hdrOutput ? SurfaceFormat.HdrBlendable : SurfaceFormat.Bgra8);
+             }
+         }
+         catch
+@@ -118,7 +135,8 @@
+     {
+         if (Mode == AntialiasMode.None)
+         {
+-            if (!HdrOutputEnabled || hdrScene?.Texture.Format != SurfaceFormat.HdrBlendable || msaa != null)
++            if (msaa != null || (HdrOutputEnabled && hdrScene?.Texture.Format != SurfaceFormat.HdrBlendable) ||
++                (!HdrOutputEnabled && (!SsaoEnabled || ldrScene?.Texture.Format != SurfaceFormat.Bgra8)))
+                 throw new InvalidOperationException("HDR scene target does not satisfy its attachment contract.");
+             return;
+         }
+@@ -144,6 +162,8 @@
+                 resolve.SourceDepth != null || !supportedStorageFormat ||
+                 (HdrOutputEnabled != (storageFormat == SystemRenderAttachmentFormat.OpenGlRgba16Float)) ||
+                 (HdrOutputEnabled && hdrResolve?.Texture.Format != SurfaceFormat.HdrBlendable) ||
++                (SsaoEnabled && (ssaoDepth?.Texture.Format != SurfaceFormat.Depth ||
++                    (!HdrOutputEnabled && ldrResolve?.Texture.Format != SurfaceFormat.Bgra8))) ||
+                 msaa.RequestedDepthBits != 24 ||
+                 msaa.Samples != expectedSamples || msaa.Width != Width || msaa.Height != Height ||
+                 msaa.HasStencil)
+@@ -154,6 +174,7 @@
+         var edges = SystemRenderPasses.GetSubpass(SystemRenderSubpass.SmaaEdgeDetection);
+         var weights = SystemRenderPasses.GetSubpass(SystemRenderSubpass.SmaaBlendWeights);
+         if (smaa == null || smaaEdges == null || smaaBlend == null || depthStencil == null ||
++            (SsaoEnabled && ssaoDepth?.Texture.Format != SurfaceFormat.Depth) ||
+             edges.Color?.Format != SystemRenderAttachmentFormat.Bgra8 ||
+             weights.Color?.Format != SystemRenderAttachmentFormat.Bgra8 ||
+             edges.Stencil?.Format != SystemRenderAttachmentFormat.Depth24Stencil8 ||
+@@ -174,6 +195,11 @@
+ 
+     public void BlitToScreen(Point offset)
+     {
++        if (Mode == AntialiasMode.None && ldrScene != null)
++        {
++            RunPostProcess(ldrScene.Texture, null, Width, Height, offset);
++            return;
++        }
+         if (Mode == AntialiasMode.None && hdrScene != null)
+         {
+             RunPostProcess(hdrScene.Texture, null, Width, Height, offset);
+@@ -186,12 +212,16 @@
+             {
+                 if (HdrOutputEnabled)
+                     msaa.BlitToRenderTarget(hdrResolve!.Backing);
++                else if (SsaoEnabled)
++                    msaa.BlitToRenderTarget(ldrResolve!.Backing);
+                 else
+                     msaa.BlitToScreen(offset);
+             }
+             finally { EndGpuSubpass(SystemRenderSubpass.MsaaColorResolve); }
+             if (HdrOutputEnabled)
+                 RunPostProcess(hdrResolve!.Texture, null, Width, Height, offset);
++            else if (SsaoEnabled)
++                RunPostProcess(ldrResolve!.Texture, null, Width, Height, offset);
+         }
+         else
+         {
+@@ -201,6 +231,11 @@
+ 
+     public void BlitToRenderTarget(RenderTarget2D rTarget)
+     {
++        if (Mode == AntialiasMode.None && ldrScene != null)
++        {
++            RunPostProcess(ldrScene.Texture, rTarget, Width, Height, Point.Zero);
++            return;
++        }
+         if (Mode == AntialiasMode.None && hdrScene != null)
+         {
+             RunPostProcess(hdrScene.Texture, rTarget, Width, Height, Point.Zero);
+@@ -213,12 +248,16 @@
+             {
+                 if (HdrOutputEnabled)
+                     msaa.BlitToRenderTarget(hdrResolve!.Backing);
++                else if (SsaoEnabled)
++                    msaa.BlitToRenderTarget(ldrResolve!.Backing);
+                 else
+                     msaa.BlitToRenderTarget(rTarget.Backing);
+             }
+             finally { EndGpuSubpass(SystemRenderSubpass.MsaaColorResolve); }
+             if (HdrOutputEnabled)
+                 RunPostProcess(hdrResolve!.Texture, rTarget, Width, Height, Point.Zero);
++            else if (SsaoEnabled)
++                RunPostProcess(ldrResolve!.Texture, rTarget, Width, Height, Point.Zero);
+         }
+         else
+         {
+@@ -234,6 +273,7 @@
+         {
+             Graphics = renderContext,
+             Source = source,
++            SceneDepth = ssaoDepth?.Texture,
+             Target = target,
+             ToneMapIntermediateTarget = HdrOutputEnabled &&
+                 Mode is >= AntialiasMode.SMAALow and <= AntialiasMode.SMAAUltra ? ldrToneMapped : null,
+@@ -260,6 +300,9 @@
+         smaaBlend?.Dispose();
+         hdrScene?.Dispose();
+         hdrResolve?.Dispose();
++        ldrScene?.Dispose();
++        ldrResolve?.Dispose();
++        ssaoDepth?.Dispose();
+         ldrToneMapped?.Dispose();
+         postProcess?.Dispose();
+         depthStencil?.Dispose();
+--- a/src/LibreLancer.Base/Graphics/PostProcessPipeline.cs
++++ b/src/LibreLancer.Base/Graphics/PostProcessPipeline.cs
+@@ -21,6 +21,7 @@
+     public float BloomResolutionScale;
+     public int BloomKernelPairs;
+     public Texture2D? BloomTexture;
++    public Texture2D? SceneDepth;
+     public Action<SystemRenderSubpass, bool>? GpuSubpassMarker;
+ }
+ 
+@@ -36,6 +37,7 @@
+ {
+     private readonly IPostProcessPass[] passes;
+     private readonly BloomPass? bloomPass;
++    private readonly ScreenSpaceAmbientOcclusionPass? ssaoPass;
+ 
+     public long BloomMemoryBytes => bloomPass?.EstimatedMemoryBytes ?? 0;
+ 
+@@ -50,9 +52,16 @@
+         }
+     }
+ 
+-    public PostProcessPipeline(RenderContext graphics, bool hdrOutput, IPostProcessPass? antialiasPass)
++    public PostProcessPipeline(RenderContext graphics, bool hdrOutput, IPostProcessPass? antialiasPass,
++        bool ssaoEnabled = false, Texture2D? sceneDepth = null, SurfaceFormat sceneFormat = SurfaceFormat.Bgra8)
+     {
+         var stages = new List<IPostProcessPass>();
++        if (ssaoEnabled && sceneDepth != null)
++        {
++            ssaoPass = new ScreenSpaceAmbientOcclusionPass(graphics, sceneDepth, sceneFormat,
++                hdrOutput || antialiasPass != null);
++            stages.Add(ssaoPass);
++        }
+         if (hdrOutput)
+         {
+             bloomPass = new BloomPass(graphics);
+@@ -63,6 +72,8 @@
+             stages.Add(antialiasPass);
+         passes = stages.ToArray();
+     }
++
++    public long SsaoMemoryBytes => ssaoPass?.EstimatedMemoryBytes ?? 0;
+ 
+     public void Execute(ref PostProcessContext context)
+     {
+--- a/src/LibreLancer.Base/Graphics/RenderContext.cs
++++ b/src/LibreLancer.Base/Graphics/RenderContext.cs
+@@ -72,6 +72,7 @@
+     internal Shader TonemapShader;
+     internal Shader BloomExtractShader;
+     internal Shader BloomBlurShader;
++    internal Shader SsaoShader;
+     internal VertexBuffer FullScreenTriangle;
+ 
+     internal static RenderContext Instance = null!;
+@@ -286,6 +287,7 @@
+         TonemapShader = ShaderBundle.FromResource<RenderContext>(this, "Tonemap.bin").Get(0);
+         BloomExtractShader = ShaderBundle.FromResource<RenderContext>(this, "BloomExtract.bin").Get(0);
+         BloomBlurShader = ShaderBundle.FromResource<RenderContext>(this, "BloomBlur.bin").Get(0);
++        SsaoShader = ShaderBundle.FromResource<RenderContext>(this, "ScreenSpaceAmbientOcclusion.bin").Get(0);
+         using (var stream = typeof(RenderContext).Assembly.GetManifestResourceStream("LibreLancer.Shaders.AreaTexDX10.dds")!)
+         {
+             SMAAAreaTex = (Texture2D)ImageLib.DDS.FromStream(this, stream);
+--- a/src/LibreLancer.Base/Graphics/ScreenSpaceAmbientOcclusionPass.cs
++++ b/src/LibreLancer.Base/Graphics/ScreenSpaceAmbientOcclusionPass.cs
+@@ -0,0 +1,96 @@
++using System;
++using System.Numerics;
++
++namespace LibreLancer.Graphics;
++
++/// <summary>Conservative, optional depth-based screen-space occlusion for opaque geometry.</summary>
++internal sealed class ScreenSpaceAmbientOcclusionPass : IPostProcessPass
++{
++    private readonly RenderContext graphics;
++    private readonly Texture2D depth;
++    private readonly SurfaceFormat format;
++    private readonly bool hasFollowingPass;
++    private RenderTarget2D? intermediate;
++    private int width;
++    private int height;
++    public long EstimatedMemoryBytes => intermediate?.EstimatedMemoryBytes ?? 0;
++
++    public ScreenSpaceAmbientOcclusionPass(RenderContext graphics, Texture2D depth, SurfaceFormat format,
++        bool hasFollowingPass)
++    {
++        this.graphics = graphics;
++        this.depth = depth;
++        this.format = format;
++        this.hasFollowingPass = hasFollowingPass;
++    }
++
++    public void Execute(ref PostProcessContext context)
++    {
++        if (context.SceneDepth == null)
++            return;
++        if (width != context.Width || height != context.Height || intermediate?.Texture.Format != format)
++        {
++            intermediate?.Dispose();
++            intermediate = new RenderTarget2D(graphics, context.Width, context.Height, null, false, format);
++            width = context.Width;
++            height = context.Height;
++        }
++        var target = hasFollowingPass ? intermediate : context.Target;
++
++        var oldTarget = graphics.RenderTarget;
++        var oldTexture0 = graphics.Textures[0];
++        var oldTexture1 = graphics.Textures[1];
++        var oldSampler0 = graphics.Samplers[0];
++        var oldSampler1 = graphics.Samplers[1];
++        var oldShader = graphics.Shader;
++        var oldBlend = graphics.BlendMode;
++        var oldDepth = graphics.DepthEnabled;
++        var oldDepthWrite = graphics.DepthWrite;
++        var oldColorWrite = graphics.ColorWrite;
++        var oldCull = graphics.Cull;
++        var viewport = false;
++        var scissor = false;
++        try
++        {
++            graphics.RenderTarget = target;
++            graphics.PushViewport(context.Offset.X, context.Offset.Y, context.Width, context.Height);
++            viewport = true;
++            scissor = graphics.PushScissor(new Rectangle(context.Offset.X, context.Offset.Y, context.Width, context.Height), false);
++            graphics.DepthEnabled = false;
++            graphics.DepthWrite = false;
++            graphics.ColorWrite = true;
++            graphics.Cull = false;
++            graphics.BlendMode = BlendMode.Opaque;
++            graphics.Textures[0] = context.Source;
++            graphics.Textures[1] = depth;
++            graphics.Samplers[0] = new SamplerState(TextureFiltering.Linear, WrapMode.ClampToEdge, WrapMode.ClampToEdge);
++            graphics.Samplers[1] = new SamplerState(TextureFiltering.Nearest, WrapMode.ClampToEdge, WrapMode.ClampToEdge);
++            var parameters = new Vector4(1f / context.Width, 1f / context.Height, 0.0015f, 0.045f);
++            graphics.SsaoShader.SetUniformBlock(3, ref parameters);
++            graphics.Shader = graphics.SsaoShader;
++            context.GpuSubpassMarker?.Invoke(SystemRenderSubpass.ScreenSpaceAmbientOcclusion, true);
++            try { graphics.FullScreenTriangle.Draw(PrimitiveTypes.TriangleList, 1); }
++            finally { context.GpuSubpassMarker?.Invoke(SystemRenderSubpass.ScreenSpaceAmbientOcclusion, false); }
++            if (hasFollowingPass)
++                context.Source = intermediate.Texture;
++        }
++        finally
++        {
++            graphics.Textures[0] = oldTexture0;
++            graphics.Textures[1] = oldTexture1;
++            graphics.Samplers[0] = oldSampler0;
++            graphics.Samplers[1] = oldSampler1;
++            graphics.Shader = oldShader;
++            graphics.BlendMode = oldBlend;
++            graphics.DepthEnabled = oldDepth;
++            graphics.DepthWrite = oldDepthWrite;
++            graphics.ColorWrite = oldColorWrite;
++            graphics.Cull = oldCull;
++            if (scissor) graphics.PopScissor();
++            if (viewport) graphics.PopViewport();
++            graphics.RenderTarget = oldTarget;
++        }
++    }
++
++    public void Dispose() => intermediate?.Dispose();
++}
+--- a/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
++++ b/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
+@@ -11,7 +11,8 @@
+     Opaque,
+     StarsAndNebula,
+     Transparent,
+-    AntialiasResolve
++    AntialiasResolve,
++    SsaoDepthPrepass
+ }
+ 
+ [Flags]
+@@ -95,7 +96,8 @@
+     BloomExtract,
+     BloomHorizontalBlur,
+     BloomVerticalBlur,
+-    ToneMap
++    ToneMap,
++    ScreenSpaceAmbientOcclusion
+ }
+ 
+ public readonly record struct SystemRenderSubpassDescriptor(
+@@ -165,6 +167,12 @@
+             SystemRenderResource.PresentationColor, SystemRenderTargetRole.Presentation,
+             new(SystemRenderResource.PresentationColor, SystemRenderAttachmentFormat.CallerDefined,
+                 SystemRenderLoadOperation.Load, SystemRenderStoreOperation.Store), null, null,
++            Conditional: true),
++        new(SystemRenderPass.SsaoDepthPrepass, "SSAO depth prepass",
++            SystemRenderResource.None, SystemRenderResource.SceneDepth,
++            SystemRenderTargetRole.PostProcess, null,
++            new(SystemRenderResource.SceneDepth, SystemRenderAttachmentFormat.DepthTexture,
++                SystemRenderLoadOperation.Clear, SystemRenderStoreOperation.Store), null,
+             Conditional: true)
+     ];
+ 
+@@ -236,6 +244,16 @@
+                 SystemRenderLoadOperation.DontCare, SystemRenderStoreOperation.Store), null, null,
+             Conditional: true,
+             SourceColor: new(SystemRenderResource.SceneColor, SystemRenderAttachmentFormat.HdrBlendable,
++                SystemRenderLoadOperation.Load, SystemRenderStoreOperation.None)),
++        new(SystemRenderSubpass.ScreenSpaceAmbientOcclusion, "SSAO",
++            SystemRenderTargetRole.PostProcess,
++            SystemRenderResource.SceneColor | SystemRenderResource.SceneDepth,
++            SystemRenderResource.PresentationColor,
++            new(SystemRenderResource.PresentationColor, SystemRenderAttachmentFormat.CallerDefined,
++                SystemRenderLoadOperation.DontCare, SystemRenderStoreOperation.Store), null, null,
++            SourceColor: new(SystemRenderResource.SceneColor, SystemRenderAttachmentFormat.CallerDefined,
++                SystemRenderLoadOperation.Load, SystemRenderStoreOperation.None),
++            SourceDepth: new(SystemRenderResource.SceneDepth, SystemRenderAttachmentFormat.DepthTexture,
+                 SystemRenderLoadOperation.Load, SystemRenderStoreOperation.None))
+     ];
+ 
+--- a/src/LibreLancer.Base/LibreLancer.Base.csproj
++++ b/src/LibreLancer.Base/LibreLancer.Base.csproj
+@@ -44,6 +44,7 @@
+     <Shader Include="Shaders\Tonemap.txt"/>
+     <Shader Include="Shaders\BloomExtract.txt" />
+     <Shader Include="Shaders\BloomBlur.txt" />
++    <Shader Include="Shaders\ScreenSpaceAmbientOcclusion.txt" />
+   </ItemGroup>
+ 
+   <ItemGroup>
+@@ -62,5 +63,7 @@
+     <ClCompile Include="Shaders\SMAAIntegration.hlsl" />
+     <ClCompile Include="Shaders\SMAANeighborhoodBlending.frag.hlsl" />
+     <ClCompile Include="Shaders\SMAANeighborhoodBlending.vert.hlsl" />
++    <ClCompile Include="Shaders\ScreenSpaceAmbientOcclusion.frag.hlsl" />
++    <ClCompile Include="Shaders\ScreenSpaceAmbientOcclusion.vert.hlsl" />
+   </ItemGroup>
+ </Project>
+--- a/src/LibreLancer.Base/Shaders/ScreenSpaceAmbientOcclusion.txt
++++ b/src/LibreLancer.Base/Shaders/ScreenSpaceAmbientOcclusion.txt
+@@ -0,0 +1,2 @@
++vertex ScreenSpaceAmbientOcclusion.vert.hlsl
++fragment ScreenSpaceAmbientOcclusion.frag.hlsl
+--- a/src/LibreLancer.Base/Shaders/ScreenSpaceAmbientOcclusion.frag.hlsl
++++ b/src/LibreLancer.Base/Shaders/ScreenSpaceAmbientOcclusion.frag.hlsl
+@@ -0,0 +1,31 @@
++Texture2D<float4> SceneTexture : register(t0, TEXTURE_SPACE);
++Texture2D<float> DepthTexture : register(t1, TEXTURE_SPACE);
++SamplerState SceneSampler : register(s0, TEXTURE_SPACE);
++SamplerState DepthSampler : register(s1, TEXTURE_SPACE);
++cbuffer Parameters : register(b3, UNIFORM_SPACE) { float4 AoParameters; }
++
++float SampleOcclusion(float2 uv, float centerDepth)
++{
++    float sampleDepth = DepthTexture.Sample(DepthSampler, uv).r;
++    return step(0.00001, centerDepth) * step(sampleDepth + AoParameters.z, centerDepth) *
++        saturate((centerDepth - sampleDepth - AoParameters.z) / max(AoParameters.w, 0.0001));
++}
++
++float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target0
++{
++    float centerDepth = DepthTexture.Sample(DepthSampler, uv).r;
++    if (centerDepth >= 0.99999)
++        return SceneTexture.Sample(SceneSampler, uv);
++    float2 pixel = AoParameters.xy * 2.0;
++    float occlusion = 0.0;
++    occlusion += SampleOcclusion(uv + pixel * float2(-1, -1), centerDepth);
++    occlusion += SampleOcclusion(uv + pixel * float2( 0, -1), centerDepth);
++    occlusion += SampleOcclusion(uv + pixel * float2( 1, -1), centerDepth);
++    occlusion += SampleOcclusion(uv + pixel * float2(-1,  0), centerDepth);
++    occlusion += SampleOcclusion(uv + pixel * float2( 1,  0), centerDepth);
++    occlusion += SampleOcclusion(uv + pixel * float2(-1,  1), centerDepth);
++    occlusion += SampleOcclusion(uv + pixel * float2( 0,  1), centerDepth);
++    occlusion += SampleOcclusion(uv + pixel * float2( 1,  1), centerDepth);
++    float factor = 1.0 - saturate(occlusion * 0.045);
++    return float4(SceneTexture.Sample(SceneSampler, uv).rgb * factor, 1.0);
++}
+--- a/src/LibreLancer.Base/Shaders/ScreenSpaceAmbientOcclusion.vert.hlsl
++++ b/src/LibreLancer.Base/Shaders/ScreenSpaceAmbientOcclusion.vert.hlsl
+@@ -0,0 +1,3 @@
++struct Input { [[vk::location(0)]] float4 Position : POSITION; [[vk::location(3)]] float2 TexCoord : TEXCOORD0; };
++struct Output { float4 Position : SV_Position; float2 TexCoord : TEXCOORD0; };
++Output main(Input input) { Output output; output.Position = input.Position; output.TexCoord = input.TexCoord; return output; }
+--- a/src/LibreLancer/GameSettings.cs
++++ b/src/LibreLancer/GameSettings.cs
+@@ -69,6 +69,8 @@
+         public bool RenderDepthPrepass = false;
+         [Entry("render_shadows")]
+         public bool RenderShadows = false;
++        [Entry("render_ssao")]
++        public bool RenderSsao = false;
+         [Entry("render_bloom_threshold")]
+         public float BloomThreshold = 1f;
+         [Entry("render_bloom_strength")]
+@@ -139,6 +141,7 @@
+         bool IRendererSettings.RenderBloom => RenderBloom;
+         bool IRendererSettings.RenderDepthPrepass => RenderDepthPrepass;
+         bool IRendererSettings.RenderShadows => RenderShadows;
++        bool IRendererSettings.RenderSsao => RenderSsao;
+         float IRendererSettings.BloomThreshold => BloomThreshold;
+         float IRendererSettings.BloomStrength => BloomStrength;
+         float IRendererSettings.BloomRadius => BloomRadius;
+@@ -195,6 +198,7 @@
+             writer.WriteLine($"render_bloom = {RenderBloom.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_depth_prepass = {RenderDepthPrepass.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_shadows = {RenderShadows.ToString().ToLowerInvariant()}");
++            writer.WriteLine($"render_ssao = {RenderSsao.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_bloom_threshold = {Fmt(BloomThreshold)}");
+             writer.WriteLine($"render_bloom_strength = {Fmt(BloomStrength)}");
+             writer.WriteLine($"render_bloom_radius = {Fmt(BloomRadius)}");
+@@ -246,6 +250,7 @@
+                 RenderBloom = RenderBloom,
+                 RenderDepthPrepass = RenderDepthPrepass,
+                 RenderShadows = RenderShadows,
++                RenderSsao = RenderSsao,
+                 BloomThreshold = BloomThreshold,
+                 BloomStrength = BloomStrength,
+                 BloomRadius = BloomRadius,
+@@ -295,6 +300,7 @@
+             RenderBloom = other.RenderBloom;
+             RenderDepthPrepass = other.RenderDepthPrepass;
+             RenderShadows = other.RenderShadows;
++            RenderSsao = other.RenderSsao;
+             BloomThreshold = other.BloomThreshold;
+             BloomStrength = other.BloomStrength;
+             BloomRadius = other.BloomRadius;
+--- a/src/LibreLancer/Render/GpuPassProfile.cs
++++ b/src/LibreLancer/Render/GpuPassProfile.cs
+@@ -15,7 +15,8 @@
+         SystemRenderPass.DepthPrepass,
+         SystemRenderPass.Opaque,
+         SystemRenderPass.StarsAndNebula,
+-        SystemRenderPass.Transparent
++        SystemRenderPass.Transparent,
++        SystemRenderPass.SsaoDepthPrepass
+     ];
+     private static readonly GpuPassSample?[] Samples =
+         new GpuPassSample?[SystemRenderPasses.Count + SystemRenderPasses.SubpassCount];
+--- a/src/LibreLancer/Render/IRendererSettings.cs
++++ b/src/LibreLancer/Render/IRendererSettings.cs
+@@ -22,6 +22,7 @@
+     bool RenderBloom => false;
+     bool RenderDepthPrepass => false;
+     bool RenderShadows => false;
++    bool RenderSsao => false;
+     float BloomThreshold => 1f;
+     float BloomStrength => 0.18f;
+     float BloomRadius => 1f;
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -302,7 +302,9 @@
+         private int _mwidth = -1, _mheight = -1;
+         private AntialiasMode _mAaMode = (AntialiasMode)(-1);
+         private bool _mHdrRequested;
++        private bool _mSsaoRequested;
+         private bool hdrAllocationFailed;
++        private bool ssaoAllocationFailed;
+         public CommandBuffer Commands;
+         private int _twidth = -1, _theight = -1;
+         private int _dwidth = -1, _dheight = -1;
+@@ -454,36 +456,71 @@
+             try
+             {
+                 bool hdrRequested = Settings.RenderHdr;
+-                bool offscreenRequested = Settings.SelectedAA != AntialiasMode.None || hdrRequested;
++                bool ssaoRequested = Settings.RenderSsao;
+                 if (_mwidth != renderWidth || _mheight != renderHeight ||
+-                    _mAaMode != Settings.SelectedAA || _mHdrRequested != hdrRequested)
++                    _mAaMode != Settings.SelectedAA || _mHdrRequested != hdrRequested || _mSsaoRequested != ssaoRequested)
+                 {
+                     _mwidth = renderWidth;
+                     _mheight = renderHeight;
+                     _mAaMode = Settings.SelectedAA;
+                     _mHdrRequested = hdrRequested;
++                    _mSsaoRequested = ssaoRequested;
+                     hdrAllocationFailed = false;
++                    ssaoAllocationFailed = false;
+                     msaa?.Dispose();
+                     msaa = null;
+                 }
+-
+-                if (offscreenRequested && (msaa == null || (!hdrAllocationFailed && hdrRequested && !msaa.HdrOutputEnabled)))
++                bool ssaoActive = ssaoRequested && !ssaoAllocationFailed;
++                bool offscreenRequested = Settings.SelectedAA != AntialiasMode.None || hdrRequested || ssaoActive;
++
++                if (offscreenRequested && (msaa == null ||
++                    (!hdrAllocationFailed && hdrRequested && !msaa.HdrOutputEnabled) ||
++                    (ssaoActive && !msaa.SsaoEnabled)))
+                 {
+                     try
+                     {
+                         msaa = new AntialiasTarget(rstate, renderWidth, renderHeight,
+-                            Settings.SelectedAA, hdrRequested && !hdrAllocationFailed);
++                            Settings.SelectedAA, hdrRequested && !hdrAllocationFailed, ssaoActive);
+                         msaa.GpuSubpassMarker = MarkGpuSubpass;
+                     }
+-                    catch (Exception ex) when (hdrRequested && !hdrAllocationFailed &&
++                    catch (Exception ex) when ((ssaoActive || (hdrRequested && !hdrAllocationFailed)) &&
+                         ex is InvalidOperationException or NotSupportedException)
+                     {
+-                        hdrAllocationFailed = true;
+-                        FLLog.Warning("Graphics", $"HDR render targets are unavailable; using the LDR renderer. {ex.Message}");
+-                        if (Settings.SelectedAA != AntialiasMode.None)
++                        if (ssaoActive)
+                         {
+-                            msaa = new AntialiasTarget(rstate, renderWidth, renderHeight, Settings.SelectedAA);
+-                            msaa.GpuSubpassMarker = MarkGpuSubpass;
++                            ssaoAllocationFailed = true;
++                            FLLog.Warning("Graphics", $"SSAO targets are unavailable; continuing without SSAO. {ex.Message}");
++                            try
++                            {
++                                if (Settings.SelectedAA == AntialiasMode.None && !hdrRequested)
++                                    msaa = null;
++                                else
++                                {
++                                    msaa = new AntialiasTarget(rstate, renderWidth, renderHeight,
++                                        Settings.SelectedAA, hdrRequested && !hdrAllocationFailed, false);
++                                    msaa.GpuSubpassMarker = MarkGpuSubpass;
++                                }
++                            }
++                            catch (Exception fallbackException) when (hdrRequested &&
++                                fallbackException is InvalidOperationException or NotSupportedException)
++                            {
++                                hdrAllocationFailed = true;
++                                FLLog.Warning("Graphics", $"HDR render targets are unavailable; using the LDR renderer. {fallbackException.Message}");
++                                msaa?.Dispose();
++                                msaa = Settings.SelectedAA == AntialiasMode.None ? null :
++                                    new AntialiasTarget(rstate, renderWidth, renderHeight, Settings.SelectedAA);
++                                if (msaa != null) msaa.GpuSubpassMarker = MarkGpuSubpass;
++                            }
++                        }
++                        else
++                        {
++                            hdrAllocationFailed = true;
++                            FLLog.Warning("Graphics", $"HDR render targets are unavailable; using the LDR renderer. {ex.Message}");
++                            if (Settings.SelectedAA != AntialiasMode.None)
++                            {
++                                msaa = new AntialiasTarget(rstate, renderWidth, renderHeight, Settings.SelectedAA);
++                                msaa.GpuSubpassMarker = MarkGpuSubpass;
++                            }
+                         }
+                     }
+                 }
+@@ -617,6 +654,54 @@
+                 // Clear depth buffer for game objects
+                 billboards.Begin(camera, Commands);
+                 SystemLighting.NumberOfTilesX = -1;
++                if (Settings.RenderSsao && msaa?.SsaoDepthTarget is { } ssaoDepthTarget)
++                {
++                    var savedTarget = rstate.RenderTarget;
++                    var savedColorWrite = rstate.ColorWrite;
++                    var savedDepthEnabled = rstate.DepthEnabled;
++                    var savedDepthWrite = rstate.DepthWrite;
++                    var savedDepthFunction = rstate.DepthFunction;
++                    var ssaoViewportPushed = false;
++                    var ssaoScissorPushed = false;
++                    try
++                    {
++                        rstate.PushViewport(new Rectangle(0, 0, renderWidth, renderHeight));
++                        ssaoViewportPushed = true;
++                        ssaoScissorPushed = rstate.PushScissor(new Rectangle(0, 0, renderWidth, renderHeight), false);
++                        rstate.RenderTarget = ssaoDepthTarget;
++                        rstate.SetCamera(camera);
++                        Commands.Camera = camera;
++                        rstate.DepthEnabled = true;
++                        rstate.DepthWrite = true;
++                        rstate.DepthFunction = DepthFunction.Less;
++                        rstate.ColorWrite = false;
++                        rstate.ClearDepth();
++                        BeginGpuPass(SystemRenderPass.SsaoDepthPrepass, ssaoDepthTarget);
++                        try
++                        {
++                            Commands.DepthOnlyPass = true;
++                            foreach (var obj in objects) obj.DepthPrepass(camera, Commands, SystemLighting, nr!);
++                        }
++                        finally
++                        {
++                            Commands.DepthOnlyPass = false;
++                            EndGpuPass(SystemRenderPass.SsaoDepthPrepass, ssaoDepthTarget);
++                        }
++                    }
++                    finally
++                    {
++                        Commands.DepthOnlyPass = false;
++                        rstate.ColorWrite = savedColorWrite;
++                        rstate.DepthEnabled = savedDepthEnabled;
++                        rstate.DepthWrite = savedDepthWrite;
++                        rstate.DepthFunction = savedDepthFunction;
++                        rstate.SetCamera(camera);
++                        Commands.Camera = camera;
++                        if (ssaoScissorPushed) rstate.PopScissor();
++                        if (ssaoViewportPushed) rstate.PopViewport();
++                        rstate.RenderTarget = savedTarget;
++                    }
++                }
+                 if (Settings.RenderDepthPrepass)
+                 {
+                     rstate.ColorWrite = false;
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -40,6 +40,7 @@
+             Console.WriteLine("         --render-hdr-exposure=-4..4");
+             Console.WriteLine("         --render-bloom=on|off");
+             Console.WriteLine("         --render-depth-prepass=on|off");
++            Console.WriteLine("         --render-ssao=on|off");
+             Console.WriteLine("         --render-bloom-threshold=0..8");
+             Console.WriteLine("         --render-bloom-strength=0..2");
+             Console.WriteLine("         --render-bloom-radius=0.25..4");
+@@ -236,6 +237,7 @@
+         private bool? bloom;
+         private bool? depthPrepass;
+         private bool? shadows;
++        private bool? ssao;
+         private float? bloomThreshold;
+         private float? bloomStrength;
+         private float? bloomRadius;
+@@ -335,6 +337,10 @@
+                 case "--render-shadows":
+                     if (!ParseToggle(out var shadowsEnabled)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
+                     shadows = shadowsEnabled;
++                    return true;
++                case "--render-ssao":
++                    if (!ParseToggle(out var ssaoEnabled)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
++                    ssao = ssaoEnabled;
+                     return true;
+                 case "--render-bloom-threshold":
+                     if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var threshold) &&
+@@ -481,6 +487,7 @@
+             if (bloom.HasValue) settings.RenderBloom = bloom.Value;
+             if (depthPrepass.HasValue) settings.RenderDepthPrepass = depthPrepass.Value;
+             if (shadows.HasValue) settings.RenderShadows = shadows.Value;
++            if (ssao.HasValue) settings.RenderSsao = ssao.Value;
+             if (bloomThreshold.HasValue) settings.BloomThreshold = bloomThreshold.Value;
+             if (bloomStrength.HasValue) settings.BloomStrength = bloomStrength.Value;
+             if (bloomRadius.HasValue) settings.BloomRadius = bloomRadius.Value;
+--- a/uixml/options.lua
++++ b/uixml/options.lua
+@@ -123,6 +123,7 @@
+         e.generated_tangents.Selected = this.opts.SurfaceGeneratedTangentsEnabled
+         e.surface_pbr_maps.Selected = this.opts.SurfacePbrMapsEnabled
+         e.shadows.Selected = this.opts.RenderShadows
++        e.ssao.Selected = this.opts.RenderSsao
+         e.environment_maps.Selected = this.opts.PbrEnvironmentMapsEnabled
+         e.dynamic_lighting.Selected = this.opts.DynamicLighting
+         e.transient_effect_lights.Selected = this.opts.RenderTransientEffectLights
+@@ -196,6 +197,12 @@
+             settings.RenderShadows = e.shadows.Selected
+             Game.ApplySettings(settings)
+         })
++        e.ssao.OnClick(() => {
++            this.opts.RenderSsao = e.ssao.Selected
++            local settings = Game.GetCurrentSettings()
++            settings.RenderSsao = e.ssao.Selected
++            Game.ApplySettings(settings)
++        })
+         e.sun_ambient.OnClick(() => {
+             this.opts.RenderSunAmbient = e.sun_ambient.Selected
+             local settings = Game.GetCurrentSettings()
+@@ -247,6 +254,7 @@
+         this.opts.RenderSunLensGlow = e.sun_lens_glow.Selected
+         this.opts.RenderSunAmbient = Game.GetCurrentSettings().RenderSunAmbient
+         this.opts.RenderShadows = Game.GetCurrentSettings().RenderShadows
++        this.opts.RenderSsao = Game.GetCurrentSettings().RenderSsao
+         this.opts.RenderHdr = Game.GetCurrentSettings().RenderHdr
+         this.opts.HdrExposure = e.hdr_exposure.Value
+         this.opts.RenderBloom = Game.GetCurrentSettings().RenderBloom
+--- a/uixml/options.xml
++++ b/uixml/options.xml
+@@ -108,6 +108,7 @@
+                 <Checkbox id="environment_maps" X="18" Y="326" Width="350" Text="PBR CUBEMAP REFLECTIONS"/>
+                 <Checkbox id="surface_pbr_maps" X="18" Y="354" Width="350" Text="SURFACE ROUGHNESS / METALLIC MAPS"/>
+                 <Checkbox id="shadows" X="18" Y="382" Width="350" Text="DIRECTIONAL SHADOW MAPS (BASIC / PBR)"/>
++                <Checkbox id="ssao" X="18" Y="410" Width="350" Text="SCREEN SPACE AMBIENT OCCLUSION"/>
+                 <!-- Toggles -->
+                 <Checkbox id="ppl" X="18" Y="92" Width="200" Text="PER-PIXEL LIGHTING"/>
+             </Panel>
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -221,7 +221,8 @@
+   - [x] HDR-Laufzeitversuch am 17.10.2026: Beide Starts laden denselben BW04-Save-Klon mit `--render-hdr=on`, einmal mit Sonnenambient an und einmal aus; der Paketmanifest- und NAP-Archivstand wurde geprüft. Zufällige Explosionen und Effekte unterscheiden sich zwischen den Prozessen, deshalb sind die Bilder ausdrücklich kein gültiger A/B-Nachweis und kalibrieren die Ambientwirkung nicht. Start- und Bildgrenzen: [Explorativer BW04-HDR-Lauf](evidence/renderer/sun-colored-ambient-bw04-ab-20261017/README.md).
+   - [ ] NAP-A/B für weiße, rote, grüne und mehrfach vorhandene Sonnen mit der luminanzerhaltenden Mischung aufnehmen; Effektstärke, Wertebegrenzung und distanzgewichtete Farbmischung visuell kalibrieren. Nebelüberschreibung und Legacy-Ausgabe bei ausgeschaltetem Schalter in der Laufzeit prüfen.
+   - [x] Hi02-Stärkeproben bei 0,25 und 1,0 mit identischem NAP-Save aufgenommen. 1,0 überstrahlt die Sonnen-/Nebelregion sichtbar; wegen unterschiedlicher Prozessframes ist dies keine Same-frame-Kalibrierung. Bilder: [Stärkeproben](evidence/renderer/sun-ambient-strength-probes-20261017/README.md).
+-- [ ] Screen-Space Ambient Occlusion als optionale Ergänzung bewerten; Geometrie- und Nebelartefakte gegen Vanilla-Szenen abgleichen.
++- [x] SSAO-Prototyp als optionale, separat abschaltbare Erweiterung in die Forward-/Post-Processing-Pipeline integrieren. Der Pass nutzt einen eigenen abtastbaren Tiefenpuffer aus opaken, sichtbaren Modellen, funktioniert mit None/SMAA/MSAA sowie HDR/LDR und lässt sich per `render_ssao`, `--render-ssao=on|off` und Performance-Menü steuern. Nicht unterstützte Depth-Targets fallen auf den bisherigen Renderer zurück.
++  - [ ] Bildqualität und Kosten in NAP-Vanilla-Szenen prüfen: Halo-/Seam-Artefakte an Mesh-Kanten, Nebelübergänge, DFM-Modelle, Alpha-Test sowie Same-Pose/FPS-Vergleich. Der erste Prototyp vergleicht Nachbartiefen und ist noch nicht visuell kalibriert oder als fertige SSAO-Qualität abgenommen.
+ - [ ] Echtzeit-Schatten (zunächst gerichtete Lichter, Kaskaden und PCF) anhand vorhandener Freelancer-Lichtdaten und der GPU-Kosten bewerten.
+   - [x] Sampleable Depth-only-Renderziele im OpenGL-Backend und no-op-Ziele im Null-Backend bereitgestellt; Release-Build sowie OpenGL-4.6/Mesa-NAP-Smoke für FBO, Clear und Depth-Readback bestanden. GLES, Shader-Sampling und PCF bleiben offen; siehe [Depth-only-Smoke](evidence/renderer/depth-only-target-smoke-20261017/README.md).
+   - [x] `DirectionalShadowCamera` kann den aktiven Kamerafrustum bis zu einer begrenzten Sichtweite in einen Lichtfrustum überführen und die orthografische XY-Projektion auf Shadow-Map-Texel rasten. Der Build prüft die Kompilierung; ein Laufzeit- oder Schattenbildnachweis fehlt. Die Kamera wird noch nicht vom `SystemRenderer` verwendet.
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -203,3 +203,4 @@
+ | 2236 | Record LI_ELITE cubemap-preview toggle A/B evidence |
+ | 2237 | Add RenderDoc debug groups for render passes |
+ | 2238 | Record marker-enabled NAP runtime smoke |
++| 2239 | Add optional SSAO depth and post-processing path |
+--- a/patches/series
++++ b/patches/series
+@@ -238,3 +238,4 @@
+ client 2236-ibl-modelviewer-preview-evidence.patch
+ client 2237-renderdoc-pass-markers.patch
+ client 2238-renderdoc-markers-nap-runtime.patch
++client 2239-ssao-depth-postprocess.patch

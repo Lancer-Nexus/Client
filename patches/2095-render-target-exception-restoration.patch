@@ -1,0 +1,729 @@
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -407,249 +407,263 @@
+             }
+ 
+             RenderTarget? restoreTarget = rstate.RenderTarget;
+-
+-            if (Settings.SelectedAA != AntialiasMode.None)
+-            {
+-                if (_mwidth != renderWidth || _mheight != renderHeight ||
+-                    Settings.SelectedAA != msaa?.Mode)
+-                {
+-                    _mwidth = renderWidth;
+-                    _mheight = renderHeight;
+-                    msaa?.Dispose();
+-                    msaa = new AntialiasTarget(rstate, renderWidth, renderHeight, Settings.SelectedAA);
+-                }
+-
+-                rstate.PushViewport(new Rectangle(0, 0, renderWidth, renderHeight));
+-                rstate.PushScissor(new Rectangle(0, 0, renderWidth, renderHeight), false);
+-                rstate.RenderTarget = msaa;
+-            }
+-
+-            RenderMaterial.VertexLighting = !(AllowPerPixelLighting && Settings.PerPixelLighting);
+-            rstate.PreferredFilterLevel = Settings.SelectedFiltering;
+-            rstate.AnisotropyLevel = Settings.SelectedAnisotropy;
+-            DrawNebulae = Settings.RenderNebulae;
+-            DrawStarsphere = Settings.RenderStarsphere;
+-            var nr = CheckNebulae(); // are we in a nebula?
+-            SystemLighting.DynamicLightsEnabled = Settings.DynamicLighting;
+-            SystemLighting.MaxFrameLights = Settings.DynamicLightBudget;
+-            SystemLighting.BeginFrame(camera.Position);
+-            if (Settings.RenderTransientEffectLights)
+-            {
+-                foreach (var effectLight in transientEffectLights)
+-                {
+-                    effectLight.Light.LightGroup = 0;
+-                    effectLight.Light.Active = true;
+-                    effectLight.Light.Light = CreateTransientEffectRenderLight(effectLight);
+-                    SystemLighting.AddFrameLight(effectLight.Light);
+-                }
+-            }
+-            rstate.SetCamera(camera);
+-            Commands.Camera = camera;
+-            var transitioned = false;
+-
+-            if (nr != null)
+-            {
+-                transitioned = nr.FogTransitioned() && DrawNebulae;
+-            }
+-
+-            rstate.DepthEnabled = true;
+-            Commands.BonesMax = Commands.BonesOffset = 0;
+-            Commands.BonesBuffer.BeginStreaming();
+-            QuadBuffer.BeginUpload();
+-
+-            foreach (var obj in tempFx)
+-            {
+-                obj.Render.PrepareRender(camera, nr, this, false);
+-            }
+-
+-            for (var i = 0; i < World.Objects.Count; i++)
+-            {
+-                World.Objects[i].PrepareRender(camera, nr, this);
+-            }
+-
+-            foreach (var n in Nebulae)
+-                n.UploadPuffs();
+-            QuadBuffer.EndUpload();
+-            Commands.BonesBuffer.EndStreaming(Commands.BonesMax);
+-
+-            if (transitioned)
+-            {
+-                // Fully in fog. Skip Starsphere
+-                rstate.ClearColor = nr!.Nebula.FogColor;
+-                rstate.ClearAll();
+-            }
+-            else
+-            {
+-                rstate.ClearColor =
+-                    BackgroundOverride ??
+-                    starSystem?.BackgroundColor ??
+-                    NullColor;
+-                rstate.ClearAll();
+-            }
+-
+-            DebugRenderer.StartFrame(rstate);
+-            Commands.StartFrame(rstate);
+-            FxPool.StartFrame(camera);
+-            Polyline.StartFrame();
+-            rstate.DepthEnabled = true;
+-            // Optimisation for dictionary lookups
+-            LightEquipRenderer.FrameStart();
+-            // Clear depth buffer for game objects
+-            billboards.Begin(camera, Commands);
+-            SystemLighting.NumberOfTilesX = -1;
+-            // Simple depth pre-pass
+-            rstate.ColorWrite = false;
+-            rstate.DepthFunction = DepthFunction.Less;
+-            foreach (var obj in objects) obj.DepthPrepass(camera, rstate);
+-            rstate.DepthFunction = DepthFunction.LessEqual;
+-            rstate.ColorWrite = true;
+-            // Actual Drawing
+-
+-            Beams.Begin(Commands, resman, camera);
+-
+-            foreach (var obj in objects)
+-            {
+-                obj.Draw(camera, Commands, SystemLighting, nr!);
+-            }
+-
+-            Beams.End();
+-            for (var i = 0; i < AsteroidFields!.Count; i++)
+-                AsteroidFields[i].Draw(resman, SystemLighting, Commands, nr!);
+-
+-            if (DrawNebulae)
+-            {
+-                if (nr == null)
+-                {
+-                    foreach (var nebula in Nebulae)
+-                    {
+-                        nebula.Draw(Commands);
+-                    }
++            bool aaViewportPushed = false;
++            bool aaScissorPushed = false;
++
++            try
++            {
++                if (Settings.SelectedAA != AntialiasMode.None)
++                {
++                    if (_mwidth != renderWidth || _mheight != renderHeight ||
++                        Settings.SelectedAA != msaa?.Mode)
++                    {
++                        _mwidth = renderWidth;
++                        _mheight = renderHeight;
++                        msaa?.Dispose();
++                        msaa = new AntialiasTarget(rstate, renderWidth, renderHeight, Settings.SelectedAA);
++                    }
++
++                    rstate.PushViewport(new Rectangle(0, 0, renderWidth, renderHeight));
++                    aaViewportPushed = true;
++                    aaScissorPushed = rstate.PushScissor(new Rectangle(0, 0, renderWidth, renderHeight), false);
++                    rstate.RenderTarget = msaa;
++                }
++
++                RenderMaterial.VertexLighting = !(AllowPerPixelLighting && Settings.PerPixelLighting);
++                rstate.PreferredFilterLevel = Settings.SelectedFiltering;
++                rstate.AnisotropyLevel = Settings.SelectedAnisotropy;
++                DrawNebulae = Settings.RenderNebulae;
++                DrawStarsphere = Settings.RenderStarsphere;
++                var nr = CheckNebulae(); // are we in a nebula?
++                SystemLighting.DynamicLightsEnabled = Settings.DynamicLighting;
++                SystemLighting.MaxFrameLights = Settings.DynamicLightBudget;
++                SystemLighting.BeginFrame(camera.Position);
++                if (Settings.RenderTransientEffectLights)
++                {
++                    foreach (var effectLight in transientEffectLights)
++                    {
++                        effectLight.Light.LightGroup = 0;
++                        effectLight.Light.Active = true;
++                        effectLight.Light.Light = CreateTransientEffectRenderLight(effectLight);
++                        SystemLighting.AddFrameLight(effectLight.Light);
++                    }
++                }
++                rstate.SetCamera(camera);
++                Commands.Camera = camera;
++                var transitioned = false;
++
++                if (nr != null)
++                {
++                    transitioned = nr.FogTransitioned() && DrawNebulae;
++                }
++
++                rstate.DepthEnabled = true;
++                Commands.BonesMax = Commands.BonesOffset = 0;
++                Commands.BonesBuffer.BeginStreaming();
++                QuadBuffer.BeginUpload();
++
++                foreach (var obj in tempFx)
++                {
++                    obj.Render.PrepareRender(camera, nr, this, false);
++                }
++
++                for (var i = 0; i < World.Objects.Count; i++)
++                {
++                    World.Objects[i].PrepareRender(camera, nr, this);
++                }
++
++                foreach (var n in Nebulae)
++                    n.UploadPuffs();
++                QuadBuffer.EndUpload();
++                Commands.BonesBuffer.EndStreaming(Commands.BonesMax);
++
++                if (transitioned)
++                {
++                    // Fully in fog. Skip Starsphere
++                    rstate.ClearColor = nr!.Nebula.FogColor;
++                    rstate.ClearAll();
+                 }
+                 else
+                 {
+-                    nr.Draw(Commands);
+-                }
+-            }
+-
+-            billboards.End();
+-            FxPool.EndFrame();
+-            Polyline.EndFrame();
+-            // Opaque Pass
+-            rstate.DepthEnabled = true;
+-            Commands.DrawOpaque(rstate);
+-
+-            if ((!transitioned || !DrawNebulae) && DrawStarsphere)
+-            {
+-                // Starsphere
+-                rstate.DepthRange = new Vector2(1, 1);
+-
+-                if (camera is ThnCamera thn && !ZOverride)
+-                {
+-                    thn.DefaultZ();
+-                    rstate.SetCamera(thn);
+-                }
+-
+-                for (var i = 0; i < StarSphereModels.Length; i++)
+-                {
+-                    Matrix4x4 ssworld = Matrix4x4.CreateTranslation(camera.Position);
+-
+-                    if (StarSphereWorlds != null)
+-                    {
+-                        ssworld = StarSphereWorlds[i] * ssworld;
+-                    }
+-
+-                    var lighting = Lighting.Empty;
+-
+-                    if (StarSphereLightings != null)
+-                    {
+-                        lighting = StarSphereLightings[i];
+-                    }
+-
+-                    // We frustum cull to save on fill rate for low end devices (pi)
+-                    var mdl = StarSphereModels[i];
+-
+-                    foreach (var part in mdl.AllParts)
+-                    {
+-                        if (!part.Active || part.Mesh == null)
++                    rstate.ClearColor =
++                        BackgroundOverride ??
++                        starSystem?.BackgroundColor ??
++                        NullColor;
++                    rstate.ClearAll();
++                }
++
++                DebugRenderer.StartFrame(rstate);
++                Commands.StartFrame(rstate);
++                FxPool.StartFrame(camera);
++                Polyline.StartFrame();
++                rstate.DepthEnabled = true;
++                // Optimisation for dictionary lookups
++                LightEquipRenderer.FrameStart();
++                // Clear depth buffer for game objects
++                billboards.Begin(camera, Commands);
++                SystemLighting.NumberOfTilesX = -1;
++                // Simple depth pre-pass
++                rstate.ColorWrite = false;
++                rstate.DepthFunction = DepthFunction.Less;
++                foreach (var obj in objects) obj.DepthPrepass(camera, rstate);
++                rstate.DepthFunction = DepthFunction.LessEqual;
++                rstate.ColorWrite = true;
++                // Actual Drawing
++
++                Beams.Begin(Commands, resman, camera);
++
++                foreach (var obj in objects)
++                {
++                    obj.Draw(camera, Commands, SystemLighting, nr!);
++                }
++
++                Beams.End();
++                for (var i = 0; i < AsteroidFields!.Count; i++)
++                    AsteroidFields[i].Draw(resman, SystemLighting, Commands, nr!);
++
++                if (DrawNebulae)
++                {
++                    if (nr == null)
++                    {
++                        foreach (var nebula in Nebulae)
+                         {
+-                            continue;
++                            nebula.Draw(Commands);
+                         }
+-
+-                        var p = part;
+-                        var w = p.LocalTransform.Matrix() * ssworld;
+-                        var bsphere = new BoundingSphere(Vector3.Transform(p.Mesh!.Center, w), p.Mesh.Radius);
+-
+-                        if (camera.FrustumCheck(bsphere))
++                    }
++                    else
++                    {
++                        nr.Draw(Commands);
++                    }
++                }
++
++                billboards.End();
++                FxPool.EndFrame();
++                Polyline.EndFrame();
++                // Opaque Pass
++                rstate.DepthEnabled = true;
++                Commands.DrawOpaque(rstate);
++
++                if ((!transitioned || !DrawNebulae) && DrawStarsphere)
++                {
++                    // Starsphere
++                    rstate.DepthRange = new Vector2(1, 1);
++
++                    if (camera is ThnCamera thn && !ZOverride)
++                    {
++                        thn.DefaultZ();
++                        rstate.SetCamera(thn);
++                    }
++
++                    for (var i = 0; i < StarSphereModels.Length; i++)
++                    {
++                        Matrix4x4 ssworld = Matrix4x4.CreateTranslation(camera.Position);
++
++                        if (StarSphereWorlds != null)
+                         {
+-                            p.Mesh.DrawImmediate(0, resman, rstate, w, ref lighting, mdl.MaterialAnims,
+-                                BasicMaterial.ForceAlpha);
++                            ssworld = StarSphereWorlds[i] * ssworld;
+                         }
+-                    }
+-                }
+-
+-                if (camera is ThnCamera thn2 && !ZOverride)
+-                {
+-                    thn2.CameraZ();
+-                    rstate.SetCamera(thn2);
+-                }
+-
+-                if (nr != null && DrawNebulae)
+-                {
+-                    nr.RenderFogTransition(rstate);
+-                }
+-
+-                rstate.DepthRange = new Vector2(0, 1);
+-            }
+-
+-            OpaqueHook?.Invoke();
+-            // Transparent Pass
+-            rstate.DepthWrite = false;
+-            Commands.DrawTransparent(rstate);
+-            rstate.DepthWrite = true;
+-            rstate.DepthEnabled = true;
+-            PhysicsHook?.Invoke();
+-
+-            foreach (var point in debugPoints)
+-            {
+-                var lX = point + new Vector3(5, 0, 0);
+-                var lmX = point + new Vector3(-5, 0, 0);
+-                var lY = point + new Vector3(0, -5, 0);
+-                var lmY = point + new Vector3(0, 5, 0);
+-                var lZ = point + new Vector3(0, 0, 5);
+-                var lmZ = point + new Vector3(0, 0, -5);
+-                DebugRenderer.DrawLine(lX, lmX, Color4.Red);
+-                DebugRenderer.DrawLine(lY, lmY, Color4.Red);
+-                DebugRenderer.DrawLine(lZ, lmZ, Color4.Red);
+-            }
+-
+-            foreach (var line in debugLines)
+-            {
+-                DebugRenderer.DrawLine(line.Start, line.End, line.Color);
+-            }
+-
+-            debugPoints = [];
+-            debugLines = [];
+-            DebugRenderer.Render();
+-
+-            if (Settings.SelectedAA != AntialiasMode.None)
+-            {
+-                rstate.PopViewport();
+-                rstate.PopScissor();
+-
+-                if (restoreTarget == null)
+-                {
+-                    msaa?.BlitToScreen(new Point(rstate.CurrentViewport.X, rstate.CurrentViewport.Y));
+-                }
+-                else
+-                {
+-                    msaa?.BlitToRenderTarget((restoreTarget as RenderTarget2D)!);
+-                }
+-
++
++                        var lighting = Lighting.Empty;
++
++                        if (StarSphereLightings != null)
++                        {
++                            lighting = StarSphereLightings[i];
++                        }
++
++                        // We frustum cull to save on fill rate for low end devices (pi)
++                        var mdl = StarSphereModels[i];
++
++                        foreach (var part in mdl.AllParts)
++                        {
++                            if (!part.Active || part.Mesh == null)
++                            {
++                                continue;
++                            }
++
++                            var p = part;
++                            var w = p.LocalTransform.Matrix() * ssworld;
++                            var bsphere = new BoundingSphere(Vector3.Transform(p.Mesh!.Center, w), p.Mesh.Radius);
++
++                            if (camera.FrustumCheck(bsphere))
++                            {
++                                p.Mesh.DrawImmediate(0, resman, rstate, w, ref lighting, mdl.MaterialAnims,
++                                    BasicMaterial.ForceAlpha);
++                            }
++                        }
++                    }
++
++                    if (camera is ThnCamera thn2 && !ZOverride)
++                    {
++                        thn2.CameraZ();
++                        rstate.SetCamera(thn2);
++                    }
++
++                    if (nr != null && DrawNebulae)
++                    {
++                        nr.RenderFogTransition(rstate);
++                    }
++
++                    rstate.DepthRange = new Vector2(0, 1);
++                }
++
++                OpaqueHook?.Invoke();
++                // Transparent Pass
++                rstate.DepthWrite = false;
++                Commands.DrawTransparent(rstate);
++                rstate.DepthWrite = true;
++                rstate.DepthEnabled = true;
++                PhysicsHook?.Invoke();
++
++                foreach (var point in debugPoints)
++                {
++                    var lX = point + new Vector3(5, 0, 0);
++                    var lmX = point + new Vector3(-5, 0, 0);
++                    var lY = point + new Vector3(0, -5, 0);
++                    var lmY = point + new Vector3(0, 5, 0);
++                    var lZ = point + new Vector3(0, 0, 5);
++                    var lmZ = point + new Vector3(0, 0, -5);
++                    DebugRenderer.DrawLine(lX, lmX, Color4.Red);
++                    DebugRenderer.DrawLine(lY, lmY, Color4.Red);
++                    DebugRenderer.DrawLine(lZ, lmZ, Color4.Red);
++                }
++
++                foreach (var line in debugLines)
++                {
++                    DebugRenderer.DrawLine(line.Start, line.End, line.Color);
++                }
++
++                debugPoints = [];
++                debugLines = [];
++                DebugRenderer.Render();
++
++                if (Settings.SelectedAA != AntialiasMode.None)
++                {
++                    aaViewportPushed = false;
++                    rstate.PopViewport();
++                    aaScissorPushed = false;
++                    rstate.PopScissor();
++
++                    if (restoreTarget == null)
++                    {
++                        msaa?.BlitToScreen(new Point(rstate.CurrentViewport.X, rstate.CurrentViewport.Y));
++                    }
++                    else
++                    {
++                        msaa?.BlitToRenderTarget((restoreTarget as RenderTarget2D)!);
++                    }
++
++                    rstate.RenderTarget = restoreTarget;
++                }
++
++                rstate.DepthEnabled = true;
++                objects.Clear();
++            }
++            finally
++            {
++                if (aaScissorPushed) rstate.PopScissor();
++                if (aaViewportPushed) rstate.PopViewport();
+                 rstate.RenderTarget = restoreTarget;
+             }
+-
+-            rstate.DepthEnabled = true;
+-            objects.Clear();
+         }
+ 
+         public void Dispose()
+--- a/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
++++ b/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
+@@ -66,74 +66,89 @@
+         var stencilEnabled = renderContext.StencilEnabled;
+         bool depth = renderContext.DepthEnabled;
+         bool cull = renderContext.Cull;
+-        renderContext.PushViewport(0, 0, Width, Height);
+-        renderContext.PushScissor(new(0, 0, Width, Height), false);
+-        // Fetch shaders and set RT size
+-        uint level = (uint)(Mode - 1);
+-        var rtMetrics = new Vector4(1.0f / Width, 1.0f / Height, Width, Height);
+-        var edgeDetection = renderContext.SMAAEdgeDetection.Get(level);
+-        edgeDetection.SetUniformBlock(3, ref rtMetrics);
+-        var blendingWeightCalculation = renderContext.SMAABlendingWeightCalculation.Get(level);
+-        blendingWeightCalculation.SetUniformBlock(3, ref rtMetrics);
+-        var neighborhoodBlending = renderContext.SMAANeighborhoodBlending.Get(level);
+-        neighborhoodBlending.SetUniformBlock(3, ref rtMetrics);
+-        // SMAA global samplers
+-        renderContext.Cull = false;
+-        renderContext.Samplers[0] = new(TextureFiltering.Linear, WrapMode.ClampToEdge, WrapMode.ClampToEdge);
+-        renderContext.Samplers[1] = new (TextureFiltering.Nearest, WrapMode.ClampToEdge, WrapMode.ClampToEdge);
+-        // Edge detection pass
+-        renderContext.RenderTarget = smaaEdges;
+-        renderContext.Textures[0] = smaa.Texture;
+-        renderContext.BlendMode = BlendMode.Opaque;
+-        renderContext.DepthEnabled = false;
+-        renderContext.Shader = edgeDetection;
+-        renderContext.StencilEnabled = true;
+-        renderContext.Stencil = new(StencilFunction.Always, StencilOperation.Replace, StencilOperation.Replace,
+-            StencilOperation.Replace, 1, 0xFFFFFFFF);
+-        renderContext.ClearDepth(); // clear stencil buffer
+-        renderContext.FullScreenTriangle.Draw(PrimitiveTypes.TriangleList, 1);
+-        // Blending weight pass
+-        renderContext.RenderTarget = smaaBlend;
+-        renderContext.Textures[0] = smaaEdges.Texture;
+-        renderContext.Textures[1] = renderContext.SMAAAreaTex;
+-        renderContext.Textures[2] = renderContext.SMAASearchTex;
+-        renderContext.Stencil = new(StencilFunction.Equal, StencilOperation.Keep, StencilOperation.Keep,
+-            StencilOperation.Keep, 1, 0xFFFFFFFF);
+-        renderContext.Shader = blendingWeightCalculation;
+-        renderContext.FullScreenTriangle.Draw(PrimitiveTypes.TriangleList, 1);
+-        //Neighborhood blending pass
+-        renderContext.StencilEnabled = false;
++        bool viewportPushed = false;
++        bool scissorPushed = false;
++        bool offsetViewportPushed = false;
++        bool offsetScissorPushed = false;
++        try
++        {
++            renderContext.PushViewport(0, 0, Width, Height);
++            viewportPushed = true;
++            scissorPushed = renderContext.PushScissor(new(0, 0, Width, Height), false);
++            // Fetch shaders and set RT size
++            uint level = (uint)(Mode - 1);
++            var rtMetrics = new Vector4(1.0f / Width, 1.0f / Height, Width, Height);
++            var edgeDetection = renderContext.SMAAEdgeDetection.Get(level);
++            edgeDetection.SetUniformBlock(3, ref rtMetrics);
++            var blendingWeightCalculation = renderContext.SMAABlendingWeightCalculation.Get(level);
++            blendingWeightCalculation.SetUniformBlock(3, ref rtMetrics);
++            var neighborhoodBlending = renderContext.SMAANeighborhoodBlending.Get(level);
++            neighborhoodBlending.SetUniformBlock(3, ref rtMetrics);
++            // SMAA global samplers
++            renderContext.Cull = false;
++            renderContext.Samplers[0] = new(TextureFiltering.Linear, WrapMode.ClampToEdge, WrapMode.ClampToEdge);
++            renderContext.Samplers[1] = new (TextureFiltering.Nearest, WrapMode.ClampToEdge, WrapMode.ClampToEdge);
++            // Edge detection pass
++            renderContext.RenderTarget = smaaEdges;
++            renderContext.Textures[0] = smaa.Texture;
++            renderContext.BlendMode = BlendMode.Opaque;
++            renderContext.DepthEnabled = false;
++            renderContext.Shader = edgeDetection;
++            renderContext.StencilEnabled = true;
++            renderContext.Stencil = new(StencilFunction.Always, StencilOperation.Replace, StencilOperation.Replace,
++                StencilOperation.Replace, 1, 0xFFFFFFFF);
++            renderContext.ClearDepth(); // clear stencil buffer
++            renderContext.FullScreenTriangle.Draw(PrimitiveTypes.TriangleList, 1);
++            // Blending weight pass
++            renderContext.RenderTarget = smaaBlend;
++            renderContext.Textures[0] = smaaEdges.Texture;
++            renderContext.Textures[1] = renderContext.SMAAAreaTex;
++            renderContext.Textures[2] = renderContext.SMAASearchTex;
++            renderContext.Stencil = new(StencilFunction.Equal, StencilOperation.Keep, StencilOperation.Keep,
++                StencilOperation.Keep, 1, 0xFFFFFFFF);
++            renderContext.Shader = blendingWeightCalculation;
++            renderContext.FullScreenTriangle.Draw(PrimitiveTypes.TriangleList, 1);
++            //Neighborhood blending pass
++            renderContext.StencilEnabled = false;
+ 
+-        renderContext.RenderTarget = tgt;
+-        renderContext.Textures[0] = smaa.Texture;
+-        renderContext.Textures[1] = smaaBlend.Texture;
+-        renderContext.Shader = neighborhoodBlending;
+-        if (offset != Point.Zero)
++            renderContext.RenderTarget = tgt;
++            renderContext.Textures[0] = smaa.Texture;
++            renderContext.Textures[1] = smaaBlend.Texture;
++            renderContext.Shader = neighborhoodBlending;
++            if (offset != Point.Zero)
++            {
++                renderContext.PushViewport(offset.X, offset.Y, Width, Height);
++                offsetViewportPushed = true;
++                offsetScissorPushed = renderContext.PushScissor(new(offset.X, offset.Y, Width, Height), false);
++            }
++            renderContext.FullScreenTriangle.Draw(PrimitiveTypes.TriangleList, 1);
++            if (offset != Point.Zero)
++            {
++                offsetScissorPushed = false;
++                renderContext.PopScissor();
++                offsetViewportPushed = false;
++                renderContext.PopViewport();
++            }
++        }
++        finally
+         {
+-            renderContext.PushViewport(offset.X, offset.Y, Width, Height);
+-            renderContext.PushScissor(new(offset.X, offset.Y, Width, Height), false);
++            if (offsetScissorPushed) renderContext.PopScissor();
++            if (offsetViewportPushed) renderContext.PopViewport();
++            renderContext.Textures[0] = t0;
++            renderContext.Textures[1] = t1;
++            renderContext.Textures[2] = t2;
++            renderContext.Samplers[0] = s0;
++            renderContext.Samplers[1] = s1;
++            renderContext.BlendMode = srcBlend;
++            renderContext.RenderTarget = sTgt;
++            renderContext.Shader = shdr;
++            renderContext.DepthEnabled = depth;
++            renderContext.Cull = cull;
++            renderContext.Stencil = stencil;
++            renderContext.StencilEnabled = stencilEnabled;
++            if (scissorPushed) renderContext.PopScissor();
++            if (viewportPushed) renderContext.PopViewport();
+         }
+-        renderContext.FullScreenTriangle.Draw(PrimitiveTypes.TriangleList, 1);
+-        if (offset != Point.Zero)
+-        {
+-            renderContext.PopScissor();
+-            renderContext.PopViewport();
+-        }
+-        // Restore state
+-        renderContext.Textures[0] = t0;
+-        renderContext.Textures[1] = t1;
+-        renderContext.Textures[2] = t2;
+-        renderContext.Samplers[0] = s0;
+-        renderContext.Samplers[1] = s1;
+-        renderContext.BlendMode = srcBlend;
+-        renderContext.RenderTarget = sTgt;
+-        renderContext.Shader = shdr;
+-        renderContext.DepthEnabled = depth;
+-        renderContext.Cull = cull;
+-        renderContext.Stencil = stencil;
+-        renderContext.StencilEnabled = stencilEnabled;
+-        renderContext.PopScissor();
+-        renderContext.PopViewport();
+     }
+ 
+     public void BlitToScreen(Point offset)
+--- a/docs/evidence/renderer/render-target-exception-path-audit-20261015.md
++++ b/docs/evidence/renderer/render-target-exception-path-audit-20261015.md
+@@ -14,28 +14,29 @@
+ umschließenden `try/finally`-Block.
+ 
+ Quellstellen: `src/LibreLancer/Render/SystemRenderer.cs`,
+-`Draw()` Setup bei 409–425 und reguläre Wiederherstellung bei 634–649.
++`Draw()` Setup bei 409–425 und AA-Wiederherstellung ab 634.
+ 
+ ## `AntialiasTarget.SMAABlit()`
+ 
+ Der SMAA-Pfad merkt Texturen 0–2, Sampler 0–1, RenderTarget, Shader, Blend-,
+ Stencil-, Depth- und Cull-Zustand vor. Danach pusht er Viewport und Scissor, führt
+ drei Fullscreen-Draws aus und stellt den gespeicherten Zustand erst danach
+-wieder her. Auch dieser Ablauf ist nicht in `try/finally` eingeschlossen.
++wieder her. Ein `finally` stellt die gespeicherten Texturen, Sampler,
++RenderTarget, Shader und Renderzustände wieder her und gleicht offene Scissor-
++und Viewport-Pushes aus. Ein optionaler Offset-Push hat einen eigenen
++Wiederherstellungspfad.
+ 
+ Quellstelle: `src/LibreLancer.Base/Graphics/AntialiasTarget.cs`,
+-`SMAABlit()` bei 50–137. Die Stack-Implementierungen für Viewport und Scissor
++`SMAABlit()`. Die Stack-Implementierungen für Viewport und Scissor
+ liegen in `src/LibreLancer.Base/Graphics/RenderContext.cs` bei 279–358.
+ 
+ ## Aussage und nächster Schritt
+ 
+-Wenn zwischen Setup und regulärer Wiederherstellung eine Ausnahme auftritt und
+-weiterer Rendercode danach ausgeführt wird, können RenderTarget, Viewport,
+-Scissor-Stack oder gespeicherte SMAA-Zustände unausgeglichen bleiben. Das ist
+-aus dem Kontrollfluss abgeleitet; ein konkreter Gameplay-Fehler oder eine
+-Laufzeitreproduktion ist damit nicht belegt.
++Die betroffenen Ressourcen-/Zielzustände sind jetzt gegen Fehler zwischen Setup
++und normaler Wiederherstellung geschützt. Das belegt keine Fehlerfreiheit
++anderer Renderzustände oder Draw-Pfade. Die Wiederherstellung wurde nicht mit
++injizierten Laufzeitfehlern geprüft; reguläre Resize-/Minimize-/Restore-Läufe
++sind ebenfalls noch offen.
+ 
+-Ein Folgepatch sollte die Zustandswiederherstellung auf `finally`-geschützte
+-Scopes umstellen und die von jeder Methode tatsächlich veränderten Felder
+-wiederherstellen. Danach sind Fehler zwischen den Draw-Pässen sowie normale
+-Resize-/Minimize-/Restore-Abläufe zu prüfen.
++Nächster Schritt: Fehler zwischen den Draw-Pässen injizieren und reguläre
++Resize-/Minimize-/Restore-Abläufe prüfen.
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -45,7 +45,7 @@
+   - [x] Bestehende Forward-Aufrufreihenfolge, Opaque-/Transparent-Kommandos, Sterne, Nebel und AA-Resolve im Quellcode erfasst; ein formaler Ressourcenvertrag fehlt weiterhin. Siehe [Pass-Reihenfolge-Audit](evidence/renderer/forward-pass-order-audit-20261015.md).
+ - [ ] Render-Target-Resize, minimierte Fenster, Scissor-/Viewport-Wechsel und Geräteverlust für zusätzliche Pässe absichern.
+   - [x] `SystemRenderer.Draw()` überspringt Frames mit Breite/Höhe 0. Bei geändertem Rendermaß oder AA-Modus gibt es das vorhandene MSAA-Target frei und erstellt es neu. Das belegt nur diesen System-Renderer-Pfad; Editor-/Offscreen-Targets, Wiederherstellungstests und Geräteverlust bleiben offen.
+-  - [ ] Renderzustand auch bei Draw-Fehlern wiederherstellen. Der Quellcode-Audit belegt fehlende `finally`-Pfade in `SystemRenderer.Draw()` und `AntialiasTarget.SMAABlit()`; Aussagegrenzen und Folgeplan stehen im [Fehlerpfad-Audit](evidence/renderer/render-target-exception-path-audit-20261015.md).
++  - [x] `SystemRenderer.Draw()` und `AntialiasTarget.SMAABlit()` stellen RenderTarget, Viewport-/Scissor-Stacks und die von SMAA veränderten Zustände in `finally` wieder her. Quellcodepfad umgesetzt; Fehler-Injektion und reguläre Resize-/Minimize-/Restore-Läufe bleiben als Laufzeitprüfung offen. Details im [Fehlerpfad-Audit](evidence/renderer/render-target-exception-path-audit-20261015.md).
+ - [ ] GPU-Zeit und Speicherverbrauch pro Pass messbar machen; Effekte müssen einzeln abschaltbar und nach Hardwareprofil skalierbar sein.
+ - [ ] Referenzszenen und feste Screenshots für Raum, Basis, Sternensystem, Nebel, Partikel und LancerEdit-Vorschau festlegen.
+ 
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -68,6 +68,7 @@
+ | 2092 | Define per-context shader bundle recreation acceptance criteria |
+ | 2093 | Audit renderer option wiring across config, CLI, menu and runtime consumers |
+ | 2094 | Derive existing scene and antialias target resource contracts |
++| 2095 | Restore render targets and state stacks after draw exceptions |
+ | 2011 (`lancerdecode`) | Native Vorbis EOF/reset handling |
+ | 2012 (`blurgtext`) | System FreeType without OT-SVG hooks |
+ 
+--- a/patches/series
++++ b/patches/series
+@@ -94,3 +94,4 @@
+ client 2092-shader-context-recreation-criteria.patch
+ client 2093-render-option-wiring-audit.patch
+ client 2094-render-target-resource-contract.patch
++client 2095-render-target-exception-restoration.patch

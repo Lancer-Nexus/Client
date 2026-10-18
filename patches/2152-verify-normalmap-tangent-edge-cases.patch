@@ -1,0 +1,83 @@
+From: Lancer Nexus
+Subject: [PATCH] Verify normal map tangent edge cases under world transforms
+
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -79,8 +79,13 @@
+   passende Charakter-Normalmap verwenden; die bisherige geliehene Schiffskarte
+   belegt nur den Pfad, nicht die Bildqualität.
+ - [ ] Spiegel-UVs, harte Normalenkanten, degenerierte UVs und nichtuniforme
+-  Skalierungen auf NaNs, Nähte und schwarze Materialien prüfen. Negative
+-  Skalierungen benötigen zusätzlich die offene visuelle GPU-/In-Game-Abnahme.
++  Skalierungen auf NaNs, Nähte und schwarze Materialien prüfen.
++  - [x] CPU-Regressionen decken gespiegelte UV-Händigkeit und endliche,
++    orthogonale Fallback-Tangenten bei degenerierten UVs für VMesh und DFM ab.
++    Nichtuniforme positive und negative Weltskalierungen behalten im
++    inverse-transponierten Normalpfad die Tangentenorthogonalität.
++  - [ ] Visuelle GPU-/NAP-Abnahme von UV-Nähten, harten Normalenkanten,
++    schwarzen Materialien und negativen Skalierungen bleibt offen.
+ - [x] Materialzuordnung im LancerEdit-Render-Tab anzeigen: Materialtyp,
+   Diffuse-Textur, MAT-/Surface-Normalmap, UV-Kanal und Stärke sowie vorhandene
+   Roughness-/Metallic-Werte für CMP-/VMesh- und DFM-Modelle.
+diff --git a/src/LibreLancer.Tests/WorldMatrixBufferTests.cs b/src/LibreLancer.Tests/WorldMatrixBufferTests.cs
+--- a/src/LibreLancer.Tests/WorldMatrixBufferTests.cs
++++ b/src/LibreLancer.Tests/WorldMatrixBufferTests.cs
+@@ -1,3 +1,4 @@
++using System;
+ using System.Numerics;
+ using LibreLancer.Render;
+ using Xunit;
+@@ -23,4 +24,28 @@
+         var world = Matrix4x4.CreateScale(0, 2, 3);
+         Assert.Equal(1.0f, WorldMatrixBuffer.CreateNormalMatrix(world).M44);
+     }
++
++    [Theory]
++    [InlineData(2f, 3f, 0.5f, 1f)]
++    [InlineData(-2f, 3f, 0.5f, -1f)]
++    public void NormalAndTangentStayOrthogonalAfterNonUniformWorldTransform(
++        float scaleX, float scaleY, float scaleZ, float expectedHandedness)
++    {
++        var world = Matrix4x4.CreateScale(scaleX, scaleY, scaleZ) *
++                    Matrix4x4.CreateRotationY(0.37f) *
++                    Matrix4x4.CreateTranslation(4, 5, 6);
++        var normalMatrix = WorldMatrixBuffer.CreateNormalMatrix(world);
++        var normal = Vector3.Normalize(new Vector3(1, 1, 1));
++        var tangent = Vector3.Normalize(Vector3.Cross(normal, Vector3.UnitZ));
++
++        var transformedNormal = Vector3.Normalize(Vector3.TransformNormal(normal, normalMatrix));
++        var transformedTangent = Vector3.Normalize(Vector3.TransformNormal(tangent, world));
++
++        Assert.True(float.IsFinite(transformedNormal.X) && float.IsFinite(transformedNormal.Y) &&
++                    float.IsFinite(transformedNormal.Z));
++        Assert.True(float.IsFinite(transformedTangent.X) && float.IsFinite(transformedTangent.Y) &&
++                    float.IsFinite(transformedTangent.Z));
++        Assert.True(MathF.Abs(Vector3.Dot(transformedNormal, transformedTangent)) < 1e-5f);
++        Assert.Equal(expectedHandedness, normalMatrix.M44);
++    }
+ }
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 150 Client bundles and two native bundles. Each
++The active series contains 151 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -152,3 +152,4 @@
+ | 2149 | Record the BW04 NAP-only sun-ambient on/off comparison |
+ | 2150 | Preserve the live sun-ambient checkbox value when leaving options |
+ | 2151 | Preserve ambient luminance while applying system sun color |
++| 2152 | Verify normal map tangent edge cases under world transforms |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -151,3 +151,4 @@
+ client 2149-record-bw04-sun-ambient-ab.patch
+ client 2150-preserve-live-sun-ambient-option.patch
+ client 2151-preserve-sun-ambient-luminance.patch
++client 2152-verify-normalmap-tangent-edge-cases.patch

@@ -1,0 +1,133 @@
+--- a/src/LibreLancer/Interface/DebugView.cs
++++ b/src/LibreLancer/Interface/DebugView.cs
+@@ -21,6 +21,9 @@
+         private const int PerformanceSampleCount = 300;
+         private readonly double[] frameWorkSamples = new double[PerformanceSampleCount];
+         private readonly double[] frameIntervalSamples = new double[PerformanceSampleCount];
++        private readonly double[] gpuPassTimeSamples = new double[PerformanceSampleCount * GpuPassProfile.Count];
++        private readonly long[] gpuPassAgeSamples = new long[PerformanceSampleCount * GpuPassProfile.Count];
++        private readonly bool[] gpuPassSampleAvailable = new bool[PerformanceSampleCount * GpuPassProfile.Count];
+         private readonly int[] frameWidthSamples = new int[PerformanceSampleCount];
+         private readonly int[] frameHeightSamples = new int[PerformanceSampleCount];
+         private readonly string?[] rendererSamples = new string?[PerformanceSampleCount];
+@@ -139,6 +142,18 @@
+                 frameWidthSamples[performanceSampleIndex] = game.Width;
+                 frameHeightSamples[performanceSampleIndex] = game.Height;
+                 rendererSamples[performanceSampleIndex] = game.Renderer;
++                var gpuSampleOffset = performanceSampleIndex * GpuPassProfile.Count;
++                for (var i = 0; i < GpuPassProfile.Count; i++)
++                {
++                    var gpuSample = GpuPassProfile.GetSample(i);
++                    var sampleIndex = gpuSampleOffset + i;
++                    gpuPassSampleAvailable[sampleIndex] = gpuSample.HasValue;
++                    if (gpuSample is { } value)
++                    {
++                        gpuPassTimeSamples[sampleIndex] = value.Milliseconds;
++                        gpuPassAgeSamples[sampleIndex] = value.AgeFrames;
++                    }
++                }
+                 performanceSampleIndex = (performanceSampleIndex + 1) % PerformanceSampleCount;
+                 performanceSamplesRecorded = Math.Min(performanceSamplesRecorded + 1, PerformanceSampleCount);
+                 if (performanceSamplesRecorded > 0 && game.TotalTime >= nextPerformancePercentileTime)
+@@ -226,7 +241,22 @@
+             var filename = $"frame-profile-{timestamp}.csv";
+             var path = Path.Combine(directory, filename);
+             var csv = new StringBuilder();
+-            csv.AppendLine("frame,renderer,width,height,update_draw_ms,frame_interval_ms,fps");
++            csv.Append("frame,renderer,width,height,update_draw_ms,frame_interval_ms,fps");
++            for (var pass = 0; pass < GpuPassProfile.Count; pass++)
++            {
++                var columnName = pass switch
++                {
++                    0 => "depth",
++                    1 => "opaque",
++                    2 => "stars_nebula",
++                    3 => "transparent",
++                    4 => "aa_resolve",
++                    _ => $"pass_{pass}"
++                };
++                csv.Append(",gpu_").Append(columnName).Append("_ms,gpu_")
++                    .Append(columnName).Append("_age_frames");
++            }
++            csv.AppendLine();
+             var start = (performanceSampleIndex - performanceSamplesRecorded + PerformanceSampleCount) % PerformanceSampleCount;
+             for (var i = 0; i < performanceSamplesRecorded; i++)
+             {
+@@ -241,7 +271,24 @@
+                     .Append(frameHeightSamples[index].ToString(CultureInfo.InvariantCulture)).Append(',')
+                     .Append(workMs.ToString("F4", CultureInfo.InvariantCulture)).Append(',')
+                     .Append(intervalMs.ToString("F4", CultureInfo.InvariantCulture)).Append(',')
+-                    .AppendLine(fps.ToString("F2", CultureInfo.InvariantCulture));
++                    .Append(fps.ToString("F2", CultureInfo.InvariantCulture));
++                var gpuSampleOffset = index * GpuPassProfile.Count;
++                for (var pass = 0; pass < GpuPassProfile.Count; pass++)
++                {
++                    var sampleIndex = gpuSampleOffset + pass;
++                    csv.Append(',');
++                    if (gpuPassSampleAvailable[sampleIndex])
++                    {
++                        csv.Append(gpuPassTimeSamples[sampleIndex].ToString("F4", CultureInfo.InvariantCulture))
++                            .Append(',')
++                            .Append(gpuPassAgeSamples[sampleIndex].ToString(CultureInfo.InvariantCulture));
++                    }
++                    else
++                    {
++                        csv.Append(',');
++                    }
++                }
++                csv.AppendLine();
+             }
+             File.WriteAllText(path, csv.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+             return $"Saved {performanceSamplesRecorded} frames: {path}";
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -48,7 +48,7 @@
+   - [x] `SystemRenderer.Draw()` und `AntialiasTarget.SMAABlit()` stellen RenderTarget, Viewport-/Scissor-Stacks und ihre geänderten RenderContext-Zustände in `finally` wieder her. `SystemRenderer` stellt auch `ThnCamera.DefaultZ()` zurück und leert die Frame-Objektliste nach Fehlern. Fehler-Injektion und reguläre Resize-/Minimize-/Restore-Läufe bleiben als Laufzeitprüfung offen. Details im [Fehlerpfad-Audit](evidence/renderer/render-target-exception-path-audit-20261015.md).
+ - [ ] GPU-Zeit und Speicherverbrauch pro Pass messbar machen; Effekte müssen einzeln abschaltbar und nach Hardwareprofil skalierbar sein.
+   - [x] Bereitschaftsaudit abgeschlossen: Timer-Query-API und Query-Aufruf fehlen in OpenGL-/RenderContext-Abstraktion; die lokale Mesa-Laufzeit meldet `GL_ARB_timer_query`. Passgrenzen und eine nicht blockierende Abfragefolge sind dokumentiert. Speicherwerte sind noch nicht als Messung verfügbar. Siehe [GPU-Timer-Query-Audit](evidence/renderer/gpu-timer-query-readiness-audit-20261015.md).
+-  - [x] OpenGL-Timer-Queries für Depth, Opaque, Sterne/Nebel, Transparenz und AA-Resolve eingebaut. Vier Query-Slots pro Pass werden ohne blockierendes Ergebnis-Polling wiederverwendet; das Debug-Overlay zeigt Messwert und Sample-Alter. Die Abfrage läuft nur bei geöffnetem Debug-Overlay. Null und OpenGL ohne Timer-Query melden keine Unterstützung. Hardwarelauf, Vergleich der GPU-Zeit gegen Treiberprofiling sowie Speicherbuchhaltung bleiben offen.
++  - [x] OpenGL-Timer-Queries für Depth, Opaque, Sterne/Nebel, Transparenz und AA-Resolve eingebaut. Vier Query-Slots pro Pass werden ohne blockierendes Ergebnis-Polling wiederverwendet; das Debug-Overlay zeigt Messwert und Sample-Alter. CSV-Zeilen erfassen den zuletzt verfügbaren GPU-Messwert samt Alter; nicht verfügbare Samples bleiben leer. Die Abfrage läuft nur bei geöffnetem Debug-Overlay. Null und OpenGL ohne Timer-Query melden keine Unterstützung. Hardwarelauf, Vergleich der GPU-Zeit gegen Treiberprofiling sowie Speicherbuchhaltung bleiben offen.
+ - [ ] Referenzszenen und feste Screenshots für Raum, Basis, Sternensystem, Nebel, Partikel und LancerEdit-Vorschau festlegen.
+ 
+ ### 2. Bumpmapping / Normalmaps vervollständigen
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -158,7 +158,9 @@
+ Ressourcenmessung sowie dokumentierte Vorher/Nachher-Baselines für feste Szenen
+ bleiben offen. OpenGL kann bei sichtbarem Debug-Overlay zusätzlich asynchrone
+ GPU-Zeiten für Depth-Prepass, Opaque-, Sterne/Nebel-, Transparent- und AA-Resolve-
+-Aufrufe anzeigen. Diese Werte sind noch nicht durch einen Hardwarelauf gegen ein
++Aufrufe anzeigen. Der CSV-Export ergänzt die zuletzt verfügbaren asynchronen
++GPU-Werte und ihr Sample-Alter pro CPU-Frame; noch nicht verfügbare Ergebnisse
++bleiben leer. Diese Werte sind noch nicht durch einen Hardwarelauf gegen ein
+ externes GPU-Profiling-Werkzeug abgeglichen; das Null-Backend meldet sie nicht.
+ 
+ ## Verifizierter Ausgangspunkt
+--- a/docs/evidence/renderer/gpu-timer-query-readiness-audit-20261015.md
++++ b/docs/evidence/renderer/gpu-timer-query-readiness-audit-20261015.md
+@@ -43,8 +43,9 @@
+ - Depth-Prepass, Opaque, Stars/Nebel, Transparent und AA-Resolve werden separat
+   gemessen. CPU-Vorbereitung und Upload bleiben außerhalb dieser GPU-Zeiten.
+ - Das Debug-Overlay meldet unterstützte/fehlende Query-Fähigkeit sowie
+-  Messwert und Sample-Alter. CSV-Erweiterung und eine Laufzeitabnahme auf einer
+-  echten Spielsituation stehen noch aus.
++  Messwert und Sample-Alter. CSV-Zeilen enthalten den zuletzt verfügbaren
++  asynchronen Wert samt Alter; fehlende Werte bleiben leer. Die Laufzeitabnahme
++  auf einer echten Spielsituation steht noch aus.
+ - Speicher bleibt getrennte Ressourcenbuchhaltung pro Ressourcentyp und ist
+   nicht Teil der Timer-Query-Implementierung. Driver-native Memory-Budget-APIs
+   bleiben backend- und plattformspezifische Ergänzungen.
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -111,3 +111,4 @@
+ | 2107 | Record renderer and resolution per sample and escape CSV fields |
+ | 2108 | Audit nonblocking GPU timer-query readiness and pass boundaries |
+ | 2109 | Add optional asynchronous OpenGL GPU pass timing |
++| 2110 | Include asynchronous GPU pass samples in frame profile CSV |
+--- a/patches/series
++++ b/patches/series
+@@ -109,3 +109,4 @@
+ client 2107-frame-profile-csv-sample-metadata.patch
+ client 2108-gpu-timer-query-readiness-audit.patch
+ client 2109-async-gpu-pass-timing.patch
++client 2110-export-gpu-pass-profile-csv.patch

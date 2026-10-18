@@ -1,0 +1,80 @@
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -69,6 +69,8 @@
+         private Billboards billboards;
+         private ResourceManager resman;
+         private IGpuTimerQuery?[]? gpuPassQueries;
++        private long nextGpuProfileFrame;
++        private long currentGpuProfileFrame;
+ 
+         public Game Game
+         {
+@@ -407,7 +409,8 @@
+                 return;
+             }
+ 
+-            UpdateGpuPassProfile();
++            currentGpuProfileFrame = nextGpuProfileFrame++;
++            UpdateGpuPassProfile(currentGpuProfileFrame);
+ 
+             RenderTarget? restoreTarget = rstate.RenderTarget;
+             bool restoreDepthEnabled = rstate.DepthEnabled;
+@@ -713,7 +716,7 @@
+             }
+         }
+ 
+-        private void UpdateGpuPassProfile()
++        private void UpdateGpuPassProfile(long currentFrame)
+         {
+             if (!rstate.GpuTimingEnabled)
+             {
+@@ -740,11 +743,11 @@
+             {
+                 if (gpuPassQueries[i]!.TryGetResult(out var nanoseconds, out var frameNumber))
+                     GpuPassProfile.SetSample(i, nanoseconds / 1_000_000.0,
+-                        Math.Max(0, rstate.FrameNumber - frameNumber));
+-            }
+-        }
+-
+-        private void BeginGpuPass(int index) => gpuPassQueries?[index]?.Begin(rstate.FrameNumber);
++                        Math.Max(0, currentFrame - frameNumber));
++            }
++        }
++
++        private void BeginGpuPass(int index) => gpuPassQueries?[index]?.Begin(currentGpuProfileFrame);
+         private void EndGpuPass(int index) => gpuPassQueries?[index]?.End();
+ 
+         private void DisposeGpuPassQueries()
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -48,7 +48,7 @@
+   - [x] `SystemRenderer.Draw()` und `AntialiasTarget.SMAABlit()` stellen RenderTarget, Viewport-/Scissor-Stacks und ihre geänderten RenderContext-Zustände in `finally` wieder her. `SystemRenderer` stellt auch `ThnCamera.DefaultZ()` zurück und leert die Frame-Objektliste nach Fehlern. Fehler-Injektion und reguläre Resize-/Minimize-/Restore-Läufe bleiben als Laufzeitprüfung offen. Details im [Fehlerpfad-Audit](evidence/renderer/render-target-exception-path-audit-20261015.md).
+ - [ ] GPU-Zeit und Speicherverbrauch pro Pass messbar machen; Effekte müssen einzeln abschaltbar und nach Hardwareprofil skalierbar sein.
+   - [x] Bereitschaftsaudit abgeschlossen: Timer-Query-API und Query-Aufruf fehlen in OpenGL-/RenderContext-Abstraktion; die lokale Mesa-Laufzeit meldet `GL_ARB_timer_query`. Passgrenzen und eine nicht blockierende Abfragefolge sind dokumentiert. Speicherwerte sind noch nicht als Messung verfügbar. Siehe [GPU-Timer-Query-Audit](evidence/renderer/gpu-timer-query-readiness-audit-20261015.md).
+-  - [x] OpenGL-Timer-Queries für Depth, Opaque, Sterne/Nebel, Transparenz und AA-Resolve eingebaut. Vier Query-Slots pro Pass werden ohne blockierendes Ergebnis-Polling wiederverwendet; das Debug-Overlay zeigt Messwert und Sample-Alter. CSV-Zeilen erfassen den zuletzt verfügbaren GPU-Messwert samt Alter; nicht verfügbare Samples bleiben leer. Die Abfrage läuft nur bei geöffnetem Debug-Overlay. Null und OpenGL ohne Timer-Query melden keine Unterstützung. Hardwarelauf, Vergleich der GPU-Zeit gegen Treiberprofiling sowie Speicherbuchhaltung bleiben offen.
++  - [x] OpenGL-Timer-Queries für Depth, Opaque, Sterne/Nebel, Transparenz und AA-Resolve eingebaut. Vier Query-Slots pro Pass werden ohne blockierendes Ergebnis-Polling wiederverwendet; das Debug-Overlay zeigt Messwert und Sample-Alter. CSV-Zeilen erfassen den zuletzt verfügbaren GPU-Messwert samt Alter; nicht verfügbare Samples bleiben leer. Das Alter zählt Aufrufe von `SystemRenderer.Draw()` und hängt nicht von `RenderContext.FrameNumber`/`ClearAll()` ab. Die Abfrage läuft nur bei geöffnetem Debug-Overlay. Null und OpenGL ohne Timer-Query melden keine Unterstützung. Hardwarelauf, Vergleich der GPU-Zeit gegen Treiberprofiling sowie Speicherbuchhaltung bleiben offen.
+ - [ ] Referenzszenen und feste Screenshots für Raum, Basis, Sternensystem, Nebel, Partikel und LancerEdit-Vorschau festlegen.
+ 
+ ### 2. Bumpmapping / Normalmaps vervollständigen
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 110 Client bundles and two native bundles. Each
++The active series contains 111 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -113,3 +113,4 @@
+ | 2109 | Add optional asynchronous OpenGL GPU pass timing |
+ | 2110 | Include asynchronous GPU pass samples in frame profile CSV |
+ | 2111 | Log built-in shader compilation wall time per bundle and in total |
++| 2112 | Count asynchronous GPU sample age by rendered system frame |
+--- a/patches/series
++++ b/patches/series
+@@ -111,3 +111,4 @@
+ client 2109-async-gpu-pass-timing.patch
+ client 2110-export-gpu-pass-profile-csv.patch
+ client 2111-shader-compilation-timing.patch
++client 2112-gpu-profile-render-frame-age.patch

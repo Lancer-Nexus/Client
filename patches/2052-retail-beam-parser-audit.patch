@@ -1,0 +1,87 @@
+diff --git a/docs/data-client-todo.md b/docs/data-client-todo.md
+--- a/docs/data-client-todo.md
++++ b/docs/data-client-todo.md
+@@ -333,9 +333,10 @@
+   verändern.
+ - [x] Beam- und Explosionseffektpfade inventarisiert; siehe
+   [Effekt-Audit](beam-and-explosion-effects-audit.md). `flash_size` wird zwar
+-  aus den Beam-INIs gelesen, aber derzeit nicht gerendert. Seine genaue
+-  Bedeutung muss vor einer visuellen Umsetzung anhand belastbarer
+-  Retail-Beobachtung oder Engine-Referenz geklärt werden.
++  vom Retail-Parser in den Beam-Datensatz übernommen und im Retail-Renderer
++  bedingt zur Geometrieberechnung verwendet. LibreLancer wertet das Feld im
++  Beam-Renderer noch nicht aus; Bedingung und Zeitpunkt müssen vor einer
++  kompatiblen Umsetzung noch genauer verfolgt werden.
+ 
+ ### Vollständige INI-Parameterabdeckung
+ 
+diff --git a/docs/beam-and-explosion-effects-audit.md b/docs/beam-and-explosion-effects-audit.md
+--- a/docs/beam-and-explosion-effects-audit.md
++++ b/docs/beam-and-explosion-effects-audit.md
+@@ -15,10 +15,7 @@
+ - `head_brightness` und `trail_brightness` werden auf die Vertex-Alpha der
+   jeweiligen Kopf- und Trailbereiche angewendet. Fehlende Helligkeitswerte
+   behalten den bisherigen Vollintensitäts-Default.
+-- `flash_size` wird im Runtimepfad aktuell nicht gelesen. Der Feldname allein
+-  belegt nicht, ob damit ein Mündungsblitz, die Projektilspitze oder ein
+-  weiteres Beam-Element gemeint ist. Eine Implementierung ohne Retail-Abgleich
+-  könnte daher den falschen Ort oder die falsche Lebensdauer verändern.
++- `flash_size` wird von LibreLancer im Beam-Renderer aktuell nicht ausgewertet.
+ - `BeamsBuffer` begrenzt Bolt- und Spear-Geometrie jeweils auf 500 Elemente pro
+   Buffer. Zusätzliche sichtbare Elemente werden derzeit verworfen. Das Limit
+   und sein Verhalten bei hoher Projektilzahl gehören in die spätere
+@@ -28,6 +25,31 @@
+ 51 `BeamSpear` und 4 `BeamBolt`. Alle haben `flash_size`; 47 Werte sind `3`,
+ 6 sind `9`, einer ist `8` und einer ist `4`. Die INI-Daten belegen damit die
+ breite Nutzung des Parameters, aber nicht seine Laufzeitsemantik.
++
++## Retail-Parserbefund
++
++Ein lokaler Ghidra-12.1.4-Auszug des Retail-Clients (`Freelancer.exe`, SHA-256
++`ea4cb797acb1a31a7841f67200fb022a056af4df7b2f7216f8ae6424cb6d1fe9`) präzisiert
++den Parserpfad:
++
++- `FUN_0042e850` behandelt die Abschnitte `BeamSpear` und `BeamBolt` und reicht
++  Werte an `FUN_0042e4a0` weiter.
++- `FUN_0042e4a0` erkennt `flash_size`, liest einen Float und speichert ihn bei
++  Offset `+0x78` des Beam-Datensatzes. Retail liest den Wert also tatsächlich
++  in sein Laufzeitmodell ein.
++- `FUN_004fa270` liest denselben Beam-Datensatz bei Offset `+0x78` unter einer
++  Bedingung: `param_3 == 0`, Flag-Bit `8` an `param_1+0x70` und ein falsches
++  Ergebnis von `FUN_0054bc80()`. Der Wert ersetzt in diesem Zweig den zuvor aus
++  `core_width` gelesenen Wert und fließt in die Berechnung von Beam-Vertex-
++  Positionen ein, unter anderem zusammen mit `head_width` und `tip_length`.
++- Damit ist ein Retail-Geometrieverbrauch nachgewiesen. Die Bedeutung von
++  `param_3`, Flag-Bit `8` und `FUN_0054bc80()` sowie der genaue sichtbare Zustand
++  sind noch offen. `flash_size` pauschal als Mündungsblitz zu interpretieren
++  wäre weiterhin unbelegt.
++- Die Parser- und Renderer-Auszüge mit Decompiler-Ausgabe liegen lokal in der
++  [Freelancer-Reverse-Engineering-Ablage](/home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-14-light-range/Freelancer-beam-parser-0042e4a0.md),
++  zusammen mit einem Hash- und Interpretationshinweis. Der Renderpfad steht in
++  [FUN_004fa270](/home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-14-light-range/Freelancer-beam-renderer-004fa270.md).
+ 
+ ## Treffer und Explosionen
+ 
+@@ -44,10 +66,10 @@
+ 
+ ## Nächste Arbeit
+ 
+-1. `flash_size` mit einer kontrollierten Retail-Szene oder einer belastbaren
+-   Engine-Referenz semantisch bestimmen.
+-2. Danach die passende Geometrie/Textur im Beam-Renderer umsetzen und Tests für
+-   Null-, Grenz- und typische NAP-Werte ergänzen.
++1. `param_3`, Flag-Bit `8` und `FUN_0054bc80()` im Retail-Aufrufpfad verfolgen,
++   damit der Zustand feststeht, in dem `flash_size` die Beam-Geometrie ändert.
++2. Danach den belegten Zweig im Beam-Renderer umsetzen und Tests für Null-,
++   Grenz- und typische NAP-Werte ergänzen.
+ 3. Beam- und Explosionseffekte mit NAP-only-Containern visuell vergleichen;
+    Originalwerte und Timing als Referenz erhalten.
+ 4. Erst nach diesen Vergleichen den übergeordneten Effekt-Todo-Punkt als
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -51,3 +51,4 @@
+ client 2049-beam-brightness-rendering.patch
+ client 2050-beam-and-explosion-effect-audit.patch
+ client 2051-configurable-modding-parameters-todo.patch
++client 2052-retail-beam-parser-audit.patch

@@ -1,0 +1,237 @@
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -570,8 +570,10 @@
+   - [x] `DepthFunction` verwendet neutrale Enum-Werte; OpenGL bildet `Less` und
+     `LessEqual` auf eigene Vergleichsoperatoren ab und wendet Laufzeitänderungen
+     in `ApplyState` an. Drei fokussierte Mappings-/Validierungstests bestehen.
+-    Vertexelement-, Wrap-, Screenshot-/Readback- und Fensterverträge bleiben
+-    offen.
++    `VertexElementType` und `WrapMode` sind nun ebenfalls backendneutral und
++    werden explizit in GL-Werte übersetzt; einschließlich der Sampler-Cache-
++    Initialisierung bestehen insgesamt dreizehn Regressionstests.
++    Screenshot-/Readback- und Fensterverträge bleiben offen.
+ - [ ] SDL3-Mindestversion und native Bereitstellung pro Plattform festlegen;
+   SDL2/GLES/Null-Pfade erhalten. Geräte-/Formatfähigkeiten beim Start prüfen
+   und eine nicht verfügbare Auswahl verständlich auf einen gültigen Backend
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -201,10 +201,10 @@
+ gesetzt. Spätere Anforderungen für `Less` und `LessEqual` erreichten deshalb den
+ GPU-Zustand nicht. Patch `2340-backend-neutral-depth-function.patch` ordnet die
+ Vergleiche backendneutralen Enum-Werten zu, mappt sie im OpenGL-Backend und
+-wendet Änderungen bei `ApplyState` an. Drei Regressionstests prüfen die beiden
+-Mappings und die Zurückweisung ungültiger Enumwerte. Der Laufzeitpfad ist damit
+-im Code geschlossen; eine GL-Frame-Capture-Abnahme folgt mit der Renderer-
+-Szenenmatrix.
++wendet Änderungen bei `ApplyState` an. Ergänzend löst er Vertexformate und
++Textur-Wrap-Modi von GL-Konstanten und mappt diese erst im GL-Backend. Dreizehn
++Regressionstests prüfen die Mappings und ungültige Enumwerte. Eine GL-Frame-
++Capture-Abnahme folgt mit der Renderer-Szenenmatrix.
+ 
+ Der HDR-NAP-Lauf zeigte einen doppelten Letterbox-Versatz: Wenn SSAO in ein
+ Zwischenziel schreibt, muss dessen Viewport bei `(0,0)` beginnen. Der Aufrufer
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 339 Client bundles and two native bundles. Each
++The active series contains 340 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -286,3 +286,4 @@
+ | 2338 | Record Hi02 shadow-fit fix and directional bias A/B evidence |
+ | 2339 | Document soft-particle implementation and outstanding scene acceptance |
+ | 2340 | Apply depth comparison changes and make depth functions backend-neutral |
++| 2341 | Move texture wrap and vertex element enums out of OpenGL constant space |
+--- a/patches/series
++++ b/patches/series
+@@ -340,3 +340,4 @@
+ client 2338-hi02-shadow-bias-runtime-evidence.patch
+ client 2339-document-soft-particle-acceptance.patch
+ client 2340-backend-neutral-depth-function.patch
++client 2341-neutralize-wrap-and-vertex-enums.patch
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/EnumConversions.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/EnumConversions.cs
+@@ -1,4 +1,5 @@
+ using System;
++using LibreLancer.Graphics.Vertices;
+ 
+ namespace LibreLancer.Graphics.Backends.OpenGL;
+ 
+@@ -11,6 +12,24 @@
+         _ => throw new ArgumentOutOfRangeException(nameof(function), function, null)
+     };
+ 
++    internal static int ToGL(this VertexElementType type) => type switch
++    {
++        VertexElementType.Float => GL.GL_FLOAT,
++        VertexElementType.UnsignedShort => GL.GL_UNSIGNED_SHORT,
++        VertexElementType.UnsignedByte => GL.GL_UNSIGNED_BYTE,
++        VertexElementType.Short => GL.GL_SHORT,
++        _ => throw new ArgumentOutOfRangeException(nameof(type), type, null)
++    };
++
++    internal static int ToGL(this WrapMode mode) => mode switch
++    {
++        WrapMode.ClampToEdge => GL.GL_CLAMP_TO_EDGE,
++        WrapMode.ClampToBorder => GL.GL_CLAMP_TO_BORDER,
++        WrapMode.MirroredRepeat => GL.GL_MIRRORED_REPEAT,
++        WrapMode.Repeat => GL.GL_REPEAT,
++        _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, null)
++    };
++
+     public static int ToGL(this CubeMapFace face)
+     {
+         switch (face)
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLTexture2D.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLTexture2D.cs
+@@ -89,13 +89,13 @@
+         if (samplerState.WrapS != modeS)
+         {
+             BindForModify(unit);
+-            GL.TexParameteri (GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_S, (int)samplerState.WrapS);
++            GL.TexParameteri (GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_S, samplerState.WrapS.ToGL());
+             modeS = samplerState.WrapS;
+         }
+         if (samplerState.WrapT != modeT)
+         {
+             BindForModify(unit);
+-            GL.TexParameteri (GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, (int)samplerState.WrapT);
++            GL.TexParameteri (GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, samplerState.WrapT.ToGL());
+             modeT = samplerState.WrapT;
+         }
+         SetTargetFiltering(unit, GL.GL_TEXTURE_2D, samplerState.Filtering);
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLTextureCube.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLTextureCube.cs
+@@ -15,8 +15,8 @@
+     private int glFormat;
+     private int glType;
+ 
+-    private WrapMode modeS = 0;
+-    private WrapMode modeT = 0;
++    private WrapMode modeS = (WrapMode)(-1);
++    private WrapMode modeT = (WrapMode)(-1);
+ 
+     public GLTextureCube (GLRenderContext ctx, int size, bool mipMap, SurfaceFormat format) : base(ctx)
+     {
+@@ -176,13 +176,13 @@
+         if (samplerState.WrapS != modeS)
+         {
+             BindForModify(unit);
+-            GL.TexParameteri (GL.GL_TEXTURE_CUBE_MAP, GL.GL_TEXTURE_WRAP_S, (int)samplerState.WrapS);
++            GL.TexParameteri (GL.GL_TEXTURE_CUBE_MAP, GL.GL_TEXTURE_WRAP_S, samplerState.WrapS.ToGL());
+             modeS = samplerState.WrapS;
+         }
+         if (samplerState.WrapT != modeT)
+         {
+             BindForModify(unit);
+-            GL.TexParameteri (GL.GL_TEXTURE_CUBE_MAP, GL.GL_TEXTURE_WRAP_T, (int)samplerState.WrapT);
++            GL.TexParameteri (GL.GL_TEXTURE_CUBE_MAP, GL.GL_TEXTURE_WRAP_T, samplerState.WrapT.ToGL());
+             modeT = samplerState.WrapT;
+         }
+         SetTargetFiltering(unit, GL.GL_TEXTURE_CUBE_MAP, samplerState.Filtering);
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLVertexBuffer.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLVertexBuffer.cs
+@@ -248,9 +248,9 @@
+         foreach (var e in decl.Elements) {
+             GL.EnableVertexAttribArray (e.Slot);
+             if(e.Integer)
+-                GL.VertexAttribIPointer ((uint)e.Slot, e.Elements, (int)e.Type, decl.Stride, o + (IntPtr)(e.Offset));
++                GL.VertexAttribIPointer ((uint)e.Slot, e.Elements, e.Type.ToGL(), decl.Stride, o + (IntPtr)(e.Offset));
+             else
+-                GL.VertexAttribPointer ((uint)e.Slot, e.Elements, (int)e.Type, e.Normalized, decl.Stride, o + (IntPtr)(e.Offset));
++                GL.VertexAttribPointer ((uint)e.Slot, e.Elements, e.Type.ToGL(), e.Normalized, decl.Stride, o + (IntPtr)(e.Offset));
+         }
+     }
+ 
+--- a/src/LibreLancer.Base/Graphics/Vertices/VertexElementType.cs
++++ b/src/LibreLancer.Base/Graphics/Vertices/VertexElementType.cs
+@@ -2,14 +2,12 @@
+ // This file is subject to the terms and conditions defined in
+ // LICENSE, which is part of this source code package
+ 
+-using LibreLancer.Graphics.Backends.OpenGL;
+-
+ namespace LibreLancer.Graphics.Vertices;
+ 
+ public enum VertexElementType
+ {
+-    Float = GL.GL_FLOAT,
+-    UnsignedShort = GL.GL_UNSIGNED_SHORT,
+-    UnsignedByte = GL.GL_UNSIGNED_BYTE,
+-    Short = GL.GL_SHORT,
++    Float,
++    UnsignedShort,
++    UnsignedByte,
++    Short,
+ }
+--- a/src/LibreLancer.Base/Graphics/WrapMode.cs
++++ b/src/LibreLancer.Base/Graphics/WrapMode.cs
+@@ -2,14 +2,12 @@
+ // This file is subject to the terms and conditions defined in
+ // LICENSE, which is part of this source code package
+ 
+-using LibreLancer.Graphics.Backends.OpenGL;
+-
+ namespace LibreLancer.Graphics;
+ 
+ public enum WrapMode
+ {
+-    ClampToEdge = GL.GL_CLAMP_TO_EDGE,
+-    ClampToBorder = GL.GL_CLAMP_TO_BORDER,
+-    MirroredRepeat = GL.GL_MIRRORED_REPEAT,
+-    Repeat = GL.GL_REPEAT
++    ClampToEdge,
++    ClampToBorder,
++    MirroredRepeat,
++    Repeat
+ }
+--- a/src/LibreLancer.Tests/DepthFunctionBackendTests.cs
++++ b/src/LibreLancer.Tests/DepthFunctionBackendTests.cs
+@@ -1,6 +1,7 @@
+ using System;
+ using LibreLancer.Graphics;
+ using LibreLancer.Graphics.Backends.OpenGL;
++using LibreLancer.Graphics.Vertices;
+ using Xunit;
+ 
+ namespace LibreLancer.Tests;
+@@ -24,4 +25,36 @@
+     {
+         Assert.Throws<ArgumentOutOfRangeException>(() => ((DepthFunction)99).ToGL());
+     }
++
++    [Theory]
++    [InlineData(VertexElementType.Float, GL.GL_FLOAT)]
++    [InlineData(VertexElementType.UnsignedShort, GL.GL_UNSIGNED_SHORT)]
++    [InlineData(VertexElementType.UnsignedByte, GL.GL_UNSIGNED_BYTE)]
++    [InlineData(VertexElementType.Short, GL.GL_SHORT)]
++    public void VertexElementType_MapsToOpenGl(VertexElementType type, int expected)
++    {
++        Assert.Equal(expected, type.ToGL());
++    }
++
++    [Fact]
++    public void InvalidVertexElementType_IsRejected()
++    {
++        Assert.Throws<ArgumentOutOfRangeException>(() => ((VertexElementType)99).ToGL());
++    }
++
++    [Theory]
++    [InlineData(WrapMode.ClampToEdge, GL.GL_CLAMP_TO_EDGE)]
++    [InlineData(WrapMode.ClampToBorder, GL.GL_CLAMP_TO_BORDER)]
++    [InlineData(WrapMode.MirroredRepeat, GL.GL_MIRRORED_REPEAT)]
++    [InlineData(WrapMode.Repeat, GL.GL_REPEAT)]
++    public void WrapMode_MapsToOpenGl(WrapMode mode, int expected)
++    {
++        Assert.Equal(expected, mode.ToGL());
++    }
++
++    [Fact]
++    public void InvalidWrapMode_IsRejected()
++    {
++        Assert.Throws<ArgumentOutOfRangeException>(() => ((WrapMode)99).ToGL());
++    }
+ }

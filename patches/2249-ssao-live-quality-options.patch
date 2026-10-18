@@ -1,0 +1,136 @@
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+index 32eb4589b54fa6068d085d658e16e86894547c65..2a55efe0ea4d6c832378865fc0b4c667c727e7d3 100644
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -225,7 +225,7 @@ Diese Liste plant moderne Renderer-Erweiterungen für LibreLancer. Sie ist eine
+   - [ ] NAP-A/B für weiße, rote, grüne und mehrfach vorhandene Sonnen mit der luminanzerhaltenden Mischung aufnehmen; Effektstärke, Wertebegrenzung und distanzgewichtete Farbmischung visuell kalibrieren. Nebelüberschreibung und Legacy-Ausgabe bei ausgeschaltetem Schalter in der Laufzeit prüfen.
+   - [x] Hi02-Stärkeproben bei 0,25 und 1,0 mit identischem NAP-Save aufgenommen. 1,0 überstrahlt die Sonnen-/Nebelregion sichtbar; wegen unterschiedlicher Prozessframes ist dies keine Same-frame-Kalibrierung. Bilder: [Stärkeproben](evidence/renderer/sun-ambient-strength-probes-20261017/README.md).
+ - [x] SSAO als optionalen Forward-/Post-Processing-Pass mit separat abschaltbarem, sampleablem Depth-Prepass integrieren. Der Shader rekonstruiert View-Space-Positionen aus der inversen Projektion, schätzt Nachbarnormalen depth-adaptiv und gewichtet Okklusion nach Raumabstand. None/SMAA/MSAA und HDR/LDR werden unterstützt; Startparameter und Menüschalter sind vorhanden. Nicht unterstützte Depth-Targets fallen auf den bisherigen Renderer zurück.
+-  - [x] Qualitätseinstellungen für Radius, Stärke und Occlusion-Bias ergänzt: INI und Startparameter `--render-ssao-radius`, `--render-ssao-strength` sowie `--render-ssao-bias` verwenden validierte Wertebereiche und behalten die bisherigen Shader-Standardwerte. Ein/Aus bleibt unabhängig steuerbar. Bildkalibrierung je Szenentyp und die offene Menübedienung bleiben Teil der visuellen Abnahme.
++  - [x] Qualitätseinstellungen für Radius, Stärke und Occlusion-Bias ergänzt: INI und Startparameter `--render-ssao-radius`, `--render-ssao-strength` sowie `--render-ssao-bias` verwenden validierte Wertebereiche und behalten die bisherigen Shader-Standardwerte. Ein/Aus bleibt unabhängig steuerbar. Die Effekte-Seite bietet Radius-, Stärke- und Occlusion-Bias-Regler, übernimmt sie mit „Zurück“ in die laufenden Einstellungen und speichert sie. Bildkalibrierung je Szenentyp bleibt offen.
+   - [x] NAP-only OpenGL/Mesa-Lauf in Hi02 bestätigt die SSAO-Pass-Ausführung mit einem asynchronen Sample von 0,759 ms auf Intel HD Graphics 4600. Ein exploratives On/Off-Paar mit gleicher Save-Kameraposition liegt vor; die Todesmeldung verdeckt einen Teil des Bildes und FPS-/Szenenmesswerte sind wegen unterschiedlicher Prozessframes nicht vergleichbar. Siehe [SSAO-Hi02-Smoke](evidence/renderer/ssao-viewspace-hi02-20261017/README.md).
+   - [x] OpenGL-Tiefenabbildung aus der inversen Projektion korrigiert: `System.Numerics` verwendet Clip-Z 0–1, OpenGL speichert diesen Bereich standardmäßig in 0,5–1; SSAO wandelt den abgetasteten Tiefenwert vor der View-Space-Rekonstruktion zurück. Dieselbe Abbildung ist im Shadow-Receiver-Shader dokumentiert. Frische Release-/NAP-only-Läufe erreichen Hi02; der Live-Spielstand mit `--invulnerable=on` bestätigt den aktiven SSAO-Pass (1,111 ms asynchron) sowie den ausgeschalteten Pfad ohne Depth-/SSAO-Pass. Screenshot-Paare sind prozessübergreifend und nicht für FPS oder Same-frame-Bildqualität vergleichbar. Siehe [SSAO-Hi02-Smoke](evidence/renderer/ssao-viewspace-hi02-20261017/README.md). GLES-Verifikation steht aus.
+   - [ ] Normalenrichtung und Bildqualität/Kosten in NAP-Vanilla-Szenen prüfen: Halo-/Seam-Artefakte, Nebelübergänge, DFM-Modelle, Alpha-Test sowie kontrollierter Same-Pose/FPS-Vergleich. Die Abnahme bleibt offen.
+diff --git a/patches/README.md b/patches/README.md
+index 3a0681e358fb8d1e23237dec032dc2e34e03bdc1..e7ba00273b20d252bec55d67169490165607515e 100644
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 247 Client bundles and two native bundles. Each
++The active series contains 248 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -214,3 +214,4 @@ jump-gate route.
+ | 2246 | Record a tighter same-session directional shadow toggle capture and remaining validation limits |
+ | 2247 | Add and smoke-test three-scale HDR bloom with per-scale GPU timing and target contracts |
+ | 2248 | Add validated SSAO radius, strength and occlusion-bias settings and startup controls |
++| 2249 | Add live SSAO quality sliders to the in-game Performance options |
+diff --git a/patches/series b/patches/series
+index 2223e103ef9f575518f92ddfab265539b596facd..d813978cfe710107749e8513dfa26490fc8a7222 100644
+--- a/patches/series
++++ b/patches/series
+@@ -248,3 +248,4 @@ client 2245-shadow-source-ini-runtime-evidence.patch
+ client 2246-shadow-same-session-capture-evidence.patch
+ client 2247-multiscale-hdr-bloom.patch
+ client 2248-ssao-quality-controls.patch
++client 2249-ssao-live-quality-options.patch
+diff --git a/uixml/options.lua b/uixml/options.lua
+index b0c83f59321e5b38085f52718707f12170e3a333..81f549efc76fbec109d1940c626fa60aa96b4345 100644
+--- a/uixml/options.lua
++++ b/uixml/options.lua
+@@ -124,6 +124,15 @@ class options : options_Designer with Modal
+         e.surface_pbr_maps.Selected = this.opts.SurfacePbrMapsEnabled
+         e.shadows.Selected = this.opts.RenderShadows
+         e.ssao.Selected = this.opts.RenderSsao
++        e.ssao_radius.Min = 0.05
++        e.ssao_radius.Max = 50
++        e.ssao_radius.Value = this.opts.SsaoRadius
++        e.ssao_strength.Min = 0
++        e.ssao_strength.Max = 4
++        e.ssao_strength.Value = this.opts.SsaoStrength
++        e.ssao_bias.Min = 0.0001
++        e.ssao_bias.Max = 0.25
++        e.ssao_bias.Value = this.opts.SsaoBias
+         e.environment_maps.Selected = this.opts.PbrEnvironmentMapsEnabled
+         e.dynamic_lighting.Selected = this.opts.DynamicLighting
+         e.transient_effect_lights.Selected = this.opts.RenderTransientEffectLights
+@@ -199,8 +208,14 @@ class options : options_Designer with Modal
+         })
+         e.ssao.OnClick(() => {
+             this.opts.RenderSsao = e.ssao.Selected
++            this.opts.SsaoRadius = e.ssao_radius.Value
++            this.opts.SsaoStrength = e.ssao_strength.Value
++            this.opts.SsaoBias = e.ssao_bias.Value
+             local settings = Game.GetCurrentSettings()
+             settings.RenderSsao = e.ssao.Selected
++            settings.SsaoRadius = e.ssao_radius.Value
++            settings.SsaoStrength = e.ssao_strength.Value
++            settings.SsaoBias = e.ssao_bias.Value
+             Game.ApplySettings(settings)
+         })
+         e.sun_ambient.OnClick(() => {
+@@ -255,6 +270,9 @@ class options : options_Designer with Modal
+         this.opts.RenderSunAmbient = Game.GetCurrentSettings().RenderSunAmbient
+         this.opts.RenderShadows = Game.GetCurrentSettings().RenderShadows
+         this.opts.RenderSsao = Game.GetCurrentSettings().RenderSsao
++        this.opts.SsaoRadius = e.ssao_radius.Value
++        this.opts.SsaoStrength = e.ssao_strength.Value
++        this.opts.SsaoBias = e.ssao_bias.Value
+         this.opts.RenderHdr = Game.GetCurrentSettings().RenderHdr
+         this.opts.HdrExposure = e.hdr_exposure.Value
+         this.opts.RenderBloom = Game.GetCurrentSettings().RenderBloom
+diff --git a/uixml/options.xml b/uixml/options.xml
+index b8a03a1f52286793902e69514e444066944905ef..ac027e72b5378db867865bdba1364a2d780adb4c 100644
+--- a/uixml/options.xml
++++ b/uixml/options.xml
+@@ -16,7 +16,7 @@
+                 <TextBlock X="18" Y="64" Width="350" Height="22" Text="VSYNC APPLIES AFTER RESTART" TextColor="text" TextShadow="black" TextSize="10"/>
+                 <TextBlock X="18" Y="110" Width="350" Height="22" Text="CURRENT GAME RENDERER: OPENGL" TextColor="text" TextShadow="black" TextSize="12"/>
+                 <Checkbox id="vulkan" X="18" Y="146" Width="340" Text="VULKAN / SDL_GPU" Enabled="false"/>
+-                <TextBlock X="18" Y="180" Width="350" Height="30" Text="VULKAN IS NOT AVAILABLE YET" TextColor="text" TextShadow="black" TextSize="10"/>
++                <TextBlock X="18" Y="190" Width="350" Height="30" Text="VULKAN IS NOT AVAILABLE YET" TextColor="text" TextShadow="black" TextSize="10"/>
+             </Panel>
+             <Panel Width="390" Height="490" ID="win_effects" Visible="false">
+                 <TextBlock Text="AVAILABLE GRAPHICS EFFECTS" Width="390" Height="22" Y="-22" Anchor="TopCenter" TextColor="text" TextShadow="black" TextSize="13"/>
+@@ -96,19 +96,25 @@
+                 <Button id="af_right" style="sel_right" X="350" Y="67"/>
+                 <TextBlock id="af_display" X="204" Y="60" Height="22" Width="150" TextColor="text" TextShadow="black" TextSize="12" Text="AF SELECTION"/>
+                 <!-- Surface metadata profile: applied on next game start -->
+-                <TextBlock X="18" Y="130" HorizontalAlignment="Left" Height="22" Width="150" TextColor="text" TextShadow="black" TextSize="13" Text="SURFACE PROFILE"/>
+-                <Button id="surface_left" style="sel_left" X="200" Y="137"/>
+-                <Button id="surface_right" style="sel_right" X="350" Y="137"/>
+-                <TextBlock id="surface_display" X="204" Y="130" Height="22" Width="150" TextColor="text" TextShadow="black" TextSize="12"/>
+-                <TextBlock X="18" Y="166" Height="30" Width="350" TextColor="text" TextShadow="black" TextSize="10" Text="METADATA PROFILE - APPLIES AFTER RESTART"/>
+-                <TextBlock X="18" Y="204" Width="350" Height="22" Text="NORMAL MAPS REQUIRE SURFACE PROFILE AND TANGENTS" TextColor="text" TextShadow="black" TextSize="10"/>
+-                <Checkbox id="normalmaps" X="18" Y="238" Width="350" Text="SURFACE NORMAL MAPS"/>
+-                <Checkbox id="generated_tangents" X="18" Y="270" Width="350" Text="GENERATE MISSING MESH TANGENTS"/>
+-                <TextBlock X="18" Y="296" Height="26" Width="350" TextColor="text" TextShadow="black" TextSize="9" Text="TURN OFF TO KEEP ORIGINAL MESHES WITHOUT GENERATED TANGENTS"/>
+-                <Checkbox id="environment_maps" X="18" Y="326" Width="350" Text="PBR CUBEMAP REFLECTIONS"/>
+-                <Checkbox id="surface_pbr_maps" X="18" Y="354" Width="350" Text="SURFACE ROUGHNESS / METALLIC MAPS"/>
+-                <Checkbox id="shadows" X="18" Y="382" Width="350" Text="DIRECTIONAL SHADOW MAPS (BASIC / PBR)"/>
+-                <Checkbox id="ssao" X="18" Y="410" Width="350" Text="SCREEN SPACE AMBIENT OCCLUSION"/>
++                <TextBlock X="18" Y="116" HorizontalAlignment="Left" Height="22" Width="150" TextColor="text" TextShadow="black" TextSize="13" Text="SURFACE PROFILE"/>
++                <Button id="surface_left" style="sel_left" X="200" Y="123"/>
++                <Button id="surface_right" style="sel_right" X="350" Y="123"/>
++                <TextBlock id="surface_display" X="204" Y="116" Height="22" Width="150" TextColor="text" TextShadow="black" TextSize="12"/>
++                <TextBlock X="18" Y="152" Height="30" Width="350" TextColor="text" TextShadow="black" TextSize="10" Text="METADATA PROFILE - APPLIES AFTER RESTART"/>
++                <TextBlock X="18" Y="180" Width="350" Height="22" Text="NORMAL MAPS REQUIRE SURFACE PROFILE AND TANGENTS" TextColor="text" TextShadow="black" TextSize="10"/>
++                <Checkbox id="normalmaps" X="18" Y="224" Width="350" Text="SURFACE NORMAL MAPS"/>
++                <Checkbox id="generated_tangents" X="18" Y="256" Width="350" Text="GENERATE MISSING MESH TANGENTS"/>
++                <TextBlock X="18" Y="282" Height="26" Width="350" TextColor="text" TextShadow="black" TextSize="9" Text="TURN OFF TO KEEP ORIGINAL MESHES WITHOUT GENERATED TANGENTS"/>
++                <Checkbox id="environment_maps" X="18" Y="312" Width="350" Text="PBR CUBEMAP REFLECTIONS"/>
++                <Checkbox id="surface_pbr_maps" X="18" Y="340" Width="350" Text="SURFACE ROUGHNESS / METALLIC MAPS"/>
++                <Checkbox id="shadows" X="18" Y="366" Width="350" Text="DIRECTIONAL SHADOW MAPS (BASIC / PBR)"/>
++                <Checkbox id="ssao" X="18" Y="396" Width="350" Text="SCREEN SPACE AMBIENT OCCLUSION"/>
++                <TextBlock X="18" Y="422" Width="170" Height="16" Text="SSAO RADIUS" TextColor="text" TextShadow="black" TextSize="9"/>
++                <HSlider id="ssao_radius" X="200" Y="424" Width="160" Height="10"/>
++                <TextBlock X="18" Y="444" Width="170" Height="16" Text="SSAO STRENGTH" TextColor="text" TextShadow="black" TextSize="9"/>
++                <HSlider id="ssao_strength" X="200" Y="446" Width="160" Height="10"/>
++                <TextBlock X="18" Y="464" Width="170" Height="16" Text="SSAO OCCLUSION BIAS" TextColor="text" TextShadow="black" TextSize="9"/>
++                <HSlider id="ssao_bias" X="200" Y="466" Width="160" Height="10"/>
+                 <!-- Toggles -->
+                 <Checkbox id="ppl" X="18" Y="92" Width="200" Text="PER-PIXEL LIGHTING"/>
+             </Panel>

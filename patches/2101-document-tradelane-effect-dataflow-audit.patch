@@ -1,0 +1,59 @@
+diff --git a/docs/evidence/renderer/tradelane-effect-dataflow-audit-20261015.md b/docs/evidence/renderer/tradelane-effect-dataflow-audit-20261015.md
+new file mode 100644
+--- /dev/null
++++ b/docs/evidence/renderer/tradelane-effect-dataflow-audit-20261015.md
+@@ -0,0 +1,22 @@
++# Tradelane-Reiseeffekt: Daten- und Laufzeitpfad (15.10.2026)
++
++## Datenbestand
++
++Der Client-NAP enthält die relevanten Originaldefinitionen und Ressourcen:
++
++- `Data/NAP/Models/equipment/SelectEquip.ini` bindet `basic_trade_lane_eq` an `tl_player_travel = basic_tl_player_travel` und `tl_ship_travel = basic_tl_ship_travel`.
++- `Data/NAP/Effects/fx/Effects.ini` definiert `basic_tl_player_travel` als `EFT_LANE_SHIP_TRAVEL`, referenziert `tradelaneinship01` und den Ton `tl_wind_int`.
++- `Data/NAP/Effects/fx/misc/MiscAle.ini` bindet `tradelaneinship01` an `fx\misc\gf_tradelaneinship01.ale` und die SARMA-, Planetflare- und Kioncannon-Texturbibliotheken.
++- `Data/NAP/Effects/fx/misc/gf_tradelaneinship01.ale` ist vorhanden (9.0 KiB).
++
++## Tatsächlicher Clientpfad
++
++`Tradelane` parst sowohl `tl_player_travel` als auch `tl_ship_travel`. `GameItemDb.CreateTradelaneEquipment` löst beide Definitionen in getrennte `ResolvedFx`-Objekte auf. Bei `SpaceGameplay.StartTradelane` hängt der Client `PlayerTravel` über `AttachShipEffect` als `ParticleEffectRenderer` an `player.ExtraRenderers` und startet den Effektton als Loop. Die Instanz aktualisiert und zeichnet über den allgemeinen Partikeleffektpfad; der Renderer berücksichtigt den normalen 20.000-Einheiten-Cull-Abstand.
++
++Der Serverpfad für NPC-Schiffe startet `ShipTravel` separat als Netzwerk-FX über `SFuseRunnerComponent`. Das ist kein Ersatz für den Spielereffekt und erklärt allein keine Abweichung in der Spieleransicht.
++
++## Befund und offene Abnahme
++
++Die Definitionen werden gefunden und an den erwarteten Spiel- bzw. NPC-Pfaden konsumiert. Damit ist ein fehlender INI-Verweis oder eine fehlende ALE-Datei als Ursache der vereinfachten Darstellung nicht belegt. Der Audit weist auch nicht nach, dass die ALE-Geometrie, Partikelparameter, Blickwinkel oder Animation identisch zum Original gerendert werden.
++
++Offen bleibt ein synchroner Vergleich der originalen Freelancer- und Client-Ansicht in denselben Eintritts-, Fahrt- und Austrittsszenen. Erst dabei lassen sich Abweichungen auf den ALE-Parser/-Renderer, die Effektauswahl oder die Laufzeitbindung eingrenzen. Es wurde in diesem Audit keine Renderfunktion geändert.
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -159,6 +159,7 @@
+   - [x] Der Übergang trägt Quell- und Zielsystem über den Szenenwechsel. Nach erfolgreichem Eintritt startet die Ankunftssequenz mit dem Gegentorprofil, falls vorhanden, sonst mit dem gespeicherten Abflugprofil. Stagingfehler und ein Spawn in einem anderen System verwerfen den ausstehenden Zustand.
+   - [ ] Tunnel und Ringe mit einer NAP-Laufzeitaufnahme für Eintritt, Fahrt und Austritt visuell gegen das Original abnehmen. Die aktuellen Belege umfassen Datenpfadprüfung und erfolgreichen Client-Build, noch keine Laufzeitbilder.
+ - [ ] Tradelane-Reiseeffekt gegen das Original vergleichen und die vereinfachte Darstellung korrigieren. Der Client hängt `PlayerTravel` als `ParticleEffectRenderer` an; anhand von `basic_tl_player_travel`/`EFT_LANE_SHIP_TRAVEL` und `tradelaneinship01` prüfen, welche ALE-Geometrie, Partikel, Bewegung, Skalierung oder Schichtung für die originale Tunnelansicht fehlen. Mit NAP-Referenzbildern für Eintritt, Fahrt und Austritt abnehmen.
++  - [x] Daten- und Laufzeitpfad auditiert: `tl_player_travel` lädt `basic_tl_player_travel`/`tradelaneinship01` als normale `ParticleEffectRenderer`-Instanz am Spielerschiff; `tl_ship_travel` läuft separat über den serverseitigen Netzwerk-FX-Pfad. Beide referenzierten INI-/ALE-Dateien sind in `Data/NAP/` vorhanden. Die statische Prüfung bestätigt die Datenauflösung, aber keine optische Gleichheit. Details: [Tradelane-FX-Audit](evidence/renderer/tradelane-effect-dataflow-audit-20261015.md).
+ - [ ] Laser-, Projektil- und Explosionseffekte visuell überarbeiten: Beam- und Trefferdarstellung, Trails, Partikel, Farbverläufe, Größen- und Zeitverhalten sowie Zusammenspiel mit dynamischem Licht. Originale Freelancer-Effekte müssen weiter funktionieren; neue Qualitätseinstellungen sollen einzeln abschaltbar bleiben. Mit reproduzierbaren NAP-Kampfszenen, Vergleichsbildern und GPU-/CPU-Messungen abnehmen.
+   - [x] `vis_beam`-Geometrie gegen parallele/degenerierte Richtungen absichern und Schreibzugriffe auf den 500-Beam-Streamingpuffer begrenzen; vier Geometrietests bestehen.
+   - [x] Partikel- und Beam-Punkte gegen den 30.000-Einträge-Pool begrenzen und leere Beam-Chunks ohne ungültigen Draw überspringen; vier Grenztests bestehen.
+
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -73,7 +73,8 @@
+ | 2097 | Load typed jump gate and gate tunnel effect data |
+ | 2098 | Start the configured jump tunnel interior effect |
+ | 2099 | Parse and render timed jump gate ring effects |
+ | 2100 | Render profile-driven gate tunnel geometry and preserve arrival transitions |
++| 2101 | Audit Tradelane effect dataflow and asset presence |
+ | 2011 (`lancerdecode`) | Native Vorbis EOF/reset handling |
+ | 2012 (`blurgtext`) | System FreeType without OT-SVG hooks |
+ 
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -100,3 +100,4 @@
+ client 2098-jump-tunnel-interior-effect.patch
+ client 2099-jump-gate-ring-effects.patch
+ client 2100-jump-gate-tunnel-geometry-and-arrival.patch
++client 2101-document-tradelane-effect-dataflow-audit.patch

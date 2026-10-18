@@ -1,0 +1,99 @@
+diff --git a/src/Editor/LancerEdit/Model/ModelViewer.cs b/src/Editor/LancerEdit/Model/ModelViewer.cs
+index 24a7aa8a8..9fc6d5f1f 100644
+--- a/src/Editor/LancerEdit/Model/ModelViewer.cs
++++ b/src/Editor/LancerEdit/Model/ModelViewer.cs
+@@ -1197,7 +1197,12 @@ namespace LancerEdit
+             ImGui.TextDisabled($"Archetype environment: {previewEnvMapMaterial ?? "(none)"}");
+             var environmentNick = PreviewEnvironment;
+             var environmentTexture = environmentNick == null ? null : res.FindTexture(environmentNick);
+-            ImGui.TextDisabled($"Environment texture: {environmentTexture?.GetType().Name ?? "unresolved"}");
++            var environmentStatus = environmentNick == null
++                ? "none"
++                : environmentTexture is TextureCube
++                    ? "TextureCube"
++                    : viewMode == M_LIT ? "not loaded" : "not loaded; Lit mode required";
++            ImGui.TextDisabled($"Environment texture: {environmentStatus}");
+             var environmentChoices = GetPreviewEnvironmentChoices();
+             var selectedEnvironment = previewEnvironmentOverride == null ? 0 :
+                 previewEnvironmentOverride.Length == 0 ? 1 : Array.IndexOf(environmentChoices, previewEnvironmentOverride);
+@@ -1212,6 +1217,8 @@ namespace LancerEdit
+                     _ => environmentChoices[selectedEnvironment]
+                 };
+             }
++            if (environmentNick != null && viewMode != M_LIT && ImGui.SmallButton("Preview environment in Lit mode"))
++                viewMode = M_LIT;
+             ImGui.TextDisabled("Preview only; does not modify Shiparch.ini or SolarArch.ini.");
+             if (environmentNick != null && res.SurfaceMaps.TryResolveCubeMap(environmentNick, out var cubeMap))
+                 ImGui.TextDisabled($"Preview catalog strength: {cubeMap!.Strength:F2}");
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+index 9e2fd6ff1..8d858c2db 100644
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -43,12 +43,15 @@ resident gehaltene Cubes muss noch gemessen und begrenzt werden.
+ Der Surface-NAP wurde ausschließlich aus `Data/NAP/Surface/` gepackt und mit
+ 45 Einträgen verifiziert. Ein isolierter NAP-only-LancerEdit-Lauf lud die
+ Freelancer-Daten und zeigte LI_ELITE im ModelViewer. Nach Auswahl von
+-`envcube_sun` meldete die Vorschau jedoch `Environment texture: unresolved`;
+-außerdem stand die Ansicht noch im `Textured`-Modus. Der Diagnose-Screenshot
++`envcube_sun` war ausgewählt, während der Viewport noch im `Textured`-Modus
++stand. Dort werden Cubes absichtlich noch nicht geladen, die damalige UI zeigte
++den Status jedoch irreführend als `unresolved`. Der Render-Tab bietet nun einen
++direkten Wechsel zum Lit-Preview und unterscheidet „noch nicht geladen“ vom
++Cube-Load-Fehler. Der Diagnose-Screenshot
+ liegt unter
+ [`hdr-ibl-li-elite-20261018/`](evidence/renderer/hdr-ibl-li-elite-20261018/README.md).
+-Das ist keine Bildabnahme der HDR-Cubemap. Als Nächstes muss der Cubemap-Load
+-im Lit-Modus bestätigt und mit einer echten Ein/Aus-Aufnahme verglichen werden.
++Der Cube-Load im Lit-Modus und ein echte Ein/Aus-Bildvergleich sind noch zu
++bestätigen.
+ 
+ ## Offene Renderer-Arbeiten
+ 
+diff --git a/docs/evidence/renderer/hdr-ibl-li-elite-20261018/README.md b/docs/evidence/renderer/hdr-ibl-li-elite-20261018/README.md
+index 3af640314..fe10ab695 100644
+--- a/docs/evidence/renderer/hdr-ibl-li-elite-20261018/README.md
++++ b/docs/evidence/renderer/hdr-ibl-li-elite-20261018/README.md
+@@ -7,9 +7,12 @@ Surface-NAP. LancerEdit lud die Freelancer-Daten und stellte LI_ELITE dar.
+ 
+ Im Render-Tab waren Surface-PBR-Maps, PBR-Umgebungsreflexionen und diffuse
+ Image-Based-Lighting eingeschaltet; als Vorschau-Cube war `envcube_sun`
+-ausgewählt. Der Status zeigte dennoch `Environment texture: unresolved`. Der
+-Viewport stand außerdem im `Textured`-Modus. Deshalb bestätigt die Aufnahme
+-weder einen Cube-Load noch HDR-/IBL-Bildwirkung und ist kein gültiger A/B-Test.
++ausgewählt. Der Viewport stand noch im `Textured`-Modus. In diesem Modus lädt
++der Renderer den Cube nicht; die damalige Statusanzeige `unresolved` war
++irreführend. Patch 2307 kennzeichnet den Cube nun als noch nicht geladen und
++führt direkt in den Lit-Modus.
+ 
+-Nächster Prüfschritt: im `Lit`-Modus den TextureCube-Load im Log/Debugger
+-bestätigen und bei unveränderter Kamera echte Ein-/Aus-Aufnahmen erstellen.
++Die Aufnahme bestätigt weiterhin weder einen Cube-Load noch HDR-/IBL-Bildwirkung.
++Nächster Prüfschritt: den neuen Lit-Preview-Wechsel ausführen, Cube-Load im
++Log/Debugger bestätigen und bei unveränderter Kamera echte Ein-/Aus-Aufnahmen
++erstellen.
+diff --git a/patches/README.md b/patches/README.md
+index 63fea8efc..e23790b9c 100644
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 305 Client bundles and two native bundles. Each
++The active series contains 306 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -261,3 +261,4 @@ jump-gate route.
+ | 2304 | Share the sRGB-to-linear conversion between PBR and common color-space shaders |
+ | 2305 | Record NAP-only PBR map, normal-map and cubemap ModelViewer A/B evidence |
+ | 2306 | Add HDR DX10 RGBA16F cubemap loading and linear shader sampling |
++| 2307 | Clarify cubemap preview residency and switch ModelViewer into Lit mode |
+diff --git a/patches/series b/patches/series
+index 8bb7ec07d..8a0ec47cf 100644
+--- a/patches/series
++++ b/patches/series
+@@ -306,3 +306,4 @@ client 2303-pbr-alpha-test-depth-shadow.patch
+ client 2304-share-srgb-linearization.patch
+ client 2305-pbr-live-nap-ab-evidence.patch
+ client 2306-hdr-ibl-cubemap-support.patch
++client 2307-lanceredit-cubemap-lit-preview.patch

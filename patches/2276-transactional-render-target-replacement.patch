@@ -1,0 +1,100 @@
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -493,21 +493,20 @@
+                     hdrAllocationFailed = false;
+                     ssaoAllocationFailed = false;
+                     softParticleDepthAllocationFailed = false;
+-                    softParticleDepthTarget = null;
+-                    msaa = null;
+                 }
+                 bool ssaoActive = ssaoRequested && !ssaoAllocationFailed;
+                 bool softParticlesActive = softParticlesRequested && !softParticleDepthAllocationFailed;
+                 bool offscreenRequested = Settings.SelectedAA != AntialiasMode.None || hdrRequested || ssaoActive;
+ 
+-                if (offscreenRequested && (msaa == null ||
+-                    (!hdrAllocationFailed && hdrRequested && !msaa.HdrOutputEnabled) ||
+-                    (ssaoActive && !msaa.SsaoEnabled)))
++                bool hdrTargetRequested = hdrRequested && !hdrAllocationFailed;
++                if (offscreenRequested && (msaa == null || msaa.Width != renderWidth ||
++                    msaa.Height != renderHeight || msaa.Mode != Settings.SelectedAA ||
++                    msaa.HdrOutputEnabled != hdrTargetRequested || msaa.SsaoEnabled != ssaoActive))
+                 {
+                     try
+                     {
+                         msaa = new AntialiasTarget(rstate, renderWidth, renderHeight,
+-                            Settings.SelectedAA, hdrRequested && !hdrAllocationFailed, ssaoActive);
++                            Settings.SelectedAA, hdrTargetRequested, ssaoActive);
+                         msaa.GpuSubpassMarker = MarkGpuSubpass;
+                     }
+                     catch (Exception ex) when ((ssaoActive || (hdrRequested && !hdrAllocationFailed)) &&
+@@ -547,6 +546,10 @@
+                                 msaa = new AntialiasTarget(rstate, renderWidth, renderHeight, Settings.SelectedAA);
+                                 msaa.GpuSubpassMarker = MarkGpuSubpass;
+                             }
++                            else
++                            {
++                                msaa = null;
++                            }
+                         }
+                     }
+                 }
+@@ -555,7 +558,13 @@
+                     msaa = null;
+                 }
+ 
+-                if (softParticlesActive && msaa?.SsaoDepthTarget == null && softParticleDepthTarget == null)
++                if (!softParticlesActive || msaa?.SsaoDepthTarget != null)
++                {
++                    softParticleDepthTarget = null;
++                }
++                if (softParticlesActive && msaa?.SsaoDepthTarget == null &&
++                    (softParticleDepthTarget == null || softParticleDepthTarget.Width != renderWidth ||
++                     softParticleDepthTarget.Height != renderHeight))
+                 {
+                     try
+                     {
+@@ -565,6 +574,7 @@
+                     {
+                         softParticleDepthAllocationFailed = true;
+                         softParticlesActive = false;
++                        softParticleDepthTarget = null;
+                         FLLog.Warning("Graphics", $"Soft particle depth target is unavailable; using legacy particle edges. {ex.Message}");
+                     }
+                 }
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -74,7 +74,7 @@
+ - [ ] Render-Target-Resize, minimierte Fenster, Scissor-/Viewport-Wechsel und Geräteverlust für zusätzliche Pässe absichern.
+   - [x] Die aktiven System-Targets für Antialias/HDR, Soft-Particle-Tiefe und Shadow-Maps werden nach Renderer-Rolle in `RendererTargetResources` ersetzt und freigegeben. Ersetzte Ressourcen bleiben bis zur erfolgreichen Konstruktion des Nachfolgers im Owner registriert; aktive Targets und fehlgeschlagene Retirements werden beim Renderer-Abbau in umgekehrter Erwerbsreihenfolge abgearbeitet. Resize-/Minimize-/Restore-Laufzeitabnahme, Geräteverlust und Editor-/Offscreen-Targets bleiben offen.
+   - [x] `AntialiasTarget` registriert alle während des Aufbaus erzeugten GPU-Ressourcen in einem idempotenten `RenderResourceScope`. Teilaufbauten werden auch bei Konstruktionsfehlern in umgekehrter Erzeugungsreihenfolge abgebaut; die Postprocess-Pässe werden vor den von ihnen geliehenen Szenen-/SMAA-Zielen freigegeben. Fehler beim Freigeben einer Ressource verhindern die Freigabe der übrigen nicht. Der `SystemRenderer`-Pfad wurde mit HDR/Bloom/SSAO/SMAA unter OpenGL auf 960×540 → 1280×720 sowie Minimize/Restore geprüft; siehe [Resize-Laufzeitnachweis](evidence/renderer/postprocess-window-resize-20261017/README.md). Editor-/Offscreen-Targets, Fehler-Injektion, Geräteverlust und Cross-Backend-Wiederherstellung bleiben offen.
+-  - [x] `SystemRenderer.Draw()` überspringt Frames mit Breite/Höhe 0. Bei geändertem Rendermaß oder AA-Modus gibt es das vorhandene MSAA-Target frei und erstellt es neu. Das belegt nur diesen System-Renderer-Pfad; Editor-/Offscreen-Targets, Wiederherstellungstests und Geräteverlust bleiben offen.
++  - [x] `SystemRenderer.Draw()` überspringt Frames mit Breite/Höhe 0. Bei geänderter Größe oder Konfiguration erstellt es Ersatz-Targets zuerst und übernimmt sie erst nach erfolgreicher Konstruktion; die bisherigen Targets bleiben bis dahin nutzbar. Bei abgeschalteten Funktionen werden nicht mehr benötigte Targets freigegeben. Das belegt nur diesen System-Renderer-Pfad; Editor-/Offscreen-Targets, Wiederherstellungstests und Geräteverlust bleiben offen.
+   - [x] `SystemRenderer.Draw()` und `AntialiasTarget.SMAABlit()` stellen RenderTarget, Viewport-/Scissor-Stacks und ihre geänderten RenderContext-Zustände in `finally` wieder her. `SystemRenderer` stellt auch `ThnCamera.DefaultZ()` zurück und leert die Frame-Objektliste nach Fehlern. Fehler-Injektion und reguläre Resize-/Minimize-/Restore-Läufe bleiben als Laufzeitprüfung offen. Details im [Fehlerpfad-Audit](evidence/renderer/render-target-exception-path-audit-20261015.md).
+   - [x] Billboard-Draws stellen Depth-Test, Cull-Zustand und den Batch-Hash auch dann wieder her, wenn ein Backend-Draw eine Exception wirft. Das schützt nachfolgende transparente Passes vor übernommenem Zustand; eine gezielte Fehler-Injektion im Backend ist noch nicht ausgeführt.
+   - [x] OpenGL prüft die Vollständigkeit normaler, multisample- und resolve Framebuffer beim Anlegen. Bei unvollständigen Zielen werden die erzeugten GL-Objekte freigegeben und der Statushexwert in der Exception ausgegeben; Laufzeitprüfung auf mehreren Treibern bleibt offen.
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 274 Client bundles and two native bundles. Each
++The active series contains 275 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -237,3 +237,4 @@
+ | 2273 | Reuse SystemRenderer pass graph nodes across frames |
+ | 2274 | Share the compiled render graph scheduler with post-processing |
+ | 2275 | Centralize replaceable SystemRenderer target ownership |
++| 2276 | Replace SystemRenderer targets transactionally on resize and option changes |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -275,3 +275,4 @@
+ client 2273-reuse-render-graph-nodes.patch
+ client 2274-share-render-graph-with-postprocess.patch
+ client 2275-centralize-system-render-target-ownership.patch
++client 2276-transactional-render-target-replacement.patch

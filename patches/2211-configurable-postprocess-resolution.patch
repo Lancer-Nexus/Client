@@ -1,0 +1,66 @@
+client 2211-configurable-postprocess-resolution.patch
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+index 6640c82..9ed27a4 100644
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -129,7 +129,7 @@ Diese Liste plant moderne Renderer-Erweiterungen für LibreLancer. Sie ist eine
+ 
+ - [ ] Allgemeine Post-Processing-Pass-Schnittstelle ergänzen; SMAA und bestehende Render-Targets dabei als Referenz für Ressourcenlebensdauer und Skalierung verwenden.
+ - [ ] Separable Gaussian Blur als erster kontrollierter Effekt: variable Kernelbreite, Auflösungs-Skalierung und keine Farb-/Alpha-Halos.
+-  - [x] Den horizontalen/vertikalen 5-Tap-Gauß-Blur als wiederverwendbaren `SeparableGaussianBlurPass` aus Bloom herausgelöst. Bloom verwendet weiterhin Quarter-Resolution-Extraktion und denselben festen Kernel; variable Kernellänge, eigenständige Auflösungsskalierung, Halo-Abnahme und GPU-Kostenmessung bleiben offen.
++  - [x] Den horizontalen/vertikalen 5-Tap-Gauß-Blur als wiederverwendbaren `SeparableGaussianBlurPass` aus Bloom herausgelöst. Der Pass akzeptiert Radius und eine begrenzte Zielauflösung von 1/8 bis 1/1 der Quelle. Bloom verwendet weiterhin Quarter-Resolution-Extraktion und dieselbe feste Kernelbreite; eine Laufzeitoption für Bloom-Skalierung, variable Kernellänge, Halo-Abnahme und GPU-Kostenmessung bleiben offen.
+ - [ ] Verwendungsfälle getrennt spezifizieren: weicher UI-/Vorschau-Hintergrund, selektiver Tiefenunschärfe-Effekt und kamerabasierte Bewegungsunschärfe sind unterschiedliche Effekte.
+ - [ ] Für kamerabasierte Motion Blur Bewegungsvektoren und Disocclusion-Artefakte untersuchen; vorhandene Partikel-Motion-Blur nicht als Ersatz behandeln.
+ - [ ] Optionalen Radial-/Zoom-Blur für klar begrenzte Cutscene- oder Effektfälle prüfen.
+diff --git a/patches/series b/patches/series
+index 825e1b9..b8089d8 100644
+--- a/patches/series
++++ b/patches/series
+@@ -210,3 +210,4 @@ client 2207-sun-ambient-strength-runtime-probes.patch
+ client 2208-particle-vertex-optimization.patch
+ client 2209-reusable-separable-gaussian-blur.patch
+ client 2210-hdr-postprocess-gpu-profile.patch
++client 2211-configurable-postprocess-resolution.patch
+diff --git a/src/LibreLancer.Base/Graphics/SeparableGaussianBlurPass.cs b/src/LibreLancer.Base/Graphics/SeparableGaussianBlurPass.cs
+index f2ed104..1731683 100644
+--- a/src/LibreLancer.Base/Graphics/SeparableGaussianBlurPass.cs
++++ b/src/LibreLancer.Base/Graphics/SeparableGaussianBlurPass.cs
+@@ -5,7 +5,8 @@ namespace LibreLancer.Graphics;
+ 
+ /// <summary>
+ /// Reusable horizontal/vertical Gaussian blur for post-processing textures.
+-/// The caller owns input extraction, output composition, and resolution policy.
++/// The caller owns input extraction and output composition; resolution scale
++/// selects the blur target size between one eighth and full source resolution.
+ /// </summary>
+ internal sealed class SeparableGaussianBlurPass : IDisposable
+ {
+@@ -23,18 +24,24 @@ internal sealed class SeparableGaussianBlurPass : IDisposable
+     public SeparableGaussianBlurPass(RenderContext context) => this.context = context;
+ 
+     public Texture2D? Process(Texture2D source, float radius, SurfaceFormat targetFormat,
+-        Action<SystemRenderSubpass, bool>? marker = null)
++        Action<SystemRenderSubpass, bool>? marker = null, float resolutionScale = 1f)
+     {
+         radius = float.IsFinite(radius) ? Math.Clamp(radius, 0.25f, 4f) : 1f;
++        resolutionScale = float.IsFinite(resolutionScale) ? Math.Clamp(resolutionScale, 0.125f, 1f) : 1f;
+         if (failed || source.Width <= 0 || source.Height <= 0)
+             return null;
+ 
+-        if (width != source.Width || height != source.Height || format != targetFormat ||
++        // Sampling a full-resolution source into smaller targets gives callers
++        // a controllable quality/performance trade-off without another pass.
++        var targetWidth = Math.Max(1, (int)MathF.Round(source.Width * resolutionScale));
++        var targetHeight = Math.Max(1, (int)MathF.Round(source.Height * resolutionScale));
++
++        if (width != targetWidth || height != targetHeight || format != targetFormat ||
+             horizontal == null || blurred == null)
+         {
+             DisposeTargets();
+-            width = source.Width;
+-            height = source.Height;
++            width = targetWidth;
++            height = targetHeight;
+             format = targetFormat;
+             try
+             {

@@ -1,0 +1,106 @@
+--- a/src/LibreLancer/Interface/DebugView.cs
++++ b/src/LibreLancer/Interface/DebugView.cs
+@@ -26,6 +26,10 @@
+         private readonly bool[] gpuPassSampleAvailable = new bool[PerformanceSampleCount * GpuPassProfile.Count];
+         private readonly int[] frameWidthSamples = new int[PerformanceSampleCount];
+         private readonly int[] frameHeightSamples = new int[PerformanceSampleCount];
++        private readonly long[] aaTargetMemorySamples = new long[PerformanceSampleCount];
++        private readonly long[] bloomTargetMemorySamples = new long[PerformanceSampleCount];
++        private readonly long[] toneMapOutputMemorySamples = new long[PerformanceSampleCount];
++        private readonly bool[] renderMemorySampleAvailable = new bool[PerformanceSampleCount];
+         private readonly string?[] rendererSamples = new string?[PerformanceSampleCount];
+         private readonly double[] percentileSortBuffer = new double[PerformanceSampleCount];
+         private int performanceSampleIndex;
+@@ -142,6 +146,7 @@
+                 frameWidthSamples[performanceSampleIndex] = game.Width;
+                 frameHeightSamples[performanceSampleIndex] = game.Height;
+                 rendererSamples[performanceSampleIndex] = game.Renderer;
++                renderMemorySampleAvailable[performanceSampleIndex] = false;
+                 var gpuSampleOffset = performanceSampleIndex * GpuPassProfile.Count;
+                 for (var i = 0; i < GpuPassProfile.Count; i++)
+                 {
+@@ -235,6 +240,18 @@
+         private static int PercentileIndex(int count, double percentile) =>
+             (int)Math.Ceiling((count - 1) * percentile);
+ 
++        public void CaptureRenderMemoryEstimate(long aaTargetBytes, long bloomTargetBytes, long toneMapOutputBytes)
++        {
++            if (performanceSamplesRecorded == 0)
++                return;
++
++            var sampleIndex = (performanceSampleIndex - 1 + PerformanceSampleCount) % PerformanceSampleCount;
++            aaTargetMemorySamples[sampleIndex] = aaTargetBytes;
++            bloomTargetMemorySamples[sampleIndex] = bloomTargetBytes;
++            toneMapOutputMemorySamples[sampleIndex] = toneMapOutputBytes;
++            renderMemorySampleAvailable[sampleIndex] = true;
++        }
++
+         private string ExportFrameProfile()
+         {
+             var directory = Path.Combine(
+@@ -253,6 +270,7 @@
+                 csv.Append(",gpu_").Append(columnName).Append("_ms,gpu_")
+                     .Append(columnName).Append("_age_frames");
+             }
++            csv.Append(",aa_target_estimated_bytes,bloom_targets_estimated_bytes,tonemap_output_target_estimated_bytes");
+             csv.AppendLine();
+             var start = (performanceSampleIndex - performanceSamplesRecorded + PerformanceSampleCount) % PerformanceSampleCount;
+             for (var i = 0; i < performanceSamplesRecorded; i++)
+@@ -285,6 +303,17 @@
+                         csv.Append(',');
+                     }
+                 }
++                csv.Append(',');
++                if (renderMemorySampleAvailable[index])
++                {
++                    csv.Append(aaTargetMemorySamples[index].ToString(CultureInfo.InvariantCulture)).Append(',')
++                        .Append(bloomTargetMemorySamples[index].ToString(CultureInfo.InvariantCulture)).Append(',')
++                        .Append(toneMapOutputMemorySamples[index].ToString(CultureInfo.InvariantCulture));
++                }
++                else
++                {
++                    csv.Append(',').Append(',');
++                }
+                 csv.AppendLine();
+             }
+             File.WriteAllText(path, csv.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+--- a/src/LibreLancer/GameStates/SpaceGameplay.Debug.cs
++++ b/src/LibreLancer/GameStates/SpaceGameplay.Debug.cs
+@@ -25,6 +25,10 @@
+     {
+         Game.Debug.Draw(delta, () =>
+         {
++            Game.Debug.CaptureRenderMemoryEstimate(
++                sysrender.EstimatedAAMemoryBytes,
++                sysrender.EstimatedBloomPassMemoryBytes,
++                sysrender.EstimatedToneMapOutputMemoryBytes);
+             ImGui.Checkbox("Object List", ref showObjectList);
+             ImGui.Text($"Object Count: {world.Objects.Count}");
+             string selObj = "None";
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -69,6 +69,7 @@
+   - [x] AA-Zeitmessung in SMAA Edge Detection, Blend Weights, Neighborhood Blend oder MSAA Color Resolve aufgeteilt. Der angezeigte `AA resolve`-Wert bleibt als Summe der drei SMAA-Unterpässe beziehungsweise als MSAA-Resolve-Zeit erhalten. CSV-Spaltennamen folgen jetzt den Passnamen einschließlich Frame-Clear und AA-Unterpässen. Ein NAP-only OpenGL-Profil bestätigt alle drei SMAA-Samples in einer M01A-Intro-Szene; die kontrollierte A/B- und Mehrhardware-Abnahme bleibt offen. Rohdaten: [SMAA-Unterpass-Profil](evidence/renderer/gpu-timer-aa-subpasses-20261016/README.md).
+   - [x] HDR-Nachbearbeitung besitzt eigene GPU-Timer-Unterpässe für Bloom-Extraktion, horizontalen Blur, vertikalen Blur und Tonemapping. Der MSAA-Timer endet vor dem Tonemapping, damit OpenGL-Zeitqueries nicht verschachtelt laufen. Laufzeitmessungen und FPS-Vergleich bleiben offen.
+   - [x] Der Debug-Overlay weist den geschätzten Speicher für Bloom-Extraktion/Blur-Targets sowie das dedizierte Tonemap-Ausgabeziel getrennt aus. Es sind Zielgrößen-Schätzungen ohne Treiberallokationen, nicht pro GPU-Pass gemessener Speicher; Speicher für Shader, Buffer und interne Treiberressourcen bleibt im Gesamttotal unvollständig.
++  - [x] Der Frame-Profil-CSV-Export enthält pro Frame die geschätzten AA-, Bloom- und Tonemap-Zielbytes aus dem Space-Gameplay-Debugfenster. Diese Werte sind Zielgrößen-Schätzungen; Samples außerhalb des Space-Gameplay-Fensters bleiben leer, und Treiber-/interne Allokationen sind nicht erfasst.
+ - [ ] Referenzszenen und feste Screenshots für Raum, Basis, Sternensystem, Nebel, Partikel und LancerEdit-Vorschau festlegen.
+ 
+ ### 2. Bumpmapping / Normalmaps vervollständigen
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -125,6 +125,7 @@
+ | 2215 | Add HDR exposure compensation to tone mapping, settings, CLI and Effects options |
+ | 2216 | Use linear Rec. 709 luminance for the Bloom extraction threshold |
+ | 2217 | Show estimated Bloom and tone-map target memory separately in the debug overlay |
++| 2218 | Export per-frame AA, Bloom and tone-map target memory estimates in frame profiles |
+ | 2116 | Estimate active SMAA and MSAA render-target memory |
+ | 2117 | Record the M01A dark station and ship lighting report |
+ | 2118 | Apply THN ambient and dynamic lights to shared gameplay lighting, then remove them on cleanup |
+--- a/patches/series
++++ b/patches/series
+@@ -217,3 +217,4 @@
+ client 2215-hdr-exposure-control.patch
+ client 2216-bloom-rec709-luminance-threshold.patch
+ client 2217-postprocess-memory-attribution.patch
++client 2218-export-postprocess-memory-profile.patch

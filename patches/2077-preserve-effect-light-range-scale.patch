@@ -1,0 +1,87 @@
+--- a/src/LibreLancer/World/GameWorld.cs
++++ b/src/LibreLancer/World/GameWorld.cs
+@@ -92,7 +92,7 @@
+             if (fx == null || Renderer == null || resources == null)
+                 return;
+             var particle = fx.GetEffect(resources);
+-            Renderer.SpawnTempFx(particle, position, fx.DynamicLightAnimation, fx.LightRadius, fx.LightTimeScale);
++            Renderer.SpawnTempFx(particle, position, fx.DynamicLightAnimation, fx.LightRadius, fx.LightTimeScale, fx.LightRangeScale);
+             if (fx.Sound != null && Sounds != null)
+             {
+                 var snd = Sounds.GetInstance(fx.Sound.Nickname, 0, -1, -1, position);
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -291,11 +291,13 @@
+         private List<TemporaryFx> tempFx = [];
+         private const int MaxTransientEffectLights = 128;
+         private sealed class TransientEffectLight(LightAnim animation, Vector3 position, float radius,
+-            float timeScale)
++            float timeScale, float rangeScale)
+         {
+             public readonly LightAnim Animation = animation;
+             public readonly Vector3 Position = position;
+             public readonly float Radius = radius;
++            // Retained until retail semantics distinguish this from lgt_radius.
++            public readonly float RangeScale = float.IsFinite(rangeScale) ? rangeScale : 0f;
+             public readonly float TimeScale = float.IsFinite(timeScale) && timeScale > 0 ? timeScale : 1f;
+             public readonly DynamicLight Light = new();
+             public float Age;
+@@ -327,7 +329,8 @@
+         }
+ 
+         public void SpawnTempFx(ParticleEffect? fx, Vector3 position,
+-            LightAnim? lightAnimation = null, float lightRadius = 0, float lightTimeScale = 1f)
++            LightAnim? lightAnimation = null, float lightRadius = 0, float lightTimeScale = 1f,
++            float lightRangeScale = 0f)
+         {
+             var ren = new ParticleEffectRenderer(fx)
+             {
+@@ -339,7 +342,7 @@
+             if (lightAnimation is not { Duration: > 0 } || !float.IsFinite(lightRadius) || lightRadius <= 0)
+                 return;
+ 
+-            var newLight = new TransientEffectLight(lightAnimation, position, lightRadius, lightTimeScale);
++            var newLight = new TransientEffectLight(lightAnimation, position, lightRadius, lightTimeScale, lightRangeScale);
+             if (transientEffectLights.Count < MaxTransientEffectLights)
+             {
+                 transientEffectLights.Add(newLight);
+--- a/docs/dynamic-lighting-audit.md
++++ b/docs/dynamic-lighting-audit.md
+@@ -46,7 +46,8 @@
+ - `GameWorld.SpawnTempFx()` übergibt die aufgelöste `LightAnim`-Kurve und den
+   `lgt_radius` an `SystemRenderer`. Dieser interpretiert `lgt_radius` derzeit
+   als direkte Lichtreichweite; das ist eine Arbeitsannahme. `lgt_range_scale`
+-  wird erhalten, aber noch nicht angewendet, bis seine Bedeutung verifiziert ist.
++  wird bis zum transienten Lichtobjekt durchgereicht und dort unverändert
++  aufbewahrt, aber noch nicht angewendet, bis seine Bedeutung verifiziert ist.
+ - `lgt_time_scale` ist im Retail-Effect-Arch-Pfad als separates Feld mit
+   Default `1` belegt. LibreLancer parst es optional und verwendet es für die
+   Abspielgeschwindigkeit und Lebensdauer des transienten Effektlichts. Der
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -508,7 +508,7 @@
+   Transparenz und bestehende Freelancer-Nebelparameter erhalten.
+ - [ ] Gerichtete Schatten zuerst mit Kaskaden/PCF, anschließend zusätzliche
+   Lichttypen; Shadow-Depth-Targets und Comparison-Sampler abstrahieren.
+-- [ ] Kurzlebige Effektlichter vervollständigen und messen: Mündungslichter aus `Gun.light_anim` sowie Explosionslichter aus `lgt_effect`/`lgt_radius` und `lgt_time_scale` sind vorhanden. Per-Objekt-Auswahl und Frame-Pool priorisieren nach geschätztem attenuiertem Lichtbeitrag; der Frame-Pool verwirft Quellen außerhalb ihrer Reichweite und ohne positiven Beitrag, bevor sie einen der 32 transienten Slots belegen. Bei voller 128er-Ereignisliste ersetzt ein stärker beitragendes neues Licht den derzeit schwächsten aktiven Kandidaten; die Animation wird für beide zum aktuellen Zeitpunkt bewertet. Offen sind `lgt_range_scale`, explizite Lichtdaten und hardpointgebundene Lebenszyklen für persistentes Feuer, allgemeine Sichtbarkeits-/Occlusion-Priorisierung, Qualitätsbudgets und reproduzierbare NAP-Szenenmessungen. Siehe [Feuerinventar](evidence/effect-fire-light-input-inventory-20261014.json).
++- [ ] Kurzlebige Effektlichter vervollständigen und messen: Mündungslichter aus `Gun.light_anim` sowie Explosionslichter aus `lgt_effect`/`lgt_radius` und `lgt_time_scale` sind vorhanden. Per-Objekt-Auswahl und Frame-Pool priorisieren nach geschätztem attenuiertem Lichtbeitrag; der Frame-Pool verwirft Quellen außerhalb ihrer Reichweite und ohne positiven Beitrag, bevor sie einen der 32 transienten Slots belegen. Bei voller 128er-Ereignisliste ersetzt ein stärker beitragendes neues Licht den derzeit schwächsten aktiven Kandidaten; die Animation wird für beide zum aktuellen Zeitpunkt bewertet. `lgt_range_scale` wird nun bis zum transienten Lichtobjekt durchgereicht, bleibt aber bis zur Semantikklärung ohne Laufzeitwirkung. Offen sind explizite Lichtdaten und hardpointgebundene Lebenszyklen für persistentes Feuer, allgemeine Sichtbarkeits-/Occlusion-Priorisierung, Qualitätsbudgets und reproduzierbare NAP-Szenenmessungen. Siehe [Feuerinventar](evidence/effect-fire-light-input-inventory-20261014.json).
+   - [x] Negative oder nichtendliche Frame-Deltas werden in `SystemRenderer.Update` auf null normalisiert, bevor Nebel, Partikeleffekte und transiente Lichter aktualisiert werden.
+ - [ ] Danach Laser-, Projektil- und Explosionseffekte überarbeiten: Beam- und Trefferdarstellung, Trails, Partikel, Farbverläufe sowie Größen-/Zeitverhalten aufeinander abstimmen und mit dynamischer Beleuchtung integrieren. Originaleffekte und einzeln abschaltbare Qualitätsoptionen erhalten; NAP-Referenzszenen mit Vergleichsbildern und CPU-/GPU-Zeit abnehmen.
+   - [x] `vis_beam`-Querschnittsbasis bleibt bei vertikaler oder ungültiger Richtung endlich und orthonormal; Zugriffe auf den Beam-Puffer sind auf seine Kapazität begrenzt. Vier fokussierte Tests bestehen.
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -50,6 +50,7 @@
+ | 2074 | Reconcile Surface Maps TODOs with implemented metadata, PBR, tangent, and editor paths |
+ | 2075 | Record the native Wayland NAP startup retest and remaining DFM visual gap |
+ | 2076 | Distinguish Surface Maps sampler support from pending visual filter-quality checks |
++| 2077 | Preserve lgt_range_scale through transient effect light creation without applying unknown semantics |
+ | 2011 (`lancerdecode`) | Native Vorbis EOF/reset handling |
+ | 2012 (`blurgtext`) | System FreeType without OT-SVG hooks |
+ 
+--- a/patches/series
++++ b/patches/series
+@@ -76,3 +76,4 @@
+ client 2074-surface-map-todo-status.patch
+ client 2075-dfm-pbr-wayland-startup-evidence.patch
+ client 2076-surface-map-filter-status.patch
++client 2077-preserve-effect-light-range-scale.patch

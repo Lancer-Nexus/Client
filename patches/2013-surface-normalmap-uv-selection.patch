@@ -1,0 +1,234 @@
+diff --git a/src/LibreLancer.Data/Schema/SurfaceMapsIni.cs b/src/LibreLancer.Data/Schema/SurfaceMapsIni.cs
+--- a/src/LibreLancer.Data/Schema/SurfaceMapsIni.cs
++++ b/src/LibreLancer.Data/Schema/SurfaceMapsIni.cs
+@@ -12,7 +12,7 @@
+ 
+ public sealed record SurfaceTextureLibrary(string Name, string File);
+ public sealed record SurfaceNormalMap(string Texture, string Library, string Map, float Strength,
+-    string? RoughnessMap, float? Roughness, string? MetallicMap, float? Metallic);
++    string? RoughnessMap, float? Roughness, string? MetallicMap, float? Metallic, int UvChannel = 0);
+ public sealed record SurfaceCubeMap(string Nickname, string File, string? Kind, float Strength);
+ public sealed record SurfaceNormalMapBinding(SurfaceNormalMap Map, SurfaceTextureLibrary Library);
+ 
+@@ -90,7 +90,7 @@
+             var allowed = name switch
+             {
+                 "texture" => "file name",
+-                "normalmap" => "texture library map strength roughness_map roughness metallic_map metallic",
++                "normalmap" => "texture library map strength uv roughness_map roughness metallic_map metallic",
+                 "cubemap" => "nickname file kind strength",
+                 _ => null
+             };
+@@ -125,6 +125,13 @@
+                         throw new FormatException($"Invalid {key}, expected finite 0..{maximum}");
+                     return result;
+                 }
++                int UvChannel()
++                {
++                    if (!fields.TryGetValue("uv", out var value)) return 0;
++                    if (!int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var result) || result is < 0 or > 1)
++                        throw new FormatException("Invalid uv, expected 0 or 1");
++                    return result;
++                }
+                 if (name == "texture")
+                 {
+                     var library = new SurfaceTextureLibrary(Required("name"), FilePath());
+@@ -136,7 +143,7 @@
+                 {
+                     var map = new SurfaceNormalMap(Required("texture"), Required("library"), Required("map"),
+                         Factor("strength", 16) ?? 1, Optional("roughness_map"), Factor("roughness", 1),
+-                        Optional("metallic_map"), Factor("metallic", 1));
++                        Optional("metallic_map"), Factor("metallic", 1), UvChannel());
+                     if (normalMaps.ContainsKey(map.Texture)) Warn(section.File ?? "Surface", $"Duplicate texture {map.Texture}; last mapping wins");
+                     normalMaps[map.Texture] = map;
+                 }
+diff --git a/src/LibreLancer/Resources/SurfaceMaterialResolver.cs b/src/LibreLancer/Resources/SurfaceMaterialResolver.cs
+--- a/src/LibreLancer/Resources/SurfaceMaterialResolver.cs
++++ b/src/LibreLancer/Resources/SurfaceMaterialResolver.cs
+@@ -7,7 +7,7 @@
+ public sealed record SurfaceTextureReference(string Library, string File, string Node);
+ public sealed record SurfaceMaterialBinding(SurfaceTextureReference? Normal, float NormalStrength,
+     SurfaceTextureReference? RoughnessMap, float? Roughness,
+-    SurfaceTextureReference? MetallicMap, float? Metallic);
++    SurfaceTextureReference? MetallicMap, float? Metallic, int NormalUvChannel = 0);
+ 
+ /// <summary>Resolves supplemental metadata without loading textures or changing MAT-owned values.</summary>
+ public static class SurfaceMaterialResolver
+@@ -29,6 +29,6 @@
+         if (normal == null && roughMap == null && metalMap == null && roughness == null && metallic == null)
+             return null;
+         return new SurfaceMaterialBinding(normal, normal != null ? map.Strength : 1,
+-            roughMap, roughness, metalMap, metallic);
++            roughMap, roughness, metalMap, metallic, normal != null ? map.UvChannel : 0);
+     }
+ }
+diff --git a/src/LibreLancer/Render/Materials/BasicMaterial.cs b/src/LibreLancer/Render/Materials/BasicMaterial.cs
+--- a/src/LibreLancer/Render/Materials/BasicMaterial.cs
++++ b/src/LibreLancer/Render/Materials/BasicMaterial.cs
+@@ -66,6 +66,16 @@
+         }
+         public string NmSampler;
+         public SamplerFlags NmFlags;
++        internal int NormalMapUvChannel => !string.IsNullOrWhiteSpace(NmSampler)
++            ? (NmFlags & SamplerFlags.SecondUV) != 0 ? 1 : 0
++            : SurfaceBinding?.Normal is not null ? SurfaceBinding.NormalUvChannel : 0;
++        internal SamplerFlags GetNormalMapSamplerFlags(bool useSurfaceNormal)
++        {
++            if (!useSurfaceNormal || !string.IsNullOrWhiteSpace(NmSampler)) return NmFlags;
++            return SurfaceBinding?.NormalUvChannel == 1
++                ? NmFlags | SamplerFlags.SecondUV
++                : NmFlags & ~SamplerFlags.SecondUV;
++        }
+         public string MtSampler;
+         public SamplerFlags MtFlags;
+         public string RtSampler;
+@@ -305,6 +315,7 @@
+                 BindTexture(rstate, 3, envmaptex, 3, SamplerFlags.Default);
+             }
+ 
++            var normalFlags = GetNormalMapSamplerFlags(activeSurfaceNormal != null);
+             if (pbr)
+             {
+                 var param = new PBRParameters()
+@@ -321,7 +332,7 @@
+                     BindTexture(rstate, 4, RtSampler, 4, RtFlags, ResourceManager.WhiteTextureName);
+                 }
+ 
+-                SetTextureCoordinates(shader, DtFlags, EtFlags, NmFlags, MtFlags, RtFlags);
++                SetTextureCoordinates(shader, DtFlags, EtFlags, normalFlags, MtFlags, RtFlags);
+             }
+             else
+             {
+@@ -331,7 +342,7 @@
+                     Tex2Type = BtEnabled ? 1 : 0, NormalStrength = activeSurfaceNormal != null ? activeSurfaceNormalStrength : NormalStrength
+                 };
+                 shader.SetUniformBlock(3, ref param);
+-                SetTextureCoordinates(shader, DtFlags, EtFlags, NmFlags, BtFlags);
++                SetTextureCoordinates(shader, DtFlags, EtFlags, normalFlags, BtFlags);
+             }
+ 
+             // Set lights
+diff --git a/src/LibreLancer/RigidModel.cs b/src/LibreLancer/RigidModel.cs
+--- a/src/LibreLancer/RigidModel.cs
++++ b/src/LibreLancer/RigidModel.cs
+@@ -163,7 +163,8 @@
+                     dc.MeshIndex >= 0 && dc.MeshIndex < sourceData.Meshes.Length)
+                 {
+                     var tangentBaseVertex = dc.BaseVertex - sourceData.Meshes[dc.MeshIndex].StartVertex;
+-                    var tangentResource = l.Resource.TryGetTangentResource(dc.MeshIndex, tangentBaseVertex, 0, res);
++                    var uvChannel = ((BasicMaterial)mat.Render).NormalMapUvChannel;
++                    var tangentResource = l.Resource.TryGetTangentResource(dc.MeshIndex, tangentBaseVertex, uvChannel, res);
+                     if (tangentResource is { IsDisposed: false })
+                     {
+                         drawVertexResource = tangentResource;
+diff --git a/src/LibreLancer/Utf/Dfm/DfmMesh.cs b/src/LibreLancer/Utf/Dfm/DfmMesh.cs
+--- a/src/LibreLancer/Utf/Dfm/DfmMesh.cs
++++ b/src/LibreLancer/Utf/Dfm/DfmMesh.cs
+@@ -65,7 +65,7 @@
+             if (!res.SurfaceGeneratedTangentsEnabled) return null;
+             var authored = !string.IsNullOrWhiteSpace(material.NmSampler);
+             if (!authored && (!res.SurfaceNormalMapsEnabled || material.SurfaceBinding?.Normal == null)) return null;
+-            int uv = (material.NmFlags & SamplerFlags.SecondUV) != 0 ? 1 : 0;
++            int uv = material.NormalMapUvChannel;
+             if (uv == 1 && (UV1 == null || UV1Indices == null)) return null;
+             var key = (group, uv);
+             if (!tangentEntries.TryGetValue(key, out var entry))
+diff --git a/src/LibreLancer.Tests/SurfaceMapsIniTests.cs b/src/LibreLancer.Tests/SurfaceMapsIniTests.cs
+--- a/src/LibreLancer.Tests/SurfaceMapsIniTests.cs
++++ b/src/LibreLancer.Tests/SurfaceMapsIniTests.cs
+@@ -28,6 +28,7 @@
+             library = SHIPS
+             map = nm_hull
+             strength = 6
++            uv = 1
+             roughness_map = rt_hull
+             roughness = 0.8
+             metallic = 0
+@@ -43,10 +44,22 @@
+         Assert.True(maps.TryResolveNormalMap("HULL.TGA", out var binding));
+         Assert.Equal("DATA/fx/ships.txm", binding!.Library.File);
+         Assert.Equal(6, binding.Map.Strength);
++        Assert.Equal(1, binding.Map.UvChannel);
+         Assert.Equal(0.8f, binding.Map.Roughness);
+         Assert.Equal(0, binding.Map.Metallic);
+         Assert.Equal(0.35f, maps.CubeMaps["SKY"].Strength);
+         Assert.Empty(maps.Diagnostics);
++    }
++
++    [Theory]
++    [InlineData("-1")]
++    [InlineData("2")]
++    [InlineData("NaN")]
++    public void RejectsInvalidNormalMapUvChannel(string value)
++    {
++        var maps = Parse($"[NormalMap]\ntexture = hull\nlibrary = ships\nmap = nm\nuv = {value}\n");
++        Assert.Empty(maps.NormalMaps);
++        Assert.NotEmpty(maps.Diagnostics);
+     }
+ 
+     [Theory]
+@@ -69,6 +82,7 @@
+         var map = Assert.Single(maps.NormalMaps).Value;
+         Assert.Equal("new", map.Map);
+         Assert.Equal(1, map.Strength);
++        Assert.Equal(0, map.UvChannel);
+         Assert.Null(map.Roughness);
+         Assert.Null(map.Metallic);
+         Assert.False(maps.TryResolveNormalMap("hull", out _));
+diff --git a/src/LibreLancer.Tests/SurfaceMaterialResolverTests.cs b/src/LibreLancer.Tests/SurfaceMaterialResolverTests.cs
+--- a/src/LibreLancer.Tests/SurfaceMaterialResolverTests.cs
++++ b/src/LibreLancer.Tests/SurfaceMaterialResolverTests.cs
+@@ -24,6 +24,7 @@
+             texture = hull
+             library = ships
+             map = nm_hull
++            uv = 1
+             strength = 2.5
+             roughness_map = rt_hull
+             roughness = 0.8
+@@ -44,6 +45,7 @@
+         Assert.Equal("DATA/fx/ships.txm", binding.Normal!.File);
+         Assert.Equal("nm_hull", binding.Normal.Node);
+         Assert.Equal(2.5f, binding.NormalStrength);
++        Assert.Equal(1, binding.NormalUvChannel);
+         Assert.Equal("rt_hull", binding.RoughnessMap!.Node);
+         Assert.Equal("mt_hull", binding.MetallicMap!.Node);
+         var render = Assert.IsType<BasicMaterial>(material.Render);
+@@ -51,6 +53,26 @@
+         Assert.Null(render.NmSampler);
+         Assert.Null(render.RtSampler);
+         Assert.Null(render.MtSampler);
++    }
++
++    [Fact]
++    public void NormalUvSelectionUsesSurfaceChannelUnlessMatSamplerOwnsIt()
++    {
++        var res = Resources();
++        var material = new Material(res) { DtName = "hull" };
++        material.Initialize(res);
++        var render = Assert.IsType<BasicMaterial>(material.Render);
++        Assert.Equal(1, render.NormalMapUvChannel);
++        Assert.Equal(LibreLancer.Utf.Mat.SamplerFlags.SecondUV,
++            render.GetNormalMapSamplerFlags(useSurfaceNormal: true) & LibreLancer.Utf.Mat.SamplerFlags.SecondUV);
++
++        render.NmSampler = "mat_normal";
++        render.NmFlags = LibreLancer.Utf.Mat.SamplerFlags.None;
++        Assert.Equal(0, render.NormalMapUvChannel);
++        Assert.Equal(LibreLancer.Utf.Mat.SamplerFlags.None,
++            render.GetNormalMapSamplerFlags(useSurfaceNormal: true) & LibreLancer.Utf.Mat.SamplerFlags.SecondUV);
++        render.NmFlags = LibreLancer.Utf.Mat.SamplerFlags.SecondUV;
++        Assert.Equal(1, render.NormalMapUvChannel);
+     }
+ 
+     [Fact]
+diff --git a/docs/surface-maps.md b/docs/surface-maps.md
+--- a/docs/surface-maps.md
++++ b/docs/surface-maps.md
+@@ -153,6 +153,7 @@
+ library  = surface_normalmaps_ships ; Name aus [Texture] (je Gruppe: ships, bases, solar, planets)
+ map      = nm_li_elite_hull      ; Texturknoten in der Bibliothek
+ strength = 2.5                   ; Faktor auf die Normalenabweichung, 0 = aus, 1 = unverändert
++uv       = 0                     ; UV-Kanal 0 oder 1 für Normalmap und Tangentenbasis (Standard 0)
+ roughness_map = rt_li_elite_hull ; optional, Einkanalkarte (R) in derselben Bibliothek
+ roughness     = 1                ; Faktor auf die Karte
+ metallic_map  = mt_li_elite_hull ; optional

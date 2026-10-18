@@ -1,0 +1,60 @@
+--- a/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
++++ b/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
+@@ -563,17 +563,27 @@
+         if (attachment is not { } contract)
+             return;
+ 
++        var resource = (int)contract.Resource;
++        if (resource == 0 || (resource & (resource - 1)) != 0)
++            throw new InvalidOperationException(
++                $"Render pass '{name}' {attachmentName} must name exactly one resource.");
++
+         if (contract.Load == SystemRenderLoadOperation.Load &&
+             (reads & contract.Resource) != contract.Resource)
+             throw new InvalidOperationException(
+                 $"Render pass '{name}' loads {attachmentName} without declaring its resource as read.");
+ 
+-        if (!isSource &&
+-            (contract.Load is SystemRenderLoadOperation.Clear or SystemRenderLoadOperation.DontCare) &&
+-            (contract.Store is SystemRenderStoreOperation.Store or SystemRenderStoreOperation.ResolveColor) &&
+-            (writes & contract.Resource) != contract.Resource)
+-            throw new InvalidOperationException(
+-                $"Render pass '{name}' stores {attachmentName} without declaring its resource as written.");
++        if (isSource)
++            return;
++
++        var stored = contract.Store is SystemRenderStoreOperation.Store or SystemRenderStoreOperation.ResolveColor;
++        var declaredWrite = (writes & contract.Resource) == contract.Resource;
++        if (stored != declaredWrite)
++            throw new InvalidOperationException(
++                $"Render pass '{name}' {attachmentName} store operation and declared write do not match.");
++        if (contract.Store == SystemRenderStoreOperation.ResolveColor && attachmentName != "color")
++            throw new InvalidOperationException(
++                $"Render pass '{name}' resolves a non-color {attachmentName} attachment.");
+     }
+ 
+     public static int Count => Descriptors.Length;
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -64,6 +64,7 @@
+   - [x] Laufzeitvalidierung für Postprocess-Subpasses ergänzt: SMAA, SSAO, Bloom und Tonemapping prüfen an ihren tatsächlichen Begin-/End-Aufrufen die Ressourcenabhängigkeiten. Verfügbare Hauptpass-Ressourcen und externe Lookup-/Ausgabeziele bilden den Frame-Anfang; optionale Bloom-Eingaben bleiben für Tonemapping optional. Der Frameabschluss stellt zusätzlich sicher, dass kein Subpass offen blieb. Das prüft Read-before-write und Passpaarung, steuert aber weiterhin keine Befehle oder Targetwechsel. Build- und Laufzeitabnahme stehen aus.
+   - [x] Die tatsächlichen Hauptpasses laufen nun über `ExecuteGpuPass`: Zielbindung prüfen, Pass beginnen, Draw ausführen, Timer/Marker schließen und den erzeugten Ressourcenstatus erst nach erfolgreichem Draw und Targetabschluss veröffentlichen. Fehlgeschlagene Draws brechen den Pass ab und erzeugen keine verfügbaren Ressourcen. Die Aufrufreihenfolge und Targetwechsel bleiben manuell gesteuert; ein Render-Graph-Scheduler ist damit noch nicht vorhanden.
+   - [x] Laufzeitprüfung der Scene- und Shadow-Map-Attachments folgt jetzt den Pflicht-/Optional-Angaben des jeweiligen Passvertrags. Optionale Depth-/Stencil-Attachments werden nicht pauschal verlangt; zwingend deklarierte Farb-, Tiefen- oder Stencil-Anhänge werden gezielt geprüft. Shadow-Map-Pässe prüfen zusätzlich, dass ihr Ziel eine samplebare Depth-Textur ist. Ein Render-Graph-Scheduler und tatsächliche Bindungs-/Formatprüfung pro Szenenpass bleiben offen.
++  - [x] Statische Passvertrag-Prüfung verlangt pro Attachment genau eine Ressource und gleicht Store/Resolve-Verhalten mit den deklarierten Writes ab; Resolve ist nur für Color erlaubt. Source-Attachments bleiben Read-Verträge. Die Metadaten steuern weiterhin nicht selbst die API-Aufrufe.
+   - [x] Der Hauptpass-Tracker veröffentlicht nach erfolgreichem Draw nur deklarierte Writes, deren optionale Attachments am konkreten Target vorhanden sind. Fehlende oder unbekannte optionale Anhänge werden nicht als verfügbare Frame-Ressourcen ausgegeben; Targetwechsel und Passplanung bleiben manuell.
+   - [x] Gebundene Backend-Renderziele stellen Farb-/Tiefen-/Stencil-Präsenz und ein bekanntes Farbformat bereit. `SystemRenderer` weist Ziele zurück, denen laut Passvertrag zwingende Anhänge fehlen; GL-MSAA meldet das Farbformat nur für bekannte sized-Formate. Swapchainformat und Desktop-GLs unsized-MSAA-Storage bleiben unbekannt.
+   - [x] `AntialiasTarget` prüft beim Erzeugen die tatsächlichen aktiven Farb-/Tiefenattachments und für SMAA auch Stencil an Kanten- und Gewichtsziel; bekannte Zielformate müssen dem gewählten LDR-/HDR-Pfad entsprechen. Unbekanntes Desktop-MSAA-Format bleibt zulässig und wird nicht geraten.
+--- a/patches/series
++++ b/patches/series
+@@ -268,3 +268,4 @@
+ client 2266-execute-main-render-passes.patch
+ client 2267-honor-scene-attachment-contracts.patch
+ client 2268-publish-only-available-pass-resources.patch
++client 2269-validate-attachment-store-contracts.patch
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -230,3 +230,4 @@
+ | 2266 | Execute main renderer passes through a failure-aware pass runner |
+ | 2267 | Honor required and optional scene attachment contracts at runtime |
+ | 2268 | Publish only resources backed by available pass attachments |
++| 2269 | Validate attachment store operations against pass resource declarations |

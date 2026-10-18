@@ -1,0 +1,236 @@
+diff --git a/src/LibreLancer.Base/Graphics/SystemRenderPass.cs b/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
+--- a/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
++++ b/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
+@@ -91,7 +91,107 @@
+     SystemRenderAttachmentContract? Color,
+     SystemRenderAttachmentContract? Depth,
+     SystemRenderAttachmentContract? Stencil,
+-    bool Conditional = false);
++    bool Conditional = false,
++    SystemRenderResource OptionalReads = SystemRenderResource.None);
++
++/// <summary>Checks the pass order and resource dependencies of one real frame.</summary>
++public sealed class SystemRenderPassExecution
++{
++    private static readonly SystemRenderPass[] RequiredPasses =
++    [SystemRenderPass.FrameClear, SystemRenderPass.Opaque, SystemRenderPass.Transparent];
++    private SystemRenderResource available;
++    private SystemRenderResource requiredBeforeTransparent;
++    private SystemRenderPass? activePass;
++    private int lastOrder = -1;
++    private uint completedMask;
++
++    private bool IsCompleted(SystemRenderPass pass) =>
++        (completedMask & (1u << (int)pass)) != 0;
++
++    public void Reset()
++    {
++        available = SystemRenderResource.None;
++        requiredBeforeTransparent = SystemRenderResource.None;
++        activePass = null;
++        lastOrder = -1;
++        completedMask = 0;
++    }
++
++    public void RequireBeforeTransparent(SystemRenderResource resources) =>
++        requiredBeforeTransparent |= resources;
++
++    public void Begin(SystemRenderPass pass)
++    {
++        if (activePass != null)
++            throw new InvalidOperationException(
++                $"Render pass '{SystemRenderPasses.Get(activePass.Value).Name}' is still active.");
++
++        var order = GetOrder(pass);
++        var descriptor = SystemRenderPasses.Get(pass);
++        if (order < lastOrder || IsCompleted(pass))
++            throw new InvalidOperationException(
++                $"Render pass '{descriptor.Name}' is out of order or was executed more than once.");
++
++        var prerequisite = pass switch
++        {
++            SystemRenderPass.SsaoDepthPrepass or SystemRenderPass.ParticleDepthPrepass or
++                SystemRenderPass.DepthPrepass or SystemRenderPass.ShadowMap or
++                SystemRenderPass.Opaque => SystemRenderPass.FrameClear,
++            SystemRenderPass.StarsAndNebula or SystemRenderPass.Transparent => SystemRenderPass.Opaque,
++            _ => (SystemRenderPass?)null
++        };
++        if (prerequisite is { } requiredPass && !IsCompleted(requiredPass))
++            throw new InvalidOperationException(
++                $"Render pass '{descriptor.Name}' requires '{SystemRenderPasses.Get(requiredPass).Name}' first.");
++
++        var required = descriptor.Reads & ~descriptor.OptionalReads;
++        if (pass == SystemRenderPass.Transparent)
++            required |= requiredBeforeTransparent;
++        var missing = required & ~available;
++        if (missing != SystemRenderResource.None)
++            throw new InvalidOperationException(
++                $"Render pass '{descriptor.Name}' reads unavailable frame resources {missing}.");
++
++        lastOrder = order;
++        activePass = pass;
++    }
++
++    public void End(SystemRenderPass pass)
++    {
++        if (activePass != pass)
++            throw new InvalidOperationException(
++                $"Render pass '{SystemRenderPasses.Get(pass).Name}' ended without a matching begin.");
++        available |= SystemRenderPasses.Get(pass).Writes;
++        completedMask |= 1u << (int)pass;
++        activePass = null;
++    }
++
++    public void CompleteFrame()
++    {
++        if (activePass != null)
++            throw new InvalidOperationException(
++                $"Render frame ended while pass '{SystemRenderPasses.Get(activePass.Value).Name}' was active.");
++        foreach (var required in RequiredPasses)
++        {
++            if (!IsCompleted(required))
++                throw new InvalidOperationException(
++                    $"Render frame ended before required pass '{SystemRenderPasses.Get(required).Name}'.");
++        }
++    }
++
++    private static int GetOrder(SystemRenderPass pass) => pass switch
++    {
++        SystemRenderPass.FrameClear => 0,
++        SystemRenderPass.SsaoDepthPrepass or SystemRenderPass.ParticleDepthPrepass => 1,
++        SystemRenderPass.DepthPrepass => 2,
++        SystemRenderPass.ShadowMap => 3,
++        SystemRenderPass.Opaque => 4,
++        SystemRenderPass.StarsAndNebula => 5,
++        SystemRenderPass.Transparent => 6,
++        _ => throw new InvalidOperationException(
++            $"Pass '{SystemRenderPasses.Get(pass).Name}' is not part of the SystemRenderer frame sequence.")
++    };
++}
+ 
+ public enum SystemRenderSubpass
+ {
+@@ -146,9 +246,10 @@
+         new(SystemRenderPass.DepthPrepass, "Depth",
+             SystemRenderResource.SceneDepth,
+             SystemRenderResource.SceneDepth, SystemRenderTargetRole.Scene,
++            null,
+             new(SystemRenderResource.SceneDepth, SystemRenderAttachmentFormat.ActiveTarget,
+-                SystemRenderLoadOperation.Load, SystemRenderStoreOperation.Store, Optional: true), null, null,
+-            Conditional: true),
++                SystemRenderLoadOperation.Load, SystemRenderStoreOperation.Store, Optional: true), null,
++            Conditional: true, OptionalReads: SystemRenderResource.SceneDepth),
+         new(SystemRenderPass.Opaque, "Opaque",
+             SystemRenderResource.SceneColor | SystemRenderResource.SceneDepth | SystemRenderResource.ShadowDepth,
+             SystemRenderResource.SceneColor | SystemRenderResource.SceneDepth,
+@@ -156,7 +257,8 @@
+             new(SystemRenderResource.SceneColor, SystemRenderAttachmentFormat.ActiveTarget,
+                 SystemRenderLoadOperation.Load, SystemRenderStoreOperation.Store),
+             new(SystemRenderResource.SceneDepth, SystemRenderAttachmentFormat.ActiveTarget,
+-                SystemRenderLoadOperation.Load, SystemRenderStoreOperation.Store, Optional: true), null),
++                SystemRenderLoadOperation.Load, SystemRenderStoreOperation.Store, Optional: true), null,
++            OptionalReads: SystemRenderResource.SceneDepth | SystemRenderResource.ShadowDepth),
+         new(SystemRenderPass.StarsAndNebula, "Stars / nebula",
+             SystemRenderResource.SceneColor | SystemRenderResource.SceneDepth,
+             SystemRenderResource.SceneColor, SystemRenderTargetRole.Scene,
+@@ -164,14 +266,15 @@
+                 SystemRenderLoadOperation.Load, SystemRenderStoreOperation.Store),
+             new(SystemRenderResource.SceneDepth, SystemRenderAttachmentFormat.ActiveTarget,
+                 SystemRenderLoadOperation.Load, SystemRenderStoreOperation.Store, Optional: true), null,
+-            Conditional: true),
++            Conditional: true, OptionalReads: SystemRenderResource.SceneDepth),
+         new(SystemRenderPass.Transparent, "Transparent",
+             SystemRenderResource.SceneColor | SystemRenderResource.SceneDepth,
+             SystemRenderResource.SceneColor, SystemRenderTargetRole.Scene,
+             new(SystemRenderResource.SceneColor, SystemRenderAttachmentFormat.ActiveTarget,
+                 SystemRenderLoadOperation.Load, SystemRenderStoreOperation.Store),
+             new(SystemRenderResource.SceneDepth, SystemRenderAttachmentFormat.ActiveTarget,
+-                SystemRenderLoadOperation.Load, SystemRenderStoreOperation.Store, Optional: true), null),
++            SystemRenderLoadOperation.Load, SystemRenderStoreOperation.Store, Optional: true), null,
++            OptionalReads: SystemRenderResource.SceneDepth),
+         new(SystemRenderPass.AntialiasResolve, "AA resolve",
+             SystemRenderResource.SceneColor | SystemRenderResource.PresentationColor,
+             SystemRenderResource.PresentationColor, SystemRenderTargetRole.Presentation,
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -70,6 +70,7 @@
+         private Billboards billboards;
+         private ResourceManager resman;
+         private IGpuTimerQuery?[]? gpuPassQueries;
++        private readonly SystemRenderPassExecution activeFramePasses = new();
+         private long nextGpuProfileFrame;
+         private long currentGpuProfileFrame;
+         private const int ShadowMapResolution = 1024;
+@@ -583,6 +584,10 @@
+                 // With AA this is the offscreen AntialiasTarget; otherwise it is
+                 // the caller's current target (which may be the screen).
+                 RenderTarget? sceneTarget = rstate.RenderTarget;
++                activeFramePasses.Reset();
++                if (Settings.RenderSoftParticles && Settings.RenderParticleEffects &&
++                    (msaa?.SsaoDepthTarget != null || softParticleDepthTarget != null))
++                    activeFramePasses.RequireBeforeTransparent(SystemRenderResource.SampleableSceneDepth);
+ 
+                 RenderMaterial.VertexLighting = !(AllowPerPixelLighting && Settings.PerPixelLighting);
+                 rstate.PreferredFilterLevel = Settings.SelectedFiltering;
+@@ -892,6 +897,7 @@
+                     RenderMaterial.ParticleSceneDepthTexture = null;
+                     RenderMaterial.ParticleSoftness = 0f;
+                 }
++                activeFramePasses.CompleteFrame();
+                 rstate.DepthWrite = true;
+                 rstate.DepthEnabled = true;
+                 PhysicsHook?.Invoke();
+@@ -1005,6 +1011,7 @@
+ 
+         private void BeginGpuPass(SystemRenderPass pass)
+         {
++            activeFramePasses.Begin(pass);
+             rstate.PushRenderDocMaterialMarker(SystemRenderPasses.Get(pass).Name);
+             try
+             {
+@@ -1220,7 +1227,14 @@
+             }
+             finally
+             {
+-                rstate.PopRenderDocMaterialMarker();
++                try
++                {
++                    rstate.PopRenderDocMaterialMarker();
++                }
++                finally
++                {
++                    activeFramePasses.End(pass);
++                }
+             }
+         }
+ 
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -60,6 +60,7 @@
+     [Target-Attachment-Audit](evidence/renderer/render-target-attachment-contract-20261016.md).
+   - [x] Bestehende Forward-Aufrufreihenfolge, Opaque-/Transparent-Kommandos, Sterne, Nebel und AA-Resolve im Quellcode erfasst. Der Depth-Prepass-Metadatavertrag ist als optional markiert und liest/schreibt nur SceneDepth; er beansprucht keinen Szenenfarb-Read oder Color-Attachment. Die Metadaten sind noch kein ausführbarer Render Graph. Siehe [Pass-Reihenfolge-Audit](evidence/renderer/forward-pass-order-audit-20261015.md).
+   - [x] Samplebare Tiefentextur als eigenen Graph-Ressourcentyp vom aktiven Szenen-Tiefenattachment getrennt. SSAO und Soft Particles deklarieren und validieren den DepthTexture-Passausgang beim realen Target-Binding; SSAO deklariert dieselbe Ressource als Quelle. Der restliche Main-Pass-Ablauf ist weiterhin manuell gesteuert.
++  - [x] Laufzeitvalidierung an die tatsächlichen Hauptpass-Aufrufe gebunden: pro Frame werden Reihenfolge, doppelte/fehlende Begin-End-Paare und Pflichtressourcen geprüft; optionale Szene-Tiefe und Schatten bleiben ausdrücklich optional. Der wiederverwendete Validator speichert ausgeführte Pässe als Bitmaske. Render-Befehle und Targetwechsel werden weiterhin manuell ausgeführt, also noch kein ausführbarer Render Graph.
+ - [ ] Render-Target-Resize, minimierte Fenster, Scissor-/Viewport-Wechsel und Geräteverlust für zusätzliche Pässe absichern.
+   - [x] `AntialiasTarget` registriert alle während des Aufbaus erzeugten GPU-Ressourcen in einem idempotenten `RenderResourceScope`. Teilaufbauten werden auch bei Konstruktionsfehlern in umgekehrter Erzeugungsreihenfolge abgebaut; die Postprocess-Pässe werden vor den von ihnen geliehenen Szenen-/SMAA-Zielen freigegeben. Fehler beim Freigeben einer Ressource verhindern die Freigabe der übrigen nicht. Der `SystemRenderer`-Pfad wurde mit HDR/Bloom/SSAO/SMAA unter OpenGL auf 960×540 → 1280×720 sowie Minimize/Restore geprüft; siehe [Resize-Laufzeitnachweis](evidence/renderer/postprocess-window-resize-20261017/README.md). Editor-/Offscreen-Targets, Fehler-Injektion, Geräteverlust und Cross-Backend-Wiederherstellung bleiben offen.
+   - [x] `SystemRenderer.Draw()` überspringt Frames mit Breite/Höhe 0. Bei geändertem Rendermaß oder AA-Modus gibt es das vorhandene MSAA-Target frei und erstellt es neu. Das belegt nur diesen System-Renderer-Pfad; Editor-/Offscreen-Targets, Wiederherstellungstests und Geräteverlust bleiben offen.
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,5 +1,5 @@
+ # Client patch groups
+ 
+-The active series contains 255 Client bundles and two native bundles. Each
++The active series contains 256 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -255,3 +255,4 @@ client 2253-structured-opengl-debug-diagnostics.patch
+ client 2254-record-m01a-ship-light-occlusion-runtime-attempt.patch
+ client 2255-soft-particles.patch
+ client 2256-separate-sampleable-scene-depth-contract.patch
++client 2257-runtime-system-pass-validation.patch

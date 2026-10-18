@@ -1,0 +1,204 @@
+diff --git a/src/LibreLancer.Data/Schema/Effects/Effect.cs b/src/LibreLancer.Data/Schema/Effects/Effect.cs
+--- a/src/LibreLancer.Data/Schema/Effects/Effect.cs
++++ b/src/LibreLancer.Data/Schema/Effects/Effect.cs
+@@ -29,6 +29,8 @@
+     public string? LgtEffect;
+     [Entry("lgt_range_scale")]
+     public float LgtRangeScale;
++    [Entry("lgt_time_scale")]
++    public float LgtTimeScale = 1f;
+     [Entry("lgt_radius")]
+     public float LgtRadius;
+ }
+diff --git a/src/LibreLancer.Data/GameData/ResolvedFx.cs b/src/LibreLancer.Data/GameData/ResolvedFx.cs
+--- a/src/LibreLancer.Data/GameData/ResolvedFx.cs
++++ b/src/LibreLancer.Data/GameData/ResolvedFx.cs
+@@ -18,5 +18,6 @@
+     public AudioEntry? Sound;
+     public LightAnim? DynamicLightAnimation;
+     public float LightRangeScale;
++    public float LightTimeScale = 1f;
+     public float LightRadius;
+ }
+diff --git a/src/LibreLancer.Data/GameItemDb.cs b/src/LibreLancer.Data/GameItemDb.cs
+--- a/src/LibreLancer.Data/GameItemDb.cs
++++ b/src/LibreLancer.Data/GameItemDb.cs
+@@ -253,6 +253,7 @@
+                 Sound = sound,
+                 DynamicLightAnimation = flData.LightAnimations.Find(effect.LgtEffect),
+                 LightRangeScale = effect.LgtRangeScale,
++                LightTimeScale = effect.LgtTimeScale,
+                 LightRadius = effect.LgtRadius
+             });
+         }
+diff --git a/src/LibreLancer/World/GameWorld.cs b/src/LibreLancer/World/GameWorld.cs
+--- a/src/LibreLancer/World/GameWorld.cs
++++ b/src/LibreLancer/World/GameWorld.cs
+@@ -92,7 +92,7 @@
+             if (fx == null || Renderer == null || resources == null)
+                 return;
+             var particle = fx.GetEffect(resources);
+-            Renderer.SpawnTempFx(particle, position, fx.DynamicLightAnimation, fx.LightRadius);
++            Renderer.SpawnTempFx(particle, position, fx.DynamicLightAnimation, fx.LightRadius, fx.LightTimeScale);
+             if (fx.Sound != null && Sounds != null)
+             {
+                 var snd = Sounds.GetInstance(fx.Sound.Nickname, 0, -1, -1, position);
+diff --git a/src/LibreLancer.Data/Schema/LightAnimIni.cs b/src/LibreLancer.Data/Schema/LightAnimIni.cs
+--- a/src/LibreLancer.Data/Schema/LightAnimIni.cs
++++ b/src/LibreLancer.Data/Schema/LightAnimIni.cs
+@@ -24,6 +24,19 @@
+         Name = name;
+         Frames = frames.OrderBy(f => f.Time).ToArray();
+     }
++
++    public static float ScalePlaybackTime(float elapsed, float timeScale)
++    {
++        if (!float.IsFinite(elapsed) || elapsed < 0) elapsed = 0;
++        if (!float.IsFinite(timeScale) || timeScale <= 0) timeScale = 1;
++        return elapsed * timeScale;
++    }
++
++    public LightAnimFrame Sample(float elapsed, float timeScale) =>
++        Sample(ScalePlaybackTime(elapsed, timeScale));
++
++    public bool IsPlaybackComplete(float elapsed, float timeScale) =>
++        ScalePlaybackTime(elapsed, timeScale) >= Duration;
+ 
+     public LightAnimFrame Sample(float time)
+     {
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -214,7 +214,7 @@
+             {
+                 var effectLight = transientEffectLights[i];
+                 effectLight.Age += (float)Math.Max(0, elapsed);
+-                if (effectLight.Age >= effectLight.Animation.Duration)
++                if (effectLight.Animation.IsPlaybackComplete(effectLight.Age, effectLight.TimeScale))
+                     transientEffectLights.RemoveAt(i);
+             }
+         }
+@@ -288,11 +288,13 @@
+ 
+         private List<TemporaryFx> tempFx = [];
+         private const int MaxTransientEffectLights = 128;
+-        private sealed class TransientEffectLight(LightAnim animation, Vector3 position, float radius)
++        private sealed class TransientEffectLight(LightAnim animation, Vector3 position, float radius,
++            float timeScale)
+         {
+             public readonly LightAnim Animation = animation;
+             public readonly Vector3 Position = position;
+             public readonly float Radius = radius;
++            public readonly float TimeScale = float.IsFinite(timeScale) && timeScale > 0 ? timeScale : 1f;
+             public readonly DynamicLight Light = new();
+             public float Age;
+         }
+@@ -300,7 +302,7 @@
+         private readonly List<TransientEffectLight> transientEffectLights = [];
+ 
+         public void SpawnTempFx(ParticleEffect? fx, Vector3 position,
+-            LightAnim? lightAnimation = null, float lightRadius = 0)
++            LightAnim? lightAnimation = null, float lightRadius = 0, float lightTimeScale = 1f)
+         {
+             var ren = new ParticleEffectRenderer(fx)
+             {
+@@ -311,7 +313,8 @@
+             tempFx.Add(new TemporaryFx(ren, position));
+             if (lightAnimation is { Duration: > 0 } && lightRadius > 0 &&
+                 transientEffectLights.Count < MaxTransientEffectLights)
+-                transientEffectLights.Add(new TransientEffectLight(lightAnimation, position, lightRadius));
++                transientEffectLights.Add(new TransientEffectLight(lightAnimation, position, lightRadius,
++                    lightTimeScale));
+         }
+ 
+         public bool ZOverride = false; // Stop Thn Camera from changing Z
+@@ -350,7 +353,7 @@
+             SystemLighting.BeginFrame(camera.Position);
+             foreach (var effectLight in transientEffectLights)
+             {
+-                var sample = effectLight.Animation.Sample(effectLight.Age);
++                var sample = effectLight.Animation.Sample(effectLight.Age, effectLight.TimeScale);
+                 effectLight.Light.LightGroup = 0;
+                 effectLight.Light.Active = true;
+                 effectLight.Light.Light = new RenderLight
+diff --git a/src/LibreLancer.Tests/EffectLightTimingTests.cs b/src/LibreLancer.Tests/EffectLightTimingTests.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Tests/EffectLightTimingTests.cs
+@@ -0,0 +1,68 @@
++using System.Numerics;
++using LibreLancer.Data.Ini;
++using LibreLancer.Data.Schema.Effects;
++using LibreLancer.Data.Schema;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class EffectLightTimingTests
++{
++    [Fact]
++    public void EffectTimeScaleDefaultsToOneAndParsesExplicitValue()
++    {
++        static Section MakeEffect(float? scale)
++        {
++            var section = new Section("Effect");
++            var nickname = new Entry(section, "nickname");
++            nickname.Add("explosion_test");
++            section.Add(nickname);
++            if (scale.HasValue)
++            {
++                var entry = new Entry(section, "lgt_time_scale");
++                entry.Add(scale.Value);
++                section.Add(entry);
++            }
++            return section;
++        }
++
++        Assert.True(Effect.TryParse(MakeEffect(null), out var defaults));
++        Assert.Equal(1f, defaults!.LgtTimeScale);
++        Assert.True(Effect.TryParse(MakeEffect(2.5f), out var parsed));
++        Assert.Equal(2.5f, parsed!.LgtTimeScale);
++    }
++
++    [Fact]
++    public void ScaledLightAnimationUsesElapsedTimeTimesScale()
++    {
++        var animation = new LightAnim("test",
++        [
++            new LightAnimFrame(0, Vector3.Zero, 0),
++            new LightAnimFrame(1, Vector3.One, 1)
++        ]);
++
++        var sample = animation.Sample(0.25f, 2f);
++
++        Assert.Equal(0.5f, sample.Time);
++        Assert.Equal(0.5f, sample.Intensity);
++        Assert.Equal(new Vector3(0.5f), sample.Color);
++    }
++
++    [Fact]
++    public void NonPositiveOrNonFiniteTimeScaleFallsBackToNormalSpeed()
++    {
++        Assert.Equal(0.5f, LightAnim.ScalePlaybackTime(0.5f, 0));
++        Assert.Equal(0.5f, LightAnim.ScalePlaybackTime(0.5f, float.NaN));
++        Assert.Equal(0f, LightAnim.ScalePlaybackTime(-1, 1));
++    }
++
++    [Fact]
++    public void TimeScaleChangesTransientLightPlaybackLifetime()
++    {
++        var animation = new LightAnim("test", [new LightAnimFrame(1, Vector3.One, 1)]);
++
++        Assert.False(animation.IsPlaybackComplete(0.49f, 2f));
++        Assert.True(animation.IsPlaybackComplete(0.5f, 2f));
++        Assert.False(animation.IsPlaybackComplete(0.5f, 1f));
++    }
++}
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -39,3 +39,4 @@
+ client 2037-pbr-evidence-and-renderer-todos.patch
+ client 2038-pbr-cubemap-asset-path-audit.patch
+ client 2039-dynamic-effect-light-scale-retail-audit.patch
++client 2040-dynamic-effect-time-scale.patch

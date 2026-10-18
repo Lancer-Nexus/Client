@@ -1,0 +1,102 @@
+diff --git a/src/Editor/LancerEdit/Model/ModelViewer.cs b/src/Editor/LancerEdit/Model/ModelViewer.cs
+--- a/src/Editor/LancerEdit/Model/ModelViewer.cs
++++ b/src/Editor/LancerEdit/Model/ModelViewer.cs
+@@ -107,6 +107,21 @@
+ 
+         private RigidModel vmsModel;
+         private readonly string? previewEnvMapMaterial;
++        private string previewEnvironmentOverride;
++        private SurfaceMapsIni environmentChoiceCatalog;
++        private string[] environmentChoiceList = Array.Empty<string>();
++
++        private string PreviewEnvironment => previewEnvironmentOverride ?? previewEnvMapMaterial;
++
++        private string[] GetPreviewEnvironmentChoices()
++        {
++            if (ReferenceEquals(environmentChoiceCatalog, res.SurfaceMaps)) return environmentChoiceList;
++            var choices = new List<string> { "Archetype default", "(none)" };
++            choices.AddRange(res.SurfaceMaps.CubeMaps.Keys.OrderBy(x => x, StringComparer.OrdinalIgnoreCase));
++            environmentChoiceCatalog = res.SurfaceMaps;
++            environmentChoiceList = choices.ToArray();
++            return environmentChoiceList;
++        }
+ 
+         private VerticalTabLayout layout;
+ 
+@@ -1179,8 +1194,26 @@
+             var loadedProfile = _window.OpenDataContext?.GameData.Items.Ini.SurfaceProfile;
+             ImGui.TextDisabled($"Loaded Surface profile: {loadedProfile?.ToString() ?? "unavailable"}");
+             ImGui.TextDisabled($"Archetype environment: {previewEnvMapMaterial ?? "(none)"}");
+-            var environmentTexture = previewEnvMapMaterial == null ? null : res.FindTexture(previewEnvMapMaterial);
++            var environmentNick = PreviewEnvironment;
++            var environmentTexture = environmentNick == null ? null : res.FindTexture(environmentNick);
+             ImGui.TextDisabled($"Environment texture: {environmentTexture?.GetType().Name ?? "unresolved"}");
++            var environmentChoices = GetPreviewEnvironmentChoices();
++            var selectedEnvironment = previewEnvironmentOverride == null ? 0 :
++                previewEnvironmentOverride.Length == 0 ? 1 : Array.IndexOf(environmentChoices, previewEnvironmentOverride);
++            if (selectedEnvironment < 0) selectedEnvironment = 0;
++            if (ImGui.Combo("Cubemap preview override", ref selectedEnvironment,
++                    environmentChoices, environmentChoices.Length))
++            {
++                previewEnvironmentOverride = selectedEnvironment switch
++                {
++                    0 => null,
++                    1 => string.Empty,
++                    _ => environmentChoices[selectedEnvironment]
++                };
++            }
++            ImGui.TextDisabled("Preview only; does not modify Shiparch.ini or SolarArch.ini.");
++            if (environmentNick != null && res.SurfaceMaps.TryResolveCubeMap(environmentNick, out var cubeMap))
++                ImGui.TextDisabled($"Preview catalog strength: {cubeMap!.Strength:F2}");
+             ImGui.TextDisabled($"Loaded catalog: {res.SurfaceMaps.Libraries.Count} libraries, " +
+                                $"{res.SurfaceMaps.NormalMaps.Count} normal-map mappings, " +
+                                $"{res.SurfaceMaps.CubeMaps.Count} cubemaps");
+diff --git a/src/Editor/LancerEdit/Model/ModelViewer.Viewport.cs b/src/Editor/LancerEdit/Model/ModelViewer.Viewport.cs
+--- a/src/Editor/LancerEdit/Model/ModelViewer.Viewport.cs
++++ b/src/Editor/LancerEdit/Model/ModelViewer.Viewport.cs
+@@ -607,10 +607,10 @@
+                 {
+                     if (useDistance)
+                         vmsModel.DrawBufferSwitch2(levelDistance, buffer, res, matrix, ref lighting, userData,
+-                            envMap: previewEnvMapMaterial);
++                            envMap: PreviewEnvironment);
+                     else
+                         vmsModel.DrawBuffer(level, buffer, res, matrix, ref lighting, userData,
+-                            envMap: previewEnvMapMaterial);
++                            envMap: PreviewEnvironment);
+                 }
+                 else
+                 {
+diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -377,6 +377,9 @@
+ - [x] `envcube_space`, `envcube_sun`, `envcube_nebula` anhand des Surface-Katalogs
+   auflösen, bedarfsgesteuert aus NAP laden und `[CubeMap] strength` an den
+   Produktions-PBR-Shader weitergeben; kontrollierte GPU-Readbacks dokumentieren.
++- [x] Im LancerEdit-ModelViewer eine Vorschau-only-Überschreibung anbieten, um
++  Katalog-Cubes auf demselben Retail-Mesh zu vergleichen, ohne `Shiparch.ini`
++  oder `SolarArch.ini` zu ändern.
+ - [ ] Cube-Orientierung und sichtbare Reflexionsstärke auf Retail-Meshes und im
+   Spiel abnehmen; der bisherige LI_ELITE-ModelViewer-A/B-ROI änderte 0 Pixel.
+ - [ ] Im PBR-Pfad eine kollisionsfreie Bindung vorsehen: vorhandene Dt/Et/Nm/
+diff --git a/docs/surface-maps.md b/docs/surface-maps.md
+--- a/docs/surface-maps.md
++++ b/docs/surface-maps.md
+@@ -6,6 +6,8 @@
+ **Status:** Parser, Profile, VFS- und CPU-/GPU-Residency sowie opt-in Normalmap-Bindungen für authored FVF3/FVF4, generierte VMesh-/DFM-Tangenten und QuadSphere sind umgesetzt. Ergänzende Roughness-/Metallic-Sampler sind über `surface_pbr_maps` angebunden. Ein kontrollierter LI_ELITE-A/B im LancerEdit ModelViewer bestätigt eine sichtbare Änderung. Im In-Game-A/B des vollständigen Profils bleiben nach Erhalt der Room-Vertex-Beleuchtung und korrekter Behandlung von Backface-Normalen die Stadtfassaden sichtbar beleuchtet; der zuvor beobachtete großflächige Schwarzeffekt tritt nicht mehr auf. Der Surface-Map-Lease-Absturz in Cutscenes ist ebenfalls behoben. Der opt-in PBR-Cubemap-Pfad löst `[CubeMap]`-Katalogeinträge nun anhand des vorhandenen `envmap_material` auf, lädt ihre MATs bei Bedarf und reicht `strength` weiter. Kontrollierte OpenGL-Proben mit Produktionsshader und echten `Data/NAP`-Assets bestätigen die drei Katalogwerte und Mip-Sampling. Der LI_ELITE-ModelViewer-A/B ändert trotzdem keine Modellpixel; sichtbare In-Game-Reflexionen, Retail-Orientierung, IBL-Qualität und Leistung bleiben offen. Vergleichsbilder und Messdaten liegen in der [Renderer-Galerie](renderer-comparison-gallery.md) und im [PBR-Cubemap-Probebericht](evidence/renderer/pbr-environment-20261014/cubemap-assets-and-binding-audit.md). Materialqualität in weiteren Szenen bleibt offen. **Stand:** 2026-10-14.
+ **Datenseite:** Repository `LN-Data` (`tools/make_surface_maps.py`, `SDK/fx/SurfaceMaps.ini`, `TODO-surface-maps.md`).
+ Engine-Änderungen bleiben gemäß `AGENTS.md` patch-only unter `patches/series`.
++Der LancerEdit-ModelViewer kann einen Cubemap-Katalogeintrag nur für die
++Vorschau überschreiben; die Auswahl schreibt nichts in die Archetyp-INIs.
+ 
+ ## Aktuell implementierte Metadaten-Anbindung
+ 
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -55,3 +55,4 @@
+ client 2053-nap-ignore-gitkeep-placeholders.patch
+ client 2054-pbr-production-cubemap-probe-evidence.patch
+ client 2055-pbr-cubemap-catalog-runtime.patch
++client 2056-lanceredit-cubemap-preview-override.patch

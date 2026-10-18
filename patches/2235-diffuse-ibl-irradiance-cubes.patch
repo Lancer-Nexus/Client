@@ -1,0 +1,299 @@
+diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
+index b4bdb2ee4..3c0208cde 100644
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -444,8 +444,8 @@ offen. Orientierung, Materialqualität, GGX-IBL und Performance bleiben offen.
+ - [ ] Für IBL GGX-vorgefilterte Specular-Mips, diffuse Irradiance und eine
+   BRDF-LUT offline erzeugen. Gewöhnliche Cube-Mipmaps sind kein Nachweis für
+   eine Roughness-Vorfilterung. Ergebnisse in Data/NAP paketieren.
+-  - [x] GGX-vorgefilterte Specular-Mips und das `[CubeMap] prefiltered`-Metadatum für `envcube_space`, `envcube_sun` und `envcube_nebula` ergänzt. Der Client wählt Roughness-Mips nur für explizit vorgefilterte Cubes; gewöhnliche Legacy-Mips werden nicht als GGX ausgegeben. Das 4-Einträge-NAP stimmt mit dem 14-Paket-Manifest überein; der OpenGL-NAP-Start lud Daten, UI und Intro ohne Folgefehler. Eine feste visuelle GGX-Abnahme steht noch aus.
+-  - [ ] Diffuse Irradiance-Cubemap, Retail-Bildqualität und GPU-Kosten bleiben offen.
++  - [x] GGX-vorgefilterte Specular-Mips plus kompakte cosine-konvolvierte diffuse Irradiance-Kuben und `[CubeMap] prefiltered`/`irradiance_file`-Metadaten für `envcube_space`, `envcube_sun` und `envcube_nebula` ergänzt. Der Client liest die diffuse Karte für PBR ein und behält bei Legacy-Katalogen den letzten Mip-Fallback. Generator- und Client-Tests sowie der NAP-Start sind zu prüfen.
++  - [ ] Feste visuelle Retail-Abnahme, Cube-Orientierung und GPU-Kosten bleiben offen.
+ - [ ] Metallische Flächen mit Umgebungslicht versorgen; ohne Karte Metallic 0
+   wählen. Roughness, Strength und Belichtung als Material-/Lichtparameter
+   im vorhandenen Uniform-Block bündeln. Glass/Alpha/Vanilla-Envmap bewahren.
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+index 9701fcc02..eb8afac76 100644
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -196,6 +196,7 @@ Diese Liste plant moderne Renderer-Erweiterungen für LibreLancer. Sie ist eine
+   - [ ] Renderer-A/B-Bilder bei sichtbarer und verdeckter Sonne aufnehmen und Radius, Farbe, Blendmodus sowie Fade-Verhalten gegen das Original abstimmen.
+ - [ ] Image-Based Lighting und konsistente Umgebungsreflexionen für den PBR-Pfad prüfen.
+   - [x] Der Data-Generator erzeugt deterministische GGX-vorgefilterte Specular-Mips für die drei NAP-Cubemaps; `[CubeMap] prefiltered=true` wählt ihre Roughness-Stufen im PBR-Shader. Legacy-Cubes ohne Metadatum samplen für Specular weiter Level 0. Diffuse Irradiance, Bildqualität an einem cubemapgebundenen Retail-Modell und GPU-Kosten bleiben offen.
++  - [x] Separate 16×16-Cubemaps liefern cosine-konvolvierte diffuse Irradiance (E/pi); `[CubeMap] irradiance_file` wird im PBR-Shader unabhängig von der GGX-Specular-Kette ausgewertet. Legacy-Kataloge behalten den bisherigen letzten-Mip-Fallback. Visuelle Retail-Abnahme und GPU-Kosten bleiben offen.
+   - [x] Surface-Normalmaps, generierte Tangenten, Roughness/Metallic-Maps und PBR-Cubemap-Reflexionen lassen sich im laufenden Client einzeln umschalten. Änderungen werden sofort auf den aktiven ResourceManager angewendet; beim Abschalten werden nicht mehr benötigte Tangenten-/Surface-Texturressourcen freigegeben. Alle vier Schalter und die sofortige Konfigurationsaktualisierung sind im selben NAP-only-Spielprozess geprüft; siehe [Laufzeitnachweis](evidence/renderer/ibl-live-options-20261018/README.md).
+   - [ ] Sichtbare PBR-/IBL-Wirkung mit fester Kamera an einem bekannten, cubemapgebundenen Schiff oder Modell vergleichen. Im pausierten M01A-Lauf änderten sich im sichtbaren Objektcrop außerhalb des Menüs 5.931 Pixel (mittlere RGB-Abweichung 1,44/255), während der Hintergrundcrop pixelgleich blieb. Das belegt eine Same-Pose-Reaktion auf den Live-Schalter, aber weder die MAT-Cubemapbindung des Objekts noch die Reflexionsqualität; Details: [Laufzeitnachweis](evidence/renderer/ibl-live-options-20261018/README.md).
+ - [ ] Systemweite Umgebungsbeleuchtung an Farbe und Intensität der jeweiligen Sonne koppeln. Unterschiedliche Sonnenfarben (z. B. grün, rot oder weiß) sollen die diffuse Grundbeleuchtung aller passenden Szenenobjekte konsistent beeinflussen; Datenquelle, Legacy-Fallback und Zusammenspiel mit PBR/IBL anhand reproduzierbarer NAP-Szenen prüfen.
+@@ -298,7 +299,7 @@ Stand der Sichtung 2026-10-12. Vorhanden sind die Backends `OpenGL` und `Null`;
+ - [x] **Diffuse IBL-Grundbeitrag:** Im opt-in PBR-Pfad wird die niedrigste Cubemap-Mipstufe als kostengünstige diffuse Umgebungsfarbe ausgewertet und Fresnel-/Metallic-gewichtet zum direkten Licht addiert. Das ist eine Laufzeit-Approximation, keine vorberechnete diffuse Irradiance.
+ - [x] **Split-Sum-BRDF-Grundbeitrag:** Die PBR-Umgebungsreflexion wertet den analytischen Epic-BRDF-Fit für `NdotV` und Rauheit aus; eine BRDF-LUT-Textur ist dafür nicht erforderlich. Der Fit ersetzt keine GGX-vorgefilterte Radiance-Cubemap.
+ - [x] **Weltfeste Reflexionsrichtung:** Der PBR-Cube-Lookup verwendet jetzt die Reflexionsrichtung aus Welt-Normale und Welt-Blickvektor, statt den Cube mit der View-Matrix zu drehen. Die DDS-Z-Achsenkonvention bleibt erhalten; die sichtbare Retail-Orientierung muss noch abgenommen werden.
+-- [ ] **Image-Based Lighting:** Retail-Orientierung und sichtbare Cubemap-Reflexion im Spiel abnehmen; GGX-vorgefilterte Specular-Mips werden jetzt für die drei generierten NAP-Cubemaps erstellt und explizit über `prefiltered` gewählt. Konvolvierte diffuse Irradiance, weitere cubemapgebundene Assets und GPU-Kosten bleiben offen. Die gleichen-szenischen LancerEdit-Aufnahmen zeigen 15.229–17.729 veränderte Viewportpixel für die drei Katalog-Cubes; der pausierte M01A-Live-Schalter ändert 5.931 Pixel im sichtbaren Objektcrop. Das belegt cubemapabhängige Ausgabe, nicht die Retail-Orientierung oder ausreichende Bildqualität. NAP-only-Verfahren und Grenzen: [Reflexionsrichtungsprüfung](evidence/renderer/pbr-world-reflection-20261017/README.md), [Live-Options-A/B](evidence/renderer/ibl-live-options-20261018/README.md) und [Cubemap-A/B](evidence/renderer/pbr-cubemap-live-ab-20261017/README.md).
++- [ ] **Image-Based Lighting:** Retail-Orientierung und sichtbare Cubemap-Reflexion im Spiel abnehmen; drei generierte NAP-Cubemaps haben GGX-vorgefilterte Specular-Mips (`prefiltered`) und separate cosine-konvolvierte diffuse Irradiance (`irradiance_file`). Legacy-Kataloge behalten ihre alten Sampling-Fallbacks. Retail-Bildqualität, weitere cubemapgebundene Assets und GPU-Kosten bleiben offen. Die gleichen-szenischen LancerEdit-Aufnahmen zeigen 15.229–17.729 veränderte Viewportpixel für die drei Katalog-Cubes; der pausierte M01A-Live-Schalter ändert 5.931 Pixel im sichtbaren Objektcrop. Das belegt cubemapabhängige Ausgabe, nicht die Retail-Orientierung oder ausreichende Bildqualität. NAP-only-Verfahren und Grenzen: [Reflexionsrichtungsprüfung](evidence/renderer/pbr-world-reflection-20261017/README.md), [Live-Options-A/B](evidence/renderer/ibl-live-options-20261018/README.md) und [Cubemap-A/B](evidence/renderer/pbr-cubemap-live-ab-20261017/README.md).
+ - [ ] **Volumetrische Nebel und Soft Particles:** Nebelfelder sind ein Merkmal des Spiels; als eigene Qualitätsstufe mit Fallback.
+ - [ ] **Vulkan-Backend (Spike):** Prüfen, wie weit `IRenderContext` und die HLSL→SPIR-V-Kette tragen. Nutzen: Linux/Steam Deck, Mehrkern-Befehlsaufzeichnung für viele Schiffe, RenderDoc, MoltenVK für macOS. Aufwand und Risiko groß, vorher messen.
+ - [ ] **Direct3D 11 und Metal nur bei konkretem Bedarf:** D3D11 nur, wenn OpenGL unter Windows Probleme macht; Metal besser über MoltenVK.
+diff --git a/docs/surface-maps.md b/docs/surface-maps.md
+index 533cbfdb9..209653809 100644
+--- a/docs/surface-maps.md
++++ b/docs/surface-maps.md
+@@ -182,6 +182,7 @@ file     = fx\envcube_space.mat  ; = material_library
+ kind     = space                 ; space | sun | nebula (Hinweis)
+ strength = 0.35                  ; Vorschlag für die Stärke der Spiegelung (0..1)
+ prefiltered = true               ; Mip-Kette enthält GGX-vorgefilterte Specular-Stufen
++irradiance_file = fx\envirradiance_space.mat ; diffuse Umgebung, cosine-konvolviert als E/pi
+ ```
+ 
+ Regeln für die Auflösung (Vorschlag):
+@@ -190,8 +191,9 @@ Regeln für die Auflösung (Vorschlag):
+ 2. Mehrere `[NormalMap]` für dieselbe Textur: der letzte Eintrag gewinnt, der Rest wird gewarnt.
+ 3. Fehlt die Bibliothek oder die Karte, bleibt das Material unverändert (Warnung im Log, kein Fehler).
+ 4. `prefiltered` ist optional und standardmäßig `false`. Nur `true`/`1` kennzeichnet GGX-Roughness-Mips. Legacy-Cubes mit gewöhnlichen Mips samplen für Specular weiter Level 0.
+-5. `[CubeMap]` ist ein **Katalog**. Gebunden wird weiter über `material_library` und `envmap_material` in `ships\Shiparch.ini` und `solar\SolarArch.ini`.
+-6. Der Original-Client ignoriert die Datei, solange sie nicht in der `Freelancer.ini` verlinkt ist.
++5. `irradiance_file` ist optional. Verweist es auf einen Cube mit cosine-konvolvierter diffuser Umgebung, nutzt PBR diesen für den diffusen IBL-Anteil; andernfalls bleibt die letzte Cubemap-Mipstufe als Legacy-Fallback aktiv. Der Generator speichert `E/pi` in einer kompakten 16×16-Karte.
++6. `[CubeMap]` ist ein **Katalog**. Gebunden wird weiter über `material_library` und `envmap_material` in `ships\Shiparch.ini` und `solar\SolarArch.ini`.
++7. Der Original-Client ignoriert die Datei, solange sie nicht in der `Freelancer.ini` verlinkt ist.
+ 
+ ## 4. Was die Engine heute tut (Client-Quelltext, nur gelesen)
+ 
+diff --git a/src/LibreLancer.Data/Schema/SurfaceMapsIni.cs b/src/LibreLancer.Data/Schema/SurfaceMapsIni.cs
+index d8179bd87..2567e7700 100644
+--- a/src/LibreLancer.Data/Schema/SurfaceMapsIni.cs
++++ b/src/LibreLancer.Data/Schema/SurfaceMapsIni.cs
+@@ -15,7 +15,7 @@ public sealed record SurfaceNormalMap(string Texture, string Library, string Map
+     string? RoughnessMap, float? Roughness, string? MetallicMap, float? Metallic, int UvChannel = 0,
+     int? PbrUvChannel = null);
+ public sealed record SurfaceCubeMap(string Nickname, string File, string? Kind, float Strength,
+-    bool Prefiltered = false);
++    bool Prefiltered = false, string? IrradianceFile = null);
+ public sealed record SurfaceNormalMapBinding(SurfaceNormalMap Map, SurfaceTextureLibrary Library);
+ 
+ /// <summary>Surface metadata only. Texture-library contents are loaded by material consumers later.</summary>
+@@ -96,7 +96,7 @@ public sealed class SurfaceMapsIni
+             {
+                 "texture" => "file name",
+                 "normalmap" => "texture library map strength uv pbr_uv roughness_map roughness metallic_map metallic",
+-                "cubemap" => "nickname file kind strength prefiltered",
++                "cubemap" => "nickname file kind strength prefiltered irradiance_file",
+                 _ => null
+             };
+             if (allowed == null) { Warn(section.File ?? "Surface", $"Unknown section {section.Name}"); continue; }
+@@ -122,6 +122,13 @@ public sealed class SurfaceMapsIni
+                     if (!IsRelativeAssetPath(value)) throw new FormatException("Invalid relative asset path");
+                     return dataPath + value;
+                 }
++                string? OptionalFile(string key)
++                {
++                    var value = Optional(key);
++                    if (value == null) return null;
++                    if (!IsRelativeAssetPath(value)) throw new FormatException($"Invalid relative {key} path");
++                    return dataPath + value;
++                }
+                 float? Factor(string key, float maximum)
+                 {
+                     if (!fields.TryGetValue(key, out var value)) return null;
+@@ -163,7 +170,7 @@ public sealed class SurfaceMapsIni
+                 else
+                 {
+                     var cube = new SurfaceCubeMap(Required("nickname"), FilePath(), Optional("kind"),
+-                        Factor("strength", 1) ?? 1, Prefiltered());
++                        Factor("strength", 1) ?? 1, Prefiltered(), OptionalFile("irradiance_file"));
+                     if (cubeMaps.ContainsKey(cube.Nickname)) Warn(section.File ?? "Surface", $"Duplicate cube {cube.Nickname}; last definition wins");
+                     cubeMaps[cube.Nickname] = cube;
+                 }
+diff --git a/src/LibreLancer.Tests/SurfaceMapsIniTests.cs b/src/LibreLancer.Tests/SurfaceMapsIniTests.cs
+index e3de5be8a..0224bc0fd 100644
+--- a/src/LibreLancer.Tests/SurfaceMapsIniTests.cs
++++ b/src/LibreLancer.Tests/SurfaceMapsIniTests.cs
+@@ -42,6 +42,7 @@ public class SurfaceMapsIniTests
+             kind = nebula
+             strength = 0.35
+             prefiltered = true
++            irradiance_file = fx/sky_irradiance.mat
+             """);
+         Assert.True(maps.TryResolveNormalMap("HULL.TGA", out var binding));
+         Assert.Equal("DATA/fx/ships.txm", binding!.Library.File);
+@@ -55,6 +56,7 @@ public class SurfaceMapsIniTests
+         Assert.Equal("DATA/fx/sky.mat", cubeMap!.File);
+         Assert.Equal("nebula", cubeMap.Kind);
+         Assert.True(cubeMap.Prefiltered);
++        Assert.Equal("DATA/fx/sky_irradiance.mat", cubeMap.IrradianceFile);
+         Assert.Empty(maps.Diagnostics);
+     }
+ 
+@@ -167,6 +169,17 @@ public class SurfaceMapsIniTests
+         Assert.Empty(maps.Diagnostics);
+     }
+ 
++    [Theory]
++    [InlineData("../outside.mat")]
++    [InlineData("/outside.mat")]
++    [InlineData("fx/../outside.mat")]
++    public void RejectsNonRelativeIrradiancePaths(string path)
++    {
++        var maps = Parse($"[CubeMap]\nnickname = sky\nfile = fx/sky.mat\nirradiance_file = {path}\n");
++        Assert.Empty(maps.CubeMaps);
++        Assert.NotEmpty(maps.Diagnostics);
++    }
++
+     [Fact]
+     public void ReadsConfiguredListFromNapWithoutOpeningTextureLibraries()
+     {
+diff --git a/src/LibreLancer/Render/Materials/BasicMaterial.cs b/src/LibreLancer/Render/Materials/BasicMaterial.cs
+index a5435bf38..1f284e376 100644
+--- a/src/LibreLancer/Render/Materials/BasicMaterial.cs
++++ b/src/LibreLancer/Render/Materials/BasicMaterial.cs
+@@ -292,7 +292,7 @@ namespace LibreLancer.Render.Materials
+             public float EnvMipCount;
+             public float EnvMapStrength;
+             public float EnvPrefiltered;
+-            public float Padding;
++            public float EnvDiffuseEnabled;
+         }
+ 
+ 
+@@ -317,6 +317,7 @@ namespace LibreLancer.Render.Materials
+             bool pbrEnvMapping = false;
+             TextureCube? legacyEnvironment = null;
+             TextureCube? pbrEnvironment = null;
++            TextureCube? pbrDiffuseIrradiance = null;
+             bool pbrEnvironmentPrefiltered = false;
+             var envMapStrength = 1.0f;
+             string? envmaptex = Glass ? "envmapglass" : EnvMap;
+@@ -330,6 +331,8 @@ namespace LibreLancer.Render.Materials
+                 pbrEnvironment = Library.ResolveEnvironmentCube(envmaptex, out envMapStrength,
+                     out pbrEnvironmentPrefiltered);
+                 pbrEnvMapping = pbrEnvironment != null;
++                if (pbrEnvMapping)
++                    pbrDiffuseIrradiance = Library.ResolveEnvironmentIrradiance(envmaptex);
+             }
+ 
+ 
+@@ -405,6 +408,11 @@ namespace LibreLancer.Render.Materials
+             {
+                 rstate.Textures[5] = pbrEnvironment;
+                 rstate.Samplers[5] = new(rstate.PreferredFilterLevel, WrapMode.Repeat, WrapMode.Repeat);
++                if (pbrDiffuseIrradiance != null)
++                {
++                    rstate.Textures[7] = pbrDiffuseIrradiance;
++                    rstate.Samplers[7] = new(rstate.PreferredFilterLevel, WrapMode.Repeat, WrapMode.Repeat);
++                }
+             }
+ 
+             var normalFlags = GetNormalMapSamplerFlags(activeSurfaceNormal != null);
+@@ -417,7 +425,8 @@ namespace LibreLancer.Render.Materials
+                       Oc = Oc * OpacityMultiplier, NormalStrength = activeSurfaceNormal != null ? activeSurfaceNormalStrength : NormalStrength,
+                       EnvMipCount = pbrEnvironment == null ? 0 : Math.Max(pbrEnvironment.LevelCount - 1, 0),
+                       EnvMapStrength = envMapStrength,
+-                      EnvPrefiltered = pbrEnvironmentPrefiltered ? 1.0f : 0.0f };
++                      EnvPrefiltered = pbrEnvironmentPrefiltered ? 1.0f : 0.0f,
++                      EnvDiffuseEnabled = pbrDiffuseIrradiance != null ? 1.0f : 0.0f };
+                 shader.SetUniformBlock(3, ref param);
+ 
+                 if (!string.IsNullOrEmpty(MtSampler))
+diff --git a/src/LibreLancer/Resources/ResourceManager.cs b/src/LibreLancer/Resources/ResourceManager.cs
+index 1e5bc7967..701016989 100644
+--- a/src/LibreLancer/Resources/ResourceManager.cs
++++ b/src/LibreLancer/Resources/ResourceManager.cs
+@@ -26,6 +26,7 @@ public abstract class ResourceManager
+ {
+     private SurfaceMapsIni surfaceMaps = new();
+     private readonly HashSet<string> unavailableSurfaceCubeMaps = new(StringComparer.OrdinalIgnoreCase);
++    private readonly HashSet<string> unavailableSurfaceIrradianceMaps = new(StringComparer.OrdinalIgnoreCase);
+     public SurfaceMapsIni SurfaceMaps
+     {
+         get => surfaceMaps;
+@@ -33,6 +34,7 @@ public abstract class ResourceManager
+         {
+             surfaceMaps = value ?? new SurfaceMapsIni();
+             unavailableSurfaceCubeMaps.Clear();
++            unavailableSurfaceIrradianceMaps.Clear();
+         }
+     }
+     public bool SurfaceNormalMapsEnabled { get; set; }
+@@ -107,6 +109,33 @@ public abstract class ResourceManager
+         return null;
+     }
+ 
++    /// <summary>Resolves an optional preconvolved diffuse irradiance cube from Surface metadata.</summary>
++    public TextureCube? ResolveEnvironmentIrradiance(string? nickname)
++    {
++        if (string.IsNullOrWhiteSpace(nickname) ||
++            !SurfaceMaps.TryResolveCubeMap(nickname, out var catalogEntry) ||
++            string.IsNullOrWhiteSpace(catalogEntry?.IrradianceFile)) return null;
++
++        var normalized = catalogEntry.IrradianceFile.Replace('\\', '/');
++        var assetNickname = Path.GetFileNameWithoutExtension(normalized);
++        if (FindTexture(assetNickname) is TextureCube existing) return existing;
++        var unavailableKey = nickname + "|" + assetNickname;
++        if (!unavailableSurfaceIrradianceMaps.Add(unavailableKey)) return null;
++        try
++        {
++            LoadResourceFile(catalogEntry.IrradianceFile);
++        }
++        catch (Exception error) when (error is IOException or InvalidDataException or NotSupportedException or ArgumentException or FileException)
++        {
++            FLLog.Warning("Surface", $"Unable to load irradiance CubeMap {assetNickname} from {catalogEntry.IrradianceFile}: {error.Message}");
++            return null;
++        }
++
++        if (FindTexture(assetNickname) is TextureCube loaded) return loaded;
++        FLLog.Warning("Surface", $"Irradiance CubeMap {assetNickname} from {catalogEntry.IrradianceFile} did not resolve to a TextureCube");
++        return null;
++    }
++
+     private Dictionary<string, RuntimeSurFile> surs = new(StringComparer.OrdinalIgnoreCase);
+ 
+     public abstract VertexResource AllocateVertices(FVFVertex format, byte[] vertices, ushort[] indices);
+diff --git a/src/LibreLancer/Shaders/PBR.frag.hlsl b/src/LibreLancer/Shaders/PBR.frag.hlsl
+index b166cc95a..3e95fa395 100644
+--- a/src/LibreLancer/Shaders/PBR.frag.hlsl
++++ b/src/LibreLancer/Shaders/PBR.frag.hlsl
+@@ -20,6 +20,7 @@ SamplerState RtSampler : register(s4, TEXTURE_SPACE);
+ 
+ #ifdef ENVMAP
+ TextureCube<float4> EnvTexture : register(t5, TEXTURE_SPACE);
++TextureCube<float4> EnvDiffuseTexture : register(t7, TEXTURE_SPACE);
+ SamplerState EnvSampler : register(s5, TEXTURE_SPACE);
+ #endif
+ 
+@@ -58,7 +59,7 @@ cbuffer PBRParameters : register(b3, UNIFORM_SPACE)
+     float EnvMipCount;
+     float EnvMapStrength;
+     float EnvPrefiltered;
+-    float PbrPadding;
++    float EnvDiffuseEnabled;
+ };
+ 
+ cbuffer TexCoordSelectors : register(b5, UNIFORM_SPACE)
+@@ -313,10 +314,11 @@ float4 main(Input input) : SV_Target0
+     float3 envFresnel = specularColor + (1.0 - specularColor) * pow(1.0 - NdotV, 5.0);
+     float2 envBrdf = IntegrateEnvironmentBrdfApprox(NdotV, perceptualRoughness);
+     color += envColor * (specularColor * envBrdf.x + envBrdf.y) * EnvMapStrength;
+-    // The last authored mip is a low-frequency approximation of diffuse irradiance.
+-    // Keep this inexpensive until the asset pipeline can provide convolved irradiance cubes.
+-    float3 diffuseEnvironment = SRGBtoLinear(
+-        EnvTexture.SampleLevel(EnvSampler, n, EnvMipCount)).rgb;
++    // Surface metadata can provide cosine-convolved irradiance (stored as E/pi).
++    // Older catalogs retain the low-frequency final-mip fallback.
++    float3 diffuseEnvironment = EnvDiffuseEnabled > 0.5
++        ? SRGBtoLinear(EnvDiffuseTexture.SampleLevel(EnvSampler, n, 0.0)).rgb
++        : SRGBtoLinear(EnvTexture.SampleLevel(EnvSampler, n, EnvMipCount)).rgb;
+     color += diffuseColor * diffuseEnvironment * (1.0 - envFresnel) * EnvMapStrength;
+ #endif
+ #ifdef VERTEX_LIGHTING
+--- a/patches/series
++++ b/patches/series
+@@ -234,3 +234,4 @@
+ client 2232-live-surface-and-ibl-options.patch
+ client 2233-ibl-live-options-runtime-evidence.patch
+ client 2234-ggx-prefiltered-cubemap-ibl.patch
++client 2235-diffuse-ibl-irradiance-cubes.patch
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -200,2 +200,3 @@
+ | 2233 | Record live PBR/IBL toggles and NAP runtime evidence |
+ | 2234 | Add GGX-prefiltered cubemap mip metadata and PBR sampling |
++| 2235 | Add cosine-convolved diffuse irradiance cubemaps to PBR IBL |

@@ -1,0 +1,143 @@
+From: Lancer Nexus Client overlay
+Subject: [PATCH] Add slow server update stage timing
+
+---
+
+--- a/src/LibreLancer/Server/GameServer.cs
++++ b/src/LibreLancer/Server/GameServer.cs
+@@ -2775,8 +2775,14 @@
+             }
+             while (!localPackets.IsEmpty && localPackets.TryDequeue(out var local))
+                 LocalPlayer!.ProcessPacketDirect(local);
++            var stageEndTime = serverTiming.Elapsed;
++            var localPacketDuration = stageEndTime - startTime;
++            var stageStartTime = stageEndTime;
+             if (worldRequests.Count > 0 && worldRequests.TryDequeue(out var a))
+                 a();
++            stageEndTime = serverTiming.Elapsed;
++            var worldRequestDuration = stageEndTime - stageStartTime;
++            stageStartTime = stageEndTime;
+             // Update
+             var connectedPlayers = GetConnectedPlayers();
+             foreach (var player in connectedPlayers)
+@@ -2792,6 +2798,9 @@
+                 localPlayer.UpdateMissionRuntime(time.TotalSeconds);
+             if (LocalPlayer is { } queuedLocalPlayer && !connectedPlayers.Contains(queuedLocalPlayer))
+                 queuedLocalPlayer.RunSave();
++            stageEndTime = serverTiming.Elapsed;
++            var playerWorkDuration = stageEndTime - stageStartTime;
++            stageStartTime = stageEndTime;
+             debugInfoForFrame = "";
+ 
+             // Copy worlds to array
+@@ -2810,7 +2819,13 @@
+             updateRunner.RunActions(Worker, allSystems.Length);
+ 
+             DebugInfo = debugInfoForFrame;
++            stageEndTime = serverTiming.Elapsed;
++            var worldWorkDuration = stageEndTime - stageStartTime;
++            stageStartTime = stageEndTime;
+             Listener?.Server?.TriggerUpdate(); // Send packets asap
++            stageEndTime = serverTiming.Elapsed;
++            var listenerWorkDuration = stageEndTime - stageStartTime;
++            stageStartTime = stageEndTime;
+             // Remove
+             for (int i = 0; i < allSystems.Length; i++)
+             {
+@@ -2825,13 +2840,18 @@
+                 }
+             }
+             ArrayPool<bool>.Shared.Return(shouldSpinDown);
++            stageEndTime = serverTiming.Elapsed;
++            var cleanupDuration = stageEndTime - stageStartTime;
+ 
+             var updateDuration = serverTiming.Elapsed - startTime;
+             PerformanceStats?.AddEntry((float)updateDuration.TotalMilliseconds);
+             bool slow = (updateDuration > TimeSpan.FromTicks(166667));
++            var slowBreakdown = slow
++                ? $" (local packets {localPacketDuration.TotalMilliseconds:F2}ms, world request {worldRequestDuration.TotalMilliseconds:F2}ms, players {playerWorkDuration.TotalMilliseconds:F2}ms, worlds {worldWorkDuration.TotalMilliseconds:F2}ms/{allSystems.Length}, listener {listenerWorkDuration.TotalMilliseconds:F2}ms, cleanup {cleanupDuration.TotalMilliseconds:F2}ms)"
++                : string.Empty;
+             if (slowCount == 0 && slow)
+             {
+-                FLLog.Warning("Server", $"Running slow: update took {updateDuration.TotalMilliseconds:F2}ms");
++                FLLog.Warning("Server", $"Running slow: update took {updateDuration.TotalMilliseconds:F2}ms{slowBreakdown}");
+                 slowCount++;
+             }
+             else if (slow)
+@@ -2839,7 +2859,7 @@
+                 slowCount++;
+                 if (slowCount > 360)
+                 {
+-                    FLLog.Warning("Server", $"Still running slow: update took {updateDuration.TotalMilliseconds:F2}ms");
++                    FLLog.Warning("Server", $"Still running slow: update took {updateDuration.TotalMilliseconds:F2}ms{slowBreakdown}");
+                     slowCount = 1;
+                 }
+             }
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -42,6 +42,7 @@
+ - [x] Ersten CPU-/Frame-Pacing-Messpunkt bereitstellen: Das Debugfenster zeigt gleitende p50/p95/p99-Werte über 300 Frames für die Update-/Draw-/EndFrame-Wandzeit und das Frame-Intervall einschließlich Swap/VSync. Die Messung läuft in SDL2, SDL3 und dem Null-Backend. Die letzten bis zu 300 Samples lassen sich als CSV exportieren; Backend und Fenstermaß werden pro Sample festgehalten und CSV-sicher maskiert. Die Arbeitszeit kann Treiberwartezeit enthalten; GPU-Zeit, Speicher und reproduzierbare Szenenmessungen bleiben offen.
+ - [ ] Systemweite Stabilität und Laufzeitleistung auf Referenzhardware messen und verbessern: FPS sowie CPU-/GPU-Framezeiten (p50/p95/p99), Speicherverbrauch und Frame-Pacing in festen Raum-, Basis-, System-, Kampf- und UI-Szenen erfassen; Langzeitläufe, Szenenwechsel, Resize, Minimieren/Wiederherstellen und Gerätefehler auf Hänger, Abstürze und Ressourcenlecks prüfen. Erst Messungen gegen einen dokumentierten Ausgangswert gelten als Optimierungsnachweis.
+   - [x] Zwei 300-Frame-Messpunkte in der M01A-Freeport-7-Szene mit CPU-/Frameintervall-Perzentilen und asynchronen GPU-Passzeiten exportiert. Die zweite Messung klappte das Trigger-Fenster ein; beide Profile enthalten weiter den Debug-Overlay-Aufwand und stammen aus unterschiedlichen bewegten Intro-Zeitpunkten. Zusätzlich meldete ein Lauf 11 langsame Serverupdates und 59 verworfene Client-Ticks. Das ist ein Diagnosehinweis, kein isolierter Ursachenbeleg. Rohdaten und Einschränkungen: [M01A-Frameprofil](evidence/renderer/m01a-frame-profile-20261015/README.md).
++  - [x] Slow-Update-Diagnose in einem separaten Release-Lauf ohne Debug-Overlay nach Serverphasen aufgeschlüsselt. Der größte Startspike lag im queued World-Request und der erste aktive FP7-Update im World-Update; innere Ursachen und Optimierungen sind nicht belegt. Details und Laufzeitgrenzen: [M01A-Frameprofil](evidence/renderer/m01a-frame-profile-20261015/README.md).
+ - [ ] Render-Passes mit klaren Ein-/Ausgaben und expliziter Farb-/Tiefenpufferverwaltung vorbereiten.
+   - [x] Bestehende Forward-Aufrufreihenfolge, Opaque-/Transparent-Kommandos, Sterne, Nebel und AA-Resolve im Quellcode erfasst; ein formaler Ressourcenvertrag fehlt weiterhin. Siehe [Pass-Reihenfolge-Audit](evidence/renderer/forward-pass-order-audit-20261015.md).
+ - [ ] Render-Target-Resize, minimierte Fenster, Scissor-/Viewport-Wechsel und Geräteverlust für zusätzliche Pässe absichern.
+@@ -160,6 +161,7 @@
+   - [x] M01A-Laufzeitprobe: `--render-sun-lens-glow=on|off` verändert die sichtbare Sonnendarstellung; beide NAP-only-Aufnahmen entstanden zwei Sekunden nach `timer_escort_launch`. Bewegte Kamera und fehlender Originalvergleich verhindern eine pixelgenaue Abnahme. Siehe [Laufzeitnachweis](evidence/renderer/sun-lens-glow-ab-20261015/README.md).
+   - [ ] Renderer-A/B-Bilder bei sichtbarer und verdeckter Sonne aufnehmen und Radius, Farbe, Blendmodus sowie Fade-Verhalten gegen das Original abstimmen.
+ - [ ] Image-Based Lighting und konsistente Umgebungsreflexionen für den PBR-Pfad prüfen.
++- [ ] Systemweite Umgebungsbeleuchtung an Farbe und Intensität der jeweiligen Sonne koppeln. Unterschiedliche Sonnenfarben (z. B. grün, rot oder weiß) sollen die diffuse Grundbeleuchtung aller passenden Szenenobjekte konsistent beeinflussen; Datenquelle, Legacy-Fallback und Zusammenspiel mit PBR/IBL anhand reproduzierbarer NAP-Szenen prüfen.
+ - [ ] Screen-Space Ambient Occlusion als optionale Ergänzung bewerten; Geometrie- und Nebelartefakte gegen Vanilla-Szenen abgleichen.
+ - [ ] Echtzeit-Schatten (zunächst gerichtete Lichter, Kaskaden und PCF) anhand vorhandener Freelancer-Lichtdaten und der GPU-Kosten bewerten.
+ - [ ] Screen-Space-Reflections als optionale Ergänzung prüfen; fehlende Bildinformation an Bildschirmrändern und bei verdeckten Objekten muss über den bestehenden PBR-Fallback abgefangen werden.
+diff --git a/docs/evidence/renderer/m01a-frame-profile-20261015/README.md b/docs/evidence/renderer/m01a-frame-profile-20261015/README.md
+--- a/docs/evidence/renderer/m01a-frame-profile-20261015/README.md
++++ b/docs/evidence/renderer/m01a-frame-profile-20261015/README.md
+@@ -49,3 +49,29 @@
+ visible overlay screenshots document the two conditions. The capture harness
+ closed the app by destroying its X11 window; shutdown emitted `BadWindow`, so
+ clean application shutdown was not verified.
++
++## Follow-up server update stage sample
++
++A separate Release run was captured with the Debug overlay disabled, normal maps
++off, and the same verified active NAP snapshot. It used the same Intel HD
++Graphics 4600/Mesa system and reached the M01A intro. A diagnostic-only change
++split slow server updates into local packet processing, one queued world request,
++player work, world updates, listener work and cleanup. Only updates above the
++16.67 ms threshold include this breakdown in the log.
++
++The run recorded 10 slow updates (18.28–95.66 ms). The 95.66 ms update spent
++93.76 ms in the queued world request; local packet processing took 0.08 ms.
++Source tracing shows this request invokes local save-game/mission startup and
++`SpaceInitialSpawn` for M01A. That is a strong lead, but the inner work is not
++instrumented, so it does not prove which operation accounts for the full delay.
++The next 75.33 ms update spent 75.06 ms in the first active FP7 world update.
++Most later slow updates were in world updates, with several player-work spikes
++(up to 17.82 ms). Listener and cleanup work were negligible in these samples.
++
++The client separately logged 4 simulation-overload notices and dropped 30 stale
++ticks (`27, 1, 1, 1`). The 27-tick drop coincided in time with the first active
++world update, but the server and client loops are separate; causation is not
++proven. No renderer crash occurred. Closing the X11 window again emitted
++`BadWindow` and an OpenAL cleanup warning, so clean shutdown remains unverified.
++This is diagnostic evidence only; it does not demonstrate an optimization or
++represent the other scene types required by the system-wide performance task.
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -129,3 +129,4 @@
+ | 2125 | Document M01A sun lens-glow runtime toggle comparison |
+ | 2126 | Record initial 300-frame M01A CPU/GPU profile and conditions |
+ | 2127 | Verify M01A cubemap fix in a fresh NAP-only Release run and update renderer evidence |
++| 2128 | Add timing breakdowns to slow server update diagnostics |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -127,3 +127,4 @@
+ client 2125-document-sun-lens-glow-runtime-ab.patch
+ client 2126-record-m01a-frame-profile-baseline.patch
+ client 2127-verify-m01a-cubemap-fix-runtime.patch
++client 2128-server-slow-update-stage-timing.patch

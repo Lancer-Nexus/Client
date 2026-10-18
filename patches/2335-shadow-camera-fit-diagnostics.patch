@@ -1,0 +1,115 @@
+--- a/src/LibreLancer/Render/Cameras/DirectionalShadowCamera.cs
++++ b/src/LibreLancer/Render/Cameras/DirectionalShadowCamera.cs
+@@ -29,8 +29,13 @@
+     /// it points from the directional light toward the scene.
+     /// </summary>
+     public bool Fit(ICamera source, Vector3 lightDirection, float maxDistance,
+-        int mapResolution, float xyPadding = 0, float depthPadding = 100)
++        int mapResolution, float xyPadding = 0, float depthPadding = 100) =>
++        Fit(source, lightDirection, maxDistance, mapResolution, xyPadding, depthPadding, out _);
++
++    public bool Fit(ICamera source, Vector3 lightDirection, float maxDistance,
++        int mapResolution, float xyPadding, float depthPadding, out string failureReason)
+     {
++        failureReason = "invalid fit input";
+         if (source == null || !IsFinite(lightDirection) || lightDirection.LengthSquared() < 1e-8f ||
+             !float.IsFinite(maxDistance) || maxDistance <= 0 || mapResolution <= 0 ||
+             !float.IsFinite(xyPadding) || xyPadding < 0 ||
+@@ -38,7 +43,10 @@
+             return false;
+ 
+         if (!Matrix4x4.Invert(source.ViewProjection, out var inverseViewProjection))
++        {
++            failureReason = "source view-projection is not invertible";
+             return false;
++        }
+ 
+         var corners = new Vector3[8];
+         var cornerIndex = 0;
+@@ -47,18 +55,27 @@
+         {
+             if (!TryUnproject(new Vector3(x, y, 0), inverseViewProjection, out var near) ||
+                 !TryUnproject(new Vector3(x, y, 1), inverseViewProjection, out var far))
++            {
++                failureReason = $"camera frustum corner ({x},{y}) cannot be unprojected";
+                 return false;
++            }
+ 
+             var ray = far - source.Position;
+             var rayLength = ray.Length();
+             if (!float.IsFinite(rayLength) || rayLength < 1e-5f)
++            {
++                failureReason = $"camera frustum corner ({x},{y}) has invalid ray length {rayLength}";
+                 return false;
++            }
+ 
+             ray /= rayLength;
+             var nearDistance = Math.Max(0, Vector3.Dot(near - source.Position, ray));
+             var farDistance = Math.Min(maxDistance, rayLength);
+             if (farDistance <= nearDistance)
++            {
++                failureReason = $"camera frustum corner ({x},{y}) has empty distance slice ({nearDistance:F3}..{farDistance:F3})";
+                 return false;
++            }
+ 
+             corners[cornerIndex++] = source.Position + ray * nearDistance;
+             corners[cornerIndex++] = source.Position + ray * farDistance;
+@@ -95,7 +112,10 @@
+         var width = max.X - min.X + 2 * xyPadding;
+         var height = max.Y - min.Y + 2 * xyPadding;
+         if (!float.IsFinite(width) || !float.IsFinite(height) || width < 1e-4f || height < 1e-4f)
++        {
++            failureReason = $"fitted light-space bounds are invalid ({width}x{height})";
+             return false;
++        }
+ 
+         // Snapping the projection center can move it by half a texel. Reserve
+         // one texel on each side so the fitted corners remain inside the map.
+@@ -111,7 +131,10 @@
+         var nearPlane = Math.Max(0.01f, -max.Z - depthPadding);
+         var farPlane = -min.Z + depthPadding;
+         if (!float.IsFinite(nearPlane) || !float.IsFinite(farPlane) || farPlane <= nearPlane)
++        {
++            failureReason = $"fitted light-space depth range is invalid ({nearPlane}..{farPlane})";
+             return false;
++        }
+ 
+         var nextProjection = Matrix4x4.CreateOrthographicOffCenter(
+             centerX - width * 0.5f, centerX + width * 0.5f,
+@@ -125,6 +148,7 @@
+         viewProjection = nextViewProjection;
+         frustum = nextFrustum;
+         Position = eye;
++        failureReason = string.Empty;
+         return true;
+     }
+ 
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -1357,9 +1357,9 @@
+                 return false;
+             }
+             if (!shadowCamera.Fit(camera, selectedLight.Light.Direction, ShadowMaxDistance,
+-                    ShadowMapResolution, 512f, ShadowDepthPadding))
+-            {
+-                ShadowMapStatus = "directional light frustum unavailable";
++                    ShadowMapResolution, 512f, ShadowDepthPadding, out var fitFailure))
++            {
++                ShadowMapStatus = $"directional light frustum unavailable: {fitFailure}";
+                 return false;
+             }
+ 
+--- a/patches/series
++++ b/patches/series
+@@ -334,3 +334,4 @@
+ client 2332-fp7-hdr-nap-runtime-evidence.patch
+ client 2333-ssao-offscreen-local-viewport.patch
+ client 2334-configurable-shadow-bias.patch
++client 2335-shadow-camera-fit-diagnostics.patch
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -280,3 +280,4 @@
+ 
+ | 2333 | Render SSAO intermediate targets at local origin |
+ | 2334 | Make directional shadow bias configurable and validated |
++| 2335 | Report the failing stage when fitting a directional shadow camera |

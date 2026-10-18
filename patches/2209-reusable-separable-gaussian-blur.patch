@@ -1,0 +1,221 @@
+client 2209-reusable-separable-gaussian-blur.patch
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+index 3d640e5..582b252 100644
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -128,6 +128,7 @@ Diese Liste plant moderne Renderer-Erweiterungen für LibreLancer. Sie ist eine
+ 
+ - [ ] Allgemeine Post-Processing-Pass-Schnittstelle ergänzen; SMAA und bestehende Render-Targets dabei als Referenz für Ressourcenlebensdauer und Skalierung verwenden.
+ - [ ] Separable Gaussian Blur als erster kontrollierter Effekt: variable Kernelbreite, Auflösungs-Skalierung und keine Farb-/Alpha-Halos.
++  - [x] Den horizontalen/vertikalen 5-Tap-Gauß-Blur als wiederverwendbaren `SeparableGaussianBlurPass` aus Bloom herausgelöst. Bloom verwendet weiterhin Quarter-Resolution-Extraktion und denselben festen Kernel; variable Kernellänge, eigenständige Auflösungsskalierung, Halo-Abnahme und GPU-Kostenmessung bleiben offen.
+ - [ ] Verwendungsfälle getrennt spezifizieren: weicher UI-/Vorschau-Hintergrund, selektiver Tiefenunschärfe-Effekt und kamerabasierte Bewegungsunschärfe sind unterschiedliche Effekte.
+ - [ ] Für kamerabasierte Motion Blur Bewegungsvektoren und Disocclusion-Artefakte untersuchen; vorhandene Partikel-Motion-Blur nicht als Ersatz behandeln.
+ - [ ] Optionalen Radial-/Zoom-Blur für klar begrenzte Cutscene- oder Effektfälle prüfen.
+diff --git a/patches/series b/patches/series
+index f0b2de6..746abc9 100644
+--- a/patches/series
++++ b/patches/series
+@@ -208,3 +208,4 @@ client 2205-pbr-world-reflection-runtime-evidence.patch
+ client 2206-sun-ambient-strength-control.patch
+ client 2207-sun-ambient-strength-runtime-probes.patch
+ client 2208-particle-vertex-optimization.patch
++client 2209-reusable-separable-gaussian-blur.patch
+diff --git a/src/LibreLancer.Base/Graphics/BloomPass.cs b/src/LibreLancer.Base/Graphics/BloomPass.cs
+index 1d3645c..4605016 100644
+--- a/src/LibreLancer.Base/Graphics/BloomPass.cs
++++ b/src/LibreLancer.Base/Graphics/BloomPass.cs
+@@ -6,15 +6,17 @@ internal sealed class BloomPass : System.IDisposable
+ {
+     private readonly RenderContext context;
+     private RenderTarget2D? extracted;
+-    private RenderTarget2D? horizontal;
+-    private RenderTarget2D? blurred;
++    private readonly SeparableGaussianBlurPass blur;
+     private int width;
+     private int height;
+     private bool failed;
+-    public long EstimatedMemoryBytes => (extracted?.EstimatedMemoryBytes ?? 0) +
+-        (horizontal?.EstimatedMemoryBytes ?? 0) + (blurred?.EstimatedMemoryBytes ?? 0);
++    public long EstimatedMemoryBytes => (extracted?.EstimatedMemoryBytes ?? 0) + blur.EstimatedMemoryBytes;
+ 
+-    public BloomPass(RenderContext context) => this.context = context;
++    public BloomPass(RenderContext context)
++    {
++        this.context = context;
++        blur = new SeparableGaussianBlurPass(context);
++    }
+ 
+     public Texture2D? Process(Texture2D source, float threshold, float radius)
+     {
+@@ -31,8 +33,6 @@ internal sealed class BloomPass : System.IDisposable
+             try
+             {
+                 extracted = new RenderTarget2D(context, width, height, null, false, SurfaceFormat.HdrBlendable);
+-                horizontal = new RenderTarget2D(context, width, height, null, false, SurfaceFormat.HdrBlendable);
+-                blurred = new RenderTarget2D(context, width, height, null, false, SurfaceFormat.HdrBlendable);
+             }
+             catch (System.Exception ex) when (ex is System.InvalidOperationException or System.NotSupportedException)
+             {
+@@ -47,8 +47,6 @@ internal sealed class BloomPass : System.IDisposable
+         {
+             Draw(context.BloomExtractShader, source, extracted!, new Vector4(
+                 1f / source.Width, 1f / source.Height, threshold, 0.5f));
+-            Draw(context.BloomBlurShader, extracted!.Texture, horizontal!, new Vector4(1f / width, 0, radius, 0));
+-            Draw(context.BloomBlurShader, horizontal!.Texture, blurred!, new Vector4(0, 1f / height, radius, 0));
+         }
+         catch (System.Exception ex) when (ex is System.InvalidOperationException or System.NotSupportedException)
+         {
+@@ -57,7 +55,7 @@ internal sealed class BloomPass : System.IDisposable
+             FLLog.Warning("Graphics", $"Bloom rendering failed; continuing without bloom. {ex.Message}");
+             return null;
+         }
+-        return blurred!.Texture;
++        return blur.Process(extracted!.Texture, radius, SurfaceFormat.HdrBlendable);
+     }
+ 
+     private void Draw(Shader shader, Texture2D source, RenderTarget2D target, Vector4 parameters)
+@@ -114,9 +112,8 @@ internal sealed class BloomPass : System.IDisposable
+     private void DisposeTargets()
+     {
+         extracted?.Dispose();
+-        horizontal?.Dispose();
+-        blurred?.Dispose();
+-        extracted = horizontal = blurred = null;
++        extracted = null;
++        blur.Dispose();
+     }
+ 
+     public void Dispose() => DisposeTargets();
+diff --git a/src/LibreLancer.Base/Graphics/SeparableGaussianBlurPass.cs b/src/LibreLancer.Base/Graphics/SeparableGaussianBlurPass.cs
+new file mode 100644
+index 0000000..6d5f6fe
+--- /dev/null
++++ b/src/LibreLancer.Base/Graphics/SeparableGaussianBlurPass.cs
+@@ -0,0 +1,127 @@
++using System;
++using System.Numerics;
++
++namespace LibreLancer.Graphics;
++
++/// <summary>
++/// Reusable horizontal/vertical Gaussian blur for post-processing textures.
++/// The caller owns input extraction, output composition, and resolution policy.
++/// </summary>
++internal sealed class SeparableGaussianBlurPass : IDisposable
++{
++    private readonly RenderContext context;
++    private RenderTarget2D? horizontal;
++    private RenderTarget2D? blurred;
++    private int width;
++    private int height;
++    private SurfaceFormat format;
++    private bool failed;
++
++    public long EstimatedMemoryBytes =>
++        (horizontal?.EstimatedMemoryBytes ?? 0) + (blurred?.EstimatedMemoryBytes ?? 0);
++
++    public SeparableGaussianBlurPass(RenderContext context) => this.context = context;
++
++    public Texture2D? Process(Texture2D source, float radius, SurfaceFormat targetFormat)
++    {
++        radius = float.IsFinite(radius) ? Math.Clamp(radius, 0.25f, 4f) : 1f;
++        if (failed || source.Width <= 0 || source.Height <= 0)
++            return null;
++
++        if (width != source.Width || height != source.Height || format != targetFormat ||
++            horizontal == null || blurred == null)
++        {
++            DisposeTargets();
++            width = source.Width;
++            height = source.Height;
++            format = targetFormat;
++            try
++            {
++                horizontal = new RenderTarget2D(context, width, height, null, false, format);
++                blurred = new RenderTarget2D(context, width, height, null, false, format);
++            }
++            catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException)
++            {
++                DisposeTargets();
++                failed = true;
++                FLLog.Warning("Graphics", $"Gaussian blur targets are unavailable; continuing without blur. {ex.Message}");
++                return null;
++            }
++        }
++
++        try
++        {
++            Draw(source, horizontal!, new Vector4(1f / source.Width, 0f, radius, 0f));
++            Draw(horizontal!.Texture, blurred!, new Vector4(0f, 1f / height, radius, 0f));
++        }
++        catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException)
++        {
++            DisposeTargets();
++            failed = true;
++            FLLog.Warning("Graphics", $"Gaussian blur failed; continuing without blur. {ex.Message}");
++            return null;
++        }
++
++        return blurred!.Texture;
++    }
++
++    private void Draw(Texture2D source, RenderTarget2D target, Vector4 parameters)
++    {
++        var previousTarget = context.RenderTarget;
++        var previousTexture = context.Textures[0];
++        var previousSampler = context.Samplers[0];
++        var previousShader = context.Shader;
++        var previousBlend = context.BlendMode;
++        var previousDepth = context.DepthEnabled;
++        var previousDepthWrite = context.DepthWrite;
++        var previousColorWrite = context.ColorWrite;
++        var previousCull = context.Cull;
++        var previousStencil = context.Stencil;
++        var previousStencilEnabled = context.StencilEnabled;
++        var viewportPushed = false;
++        var scissorPushed = false;
++        try
++        {
++            context.RenderTarget = target;
++            context.PushViewport(0, 0, width, height);
++            viewportPushed = true;
++            scissorPushed = context.PushScissor(new Rectangle(0, 0, width, height), false);
++            context.DepthEnabled = false;
++            context.DepthWrite = false;
++            context.ColorWrite = true;
++            context.Cull = false;
++            context.StencilEnabled = false;
++            context.BlendMode = BlendMode.Opaque;
++            context.Textures[0] = source;
++            context.Samplers[0] = new SamplerState(TextureFiltering.Linear, WrapMode.ClampToEdge, WrapMode.ClampToEdge);
++            context.BloomBlurShader.SetUniformBlock(3, ref parameters);
++            context.Shader = context.BloomBlurShader;
++            context.FullScreenTriangle.Draw(PrimitiveTypes.TriangleList, 1);
++        }
++        finally
++        {
++            context.Textures[0] = previousTexture;
++            context.Samplers[0] = previousSampler;
++            context.Shader = previousShader;
++            context.BlendMode = previousBlend;
++            context.DepthEnabled = previousDepth;
++            context.DepthWrite = previousDepthWrite;
++            context.ColorWrite = previousColorWrite;
++            context.Cull = previousCull;
++            context.Stencil = previousStencil;
++            context.StencilEnabled = previousStencilEnabled;
++            if (scissorPushed) context.PopScissor();
++            if (viewportPushed) context.PopViewport();
++            context.RenderTarget = previousTarget;
++        }
++    }
++
++    private void DisposeTargets()
++    {
++        horizontal?.Dispose();
++        blurred?.Dispose();
++        horizontal = blurred = null;
++    }
++
++    public void Dispose() => DisposeTargets();
++}

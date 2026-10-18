@@ -1,0 +1,249 @@
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -16,7 +16,7 @@
+ | HDR und Tonemapping | Linearisiertes Scene-Target, ACES-Tonemapping, linearisierte PBR-Albedo-/Licht-/Emissionswerte und exakte sRGB-Ausgabe im PBR-LDR-Pfad. System- und Nebel-Clearfarben werden ebenfalls vor dem HDR-Clear linearisiert; LDR bleibt unverändert. Ein Source-Audit hat alle 19 Ingame-Fragmentshader und den Postprocess-Ausgang geprüft; 2 Farbraum- und 21 Ambientlicht-Regressionstests bestehen. | Retail-Farbannahmen, visuelle Gleichheit zwischen Legacy/PBR, transparente Effekte, Fog und zusammengesetzte Ingame-Szenen brauchen weiterhin feste Bildvergleiche, Original-Client-Referenz und Hardware-GPU-Abnahme. HDR/LDR-Vergleich: `docs/evidence/renderer/postprocess-four-mode-ab-20261017/`; Shaderaudit: `docs/evidence/renderer/hdr-shader-color-contract-audit-20261018.md`; Clear-Farbvertrag: `docs/evidence/renderer/hdr-clear-color-contract-20261018.md`. |
+ | Bloom | HDR-Extraktion mittelt jetzt ein vollständiges 4×4-Quellfenster in Viertelauflösung; aufrundende Zielmaße behalten Randpixel bei ungeraden Fenstergrößen. Basis-, mittlere und breite Blur-Stufen sowie Schwelle, Radius, Auflösung und Kernel sind konfigurierbar. | Die Extraktion beseitigt das bisherige Unterabtasten der zentralen vier Texel. Der Code führt alle drei Stufen aus. Die vorhandene Bloom-Pyramidenaufnahme nennt ein Laufzeitpaket/Manifest vom 18.10. und gilt am Dokumentstand 17.10. nicht als verifizierter NAP-Lauf. Laufzeitabnahme, Halo-Kalibrierung und GPU-Kosten bleiben offen. |
+ | Antialiasing | SMAA-Pässe und MSAA-Auflösung; HDR/LDR-Kombinationen sowie Resize und Minimize/Restore wurden auf OpenGL/Mesa geprüft. | Andere Backends/Treiber, wiederholte Lifecycle-Zyklen und Fehler-Injektion stehen aus. |
+-| GPU-Readback | Asynchrones OpenGL-Textur-Readback verwendet PBO und Fence. Fehler beim Setup räumen PBO/FBO/Fence auf; Mapping- und Unmap-Fehler beenden den Task mit Fehler und geben den PBO frei. | Der Quellpfad baut. GL-Fehler-Injektion und ein Laufzeit-Readback auf unterstützten und Sync-losen Treibern sind noch nicht abgenommen. Siehe `docs/evidence/renderer/gl-texture-async-readback-lifecycle-20261018/`. |
++| GPU-Readback | Asynchrones OpenGL-Textur-Readback verwendet PBO und Fence. Synchron liest Desktop-GL die angeforderte Mip-Ebene mit `glGetTexImage` und kopiert die Region in den Zielbereich; GLES verwendet ein temporäres FBO und `ReadPixels`. Pack-Alignment und PBO-Bindung werden wiederhergestellt. | Ein Release-Runtime-Probe mit Mip 1, Teilrechteck und Zieloffset besteht auf Mesa/OpenGL mit Intel HD 4600. Komprimierte Formate werden ausdrücklich abgelehnt. GLES-Lauf, Fehler-Injektion und Editor-Export bleiben offen. Siehe `docs/evidence/renderer/gl-texture-readback-smoke-20261018.md` und `docs/evidence/renderer/gl-texture-async-readback-lifecycle-20261018/`. |
+ | Postprocess-Lifecycle | Postprocess-Pässe werden in umgekehrter Ausführungsreihenfolge entsorgt; bei einem Fehler läuft die Freigabe aller übrigen Pässe weiter. Der Plan ist idempotent entsorgbar und meldet Fehler gebündelt. | Regressionstests decken Reihenfolge, Fehlerfortsetzung und wiederholtes Dispose ab. Fehler im eigentlichen Backend-Ressourcenfreigabepfad und Kontextverlust sind weiter offen. |
+ | Systemrenderer-Lifecycle | `SystemRenderer.Dispose()` versucht die Freigabe aller Frame-/Effekt-/Target-Ressourcen und GPU-Timerabfragen auch dann, wenn einzelne Freigaben fehlschlagen; Fehler werden gebündelt. Wiederholtes Dispose ist wirkungslos. | Fehlerfortsetzung der allgemeinen Bereinigungsroutine ist unit-getestet. Native GL-Fehlerinjektion und Kontextverlust bleiben offen. Siehe `docs/evidence/renderer/system-renderer-cleanup-20261018/`. |
+ | RenderContext-Lifecycle | SDL2/SDL3 geben den RenderContext vor dem nativen Kontextabbau frei. Nach Abschluss der GPU-Fences werden Shader, SMAA-Texturen, Fullscreen- und Renderer2D-Puffer, Font-Texturen sowie der unmanaged 2D-Pool auch bei Einzel-Fehlern bereinigt. | Headless-Regression prüft Fence-Drain, Wiederholbarkeit und bekannte Kontext-Ressourcen. GL-native Fehlerpfade und Kontextverlust bleiben offen. Siehe `docs/evidence/renderer/render-context-shutdown-20261018/`. |
+@@ -228,6 +228,18 @@
+ Der Nachweis gilt für OpenGL/Mesa llvmpipe und ersetzt keine Abnahme auf weiteren
+ Treibern oder GPUs.
+ 
++Patch `2345-opengl-texture-region-readback.patch` vervollständigt außerdem den
++synchronen `Texture2D.GetData`-Vertrag: Mip-Level, optionale Rechtecke,
++Zieloffset und Elementanzahl werden validiert und angewendet. Desktop-GL liest
++die ausgewählte Mip-Ebene direkt mit `glGetTexImage`; GLES nutzt ein temporäres
++FBO, stellt getrennte Read-/Draw-Framebufferbindungen, Pixel-Pack-Alignment
++und PBO-Bindung wieder her und liest BGRA8 über RGBA mit nachfolgendem
++Kanalaustausch. Komprimierte Formate werden gezielt abgewiesen, da dieser Pfad
++sie nicht dekomprimiert. Patch `2346-gl-texture-readback-smoke.patch` ergänzt
++einen separaten Runtime-Probe ohne Freelancer-Daten; er besteht auf Mesa/OpenGL
++mit Intel HD 4600 für Mip 1, Teilrechteck, Offset/Count, Pixelwerte und
++ungültige Argumente. Editor-Export und GLES-Abnahme bleiben offen.
++
+ 
+ ## SDL_GPU-Probe
+ 
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -292,3 +292,4 @@
+ | 2343 | Move SDL screenshot readback behind the render backend interface |
+ 
+ | 2344 | Add SDL_GPU vertex upload, BC5 normal-map sampling, pipeline and pixel readback smoke |
++| 2345 | Implement mip and region-aware synchronous OpenGL texture readback |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -344,3 +344,4 @@
+ client 2342-record-neutral-enums-nap-smoke.patch
+ client 2343-renderer-readback-contract.patch
+ client 2344-sdl-gpu-swapchain-smoke.patch
++client 2345-opengl-texture-region-readback.patch
+diff --git a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Constants.cs b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Constants.cs
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Constants.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Constants.cs
+@@ -162,6 +162,7 @@
+     public const int GL_READ_FRAMEBUFFER_BINDING = 0x8CAA;
+     public const int GL_READ_BUFFER = 0x0C02;
+     public const int GL_DRAW_FRAMEBUFFER = 0x8CA9;
++    public const int GL_DRAW_FRAMEBUFFER_BINDING = 0x8CA6;
+     public const int GL_RENDERBUFFER = 0x8D41;
+     public const int GL_DEPTH_COMPONENT16 = 0x81A5;
+     public const int GL_DEPTH_COMPONENT24 = 0x81A6;
+diff --git a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLTexture2D.cs b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLTexture2D.cs
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLTexture2D.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLTexture2D.cs
+@@ -238,57 +238,149 @@
+     private int maxLevel = 0;
+     private int currentLevels = 0;
+ 
+-    //TODO: Re-implement Texture2D.GetData later
+     public void GetData<T>(int level, Rectangle? rect, T[] data, int start, int count) where T : struct
+     {
+-        GetData<T>(data);
++        ArgumentNullException.ThrowIfNull(data);
++        if (level < 0 || level >= LevelCount) throw new ArgumentOutOfRangeException(nameof(level));
++        if (start < 0 || count < 0 || start > data.Length - count)
++            throw new ArgumentOutOfRangeException(nameof(start));
++        if (glFormat == GL.GL_NUM_COMPRESSED_TEXTURE_FORMATS)
++            throw new NotSupportedException("Synchronous pixel readback does not decompress compressed textures.");
++
++        GetMipSize(level, Width, Height, out var mipWidth, out var mipHeight);
++        var region = rect ?? new Rectangle(0, 0, mipWidth, mipHeight);
++        if (region.X < 0 || region.Y < 0 || region.Width <= 0 || region.Height <= 0 ||
++            region.X > mipWidth - region.Width || region.Y > mipHeight - region.Height)
++            throw new ArgumentOutOfRangeException(nameof(rect), "Readback rectangle is outside the selected mip level.");
++
++        var requiredElements = checked(region.Width * region.Height);
++        if (count < requiredElements)
++            throw new ArgumentException("The destination element count is smaller than the requested texture region.", nameof(count));
++        var elementSize = Marshal.SizeOf<T>();
++        var bytesPerPixel = Format.GetSizeEstimate();
++        if (elementSize != bytesPerPixel)
++            throw new ArgumentException($"Element size {elementSize} does not match the {bytesPerPixel}-byte {Format} texture format.", nameof(data));
++
++        if (!GL.GLES)
++        {
++            GL.GetIntegerv(GL.GL_PIXEL_PACK_BUFFER_BINDING, out var desktopPackBuffer);
++            GL.GetIntegerv(GL.GL_PACK_ALIGNMENT, out var desktopPackAlignment);
++            var mipData = new T[checked(mipWidth * mipHeight)];
++            GCHandle mipHandle = default;
++            try
++            {
++                GL.BindBuffer(GL.GL_PIXEL_PACK_BUFFER, 0);
++                GL.PixelStorei(GL.GL_PACK_ALIGNMENT, 1);
++                BindForModify(0);
++                mipHandle = GCHandle.Alloc(mipData, GCHandleType.Pinned);
++                GL.GetTexImage(GL.GL_TEXTURE_2D, level, glFormat, glType, mipHandle.AddrOfPinnedObject());
++                for (var row = 0; row < region.Height; row++)
++                    Array.Copy(mipData, (region.Y + row) * mipWidth + region.X,
++                        data, start + row * region.Width, region.Width);
++            }
++            finally
++            {
++                if (mipHandle.IsAllocated) mipHandle.Free();
++                try
++                {
++                    GL.PixelStorei(GL.GL_PACK_ALIGNMENT, desktopPackAlignment);
++                }
++                finally
++                {
++                    GL.BindBuffer(GL.GL_PIXEL_PACK_BUFFER, (uint)desktopPackBuffer);
++                }
++            }
++            return;
++        }
++
++        GL.GetIntegerv(GL.GL_READ_FRAMEBUFFER_BINDING, out var previousFramebuffer);
++        GL.GetIntegerv(GL.GL_DRAW_FRAMEBUFFER_BINDING, out var previousDrawFramebuffer);
++        GL.GetIntegerv(GL.GL_PIXEL_PACK_BUFFER_BINDING, out var previousPackBuffer);
++        GL.GetIntegerv(GL.GL_PACK_ALIGNMENT, out var previousPackAlignment);
++        var framebuffer = GL.GenFramebuffer();
++        if (framebuffer == 0) throw new InvalidOperationException("Texture readback framebuffer creation failed");
++        GCHandle handle = default;
++        try
++        {
++            GL.BindBuffer(GL.GL_PIXEL_PACK_BUFFER, 0);
++            GL.PixelStorei(GL.GL_PACK_ALIGNMENT, 1);
++            GL.BindFramebuffer(GL.GL_FRAMEBUFFER, framebuffer);
++            AttachForReadback(GL.GL_FRAMEBUFFER, level);
++            if (Format != SurfaceFormat.Depth)
++                GL.ReadBuffer(GL.GL_COLOR_ATTACHMENT0);
++            var framebufferStatus = GL.CheckFramebufferStatus(GL.GL_FRAMEBUFFER);
++            if (framebufferStatus != GL.GL_FRAMEBUFFER_COMPLETE)
++                throw new InvalidOperationException($"Texture readback framebuffer is incomplete for mip {level} (0x{framebufferStatus:X}).");
++
++            handle = GCHandle.Alloc(data, GCHandleType.Pinned);
++            var destination = IntPtr.Add(handle.AddrOfPinnedObject(), checked(start * elementSize));
++            // BGRA readback is not part of core GLES. Read RGBA there and convert
++            // to the engine's BGRA8 memory layout after the transfer.
++            var readFormat = GL.GLES && Format == SurfaceFormat.Bgra8 ? GL.GL_RGBA : glFormat;
++            GL.ReadPixels(region.X, region.Y, region.Width, region.Height, readFormat, glType, destination);
++            if (readFormat != glFormat)
++            {
++                for (var pixel = 0; pixel < requiredElements; pixel++)
++                {
++                    var offset = checked(pixel * 4);
++                    var red = Marshal.ReadByte(destination, offset);
++                    Marshal.WriteByte(destination, offset, Marshal.ReadByte(destination, offset + 2));
++                    Marshal.WriteByte(destination, offset + 2, red);
++                }
++            }
++        }
++        finally
++        {
++            if (handle.IsAllocated) handle.Free();
++            try
++            {
++                try
++                {
++                    GL.BindFramebuffer(GL.GL_READ_FRAMEBUFFER, (uint)previousFramebuffer);
++                }
++                finally
++                {
++                    try
++                    {
++                        GL.BindFramebuffer(GL.GL_DRAW_FRAMEBUFFER, (uint)previousDrawFramebuffer);
++                    }
++                    finally
++                    {
++                        try
++                        {
++                            GL.PixelStorei(GL.GL_PACK_ALIGNMENT, previousPackAlignment);
++                        }
++                        finally
++                        {
++                            GL.BindBuffer(GL.GL_PIXEL_PACK_BUFFER, (uint)previousPackBuffer);
++                        }
++                    }
++                }
++            }
++            finally
++            {
++                GL.DeleteFramebuffer(framebuffer);
++            }
++        }
+     }
+ 
+     public void GetData<T>(T[] data) where T : struct
+     {
+-        if (glFormat == GL.GL_NUM_COMPRESSED_TEXTURE_FORMATS)
+-        {
+-            throw new NotImplementedException();
+-        }
+-        else {
+-            var handle = GCHandle.Alloc(data, GCHandleType.Pinned);
+-            BindForModify(0);
+-            if (GL.GLES)
+-            {
+-                var fbo = GL.GenFramebuffer();
+-                GL.BindFramebuffer(GL.GL_FRAMEBUFFER, fbo);
+-                AttachForReadback();
+-                GL.ReadPixels(0,0,Width,Height, glFormat, glType, handle.AddrOfPinnedObject());
+-                RestoreFramebuffer();
+-                GL.DeleteFramebuffer(fbo);
+-            }
+-            else
+-            {
+-
+-                GL.GetTexImage(
+-                    GL.GL_TEXTURE_2D,
+-                    0,
+-                    glFormat,
+-                    glType,
+-                    handle.AddrOfPinnedObject()
+-                );
+-
+-            }
+-            handle.Free();
+-        }
+-    }
+-
+-    private void AttachForReadback()
++        ArgumentNullException.ThrowIfNull(data);
++        GetData(0, null, data, 0, data.Length);
++    }
++
++    private void AttachForReadback(int target = GL.GL_FRAMEBUFFER, int level = 0)
+     {
+         if (Format == SurfaceFormat.Depth)
+         {
+-            GL.FramebufferTexture2D(GL.GL_FRAMEBUFFER, GL.GL_DEPTH_ATTACHMENT, GL.GL_TEXTURE_2D, ID, 0);
+-            GL.DrawBuffer(GL.GL_NONE);
++            GL.FramebufferTexture2D(target, GL.GL_DEPTH_ATTACHMENT, GL.GL_TEXTURE_2D, ID, level);
++            if (target != GL.GL_READ_FRAMEBUFFER) GL.DrawBuffer(GL.GL_NONE);
+             GL.ReadBuffer(GL.GL_NONE);
+         }
+         else
+         {
+-            GL.FramebufferTexture2D(GL.GL_FRAMEBUFFER, GL.GL_COLOR_ATTACHMENT0, GL.GL_TEXTURE_2D, ID, 0);
++            GL.FramebufferTexture2D(target, GL.GL_COLOR_ATTACHMENT0, GL.GL_TEXTURE_2D, ID, level);
+         }
+     }
+ 

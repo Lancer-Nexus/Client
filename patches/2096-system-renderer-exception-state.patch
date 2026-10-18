@@ -1,0 +1,127 @@
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -407,8 +407,15 @@
+             }
+ 
+             RenderTarget? restoreTarget = rstate.RenderTarget;
++            bool restoreDepthEnabled = rstate.DepthEnabled;
++            bool restoreDepthWrite = rstate.DepthWrite;
++            DepthFunction restoreDepthFunction = rstate.DepthFunction;
++            Vector2 restoreDepthRange = rstate.DepthRange;
++            bool restoreColorWrite = rstate.ColorWrite;
++            Color4 restoreClearColor = rstate.ClearColor;
+             bool aaViewportPushed = false;
+             bool aaScissorPushed = false;
++            bool thnDefaultZActive = false;
+ 
+             try
+             {
+@@ -550,6 +557,7 @@
+ 
+                     if (camera is ThnCamera thn && !ZOverride)
+                     {
++                        thnDefaultZActive = true;
+                         thn.DefaultZ();
+                         rstate.SetCamera(thn);
+                     }
+@@ -595,6 +603,7 @@
+                     if (camera is ThnCamera thn2 && !ZOverride)
+                     {
+                         thn2.CameraZ();
++                        thnDefaultZActive = false;
+                         rstate.SetCamera(thn2);
+                     }
+ 
+@@ -656,13 +665,30 @@
+                 }
+ 
+                 rstate.DepthEnabled = true;
+-                objects.Clear();
+             }
+             finally
+             {
+-                if (aaScissorPushed) rstate.PopScissor();
+-                if (aaViewportPushed) rstate.PopViewport();
+-                rstate.RenderTarget = restoreTarget;
++                try
++                {
++                    if (thnDefaultZActive && camera is ThnCamera thn)
++                    {
++                        thn.CameraZ();
++                        rstate.SetCamera(thn);
++                    }
++                }
++                finally
++                {
++                    if (aaScissorPushed) rstate.PopScissor();
++                    if (aaViewportPushed) rstate.PopViewport();
++                    rstate.RenderTarget = restoreTarget;
++                    objects.Clear();
++                    rstate.DepthEnabled = restoreDepthEnabled;
++                    rstate.DepthWrite = restoreDepthWrite;
++                    rstate.DepthFunction = restoreDepthFunction;
++                    rstate.DepthRange = restoreDepthRange;
++                    rstate.ColorWrite = restoreColorWrite;
++                    rstate.ClearColor = restoreClearColor;
++                }
+             }
+         }
+ 
+--- a/docs/evidence/renderer/render-target-exception-path-audit-20261015.md
++++ b/docs/evidence/renderer/render-target-exception-path-audit-20261015.md
+@@ -10,11 +10,14 @@
+ aktivem Antialiasing erstellt der Renderer ein passendes `AntialiasTarget`,
+ pusht Viewport und Scissor und bindet danach das MSAA-Target. Das reguläre
+ Aufräumen poppt beide Stacks, blitted das Ergebnis und setzt `restoreTarget`
+-wieder. Diese Schritte liegen nach den Draw-Pässen; die Methode hat keinen
+-umschließenden `try/finally`-Block.
++wieder. Ein `finally` stellt RenderTarget, offene Viewport-/Scissor-Pushes,
++DepthEnabled, DepthWrite, DepthFunction, DepthRange, ColorWrite und ClearColor
++wieder her. Es schaltet eine aktive `ThnCamera.DefaultZ()`-Projektion zurück
++und leert die Frame-Objektliste auch nach einem Draw-Fehler.
+ 
+ Quellstellen: `src/LibreLancer/Render/SystemRenderer.cs`,
+-`Draw()` Setup bei 409–425 und AA-Wiederherstellung ab 634.
++`Draw()` Setup bei 409–425, THN-Projektionswechsel bei 560–606 und Ausnahme-
++Wiederherstellung ab 669.
+ 
+ ## `AntialiasTarget.SMAABlit()`
+ 
+@@ -33,10 +36,11 @@
+ ## Aussage und nächster Schritt
+ 
+ Die betroffenen Ressourcen-/Zielzustände sind jetzt gegen Fehler zwischen Setup
+-und normaler Wiederherstellung geschützt. Das belegt keine Fehlerfreiheit
+-anderer Renderzustände oder Draw-Pfade. Die Wiederherstellung wurde nicht mit
+-injizierten Laufzeitfehlern geprüft; reguläre Resize-/Minimize-/Restore-Läufe
+-sind ebenfalls noch offen.
++und normaler Wiederherstellung geschützt. Das deckt die direkt in beiden
++Methoden gespeicherten und veränderten Zustände ab, nicht beliebige Zustände
++innerhalb benutzerdefinierter Hooks oder beliebiger Draw-Pfade. Die
++Wiederherstellung wurde nicht mit injizierten Laufzeitfehlern geprüft;
++reguläre Resize-/Minimize-/Restore-Läufe sind ebenfalls noch offen.
+ 
+ Nächster Schritt: Fehler zwischen den Draw-Pässen injizieren und reguläre
+ Resize-/Minimize-/Restore-Abläufe prüfen.
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -46,3 +46,3 @@
+   - [x] `SystemRenderer.Draw()` überspringt Frames mit Breite/Höhe 0. Bei geändertem Rendermaß oder AA-Modus gibt es das vorhandene MSAA-Target frei und erstellt es neu. Das belegt nur diesen System-Renderer-Pfad; Editor-/Offscreen-Targets, Wiederherstellungstests und Geräteverlust bleiben offen.
+-  - [x] `SystemRenderer.Draw()` und `AntialiasTarget.SMAABlit()` stellen RenderTarget, Viewport-/Scissor-Stacks und die von SMAA veränderten Zustände in `finally` wieder her. Quellcodepfad umgesetzt; Fehler-Injektion und reguläre Resize-/Minimize-/Restore-Läufe bleiben als Laufzeitprüfung offen. Details im [Fehlerpfad-Audit](evidence/renderer/render-target-exception-path-audit-20261015.md).
++  - [x] `SystemRenderer.Draw()` und `AntialiasTarget.SMAABlit()` stellen RenderTarget, Viewport-/Scissor-Stacks und ihre geänderten RenderContext-Zustände in `finally` wieder her. `SystemRenderer` stellt auch `ThnCamera.DefaultZ()` zurück und leert die Frame-Objektliste nach Fehlern. Fehler-Injektion und reguläre Resize-/Minimize-/Restore-Läufe bleiben als Laufzeitprüfung offen. Details im [Fehlerpfad-Audit](evidence/renderer/render-target-exception-path-audit-20261015.md).
+ - [ ] GPU-Zeit und Speicherverbrauch pro Pass messbar machen; Effekte müssen einzeln abschaltbar und nach Hardwareprofil skalierbar sein.
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -70,4 +70,5 @@
+ | 2094 | Derive existing scene and antialias target resource contracts |
+ | 2095 | Restore render targets and state stacks after draw exceptions |
++| 2096 | Restore SystemRenderer graphics state after exceptions |
+ | 2011 (`lancerdecode`) | Native Vorbis EOF/reset handling |
+ | 2012 (`blurgtext`) | System FreeType without OT-SVG hooks |
+--- a/patches/series
++++ b/patches/series
+@@ -95,3 +95,4 @@
+ client 2093-render-option-wiring-audit.patch
+ client 2094-render-target-resource-contract.patch
+ client 2095-render-target-exception-restoration.patch
++client 2096-system-renderer-exception-state.patch

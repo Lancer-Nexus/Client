@@ -1,0 +1,140 @@
+diff --git a/src/LibreLancer/Render/RenderMaterial.cs b/src/LibreLancer/Render/RenderMaterial.cs
+--- a/src/LibreLancer/Render/RenderMaterial.cs
++++ b/src/LibreLancer/Render/RenderMaterial.cs
+@@ -27,6 +27,7 @@
+         public static float ShadowBias = 0.0015f;
+         public static Texture2D? ParticleSceneDepthTexture;
+         public static float ParticleSoftness;
++        public static Vector2 ParticleSceneDepthViewportOrigin;
+ 
+         public int Key { get; private set; }
+ 
+diff --git a/src/LibreLancer/Render/Materials/ParticleMaterial.cs b/src/LibreLancer/Render/Materials/ParticleMaterial.cs
+--- a/src/LibreLancer/Render/Materials/ParticleMaterial.cs
++++ b/src/LibreLancer/Render/Materials/ParticleMaterial.cs
+@@ -39,6 +39,8 @@
+             1f / Math.Max(1, RenderMaterial.ParticleSceneDepthTexture?.Width ?? 1),
+             1f / Math.Max(1, RenderMaterial.ParticleSceneDepthTexture?.Height ?? 1), 0f);
+         shader.SetUniformBlock(4, ref softParameters);
++        var depthViewport = new Vector4(RenderMaterial.ParticleSceneDepthViewportOrigin, 0f, 0f);
++        shader.SetUniformBlock(5, ref depthViewport);
+         var dk = Parameters[userData].drawKind;
+         shader.SetUniformBlock(3, ref dk);
+         rstate.BlendMode = Parameters[userData].blendMode;
+diff --git a/src/LibreLancer/Render/Materials/ParticleBeamMaterial.cs b/src/LibreLancer/Render/Materials/ParticleBeamMaterial.cs
+--- a/src/LibreLancer/Render/Materials/ParticleBeamMaterial.cs
++++ b/src/LibreLancer/Render/Materials/ParticleBeamMaterial.cs
+@@ -33,6 +33,8 @@
+             1f / Math.Max(1, RenderMaterial.ParticleSceneDepthTexture?.Width ?? 1),
+             1f / Math.Max(1, RenderMaterial.ParticleSceneDepthTexture?.Height ?? 1), 0f);
+         shader.SetUniformBlock(4, ref softParameters);
++        var depthViewport = new Vector4(RenderMaterial.ParticleSceneDepthViewportOrigin, 0f, 0f);
++        shader.SetUniformBlock(5, ref depthViewport);
+         int dk = Parameters[userData].rotate ? 1 : 0;
+         shader.SetUniformBlock(3, ref dk);
+         rstate.BlendMode = Parameters[userData].blendMode;
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -1181,6 +1181,11 @@
+                 ? frameSampleableDepthTarget?.Texture
+                 : null;
+             RenderMaterial.ParticleSoftness = Settings.SoftParticleDistance;
++            var viewport = rstate.CurrentViewport;
++            var viewportOriginY = frameSceneTarget == null
++                ? rstate.DrawableSize.Y - viewport.Y - viewport.Height
++                : viewport.Y;
++            RenderMaterial.ParticleSceneDepthViewportOrigin = new Vector2(viewport.X, viewportOriginY);
+             try
+             {
+                 ExecuteGpuPass(SystemRenderPass.Transparent, frameSceneTarget, transparentDrawCallback);
+@@ -1189,6 +1194,7 @@
+             {
+                 RenderMaterial.ParticleSceneDepthTexture = null;
+                 RenderMaterial.ParticleSoftness = 0f;
++                RenderMaterial.ParticleSceneDepthViewportOrigin = Vector2.Zero;
+             }
+         }
+ 
+diff --git a/src/LibreLancer/Shaders/Particle.frag.hlsl b/src/LibreLancer/Shaders/Particle.frag.hlsl
+--- a/src/LibreLancer/Shaders/Particle.frag.hlsl
++++ b/src/LibreLancer/Shaders/Particle.frag.hlsl
+@@ -14,6 +14,12 @@
+     float _padding;
+ };
+ 
++cbuffer SoftParticleViewport : register(b5, UNIFORM_SPACE)
++{
++    float2 DepthViewportOrigin;
++    float2 _viewportPadding;
++};
++
+ struct PSInput
+ {
+     float2 texCoord : TEXCOORD0;
+@@ -28,7 +34,7 @@
+     float alpha = texel.a * input.color.a;
+     if (Softness > 0.0)
+     {
+-        float2 uv = input.position.xy * float2(InvWidth, InvHeight);
++        float2 uv = (input.position.xy - DepthViewportOrigin) * float2(InvWidth, InvHeight);
+         float sceneDepth = SceneDepth.Sample(DepthSampler, uv);
+         if (sceneDepth < 0.999999)
+         {
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -149,11 +149,14 @@
+    Retail-MAT und Binärspur sind unter
+    `docs/evidence/renderer/atmosphere-fade-retail-20261017.md` dokumentiert;
+    `Fade=1.1` ist bestätigt, seine Retail-Berechnung bleibt ungeklärt. Vor einer
+-   Änderung muss die tatsächliche Winkelwirkung im Retailpfad geklärt werden. Danach
++   Änderung muss die tatsächliche Winkelwirkung im Retailpfad geklärt werden.
+    Der Soft-Particle-Pfad bindet eine samplebare Szenentiefen-Textur in Partikel-
+    und Beamshader ein und bietet einen Legacy-Fallback bei fehlgeschlagener
+-   Zielallokation. Ein kombinierter Optionslauf ist dokumentiert, aber noch kein
+-   isolierter visueller Ein/Aus-Nachweis; Tiefenkanten, Letterbox-Viewports,
++   Zielallokation. Vor dem Abtasten wird bei einem Backbuffer-Viewport dessen
++   OpenGL-Ursprung unten links umgerechnet und von den Fragmentkoordinaten
++   abgezogen; dadurch passt Letterboxing zum lokalen Offscreen-Tiefenziel. Ein
++   isolierter visueller Ein/Aus-
++   Nachweis fehlt weiterhin; Tiefenkanten, Letterbox-Viewports,
+    transparente Überlagerungen und GPU-Kosten müssen in festen NAP-Szenen
+    geprüft werden. Sonnen-/Planetenatmosphären, Lens Glow, Jump-Gates,
+    Tradelanes, Laser, Explosionen und Partikel ebenfalls in repräsentativen
+@@ -240,6 +243,19 @@
+ mit Intel HD 4600 für Mip 1, Teilrechteck, Offset/Count, Pixelwerte und
+ ungültige Argumente. Editor-Export und GLES-Abnahme bleiben offen.
+ 
++Patch `2348-offset-soft-particle-viewport-uvs.patch` zieht bei der
++Soft-Particle-Tiefenabtastung den tatsächlichen OpenGL-Viewportursprung ab.
++`CurrentViewport.Y` ist oben-links-basiert; für den Backbuffer wird es anhand
++der Drawable-Höhe in den unteren GL-Ursprung umgerechnet. Für lokale
++Offscreen-Ziele bleibt der lokale Viewportursprung maßgeblich. Der GLSL-Dump
++bestätigt, dass `SV_Position` als `gl_FragCoord` übersetzt wird. Overlay-Aufbau
++bestand mit 965 Dateien; der Release-Build bestand mit 0 Fehlern und 131
++Warnungen. Mit dem SHA-256-geprüften 13er-NAP-Manifest
++`lancer-softparticle-20261018` lud der Release-Client auf Intel HD 4600 die
++Spiel-Daten, stellte den Hi02-Spielstand wieder her und betrat das System.
++Eine Bildabnahme der Depth-Kanten und eine kontrollierte Soft-Particle-ON/OFF-
++Messung sind weiterhin offen.
++
+ 
+ ## SDL_GPU-Probe
+ 
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -295,3 +295,4 @@
+ | 2345 | Implement mip and region-aware synchronous OpenGL texture readback |
+ | 2346 | Add runtime smoke for OpenGL texture mip and region readback |
+ | 2347 | Validate the configured soft-particle depth fade distance |
++| 2348 | Offset soft-particle depth UVs for nonzero viewport origins |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -347,3 +347,4 @@
+ client 2345-opengl-texture-region-readback.patch
+ client 2346-gl-texture-readback-smoke.patch
+ client 2347-validate-soft-particle-distance.patch
++client 2348-offset-soft-particle-viewport-uvs.patch

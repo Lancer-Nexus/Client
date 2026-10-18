@@ -1,0 +1,71 @@
+--- a/src/LibreLancer/Render/Cameras/DirectionalShadowCamera.cs
++++ b/src/LibreLancer/Render/Cameras/DirectionalShadowCamera.cs
+@@ -54,13 +54,16 @@
+         for (var x = -1; x <= 1; x += 2)
+         {
+             if (!TryUnproject(new Vector3(x, y, 0), inverseViewProjection, out var near) ||
+-                !TryUnproject(new Vector3(x, y, 1), inverseViewProjection, out var far))
++                !TryUnproject(new Vector3(x, y, 0.5f), inverseViewProjection, out var rayPoint))
+             {
+                 failureReason = $"camera frustum corner ({x},{y}) cannot be unprojected";
+                 return false;
+             }
+ 
+-            var ray = far - source.Position;
++            // The far clip point can have a homogeneous W close to zero for the
++            // game's 10,000,000-unit camera range. A middle-depth sample gives a
++            // stable ray direction; the far point is used only if it is finite.
++            var ray = rayPoint - source.Position;
+             var rayLength = ray.Length();
+             if (!float.IsFinite(rayLength) || rayLength < 1e-5f)
+             {
+@@ -70,7 +73,13 @@
+ 
+             ray /= rayLength;
+             var nearDistance = Math.Max(0, Vector3.Dot(near - source.Position, ray));
+-            var farDistance = Math.Min(maxDistance, rayLength);
++            var farDistance = maxDistance;
++            if (TryUnproject(new Vector3(x, y, 1), inverseViewProjection, out var far))
++            {
++                var cameraFarDistance = Vector3.Dot(far - source.Position, ray);
++                if (float.IsFinite(cameraFarDistance) && cameraFarDistance > nearDistance)
++                    farDistance = Math.Min(maxDistance, cameraFarDistance);
++            }
+             if (farDistance <= nearDistance)
+             {
+                 failureReason = $"camera frustum corner ({x},{y}) has empty distance slice ({nearDistance:F3}..{farDistance:F3})";
+--- a/src/LibreLancer.Tests/DirectionalShadowCameraTests.cs
++++ b/src/LibreLancer.Tests/DirectionalShadowCameraTests.cs
+@@ -25,6 +25,18 @@
+ 
+         Assert.Equal(initial.X, moved.X, 6);
+         Assert.Equal(initial.Y, moved.Y, 6);
++    }
++
++    [Fact]
++    public void FitSupportsTheGamesTenMillionUnitCameraFarPlane()
++    {
++        var source = new LookAtCamera { ZRange = new Vector2(3f, 10_000_000f) };
++        source.Update(1280, 720, new Vector3(120, -30, 50), new Vector3(120, -30, 49));
++        var shadow = new DirectionalShadowCamera();
++
++        Assert.True(shadow.Fit(source, Vector3.Normalize(new Vector3(-0.6f, -0.3f, 0.8f)),
++            50_000f, 1024, 512, 2048, out var failureReason), failureReason);
++        Assert.Equal(string.Empty, failureReason);
+     }
+ 
+     [Fact]
+--- a/patches/series
++++ b/patches/series
+@@ -335,3 +335,4 @@
+ client 2333-ssao-offscreen-local-viewport.patch
+ client 2334-configurable-shadow-bias.patch
+ client 2335-shadow-camera-fit-diagnostics.patch
++client 2336-stabilize-shadow-frustum-far-unprojection.patch
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -281,3 +281,4 @@
+ | 2333 | Render SSAO intermediate targets at local origin |
+ | 2334 | Make directional shadow bias configurable and validated |
+ | 2335 | Report the failing stage when fitting a directional shadow camera |
++| 2336 | Keep directional shadow fitting stable with the game's long far plane |

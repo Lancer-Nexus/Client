@@ -1,0 +1,203 @@
+diff --git a/src/LibreLancer/World/ProjectileManager.cs b/src/LibreLancer/World/ProjectileManager.cs
+--- a/src/LibreLancer/World/ProjectileManager.cs
++++ b/src/LibreLancer/World/ProjectileManager.cs
+@@ -14,6 +14,7 @@
+ using LibreLancer.Media;
+ using LibreLancer.Net;
+ using LibreLancer.Net.Protocol;
++using LibreLancer.Render;
+ using LibreLancer.Resources;
+ using LibreLancer.Sounds;
+ using LibreLancer.World.Components;
+@@ -131,8 +132,8 @@
+ 
+                 if (gunDef.Munition.Def.ConstEffect != null)
+                 {
+-                    pdata.TravelEffect = res.Items.Effects.Get(gunDef.Munition.Def.ConstEffect)?
+-                        .GetEffect(world.Renderer.ResourceManager);
++                    pdata.TravelFx = res.Items.Effects.Get(gunDef.Munition.Def.ConstEffect);
++                    pdata.TravelEffect = pdata.TravelFx?.GetEffect(world.Renderer.ResourceManager);
+                 }
+             }
+ 
+@@ -336,6 +337,7 @@
+         public float Velocity;
+         public float Lifetime;
+         public ResolvedFx? HitEffect;
++        public ResolvedFx? TravelFx;
+         public ParticleEffect? TravelEffect;
+     }
+ 
+@@ -343,6 +345,7 @@
+     {
+         public ProjectileData Data;
+         public ParticleEffectInstance? Effect;
++        public DynamicLight? TravelEffectLight;
+         public GameObject Owner;
+         public bool Alive;
+         public float Time;
+diff --git a/src/LibreLancer/Render/ProjectileRenderer.cs b/src/LibreLancer/Render/ProjectileRenderer.cs
+--- a/src/LibreLancer/Render/ProjectileRenderer.cs
++++ b/src/LibreLancer/Render/ProjectileRenderer.cs
+@@ -4,6 +4,7 @@
+ 
+ using System.Linq;
+ using System.Numerics;
++using LibreLancer.Data.GameData;
+ using LibreLancer.Graphics;
+ using LibreLancer.World;
+ 
+@@ -31,13 +32,27 @@
+             renderCount = 0;
+             foreach (var i in Projectiles.Ids.GetAllocated().Where(i => Projectiles.Projectiles[i].Alive))
+             {
+-                if (Projectiles.Projectiles[i].Effect != null)
++                ref var projectile = ref Projectiles.Projectiles[i];
++                if (projectile.Effect != null)
+                 {
+-                    Projectiles.Projectiles[i].Effect!.Resources = sys.ResourceManager;
+-                    Projectiles.Projectiles[i].Effect!.Pool = sys.FxPool;
++                    projectile.Effect!.Resources = sys.ResourceManager;
++                    projectile.Effect!.Pool = sys.FxPool;
+                 }
+ 
+-                toRender[renderCount++] = Projectiles.Projectiles[i];
++                if (sys.Settings.RenderTransientEffectLights &&
++                    projectile.Data.TravelFx is
++                    {
++                        DynamicLightAnimation: { Duration: > 0 }
++                    } travelFx &&
++                    float.IsFinite(travelFx.LightRadius) && travelFx.LightRadius > 0 &&
++                    TryUpdateTravelEffectLight(projectile.TravelEffectLight ??= new DynamicLight(),
++                        travelFx, projectile.Time, projectile.Position,
++                        projectile.Owner.RenderComponent?.LightGroup ?? 0))
++                {
++                    sys.SystemLighting.AddFrameLight(projectile.TravelEffectLight!, true);
++                }
++
++                toRender[renderCount++] = projectile;
+             }
+ 
+             if (renderCount > 0)
+@@ -45,6 +60,23 @@
+                 sys.AddObject(this);
+             }
+ 
++            return true;
++        }
++
++        internal static bool TryUpdateTravelEffectLight(DynamicLight light, ResolvedFx? effect,
++            float age, Vector3 position, int lightGroup)
++        {
++            if (effect?.DynamicLightAnimation is not { Duration: > 0 } animation ||
++                !float.IsFinite(effect.LightRadius) || effect.LightRadius <= 0)
++            {
++                light.Active = false;
++                return false;
++            }
++
++            light.Active = true;
++            light.LightGroup = lightGroup;
++            light.Light = ParticleEffectRenderer.CreateEffectLight(animation, age,
++                effect.LightTimeScale, effect.LightRadius, position);
+             return true;
+         }
+         public override bool OutOfView(ICamera camera)
+diff --git a/src/LibreLancer.Tests/EffectLightTimingTests.cs b/src/LibreLancer.Tests/EffectLightTimingTests.cs
+--- a/src/LibreLancer.Tests/EffectLightTimingTests.cs
++++ b/src/LibreLancer.Tests/EffectLightTimingTests.cs
+@@ -1,5 +1,6 @@
+ using System.Numerics;
+ using LibreLancer.Data.Ini;
++using LibreLancer.Data.GameData;
+ using LibreLancer.Data.Schema.Effects;
+ using LibreLancer.Data.Schema;
+ using LibreLancer.Render;
+@@ -100,4 +101,48 @@
+         var expectedSample = animation.Sample(0.25f);
+         Assert.Equal(new Color3f(expectedSample.Color) * expectedSample.Intensity, light.Color);
+     }
++
++    [Fact]
++    public void ProjectileTravelEffectLightUsesProjectileAgePositionAndLightGroup()
++    {
++        var animation = new LightAnim("projectile",
++        [
++            new LightAnimFrame(0, Vector3.One, 0.2f),
++            new LightAnimFrame(1, Vector3.One, 0.8f)
++        ]);
++        var effect = new ResolvedFx
++        {
++            LibraryFiles = [],
++            DynamicLightAnimation = animation,
++            LightRadius = 70,
++            LightTimeScale = 2
++        };
++        var light = new DynamicLight();
++        var position = new Vector3(10, 20, 30);
++
++        Assert.True(ProjectileRenderer.TryUpdateTravelEffectLight(light, effect,
++            0.25f, position, 4));
++
++        Assert.True(light.Active);
++        Assert.Equal(4, light.LightGroup);
++        Assert.Equal(position, light.Light.Position);
++        Assert.Equal(70, light.Light.Range);
++        Assert.Equal(new Color3f(0.5f, 0.5f, 0.5f), light.Light.Color);
++    }
++
++    [Fact]
++    public void ProjectileTravelEffectWithoutValidLightDoesNotRemainActive()
++    {
++        var light = new DynamicLight { Active = true };
++        var effect = new ResolvedFx
++        {
++            LibraryFiles = [],
++            DynamicLightAnimation = new LightAnim("projectile", [new LightAnimFrame(0, Vector3.One, 1)]),
++            LightRadius = 0
++        };
++
++        Assert.False(ProjectileRenderer.TryUpdateTravelEffectLight(light, effect,
++            0, Vector3.Zero, 0));
++        Assert.False(light.Active);
++    }
+ }
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -20,7 +20,7 @@
+ | Postprocess-Lifecycle | Postprocess-Pässe werden in umgekehrter Ausführungsreihenfolge entsorgt; bei einem Fehler läuft die Freigabe aller übrigen Pässe weiter. Der Plan ist idempotent entsorgbar und meldet Fehler gebündelt. | Regressionstests decken Reihenfolge, Fehlerfortsetzung und wiederholtes Dispose ab. Fehler im eigentlichen Backend-Ressourcenfreigabepfad und Kontextverlust sind weiter offen. |
+ | Systemrenderer-Lifecycle | `SystemRenderer.Dispose()` versucht die Freigabe aller Frame-/Effekt-/Target-Ressourcen und GPU-Timerabfragen auch dann, wenn einzelne Freigaben fehlschlagen; Fehler werden gebündelt. Wiederholtes Dispose ist wirkungslos. | Fehlerfortsetzung der allgemeinen Bereinigungsroutine ist unit-getestet. Native GL-Fehlerinjektion und Kontextverlust bleiben offen. Siehe `docs/evidence/renderer/system-renderer-cleanup-20261018/`. |
+ | RenderContext-Lifecycle | SDL2/SDL3 geben den RenderContext vor dem nativen Kontextabbau frei. Nach Abschluss der GPU-Fences werden Shader, SMAA-Texturen, Fullscreen- und Renderer2D-Puffer, Font-Texturen sowie der unmanaged 2D-Pool auch bei Einzel-Fehlern bereinigt. | Headless-Regression prüft Fence-Drain, Wiederholbarkeit und bekannte Kontext-Ressourcen. GL-native Fehlerpfade und Kontextverlust bleiben offen. Siehe `docs/evidence/renderer/render-context-shutdown-20261018/`. |
+-| Dynamische Lichter und Schatten | Persistente und kurzlebige Lichter werden priorisiert; ein ausgewähltes Richtungslicht läuft durch Shadow-Map-Pass und 3×3-PCF. Alpha-Test-Texturen werden auch in PBR-Depth-/Shadow-Pässen anhand eines Material-Uniforms ausgeschnitten; blendtransparente Materialien werfen keine Schatten. Lichtprojektion ist im Licht-XY-Raum verankert und texelgesnappt; Mesh-Cullingradien berücksichtigen `RenderScale`. | Hi02 belegt Pass, Lichtauswahl und Live-Schaltung auf einer OpenGL-GPU. Kamera-Fit-/Stabilitäts- und RenderScale-Radiustests bestehen. Ein NAP-only-Hi02-A/B auf Intel HD 4600 bestätigt den aktiven Pass bei Bias 0 und 0,02; der Hull-Unterschied ist subtil und kalibriert keinen empfohlenen Wert. Offscreen-Caster-Abdeckung, Prüfung weiterer Materialien/Szenen und GPU-Kosten bleiben offen. Siehe `docs/evidence/renderer/shadow-map-hi02-live-toggle-20261017/`, `docs/evidence/renderer/shadow-camera-stability-20261018.md` und `docs/evidence/renderer/scaled-model-culling-20261018.md`. |
++| Dynamische Lichter und Schatten | Persistente und kurzlebige Lichter werden priorisiert; `lgt_effect`-Lichter von fliegenden Projektilen folgen nun dem Projektilalter und seiner Position. Ein ausgewähltes Richtungslicht läuft durch Shadow-Map-Pass und 3×3-PCF. Alpha-Test-Texturen werden auch in PBR-Depth-/Shadow-Pässen anhand eines Material-Uniforms ausgeschnitten; blendtransparente Materialien werfen keine Schatten. Lichtprojektion ist im Licht-XY-Raum verankert und texelgesnappt; Mesh-Cullingradien berücksichtigen `RenderScale`. | Unit-Tests decken Lichtkurvenzeit, Position, Gruppe und ungültige Radien für Projektil-Lichter ab. Hi02 belegt Pass, Lichtauswahl und Live-Schaltung auf einer OpenGL-GPU. Kamera-Fit-/Stabilitäts- und RenderScale-Radiustests bestehen. Ein NAP-only-Hi02-A/B auf Intel HD 4600 bestätigt den aktiven Pass bei Bias 0 und 0,02; der Hull-Unterschied ist subtil und kalibriert keinen empfohlenen Wert. Eine Ingame-Abnahme von Waffenfeuer-/Projektillichtern, Offscreen-Castern, weiteren Materialien/Szenen und GPU-Kosten bleibt offen. Siehe `docs/evidence/renderer/shadow-map-hi02-live-toggle-20261017/`, `docs/evidence/renderer/shadow-camera-stability-20261018.md` und `docs/evidence/renderer/scaled-model-culling-20261018.md`. |
+ | Diagnose | CPU-Framezeitprofile, asynchrone OpenGL-GPU-Passzeiten, Bloom-/Shadow-Passzeiten, Ziel-/Speicherschätzungen und CSV-Ausgabe. Environment-Cubemaps mit mehreren Catalog-Aliasen werden im geschätzten GPU-Texturspeicher nur einmal gezählt und bei Bereinigung auch nur einmal freigegeben. | Langzeitprofile und plattformübergreifende Vergleichsbaselines fehlen. Einzelne asynchrone Samples sind keine FPS-Baseline. |
+ 
+ ## Neueste Ingame-Beobachtung
+@@ -36,6 +36,12 @@
+ [`Sky-Sphere Depth Fix`](evidence/renderer/sky-sphere-depth-20261018/README.md).
+ Die Kamera war zwischen den Bildern weitergelaufen; Perspektive und Ausschnitt
+ sind daher nicht identisch.
++
++Ein separater FP7-Intro-Loglauf meldet außerdem, dass `sun.sph` nicht alle sechs
++Seiten enthält und deshalb nicht gerendert wird. Das erklärt eine fehlende
++Sonnenkugel, belegt aber keinen schwarzen THN-Himmelsdom; für diesen Lauf fehlt
++ein korrespondierender Screenshot. Die unvollständige Sonnenkugel ist ein
++separater NAP-Datenbefund.
+ 
+ Der NAP-only FP7-Intro-Vergleich vom 2026-10-17 zeigt im `Original`-Profil
+ und mit den zusätzlichen Renderfunktionen aus dieselben gesättigt blauen
+--- a/patches/series
++++ b/patches/series
+@@ -354,3 +354,4 @@
+ client 2353-fix-sky-sphere-depth-test.patch
+ client 2354-sky-sphere-runtime-evidence.patch
+ client 2356-render-backend-contracts-and-sdl-gpu-smoke.patch
++client 2357-projectile-travel-effect-lights.patch
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -302,3 +302,4 @@
+ | 2353 | Render sky spheres against the frame clear depth |
+ | 2354 | Record the NAP-only sky sphere runtime comparison and verified roadmap result |
+ | 2356 | Group backend-neutral render contracts and the SDL_GPU indexed FVF3 normal-map smoke |
++| 2357 | Render dynamic lights attached to projectile travel effects |

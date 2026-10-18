@@ -1,0 +1,176 @@
+diff --git a/src/LibreLancer/Render/Materials/BasicMaterial.cs b/src/LibreLancer/Render/Materials/BasicMaterial.cs
+--- a/src/LibreLancer/Render/Materials/BasicMaterial.cs
++++ b/src/LibreLancer/Render/Materials/BasicMaterial.cs
+@@ -429,7 +429,8 @@
+                       EnvMapStrength = envMapStrength,
+                       EnvPrefiltered = pbrEnvironmentPrefiltered ? 1.0f : 0.0f,
+                       EnvDiffuseEnabled = pbrDiffuseIrradiance != null ? 1.0f : 0.0f,
+-                      EnvDiffuseIblEnabled = Library?.PbrDiffuseIblEnabled == true ? 1.0f : 0.0f };
++                      EnvDiffuseIblEnabled = Library?.PbrDiffuseIblEnabled == true ? 1.0f : 0.0f,
++                      Padding = new Vector3(AlphaTest || dxt1 ? 1.0f : 0.0f, 0, 0) };
+                 shader.SetUniformBlock(3, ref param);
+ 
+                 if (!string.IsNullOrEmpty(MtSampler))
+diff --git a/src/LibreLancer/Shaders/PBR.frag.hlsl b/src/LibreLancer/Shaders/PBR.frag.hlsl
+--- a/src/LibreLancer/Shaders/PBR.frag.hlsl
++++ b/src/LibreLancer/Shaders/PBR.frag.hlsl
+@@ -198,6 +198,12 @@
+ #ifdef DEPTH_ONLY
+ float4 main(Input input) : SV_Target0
+ {
++    if (PBRPadding.x > 0.5)
++    {
++        float alpha = DtTexture.Sample(DtSampler, GetTexCoord(0, input)).a;
++        if (alpha < 0.5)
++            discard;
++    }
+     return 0;
+ }
+ #else
+@@ -211,6 +217,8 @@
+     float alphaRoughness = perceptualRoughness * perceptualRoughness;
+ 
+     float4 baseTexture = SRGBtoLinear(DtTexture.Sample(DtSampler, GetTexCoord(0, input)));
++    if (PBRPadding.x > 0.5 && baseTexture.a < 0.5)
++        discard;
+     float4 baseColor = baseTexture * SRGBtoLinear(Dc);
+ 
+     float3 f0 = 0.04;
+diff --git a/src/LibreLancer.Tests/DfmSkinnedPbrShaderTests.cs b/src/LibreLancer.Tests/DfmSkinnedPbrShaderTests.cs
+--- a/src/LibreLancer.Tests/DfmSkinnedPbrShaderTests.cs
++++ b/src/LibreLancer.Tests/DfmSkinnedPbrShaderTests.cs
+@@ -40,12 +40,28 @@
+ 
+             Assert.Same(AllShaders.PBR_Skinned.Get(1u << 4), GetPbrShader(material, new DfmVertex()));
+ 
++            material.AlphaTest = true;
++            Assert.Same(AllShaders.PBR_Skinned.Get(1u << 4),
++                GetPbrShader(material, new DfmVertex()));
++            material.DepthOnlyPass = true;
++            Assert.Same(AllShaders.PBR_Skinned.Get((1u << 4) | (1u << 7)),
++                GetPbrShader(material, new DfmVertex()));
++            material.DepthOnlyPass = false;
++            material.AlphaTest = false;
++
+             material.NmSampler = "qa_normal";
+             Assert.Same(AllShaders.PBR_Skinned.Get(1u << 4), GetPbrShader(material, new DfmVertex()));
+             Assert.Same(AllShaders.PBR_Skinned.Get((1u << 4) | 1u), GetPbrShader(material, new DfmTangentVertex()));
+ 
+             material.Bones = null;
+             Assert.Same(AllShaders.PBR.Get((1u << 4) | 1u), GetPbrShader(material, new DfmTangentVertex()));
++
++            material.AlphaTest = true;
++            Assert.Same(AllShaders.PBR.Get((1u << 4) | 1u),
++                GetPbrShader(material, new DfmTangentVertex()));
++            material.DepthOnlyPass = true;
++            Assert.Same(AllShaders.PBR.Get((1u << 4) | 1u | (1u << 7)),
++                GetPbrShader(material, new DfmTangentVertex()));
+         }
+         finally
+         {
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -16,7 +16,7 @@
+ | HDR und Tonemapping | Linearisiertes Scene-Target, ACES-Tonemapping, linearisierte PBR-Albedo-/Licht-/Emissionswerte und exakte sRGB-Ausgabe im PBR-LDR-Pfad. | Der Farbvertrag für Legacy-Vertexfarben, Transparenz, Fog und zusammengesetzte Effekte ist noch nicht für alle Pfade visuell abgenommen. Ein HDR/LDR-Vergleich ist unter `docs/evidence/renderer/postprocess-four-mode-ab-20261017/` dokumentiert. |
+ | Bloom | HDR-Extraktion plus Basis-, mittlere und breite Blur-Stufe; Schwelle, Radius, Auflösung und Kernel sind konfigurierbar. | Der Code führt alle drei Stufen aus. Die vorhandene Bloom-Pyramidenaufnahme nennt ein Laufzeitpaket/Manifest vom 18.10. und gilt am Dokumentstand 17.10. nicht als verifizierter NAP-Lauf. Laufzeitabnahme, Halo-Kalibrierung und GPU-Kosten bleiben offen. |
+ | Antialiasing | SMAA-Pässe und MSAA-Auflösung; HDR/LDR-Kombinationen sowie Resize und Minimize/Restore wurden auf OpenGL/Mesa geprüft. | Andere Backends/Treiber, wiederholte Lifecycle-Zyklen und Fehler-Injektion stehen aus. |
+-| Dynamische Lichter und Schatten | Persistente und kurzlebige Lichter werden priorisiert; ein ausgewähltes Richtungslicht läuft durch Shadow-Map-Pass und 3×3-PCF. Quelle und Ein/Aus-Schaltung sind konfigurierbar. | Hi02 belegt Pass, Lichtauswahl und Live-Schaltung auf einer OpenGL-GPU. Bias, Caster-Abdeckung und Bildqualität über weitere Materialien/Szenen brauchen kontrollierte Vergleiche. Siehe `docs/evidence/renderer/shadow-map-hi02-live-toggle-20261017/`. |
++| Dynamische Lichter und Schatten | Persistente und kurzlebige Lichter werden priorisiert; ein ausgewähltes Richtungslicht läuft durch Shadow-Map-Pass und 3×3-PCF. Alpha-Test-Texturen werden auch in PBR-Depth-/Shadow-Pässen anhand eines Material-Uniforms ausgeschnitten; dafür entstehen keine zusätzlichen Shader-Varianten. Blendtransparente Materialien werfen keine Schatten. Quelle und Ein/Aus-Schaltung sind konfigurierbar. | Hi02 belegt Pass, Lichtauswahl und Live-Schaltung auf einer OpenGL-GPU. Bias, Caster-Abdeckung und Bildqualität über weitere Materialien/Szenen brauchen kontrollierte Vergleiche. Siehe `docs/evidence/renderer/shadow-map-hi02-live-toggle-20261017/`. |
+ | Diagnose | CPU-Framezeitprofile, asynchrone OpenGL-GPU-Passzeiten, Bloom-/Shadow-Passzeiten, Ziel-/Speicherschätzungen und CSV-Ausgabe. | Langzeitprofile und plattformübergreifende Vergleichsbaselines fehlen. Einzelne asynchrone Samples sind keine FPS-Baseline. |
+ 
+ ## Neueste Ingame-Beobachtung
+@@ -48,9 +48,10 @@
+ 4. **Atmosphären und Effekte vervollständigen.** `AtmosphereMaterial.Fade` wird
+    vom MAT-Parser bis zum Shader-Parameter weitergereicht, im Shader jedoch
+    nicht verwendet. Retail-MATs setzen den Wert typischerweise auf 1,1; ein
+-   String-Xref in `shading.dll` fand nur die Materialregistrierung und belegt
+-   noch keine genaue Kurve. Vor einer Änderung muss der tatsächliche Winkel-Fade
+-   im Retailpfad geklärt werden. Danach
++   Retail-MAT und Binärspur sind unter
++   `docs/evidence/renderer/atmosphere-fade-retail-20261017.md` dokumentiert;
++   `Fade=1.1` ist bestätigt, seine Retail-Berechnung bleibt ungeklärt. Vor einer
++   Änderung muss die tatsächliche Winkelwirkung im Retailpfad geklärt werden. Danach
+    Sonnen-/Planetenatmosphären, Lens Glow, Jump-Gates, Tradelanes, Laser,
+    Explosionen und Partikel in repräsentativen Szenen abnehmen.
+ 5. **Render-Graph backendneutralisieren.** Der Systemrenderer und Postprocessing
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -257,3 +257,4 @@
+ | 2300 | Record NAP-only RenderGraph intro smoke evidence |
+ | 2301 | Add FP7 intro renderer feature-matrix evidence |
+ | 2302 | Add independent legacy environment-map toggle |
++| 2303 | Add PBR alpha testing to depth and shadow passes |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -302,3 +302,4 @@
+ client 2300-rendergraph-nap-intro-smoke-evidence.patch
+ client 2301-fp7-renderer-feature-matrix-evidence.patch
+ client 2302-legacy-environment-map-toggle.patch
++client 2303-pbr-alpha-test-depth-shadow.patch
+diff --git a/docs/evidence/renderer/atmosphere-fade-retail-20261017.md b/docs/evidence/renderer/atmosphere-fade-retail-20261017.md
+new file mode 100644
+--- /dev/null
++++ b/docs/evidence/renderer/atmosphere-fade-retail-20261017.md
+@@ -0,0 +1,59 @@
++# AtmosphereMaterial Fade: Retail-Daten- und Binärprüfung (2026-10-17)
++
++## Retail-MAT
++
++`/home/masterbee/Dokumente/FL/DATA/SOLAR/PLANETS/PLANET_EARTH/planet_earth.mat`
++enthält den UTF-Knoten `Material library/planet_earth_atmosphere` mit:
++
++| MAT-Feld | Wert |
++|---|---:|
++| `Type` | `AtmosphereMaterial` |
++| `Fade` | `1.1` |
++| `Alpha` | `0.6` |
++| `Scale` | `1.025` |
++
++Die Werte wurden mit `UtfFile.parseFile` und `Material.FromNode` gelesen,
++nachdem der Harness wie der Spieldatenpfad eine globale `MaterialMap`
++initialisiert hatte. Ohne diese Initialisierung wirft `Material.FromNode` bei
++`MaterialMap.Instance.Get(...)` eine NullReferenceException; `MatFile` fängt
++den Fehler pro Material ab und liefert anschließend eine leere Materialliste.
++Der erste Harnesslauf ohne `MaterialMap` war daher kein Befund zur Retail-Datei.
++
++Das bestätigt den MAT-Eingabewert. Es zeigt nicht, wie `shading.dll` ihn
++verwendet.
++
++Der gleiche Parserlauf über alle 239 `*.mat`-Dateien unter
++`../Data/NAP/Material/` fand 78 Atmosphärenmaterialien in 78 Planeten-MATs. Alle
++78 setzen `Fade=1.1` und verwenden die Textur `atmosphere`. `Alpha` variiert:
++36 Materialien setzen `0.6`, 34 setzen `0.7`, vier `0.3`, zwei `0.4` und zwei
++`0.5`. `Scale` ist bei 48 Materialien `1.025` und bei 30 `1.03`. Die
++Verteilung bestätigt, dass `Fade` in diesem Retaildatenbestand konstant ist;
++sie belegt weiterhin keine konkrete Shaderwirkung.
++
++## Binärspur
++
++- `shading.dll`, SHA-256
++  `3c590a134b2f0bb4d6aecfbbca59dba58733017127705b25af535c2c7bfbc15d`.
++- Ghidra 12.1.4, vorhandenes `FreelancerRetail`-Projekt, `-noanalysis`.
++- Die untersuchten Material-VTable-Funktionen und der Render-/Bindepfad
++  enthalten keine eindeutige Zuordnung des MAT-Felds `Fade` zu einer
++  Shaderoperation oder Uniform.
++- String-Xref-Suche in `flmaterials.dll` fand weder `AtmosphereMaterial` noch
++  `Fade`.
++
++Das ist kein Beweis, dass die Retail-Engine den Wert ignoriert: Feldzugriff und
++Shaderberechnung können ohne symbolische Namen oder über generische
++Materialdaten laufen. `Atmosphere.frag.hlsl` im Client verwendet den
++übertragenen `Fade`-Parameter derzeit nicht. Eine Kurve wie `pow`, `lerp` oder
++eine Alpha-Skalierung wäre mit den vorliegenden Belegen geraten und wird nicht
++als Retail-Verhalten umgesetzt.
++
++## Nächster belastbarer Schritt
++
++Die Werte `Fade` und `Alpha` müssen in einer kontrollierten Planetenansicht
++gegen den Retail-Client oder eine aus dem Originalshader rekonstruierte
++Parameterwirkung verglichen werden. Danach kann die Shaderänderung mit einem
++reproduzierbaren Bildvergleich abgesichert werden.
++
++Die unveränderten Ghidra-Auszüge und Metadaten liegen außerhalb des Git-Repos
++unter `/home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/`.

@@ -1,0 +1,91 @@
+diff --git a/src/LibreLancer/Interface/DebugView.cs b/src/LibreLancer/Interface/DebugView.cs
+--- a/src/LibreLancer/Interface/DebugView.cs
++++ b/src/LibreLancer/Interface/DebugView.cs
+@@ -21,6 +21,9 @@
+         private const int PerformanceSampleCount = 300;
+         private readonly double[] frameWorkSamples = new double[PerformanceSampleCount];
+         private readonly double[] frameIntervalSamples = new double[PerformanceSampleCount];
++        private readonly int[] frameWidthSamples = new int[PerformanceSampleCount];
++        private readonly int[] frameHeightSamples = new int[PerformanceSampleCount];
++        private readonly string?[] rendererSamples = new string?[PerformanceSampleCount];
+         private readonly double[] percentileSortBuffer = new double[PerformanceSampleCount];
+         private int performanceSampleIndex;
+         private int performanceSamplesRecorded;
+@@ -133,6 +136,9 @@
+             {
+                 frameWorkSamples[performanceSampleIndex] = game.FrameWorkTime;
+                 frameIntervalSamples[performanceSampleIndex] = game.FrameInterval;
++                frameWidthSamples[performanceSampleIndex] = game.Width;
++                frameHeightSamples[performanceSampleIndex] = game.Height;
++                rendererSamples[performanceSampleIndex] = game.Renderer;
+                 performanceSampleIndex = (performanceSampleIndex + 1) % PerformanceSampleCount;
+                 performanceSamplesRecorded = Math.Min(performanceSamplesRecorded + 1, PerformanceSampleCount);
+                 if (performanceSamplesRecorded > 0 && game.TotalTime >= nextPerformancePercentileTime)
+@@ -212,10 +218,11 @@
+                 var workMs = frameWorkSamples[index] * 1000;
+                 var intervalMs = frameIntervalSamples[index] * 1000;
+                 var fps = frameIntervalSamples[index] > 0 ? 1 / frameIntervalSamples[index] : 0;
+-                csv.Append(i.ToString(CultureInfo.InvariantCulture)).Append(',')
+-                    .Append(game.Renderer ?? "unknown").Append(',')
+-                    .Append(game.Width.ToString(CultureInfo.InvariantCulture)).Append(',')
+-                    .Append(game.Height.ToString(CultureInfo.InvariantCulture)).Append(',')
++                csv.Append(i.ToString(CultureInfo.InvariantCulture)).Append(',');
++                AppendCsvField(csv, rendererSamples[index] ?? "unknown");
++                csv.Append(',')
++                    .Append(frameWidthSamples[index].ToString(CultureInfo.InvariantCulture)).Append(',')
++                    .Append(frameHeightSamples[index].ToString(CultureInfo.InvariantCulture)).Append(',')
+                     .Append(workMs.ToString("F4", CultureInfo.InvariantCulture)).Append(',')
+                     .Append(intervalMs.ToString("F4", CultureInfo.InvariantCulture)).Append(',')
+                     .AppendLine(fps.ToString("F2", CultureInfo.InvariantCulture));
+@@ -223,5 +230,10 @@
+             File.WriteAllText(path, csv.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+             return $"Saved {performanceSamplesRecorded} frames: {path}";
+         }
++
++        private static void AppendCsvField(StringBuilder csv, string value)
++        {
++            csv.Append('"').Append(value.Replace("\"", "\"\"", StringComparison.Ordinal)).Append('"');
++        }
+     }
+ }
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -39,7 +39,7 @@
+ 
+ ### 1. Render-Pipeline und Profiling
+ 
+-- [x] Ersten CPU-/Frame-Pacing-Messpunkt bereitstellen: Das Debugfenster zeigt gleitende p50/p95/p99-Werte über 300 Frames für die Update-/Draw-/EndFrame-Wandzeit und das Frame-Intervall einschließlich Swap/VSync. Die Messung läuft in SDL2, SDL3 und dem Null-Backend. Die letzten bis zu 300 Samples lassen sich als CSV mit Backend, Fenstermaß, Update-/Draw-Wandzeit und Frameintervall exportieren. Die Arbeitszeit kann Treiberwartezeit enthalten; GPU-Zeit, Speicher und reproduzierbare Szenenmessungen bleiben offen.
++- [x] Ersten CPU-/Frame-Pacing-Messpunkt bereitstellen: Das Debugfenster zeigt gleitende p50/p95/p99-Werte über 300 Frames für die Update-/Draw-/EndFrame-Wandzeit und das Frame-Intervall einschließlich Swap/VSync. Die Messung läuft in SDL2, SDL3 und dem Null-Backend. Die letzten bis zu 300 Samples lassen sich als CSV exportieren; Backend und Fenstermaß werden pro Sample festgehalten und CSV-sicher maskiert. Die Arbeitszeit kann Treiberwartezeit enthalten; GPU-Zeit, Speicher und reproduzierbare Szenenmessungen bleiben offen.
+ - [ ] Systemweite Stabilität und Laufzeitleistung auf Referenzhardware messen und verbessern: FPS sowie CPU-/GPU-Framezeiten (p50/p95/p99), Speicherverbrauch und Frame-Pacing in festen Raum-, Basis-, System-, Kampf- und UI-Szenen erfassen; Langzeitläufe, Szenenwechsel, Resize, Minimieren/Wiederherstellen und Gerätefehler auf Hänger, Abstürze und Ressourcenlecks prüfen. Erst Messungen gegen einen dokumentierten Ausgangswert gelten als Optimierungsnachweis.
+ - [ ] Render-Passes mit klaren Ein-/Ausgaben und expliziter Farb-/Tiefenpufferverwaltung vorbereiten.
+   - [x] Bestehende Forward-Aufrufreihenfolge, Opaque-/Transparent-Kommandos, Sterne, Nebel und AA-Resolve im Quellcode erfasst; ein formaler Ressourcenvertrag fehlt weiterhin. Siehe [Pass-Reihenfolge-Audit](evidence/renderer/forward-pass-order-audit-20261015.md).
+diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -153,7 +153,8 @@
+ viermal pro Sekunde neu berechnet. SDL2, SDL3 und Null stellen die Messwerte
+ bereit. Die erste Messung ist CPU-seitige Wandzeit und kann Treiberwartezeit
+ enthalten; sie ist kein GPU-Timer. Die letzten bis zu 300 Samples lassen sich
+-aus dem Debugfenster als CSV mit Backend und Fenstermaß exportieren. GPU-Zeit und
++aus dem Debugfenster als CSV exportieren. Backend und Fenstermaß werden je Frame
++aufgezeichnet; das Backend-Feld wird CSV-sicher maskiert. GPU-Zeit und
+ Ressourcenmessung sowie dokumentierte Vorher/Nachher-Baselines für feste Szenen
+ bleiben offen.
+ 
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -108,3 +108,4 @@
+ | 2104 | Update transient-light tests for the configurable per-instance frame budget |
+ | 2105 | Keep dynamic light emitters behind geometry from leaking unshadowed light |
+ | 2106 | Export recent CPU frame-pacing samples from the Debug overlay as CSV |
++| 2107 | Record renderer and resolution per sample and escape CSV fields |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -106,3 +106,4 @@
+ client 2104-transient-light-budget-test-fix.patch
+ client 2105-light-equipment-occlusion-gating.patch
+ client 2106-export-frame-profile-csv.patch
++client 2107-frame-profile-csv-sample-metadata.patch

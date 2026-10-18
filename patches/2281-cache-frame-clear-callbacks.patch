@@ -1,0 +1,124 @@
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -74,12 +74,17 @@
+         private readonly SystemRenderPassGraph framePassGraph = new();
+         private readonly SystemRenderSubpassExecution activeFrameSubpasses = new();
+         private readonly Action frameSetupCallback;
++        private readonly Action frameClearCallback;
++        private readonly Action frameClearDrawCallback;
+         private readonly Action depthStateCallback;
+         private readonly Action shadowMapCallback;
+         private readonly Action opaqueHookCallback;
+         private readonly Action physicsHookCallback;
+         private readonly Action debugOverlayCallback;
+         private bool frameShadowMapReady;
++        private RenderTarget? frameClearTarget;
++        private NebulaRenderer? frameClearNebula;
++        private bool frameClearTransitioned;
+         private bool subpassResourcesInitialized;
+         private long nextGpuProfileFrame;
+         private long currentGpuProfileFrame;
+@@ -123,6 +128,8 @@
+         {
+             this.game = game;
+             frameSetupCallback = SetupFramePass;
++            frameClearCallback = ClearFramePass;
++            frameClearDrawCallback = ClearFrameAttachments;
+             depthStateCallback = SetDepthStatePass;
+             shadowMapCallback = DrawShadowMapPass;
+             opaqueHookCallback = InvokeOpaqueHookPass;
+@@ -700,27 +707,11 @@
+                 var frameSetup = "Frame setup";
+                 var opaqueHook = "Opaque hook";
+                 frameShadowMapReady = false;
+-
+-                framePassGraph.AddPass(SystemRenderPass.FrameClear, () =>
+-                {
+-                    // OpenGL clears respect active write masks. The renderer owns
+-                    // these attachments for the frame and restores caller state later.
+-                    rstate.ColorWrite = true;
+-                    rstate.DepthWrite = true;
+-                    ExecuteGpuPass(SystemRenderPass.FrameClear, sceneTarget, () =>
+-                    {
+-                        if (transitioned)
+-                        {
+-                            rstate.ClearColor = nr!.Nebula.FogColor;
+-                            rstate.ClearAll();
+-                        }
+-                        else
+-                        {
+-                            rstate.ClearColor = BackgroundOverride ?? starSystem?.BackgroundColor ?? NullColor;
+-                            rstate.ClearAll();
+-                        }
+-                    });
+-                });
++                frameClearTarget = sceneTarget;
++                frameClearNebula = nr;
++                frameClearTransitioned = transitioned;
++
++                framePassGraph.AddPass(SystemRenderPass.FrameClear, frameClearCallback);
+ 
+                 framePassGraph.AddAction(frameSetup, frameSetupCallback, priority: 1,
+                     SystemRenderPassGraph.Name(SystemRenderPass.FrameClear));
+@@ -1180,6 +1171,24 @@
+             SystemLighting.NumberOfTilesX = -1;
+         }
+ 
++        private void ClearFramePass()
++        {
++            // OpenGL clears respect active write masks. The renderer owns these
++            // attachments for the frame and restores caller state later.
++            rstate.ColorWrite = true;
++            rstate.DepthWrite = true;
++            ExecuteGpuPass(SystemRenderPass.FrameClear, frameClearTarget, frameClearDrawCallback);
++        }
++
++        private void ClearFrameAttachments()
++        {
++            if (frameClearTransitioned)
++                rstate.ClearColor = frameClearNebula!.Nebula.FogColor;
++            else
++                rstate.ClearColor = BackgroundOverride ?? starSystem?.BackgroundColor ?? NullColor;
++            rstate.ClearAll();
++        }
++
+         private void SetDepthStatePass()
+         {
+             rstate.DepthFunction = DepthFunction.Less;
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -67,7 +67,7 @@
+   - [x] Statische Passvertrag-Prüfung verlangt pro Attachment genau eine Ressource und gleicht Store/Resolve-Verhalten mit den deklarierten Writes ab; Resolve ist nur für Color erlaubt. Source-Attachments bleiben Read-Verträge. Die Metadaten steuern weiterhin nicht selbst die API-Aufrufe.
+   - [x] Die statische Passfolgenprüfung wertet optionale Reads wie die Laufzeitprüfung aus und verlangt sie nicht als zwingende Eingaben; so sind sequenzielle Prüfläufe auch ohne optionalen Schatten- oder Tiefenpuffer gültig.
+   - [x] Die Hauptpass-Ausführungsreihenfolge steht in den typisierten Passdeskriptoren und wird von Laufzeitprüfung sowie Scheduler daraus gelesen; der separate Pass-zu-Order-Switch ist entfernt. Der Graph führt die Passcallbacks aus.
+-  - [x] `SystemRenderPassGraph` topologisch sortiert und führt Hauptpässe, Physics-Hook, Debug-Overlay und optionalen AA-/HDR-Resolve anhand deklarierter Read-/Write-Ressourcen und expliziter Abhängigkeiten aus. Derselbe Scheduler kompiliert und führt den Postprocess-Plan aus. Ressourcenproduzenten dürfen unabhängig von ihrer Registrierungsreihenfolge stehen; Read-after-write, Write-after-read und Write-after-write werden eingeordnet. Pflicht-Reads ohne Producer, fehlende explizite Vorgänger und Zyklen werden vor Ausführung der Callbacks abgewiesen. Knoten und Abhängigkeitspuffer werden zwischen Frames wiederverwendet; bei gleicher exakter Passstruktur und denselben externen Ressourcen wird auch die topologische Ausführungsfolge wiederverwendet. Eine Strukturänderung löst eine erneute Kompilierung aus. Targetwechsel und Attachments bleiben in den Passcallbacks. Die Abhängigkeitsauflösung nutzt keine pro Kompilierung erzeugten lokalen Closure-Helfer mehr. Setup-, Depth-State-, Shadow-Status-, Hook- und Debug-Callbacks des `SystemRenderer` verwenden langlebige Delegates; Haupt-Draw-Callbacks werden weiterhin pro Frame neu erstellt und können Closure-Allokationen verursachen. Laufzeit-/Bildabnahme und Frame-Profiling bleiben offen.
++  - [x] `SystemRenderPassGraph` topologisch sortiert und führt Hauptpässe, Physics-Hook, Debug-Overlay und optionalen AA-/HDR-Resolve anhand deklarierter Read-/Write-Ressourcen und expliziter Abhängigkeiten aus. Derselbe Scheduler kompiliert und führt den Postprocess-Plan aus. Ressourcenproduzenten dürfen unabhängig von ihrer Registrierungsreihenfolge stehen; Read-after-write, Write-after-read und Write-after-write werden eingeordnet. Pflicht-Reads ohne Producer, fehlende explizite Vorgänger und Zyklen werden vor Ausführung der Callbacks abgewiesen. Knoten und Abhängigkeitspuffer werden zwischen Frames wiederverwendet; bei gleicher exakter Passstruktur und denselben externen Ressourcen wird auch die topologische Ausführungsfolge wiederverwendet. Eine Strukturänderung löst eine erneute Kompilierung aus. Targetwechsel und Attachments bleiben in den Passcallbacks. Die Abhängigkeitsauflösung nutzt keine pro Kompilierung erzeugten lokalen Closure-Helfer mehr. Setup-, Clear-, Depth-State-, Shadow-Status-, Hook- und Debug-Callbacks des `SystemRenderer` verwenden langlebige Delegates; weitere Haupt-Draw-Callbacks werden weiterhin pro Frame neu erstellt und können Closure-Allokationen verursachen. Laufzeit-/Bildabnahme und Frame-Profiling bleiben offen.
+   - [x] Der Hauptpass-Tracker veröffentlicht nach erfolgreichem Draw nur deklarierte Writes, deren optionale Attachments am konkreten Target vorhanden sind. Fehlende oder unbekannte optionale Anhänge werden nicht als verfügbare Frame-Ressourcen ausgegeben. Die Passplanung erfolgt im Graphen; Targetwechsel bleiben in den jeweiligen Callbacks.
+   - [x] Gebundene Backend-Renderziele stellen Farb-/Tiefen-/Stencil-Präsenz und ein bekanntes Farbformat bereit. `SystemRenderer` weist Ziele zurück, denen laut Passvertrag zwingende Anhänge fehlen; GL-MSAA meldet das Farbformat nur für bekannte sized-Formate. Swapchainformat und Desktop-GLs unsized-MSAA-Storage bleiben unbekannt.
+   - [x] `AntialiasTarget` prüft beim Erzeugen die tatsächlichen aktiven Farb-/Tiefenattachments und für SMAA auch Stencil an Kanten- und Gewichtsziel; bekannte Zielformate müssen dem gewählten LDR-/HDR-Pfad entsprechen. Unbekanntes Desktop-MSAA-Format bleibt zulässig und wird nicht geraten.
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 279 Client bundles and two native bundles. Each
++The active series contains 280 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -242,3 +242,4 @@
+ | 2278 | Reuse simple SystemRenderer frame callbacks |
+ | 2279 | Apply MaterialAnim UV scale to normal-map tangent frames |
+ | 2280 | Cache SystemRenderer pass schedules when topology is unchanged |
++| 2281 | Reuse frame-clear callbacks across SystemRenderer frames |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -280,3 +280,4 @@
+ client 2278-reuse-simple-system-renderer-callbacks.patch
+ client 2279-normalmap-material-animation-tangent-scale.patch
+ client 2280-cache-system-render-pass-schedule.patch
++client 2281-cache-frame-clear-callbacks.patch

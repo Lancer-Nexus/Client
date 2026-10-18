@@ -1,0 +1,129 @@
+--- a/src/LibreLancer.Base/Graphics/PostProcessExecutionPlan.cs
++++ b/src/LibreLancer.Base/Graphics/PostProcessExecutionPlan.cs
+@@ -43,6 +43,7 @@
+     private readonly PostProcessStage[] stages;
+     private readonly SystemRenderPassSchedule schedule;
+     private readonly RuntimeContext runtimeContext;
++    private bool disposed;
+ 
+     private PostProcessExecutionPlan(PostProcessStage[] stages,
+         SystemRenderPassSchedule schedule, RuntimeContext runtimeContext)
+@@ -136,6 +137,7 @@
+ 
+     public void Execute(ref PostProcessContext context)
+     {
++        ObjectDisposedException.ThrowIf(disposed, this);
+         runtimeContext.Value = context;
+         try
+         {
+@@ -161,7 +163,24 @@
+ 
+     public void Dispose()
+     {
++        if (disposed)
++            return;
++        disposed = true;
++
++        List<Exception>? errors = null;
+         for (var i = stages.Length - 1; i >= 0; i--)
+-            stages[i].Pass.Dispose();
++        {
++            try
++            {
++                stages[i].Pass.Dispose();
++            }
++            catch (Exception ex)
++            {
++                (errors ??= new()).Add(ex);
++            }
++        }
++
++        if (errors != null)
++            throw new AggregateException("Post-process pass disposal failed", errors);
+     }
+ }
+--- a/src/LibreLancer.Tests/PostProcessExecutionPlanTests.cs
++++ b/src/LibreLancer.Tests/PostProcessExecutionPlanTests.cs
+@@ -200,6 +200,55 @@
+         Assert.Equal(new[] { "second", "first" }, disposed);
+     }
+ 
++    [Fact]
++    public void DisposeContinuesAfterPassFailureAndIsIdempotent()
++    {
++        var disposed = new List<string>();
++        var first = new TestPass(dispose: () => disposed.Add("first"));
++        var failing = new TestPass(dispose: () =>
++        {
++            disposed.Add("failing");
++            throw new InvalidOperationException("dispose failure");
++        });
++        var last = new TestPass(dispose: () => disposed.Add("last"));
++        var stages = new[]
++        {
++            new PostProcessStage("First", first, PostProcessResource.CurrentColor,
++                PostProcessResource.BloomBase),
++            new PostProcessStage("Failing", failing,
++                PostProcessResource.CurrentColor | PostProcessResource.BloomBase,
++                PostProcessResource.BloomMedium),
++            new PostProcessStage("Last", last,
++                PostProcessResource.CurrentColor | PostProcessResource.BloomMedium,
++                PostProcessResource.PresentationColor)
++        };
++        var plan = PostProcessExecutionPlan.Compile(stages, PostProcessResource.CurrentColor);
++
++        var error = Assert.Throws<AggregateException>(plan.Dispose);
++        plan.Dispose();
++
++        Assert.Contains("dispose failure", error.ToString());
++        Assert.Equal(new[] { "last", "failing", "first" }, disposed);
++        Assert.Equal(1, first.DisposeCount);
++        Assert.Equal(1, failing.DisposeCount);
++        Assert.Equal(1, last.DisposeCount);
++    }
++
++    [Fact]
++    public void ExecuteAfterDisposeIsRejected()
++    {
++        var pass = new TestPass();
++        var plan = PostProcessExecutionPlan.Compile(
++            [new PostProcessStage("Tone map", pass, PostProcessResource.CurrentColor,
++                PostProcessResource.PresentationColor)],
++            PostProcessResource.CurrentColor);
++        var context = ContextWithColor();
++        plan.Dispose();
++
++        Assert.Throws<ObjectDisposedException>(() => plan.Execute(ref context));
++        Assert.Equal(0, pass.ExecuteCount);
++    }
++
+     private static PostProcessContext ContextWithColor() =>
+         new() { AvailableResources = PostProcessResource.CurrentColor };
+ 
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -17,6 +17,7 @@
+ | Bloom | HDR-Extraktion mittelt jetzt ein vollständiges 4×4-Quellfenster in Viertelauflösung; aufrundende Zielmaße behalten Randpixel bei ungeraden Fenstergrößen. Basis-, mittlere und breite Blur-Stufen sowie Schwelle, Radius, Auflösung und Kernel sind konfigurierbar. | Die Extraktion beseitigt das bisherige Unterabtasten der zentralen vier Texel. Der Code führt alle drei Stufen aus. Die vorhandene Bloom-Pyramidenaufnahme nennt ein Laufzeitpaket/Manifest vom 18.10. und gilt am Dokumentstand 17.10. nicht als verifizierter NAP-Lauf. Laufzeitabnahme, Halo-Kalibrierung und GPU-Kosten bleiben offen. |
+ | Antialiasing | SMAA-Pässe und MSAA-Auflösung; HDR/LDR-Kombinationen sowie Resize und Minimize/Restore wurden auf OpenGL/Mesa geprüft. | Andere Backends/Treiber, wiederholte Lifecycle-Zyklen und Fehler-Injektion stehen aus. |
+ | GPU-Readback | Asynchrones OpenGL-Textur-Readback verwendet PBO und Fence. Fehler beim Setup räumen PBO/FBO/Fence auf; Mapping- und Unmap-Fehler beenden den Task mit Fehler und geben den PBO frei. | Der Quellpfad baut. GL-Fehler-Injektion und ein Laufzeit-Readback auf unterstützten und Sync-losen Treibern sind noch nicht abgenommen. Siehe `docs/evidence/renderer/gl-texture-async-readback-lifecycle-20261018/`. |
++| Postprocess-Lifecycle | Postprocess-Pässe werden in umgekehrter Ausführungsreihenfolge entsorgt; bei einem Fehler läuft die Freigabe aller übrigen Pässe weiter. Der Plan ist idempotent entsorgbar und meldet Fehler gebündelt. | Regressionstests decken Reihenfolge, Fehlerfortsetzung und wiederholtes Dispose ab. Fehler im eigentlichen Backend-Ressourcenfreigabepfad und Kontextverlust sind weiter offen. |
+ | Dynamische Lichter und Schatten | Persistente und kurzlebige Lichter werden priorisiert; ein ausgewähltes Richtungslicht läuft durch Shadow-Map-Pass und 3×3-PCF. Alpha-Test-Texturen werden auch in PBR-Depth-/Shadow-Pässen anhand eines Material-Uniforms ausgeschnitten; blendtransparente Materialien werfen keine Schatten. Lichtprojektion ist im Licht-XY-Raum verankert und texelgesnappt; Mesh-Cullingradien berücksichtigen `RenderScale`. | Hi02 belegt Pass, Lichtauswahl und Live-Schaltung auf einer OpenGL-GPU. Kamera-Fit-/Stabilitäts- und RenderScale-Radiustests bestehen. Bias-Kalibrierung, Offscreen-Caster-Abdeckung und Bildqualität über weitere Materialien/Szenen brauchen kontrollierte Vergleiche. Siehe `docs/evidence/renderer/shadow-map-hi02-live-toggle-20261017/`, `docs/evidence/renderer/shadow-camera-stability-20261018.md` und `docs/evidence/renderer/scaled-model-culling-20261018.md`. |
+ | Diagnose | CPU-Framezeitprofile, asynchrone OpenGL-GPU-Passzeiten, Bloom-/Shadow-Passzeiten, Ziel-/Speicherschätzungen und CSV-Ausgabe. Environment-Cubemaps mit mehreren Catalog-Aliasen werden im geschätzten GPU-Texturspeicher nur einmal gezählt und bei Bereinigung auch nur einmal freigegeben. | Langzeitprofile und plattformübergreifende Vergleichsbaselines fehlen. Einzelne asynchrone Samples sind keine FPS-Baseline. |
+ 
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 315 Client bundles and two native bundles. Each
++The active series contains 316 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+--- a/patches/series
++++ b/patches/series
+@@ -316,3 +316,4 @@
+ client 2314-stabilize-directional-shadow-camera.patch
+ client 2315-scaled-model-culling-bounds.patch
+ client 2316-gl-async-texture-readback-lifecycle.patch
++client 2317-postprocess-disposal-failure-recovery.patch

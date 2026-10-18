@@ -1,0 +1,853 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index 1b80c98..0d2e8c5 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -237,6 +237,7 @@ in older audit documents refer to Git history.
+   - `--render-starsphere=on|off` → `render_starsphere`.
+   - `--render-sun-lens-glow=on|off` → `render_sun_lens_glow`.
+   - `--render-sun-ambient=on|off` → `render_sun_ambient` (opt-in 25% diffuse tint from locally weighted persistent system-light colors; off by default).
++  - `--render-hdr=on|off` → `render_hdr` (opt-in float scene target and ACES tone mapping; falls back to LDR when the GPU target is unavailable).
+   - `--render-projectile-beams=on|off` → `render_projectile_beams` (only hides `vis_beam`; simulation and projectile particle effects remain active).
+   - `--render-particle-effects=on|off` → `render_particle_effects` (suppresses particle geometry while effect timing and simulation continue).
+   - `--render-jump-gate-effects=on|off` → `render_jump_gate_effects` (controls the configured jump-tunnel effect renderer).
+diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
+index a5f8938..58d6d23 100644
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -494,9 +494,14 @@ offen. Orientierung, Materialqualität, GGX-IBL und Performance bleiben offen.
+ - [ ] Pass-Ein-/Ausgaben, Farb-/Tiefen-/Stencil-Lebensdauer, Clears, Resolve,
+   Resize und minimierte Fenster explizit machen; Debug-Marker und Timings
+   hinzufügen. Offscreen-Widgets und Editor-Viewports einbeziehen.
+-- [ ] HDR-Scene-Target, linear/sRGB-Farbmanagement, Belichtung und Tonemapping
+-  gemeinsam liefern. UI nach der Tonemapping-Stufe korrekt komponieren;
+-  MSAA/SMAA vollständig integrieren.
++- [x] Opt-in HDR-Zwischenziel und ACES-Tonemapping als erste GL-Ausgabestufe
++  ergänzen. `render_hdr`, CLI-Override und Effects-Checkbox steuern den Pfad;
++  Half-Float-Ziele werden für SMAA und MSAA verwendet. Bei nicht unterstütztem
++  Floatziel bleibt der LDR-Pfad aktiv.
++- [ ] Vollständiges lineares/sRGB-Farbmanagement für Legacy- und PBR-Ausgaben,
++  transparente Mischungen und UI-Komposition nach Tonemapping umsetzen. Die
++  aktuelle Übergangsstufe decodiert den fertig komponierten display-referred
++  Szenenwert vor ACES und ist noch nicht visuell abgenommen.
+ - [ ] Bloom mit Downsample-Pyramide, konfigurierbaren Schwellen und
+   separablem Blur liefern. UI-Blur, Tiefenunschärfe und Cutscene-Radialblur
+   bekommen eigene begrenzte Einsatzfälle und Qualitätsschalter.
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+index 6169646..d8f6d7c 100644
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -170,7 +170,7 @@ Diese Liste plant moderne Renderer-Erweiterungen für LibreLancer. Sie ist eine
+   `BasicMaterial`-Pfad opak; transparente Rumpfteile sind als Ursache nicht
+   belegt. Die THN-Kamera folgt `Path_shot1` 35 Sekunden; Details der offenen
+   Reproduktion stehen in [ship-light-occlusion.md](ship-light-occlusion.md).
+-- [ ] HDR-Zwischenpuffer, Belichtung und Tonemapping als zusammenhängenden Farbmanagement-Schritt entwerfen; sRGB-Ein-/Ausgabe und UI-Komposition berücksichtigen.
++- [x] Erste opt-in HDR-Ausgabestufe im bestehenden GL-Pfad ergänzt: Half-Float-Szenenziel, float MSAA/SMAA-Eingang und ACES-Tonemapping; per `render_hdr`, `--render-hdr=on|off` und Effects-Checkbox schaltbar. Dies ist eine Übergangsstufe: der aktuelle Renderer komponiert weiter display-referred Farben und decodiert sie erst vor dem Tonemapping. Vollständig lineares/sRGB-Farbmanagement, korrekte transparente Mischungen, UI-Komposition nach Tonemapping und eine visuelle Laufzeitabnahme sind noch offen.
+ - [ ] Bloom als nachgelagerten Effekt mit Threshold, Downsampling-Pyramide und konfigurierbarer Intensität untersuchen.
+ - [ ] Sonnen-Lens-Glow anhand reproduzierbarer NAP-Szenen visuell abnehmen; `lens_flare` und die Stern-Intensitäts-/Zonen-Fades bleiben separate offene Datenpfade ([Parser-/Laufzeitabgleich](data-client-plan.md)).
+   - [x] `lens_flare`-Datenpfad auditiert: `StararchIni` und `Star` parsen Profile/Referenzen, aber `GameItemDb.InitStars` übernimmt nur StarGlow, LensGlow und Spines; `Sun` und `SunRenderer` haben keinen Flare-Pfad. Retail-Funktion `FUN_00511248` ruft beim Einlesen eines Star-`lens_flare`-Verweises `FUN_0050f3a0` auf und wertet deren Rückgabewert für den Parse-Status aus. Der Parser liest Shape, Min-/Max-Radius und sechs Floatwerte je Bead. `Data/NAP/World/solar/StarArch.ini` enthält 7 Profile mit 61 Beads, auf die 38 Sterne verweisen. Die Bedeutung der Bead-Komponenten und der Retail-Zeichnung ist noch nicht nachgewiesen; siehe [Retail-Stringtrace](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-15-lens-flare-trace/Freelancer-lens-flare.md>) und [Parser-Aufrufer](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-15-lens-flare-trace/Freelancer-lens-flare-loader-caller.md>).
+diff --git a/patches/README.md b/patches/README.md
+index 4251851..cb5bbad 100644
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -159,3 +159,4 @@ jump-gate route.
+ | 2165 | Add typed SystemRenderer passes, time actual opaque draws, audit render-target attachments, and trace Retail CBeam velocity |
+ | 2166 | Profile SMAA subpasses and MSAA resolve with asynchronous GPU timers in a NAP-only M01A run |
+ | 2167 | Audit the HDR, tonemapping, linear-color and AA transition requirements |
++| 2168 | Add opt-in HDR scene output and tone mapping across AA paths |
+diff --git a/patches/series b/patches/series
+index d5edfc0..29cd13c 100644
+--- a/patches/series
++++ b/patches/series
+@@ -167,3 +167,4 @@ client 2164-document-engbase-iengine-slot.patch
+ client 2165-system-render-pass-contract-and-beam-velocity-trace.patch
+ client 2166-gpu-timer-aa-subpass-runtime-profile.patch
+ client 2167-hdr-tonemapping-transition-audit.patch
++client 2168-hdr-tonemapping-scene-output.patch
+diff --git a/src/LibreLancer.Base/Graphics/AntialiasTarget.cs b/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
+index f9bbcf9..8078f31 100644
+--- a/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
++++ b/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
+@@ -13,19 +13,25 @@ public class AntialiasTarget : RenderTarget
+     public int Width { get; private set; }
+     public int Height { get; private set; }
+     public AntialiasMode Mode { get; private set; }
++    public bool HdrOutputEnabled { get; }
+     public Action<SystemRenderSubpass, bool>? GpuSubpassMarker { get; set; }
+     public int Samples => msaa?.Samples ?? 1;
+     public SystemRenderAttachmentFormat MultisampleStorageFormat => msaa?.RequestedColorFormat switch
+     {
+         MultisampleColorFormat.Rgba8 => SystemRenderAttachmentFormat.OpenGlRgba8,
++        MultisampleColorFormat.Rgba16Float => SystemRenderAttachmentFormat.OpenGlRgba16Float,
+         MultisampleColorFormat.RgbaImplementationDefined =>
+             SystemRenderAttachmentFormat.OpenGlRgbaImplementationDefined,
+         _ => SystemRenderAttachmentFormat.OpenGlMsaaColor
+     };
+-    public long EstimatedMemoryBytes => msaa?.EstimatedMemoryBytes ??
++    public long EstimatedMemoryBytes => (msaa?.EstimatedMemoryBytes ?? 0) +
++        (hdrResolve?.EstimatedMemoryBytes ?? 0) +
+         (long)(smaa?.Texture.EstimatedTextureMemory ?? 0) +
+         (smaaEdges?.Texture.EstimatedTextureMemory ?? 0) +
+         (smaaBlend?.Texture.EstimatedTextureMemory ?? 0) +
++        (hdrScene?.EstimatedMemoryBytes ?? 0) +
++        (hdrResolve?.EstimatedMemoryBytes ?? 0) +
++        (ldrToneMapped?.EstimatedMemoryBytes ?? 0) +
+         (smaa?.DepthBuffer?.EstimatedMemoryBytes ?? 0) +
+         (depthStencil?.EstimatedMemoryBytes ?? 0);
+ 
+@@ -33,36 +39,54 @@ public class AntialiasTarget : RenderTarget
+     private RenderTarget2D? smaa;
+     private RenderTarget2D? smaaEdges;
+     private RenderTarget2D? smaaBlend;
++    private RenderTarget2D? hdrScene;
++    private RenderTarget2D? hdrResolve;
++    private RenderTarget2D? ldrToneMapped;
+     private DepthBuffer? depthStencil;
+     private RenderContext renderContext;
+ 
+-    public AntialiasTarget(RenderContext renderContext, int width, int height, AntialiasMode mode)
++    public AntialiasTarget(RenderContext renderContext, int width, int height, AntialiasMode mode,
++        bool hdrOutput = false)
+     {
+         this.renderContext = renderContext;
+         Width = width;
+         Height = height;
+         Mode = mode;
+-        if (mode >= AntialiasMode.MSAA2x)
+-        {
+-            msaa = renderContext.Backend.CreateMultisampleTarget(width, height, mode switch
+-            {
+-                AntialiasMode.MSAA4x => 4,
+-                AntialiasMode.MSAA8x => 8,
+-                _ => 2
+-            });
+-            Target = msaa;
+-        }
+-        else
+-        {
+-            smaa = new(renderContext, width, height);
+-            depthStencil = new(renderContext, width, height, true);
+-            smaaEdges = new(renderContext, width, height, depthStencil, false);
+-            smaaBlend = new(renderContext, width, height, depthStencil, false);
+-            Target = smaa.Target;
+-        }
+-
++        HdrOutputEnabled = hdrOutput;
+         try
+         {
++            if (mode == AntialiasMode.None && hdrOutput)
++            {
++                hdrScene = new RenderTarget2D(renderContext, width, height, SurfaceFormat.HdrBlendable);
++                Target = hdrScene.Target;
++            }
++            else if (mode >= AntialiasMode.MSAA2x)
++            {
++                msaa = renderContext.Backend.CreateMultisampleTarget(width, height, mode switch
++                {
++                    AntialiasMode.MSAA4x => 4,
++                    AntialiasMode.MSAA8x => 8,
++                    _ => 2
++                }, hdrOutput ? SurfaceFormat.HdrBlendable : SurfaceFormat.Bgra8);
++                if (hdrOutput)
++                    hdrResolve = new RenderTarget2D(renderContext, width, height, null, false, SurfaceFormat.HdrBlendable);
++                Target = msaa;
++            }
++            else if (mode == AntialiasMode.None)
++            {
++                throw new ArgumentException("An offscreen target is only needed for HDR when antialiasing is disabled.", nameof(mode));
++            }
++            else
++            {
++                smaa = new(renderContext, width, height,
++                    format: hdrOutput ? SurfaceFormat.HdrBlendable : SurfaceFormat.Bgra8);
++                if (hdrOutput)
++                    ldrToneMapped = new RenderTarget2D(renderContext, width, height, null, false, SurfaceFormat.Bgra8);
++                depthStencil = new(renderContext, width, height, true);
++                smaaEdges = new(renderContext, width, height, depthStencil, false);
++                smaaBlend = new(renderContext, width, height, depthStencil, false);
++                Target = smaa.Target;
++            }
+             ValidateAttachmentContracts();
+         }
+         catch
+@@ -74,6 +98,12 @@ public class AntialiasTarget : RenderTarget
+ 
+     private void ValidateAttachmentContracts()
+     {
++        if (Mode == AntialiasMode.None)
++        {
++            if (!HdrOutputEnabled || hdrScene?.Texture.Format != SurfaceFormat.HdrBlendable || msaa != null)
++                throw new InvalidOperationException("HDR scene target does not satisfy its attachment contract.");
++            return;
++        }
+         if (msaa != null)
+         {
+             var resolve = SystemRenderPasses.GetSubpass(SystemRenderSubpass.MsaaColorResolve);
+@@ -88,11 +118,14 @@ public class AntialiasTarget : RenderTarget
+             var supportedStorageFormat = storageFormat is
+                 SystemRenderAttachmentFormat.OpenGlMsaaColor or
+                 SystemRenderAttachmentFormat.OpenGlRgba8 or
++                SystemRenderAttachmentFormat.OpenGlRgba16Float or
+                 SystemRenderAttachmentFormat.OpenGlRgbaImplementationDefined;
+             if (resolve.Color?.Format != SystemRenderAttachmentFormat.CallerDefined ||
+                 sourceColor?.Format != SystemRenderAttachmentFormat.OpenGlMsaaColor ||
+                 sourceColor?.Samples != SystemRenderSampleCount.ModeSelected ||
+                 resolve.SourceDepth != null || !supportedStorageFormat ||
++                (HdrOutputEnabled != (storageFormat == SystemRenderAttachmentFormat.OpenGlRgba16Float)) ||
++                (HdrOutputEnabled && hdrResolve?.Texture.Format != SurfaceFormat.HdrBlendable) ||
+                 msaa.RequestedDepthBits != 24 ||
+                 msaa.Samples != expectedSamples || msaa.Width != Width || msaa.Height != Height ||
+                 msaa.HasStencil)
+@@ -109,6 +142,8 @@ public class AntialiasTarget : RenderTarget
+             weights.Stencil?.Format != SystemRenderAttachmentFormat.Depth24Stencil8 ||
+             smaaEdges.Texture.Format != SurfaceFormat.Bgra8 ||
+             smaaBlend.Texture.Format != SurfaceFormat.Bgra8 ||
++            smaa.Texture.Format != (HdrOutputEnabled ? SurfaceFormat.HdrBlendable : SurfaceFormat.Bgra8) ||
++            (HdrOutputEnabled && ldrToneMapped?.Texture.Format != SurfaceFormat.Bgra8) ||
+             smaaEdges.Width != Width || smaaEdges.Height != Height ||
+             smaaBlend.Width != Width || smaaBlend.Height != Height ||
+             !ReferenceEquals(smaaEdges.DepthBuffer, depthStencil) ||
+@@ -144,6 +179,12 @@ public class AntialiasTarget : RenderTarget
+         bool offsetScissorPushed = false;
+         try
+         {
++            Texture2D sceneColor = smaa.Texture;
++            if (HdrOutputEnabled)
++            {
++                TonemapPass.Draw(renderContext, sceneColor, ldrToneMapped, Width, Height, Point.Zero);
++                sceneColor = ldrToneMapped!.Texture;
++            }
+             renderContext.PushViewport(0, 0, Width, Height);
+             viewportPushed = true;
+             scissorPushed = renderContext.PushScissor(new(0, 0, Width, Height), false);
+@@ -165,7 +206,7 @@ public class AntialiasTarget : RenderTarget
+             try
+             {
+                 BindSubpassTarget(SystemRenderSubpass.SmaaEdgeDetection, smaaEdges);
+-                renderContext.Textures[0] = smaa.Texture;
++                renderContext.Textures[0] = sceneColor;
+                 renderContext.BlendMode = BlendMode.Opaque;
+                 renderContext.DepthEnabled = false;
+                 renderContext.Shader = edgeDetection;
+@@ -202,7 +243,7 @@ public class AntialiasTarget : RenderTarget
+             {
+                 renderContext.StencilEnabled = false;
+                 BindSubpassTarget(SystemRenderSubpass.SmaaNeighborhoodBlend, tgt);
+-                renderContext.Textures[0] = smaa.Texture;
++                renderContext.Textures[0] = sceneColor;
+                 renderContext.Textures[1] = smaaBlend.Texture;
+                 renderContext.Shader = neighborhoodBlending;
+                 if (offset != Point.Zero)
+@@ -275,10 +316,24 @@ public class AntialiasTarget : RenderTarget
+ 
+     public void BlitToScreen(Point offset)
+     {
++        if (Mode == AntialiasMode.None && hdrScene != null)
++        {
++            TonemapPass.Draw(renderContext, hdrScene.Texture, null, Width, Height, offset);
++            return;
++        }
+         if (msaa != null)
+         {
+             BeginGpuSubpass(SystemRenderSubpass.MsaaColorResolve);
+-            try { msaa.BlitToScreen(offset); }
++            try
++            {
++                if (HdrOutputEnabled)
++                {
++                    msaa.BlitToRenderTarget(hdrResolve!.Backing);
++                    TonemapPass.Draw(renderContext, hdrResolve.Texture, null, Width, Height, offset);
++                }
++                else
++                    msaa.BlitToScreen(offset);
++            }
+             finally { EndGpuSubpass(SystemRenderSubpass.MsaaColorResolve); }
+         }
+         else
+@@ -289,10 +344,24 @@ public class AntialiasTarget : RenderTarget
+ 
+     public void BlitToRenderTarget(RenderTarget2D rTarget)
+     {
++        if (Mode == AntialiasMode.None && hdrScene != null)
++        {
++            TonemapPass.Draw(renderContext, hdrScene.Texture, rTarget, Width, Height, Point.Zero);
++            return;
++        }
+         if (msaa != null)
+         {
+             BeginGpuSubpass(SystemRenderSubpass.MsaaColorResolve);
+-            try { msaa.BlitToRenderTarget(rTarget.Backing); }
++            try
++            {
++                if (HdrOutputEnabled)
++                {
++                    msaa.BlitToRenderTarget(hdrResolve!.Backing);
++                    TonemapPass.Draw(renderContext, hdrResolve.Texture, rTarget, Width, Height, Point.Zero);
++                }
++                else
++                    msaa.BlitToRenderTarget(rTarget.Backing);
++            }
+             finally { EndGpuSubpass(SystemRenderSubpass.MsaaColorResolve); }
+         }
+         else
+@@ -307,6 +376,9 @@ public class AntialiasTarget : RenderTarget
+         smaa?.Dispose();
+         smaaEdges?.Dispose();
+         smaaBlend?.Dispose();
++        hdrScene?.Dispose();
++        hdrResolve?.Dispose();
++        ldrToneMapped?.Dispose();
+         depthStencil?.Dispose();
+     }
+ }
+diff --git a/src/LibreLancer.Base/Graphics/Backends/IMultisampleTarget.cs b/src/LibreLancer.Base/Graphics/Backends/IMultisampleTarget.cs
+index 62691ce..9ca2a3a 100644
+--- a/src/LibreLancer.Base/Graphics/Backends/IMultisampleTarget.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/IMultisampleTarget.cs
+@@ -5,6 +5,7 @@ internal enum MultisampleColorFormat
+ {
+     Unknown,
+     Rgba8,
++    Rgba16Float,
+     RgbaImplementationDefined
+ }
+ 
+diff --git a/src/LibreLancer.Base/Graphics/Backends/IRenderContext.cs b/src/LibreLancer.Base/Graphics/Backends/IRenderContext.cs
+index 314400d..652e07d 100644
+--- a/src/LibreLancer.Base/Graphics/Backends/IRenderContext.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/IRenderContext.cs
+@@ -40,7 +40,8 @@ internal interface IRenderContext
+ 
+     IRenderTarget2D CreateRenderTarget2D(ITexture2D texture, IDepthBuffer? buffer);
+ 
+-    IMultisampleTarget CreateMultisampleTarget(int width, int height, int samples);
++    IMultisampleTarget CreateMultisampleTarget(int width, int height, int samples,
++        SurfaceFormat colorFormat = SurfaceFormat.Bgra8);
+ 
+     IStorageBuffer CreateStorageBuffer(int size, int stride);
+ 
+diff --git a/src/LibreLancer.Base/Graphics/Backends/Null/NullRenderContext.cs b/src/LibreLancer.Base/Graphics/Backends/Null/NullRenderContext.cs
+index 59be9ff..a92728b 100644
+--- a/src/LibreLancer.Base/Graphics/Backends/Null/NullRenderContext.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/Null/NullRenderContext.cs
+@@ -110,7 +110,8 @@ internal class NullRenderContext : IRenderContext
+     public IRenderTarget2D CreateRenderTarget2D(ITexture2D texture, IDepthBuffer? buffer) =>
+         new NullRenderTarget2D(texture.Width, texture.Height);
+ 
+-    public IMultisampleTarget CreateMultisampleTarget(int width, int height, int samples) =>
++    public IMultisampleTarget CreateMultisampleTarget(int width, int height, int samples,
++        SurfaceFormat colorFormat = SurfaceFormat.Bgra8) =>
+         new NullMultisampleTarget(width, height, samples);
+ 
+     public IStorageBuffer CreateStorageBuffer(int size, int stride) =>
+diff --git a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLMultisampleTarget.cs b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLMultisampleTarget.cs
+index ea5ba3c..252ab0f 100644
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLMultisampleTarget.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLMultisampleTarget.cs
+@@ -15,8 +15,10 @@ internal class GLMultisampleTarget : GLRenderTarget, IMultisampleTarget
+     public int Height { get; private set; }
+     public MultisampleColorFormat RequestedColorFormat { get; }
+     public int RequestedDepthBits => 24;
+-    public long EstimatedMemoryBytes => checked((long)Width * Height * Samples * 8 +
+-        (resolveTexID != 0 ? (long)Width * Height * 4 : 0));
++    public long EstimatedMemoryBytes => checked((long)Width * Height * Samples *
++        (RequestedColorFormat == MultisampleColorFormat.Rgba16Float ? 12 : 8) +
++        (resolveTexID != 0 ? (long)Width * Height *
++            (RequestedColorFormat == MultisampleColorFormat.Rgba16Float ? 8 : 4) : 0));
+     public int Samples { get; }
+ 
+     private GLRenderContext context;
+@@ -26,23 +28,26 @@ internal class GLMultisampleTarget : GLRenderTarget, IMultisampleTarget
+ 
+     public override bool HasStencil => false;
+ 
+-    public GLMultisampleTarget(GLRenderContext context, int width, int height, int samples)
++    public GLMultisampleTarget(GLRenderContext context, int width, int height, int samples, SurfaceFormat colorFormat)
+     {
+         this.context = context;
+         Width = width;
+         Height = height;
+         Samples = samples;
+-        RequestedColorFormat = GL.GLES
+-            ? MultisampleColorFormat.Rgba8
+-            : MultisampleColorFormat.RgbaImplementationDefined;
++        bool hdr = colorFormat is SurfaceFormat.HdrBlendable or SurfaceFormat.HalfVector4;
++        RequestedColorFormat = hdr
++            ? MultisampleColorFormat.Rgba16Float
++            : GL.GLES ? MultisampleColorFormat.Rgba8 : MultisampleColorFormat.RgbaImplementationDefined;
+         try
+         {
+             texID = GL.GenTexture();
+             GLBind.BindTexture(0, GL.GL_TEXTURE_2D_MULTISAMPLE, texID);
+             if(GL.GLES)
+-                GL.TexStorage2DMultisample(GL.GL_TEXTURE_2D_MULTISAMPLE, samples, GL.GL_RGBA8, width, height, true);
++                GL.TexStorage2DMultisample(GL.GL_TEXTURE_2D_MULTISAMPLE, samples,
++                    hdr ? GL.GL_RGBA16F : GL.GL_RGBA8, width, height, true);
+             else
+-                GL.TexImage2DMultisample(GL.GL_TEXTURE_2D_MULTISAMPLE, samples, GL.GL_RGBA, width, height, true);
++                GL.TexImage2DMultisample(GL.GL_TEXTURE_2D_MULTISAMPLE, samples,
++                    hdr ? GL.GL_RGBA16F : GL.GL_RGBA, width, height, true);
+             depthID = GL.GenRenderbuffer();
+             GL.BindRenderbuffer(GL.GL_RENDERBUFFER, depthID);
+             GL.RenderbufferStorageMultisample(GL.GL_RENDERBUFFER, samples, GL.GL_DEPTH_COMPONENT24, width, height);
+@@ -88,10 +93,12 @@ internal class GLMultisampleTarget : GLRenderTarget, IMultisampleTarget
+                 resolveTexID = GL.GenTexture();
+                 GLBind.Trash();
+                 GLBind.BindTextureForModify(0, GL.GL_TEXTURE_2D, resolveTexID);
++                bool hdr = RequestedColorFormat == MultisampleColorFormat.Rgba16Float;
+                 GL.TexImage2D(GL.GL_TEXTURE_2D, 0,
+-                    GL.GL_RGBA,
++                    hdr ? GL.GL_RGBA16F : GL.GL_RGBA,
+                     Width, Height, 0,
+-                    GL.GL_BGRA, GL.GL_UNSIGNED_BYTE, IntPtr.Zero);
++                    hdr ? GL.GL_RGBA : GL.GL_BGRA,
++                    hdr ? GL.GL_HALF_FLOAT : GL.GL_UNSIGNED_BYTE, IntPtr.Zero);
+                 GL.FramebufferTexture2D (GL.GL_FRAMEBUFFER,
+                     GL.GL_COLOR_ATTACHMENT0,
+                     GL.GL_TEXTURE_2D, resolveTexID, 0);
+diff --git a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderContext.cs b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderContext.cs
+index c95cd05..de0e6ff 100644
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderContext.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderContext.cs
+@@ -749,8 +749,9 @@ internal class GLRenderContext : IRenderContext
+     public IRenderTarget2D CreateRenderTarget2D(ITexture2D texture, IDepthBuffer? buffer) =>
+         new GLRenderTarget2D(this, (GLTexture2D)texture, buffer as GLDepthBuffer);
+ 
+-    public IMultisampleTarget CreateMultisampleTarget(int width, int height, int samples)
+-        => new GLMultisampleTarget(this, width, height, samples);
++    public IMultisampleTarget CreateMultisampleTarget(int width, int height, int samples,
++        SurfaceFormat colorFormat = SurfaceFormat.Bgra8)
++        => new GLMultisampleTarget(this, width, height, samples, colorFormat);
+ 
+     public IStorageBuffer CreateStorageBuffer(int size, int stride)
+         => SSBO
+diff --git a/src/LibreLancer.Base/Graphics/RenderContext.cs b/src/LibreLancer.Base/Graphics/RenderContext.cs
+index 870cb75..c018e18 100644
+--- a/src/LibreLancer.Base/Graphics/RenderContext.cs
++++ b/src/LibreLancer.Base/Graphics/RenderContext.cs
+@@ -67,6 +67,7 @@ public class RenderContext
+     internal ShaderBundle SMAAEdgeDetection;
+     internal ShaderBundle SMAABlendingWeightCalculation;
+     internal ShaderBundle SMAANeighborhoodBlending;
++    internal Shader TonemapShader;
+     internal VertexBuffer FullScreenTriangle;
+ 
+     internal static RenderContext Instance = null!;
+@@ -259,6 +260,7 @@ public class RenderContext
+         SMAAEdgeDetection = ShaderBundle.FromResource<RenderContext>(this, "SMAAEdgeDetection.bin");
+         SMAABlendingWeightCalculation = ShaderBundle.FromResource<RenderContext>(this, "SMAABlendingWeightCalculation.bin");
+         SMAANeighborhoodBlending = ShaderBundle.FromResource<RenderContext>(this, "SMAANeighborhoodBlending.bin");
++        TonemapShader = ShaderBundle.FromResource<RenderContext>(this, "Tonemap.bin").Get(0);
+         using (var stream = typeof(RenderContext).Assembly.GetManifestResourceStream("LibreLancer.Shaders.AreaTexDX10.dds")!)
+         {
+             SMAAAreaTex = (Texture2D)ImageLib.DDS.FromStream(this, stream);
+diff --git a/src/LibreLancer.Base/Graphics/RenderTarget2D.cs b/src/LibreLancer.Base/Graphics/RenderTarget2D.cs
+index c727884..c1b7c28 100644
+--- a/src/LibreLancer.Base/Graphics/RenderTarget2D.cs
++++ b/src/LibreLancer.Base/Graphics/RenderTarget2D.cs
+@@ -16,9 +16,10 @@ public class RenderTarget2D : RenderTarget
+ 
+     internal readonly IRenderTarget2D Backing;
+     private bool disposeDepth;
+-    public RenderTarget2D (RenderContext context, int width, int height, DepthBuffer? depth, bool disposeDepth)
++    public RenderTarget2D (RenderContext context, int width, int height, DepthBuffer? depth, bool disposeDepth,
++        SurfaceFormat format = SurfaceFormat.Bgra8)
+     {
+-        Texture = new Texture2D(context, width, height);
++        Texture = new Texture2D(context, width, height, format: format);
+         DepthBuffer = depth;
+         try
+         {
+@@ -36,7 +37,12 @@ public class RenderTarget2D : RenderTarget
+     }
+ 
+     public RenderTarget2D(RenderContext context, int width, int height)
+-        : this(context, width, height, new DepthBuffer(context, width, height), true)
++        : this(context, width, height, new DepthBuffer(context, width, height), true, SurfaceFormat.Bgra8)
++    {
++    }
++
++    public RenderTarget2D(RenderContext context, int width, int height, SurfaceFormat format)
++        : this(context, width, height, new DepthBuffer(context, width, height), true, format)
+     {
+     }
+ 
+diff --git a/src/LibreLancer.Base/Graphics/SystemRenderPass.cs b/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
+index c9c8aef..1d9c88e 100644
+--- a/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
++++ b/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
+@@ -43,6 +43,7 @@ public enum SystemRenderAttachmentFormat
+     Bgra8,
+     OpenGlMsaaColor,
+     OpenGlRgba8,
++    OpenGlRgba16Float,
+     OpenGlRgbaImplementationDefined,
+     Depth24,
+     Depth24Stencil8
+diff --git a/src/LibreLancer.Base/Graphics/TonemapPass.cs b/src/LibreLancer.Base/Graphics/TonemapPass.cs
+new file mode 100644
+index 0000000..1baec54
+--- /dev/null
++++ b/src/LibreLancer.Base/Graphics/TonemapPass.cs
+@@ -0,0 +1,68 @@
++using System.Numerics;
++
++namespace LibreLancer.Graphics;
++
++internal static class TonemapPass
++{
++    private struct Parameters
++    {
++        public Vector4 Values;
++    }
++
++    public static void Draw(RenderContext context, Texture2D source, RenderTarget? target,
++        int width, int height, Point offset)
++    {
++        if (width <= 0 || height <= 0)
++            return;
++
++        var previousTarget = context.RenderTarget;
++        var previousTexture = context.Textures[0];
++        var previousSampler = context.Samplers[0];
++        var previousShader = context.Shader;
++        var previousBlend = context.BlendMode;
++        var previousDepth = context.DepthEnabled;
++        var previousDepthWrite = context.DepthWrite;
++        var previousColorWrite = context.ColorWrite;
++        var previousCull = context.Cull;
++        var previousStencil = context.Stencil;
++        var previousStencilEnabled = context.StencilEnabled;
++        var viewportPushed = false;
++        var scissorPushed = false;
++        try
++        {
++            context.RenderTarget = target;
++            context.PushViewport(offset.X, offset.Y, width, height);
++            viewportPushed = true;
++            scissorPushed = context.PushScissor(new Rectangle(offset.X, offset.Y, width, height), false);
++            context.DepthEnabled = false;
++            context.DepthWrite = false;
++            context.ColorWrite = true;
++            context.Cull = false;
++            context.StencilEnabled = false;
++            context.BlendMode = BlendMode.Opaque;
++            context.Textures[0] = source;
++            context.Samplers[0] = new SamplerState(TextureFiltering.Linear,
++                WrapMode.ClampToEdge, WrapMode.ClampToEdge);
++            var parameters = new Parameters { Values = Vector4.Zero };
++            context.TonemapShader.SetUniformBlock(3, ref parameters);
++            context.Shader = context.TonemapShader;
++            context.FullScreenTriangle.Draw(PrimitiveTypes.TriangleList, 1);
++        }
++        finally
++        {
++            context.Textures[0] = previousTexture;
++            context.Samplers[0] = previousSampler;
++            context.Shader = previousShader;
++            context.BlendMode = previousBlend;
++            context.DepthEnabled = previousDepth;
++            context.DepthWrite = previousDepthWrite;
++            context.ColorWrite = previousColorWrite;
++            context.Cull = previousCull;
++            context.Stencil = previousStencil;
++            context.StencilEnabled = previousStencilEnabled;
++            if (scissorPushed) context.PopScissor();
++            if (viewportPushed) context.PopViewport();
++            context.RenderTarget = previousTarget;
++        }
++    }
++}
+diff --git a/src/LibreLancer.Base/LibreLancer.Base.csproj b/src/LibreLancer.Base/LibreLancer.Base.csproj
+index d3b34d1..fe9565b 100644
+--- a/src/LibreLancer.Base/LibreLancer.Base.csproj
++++ b/src/LibreLancer.Base/LibreLancer.Base.csproj
+@@ -41,6 +41,7 @@
+     <Shader Include="Shaders\SMAAEdgeDetection.txt"/>
+     <Shader Include="Shaders\SMAABlendingWeightCalculation.txt"/>
+     <Shader Include="Shaders\SMAANeighborhoodBlending.txt"/>
++    <Shader Include="Shaders\Tonemap.txt"/>
+   </ItemGroup>
+ 
+   <ItemGroup>
+diff --git a/src/LibreLancer.Base/Shaders/Tonemap.frag.hlsl b/src/LibreLancer.Base/Shaders/Tonemap.frag.hlsl
+new file mode 100644
+index 0000000..9df54cd
+--- /dev/null
++++ b/src/LibreLancer.Base/Shaders/Tonemap.frag.hlsl
+@@ -0,0 +1,28 @@
++Texture2D<float4> SceneTexture : register(t0, TEXTURE_SPACE);
++SamplerState SceneSampler : register(s0, TEXTURE_SPACE);
++
++cbuffer Parameters : register(b3, UNIFORM_SPACE)
++{
++    float4 ToneMapParameters;
++}
++
++float3 AcesFitted(float3 color)
++{
++    const float a = 2.51;
++    const float b = 0.03;
++    const float c = 2.43;
++    const float d = 0.59;
++    const float e = 0.14;
++    return saturate((color * (a * color + b)) / (color * (c * color + d) + e));
++}
++
++float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target0
++{
++    float4 source = SceneTexture.Sample(SceneSampler, uv);
++    // Current Freelancer materials produce display-referred colour. Decode the
++    // composed scene before applying exposure and the display transform.
++    float3 linearColor = pow(max(source.rgb, 0.0), 2.2);
++    linearColor *= exp2(ToneMapParameters.x);
++    float3 mapped = AcesFitted(linearColor);
++    return float4(pow(mapped, 1.0 / 2.2), source.a);
++}
+diff --git a/src/LibreLancer.Base/Shaders/Tonemap.txt b/src/LibreLancer.Base/Shaders/Tonemap.txt
+new file mode 100644
+index 0000000..8dc5f62
+--- /dev/null
++++ b/src/LibreLancer.Base/Shaders/Tonemap.txt
+@@ -0,0 +1,2 @@
++vertex Tonemap.vert.hlsl
++fragment Tonemap.frag.hlsl
+diff --git a/src/LibreLancer.Base/Shaders/Tonemap.vert.hlsl b/src/LibreLancer.Base/Shaders/Tonemap.vert.hlsl
+new file mode 100644
+index 0000000..6e6ceee
+--- /dev/null
++++ b/src/LibreLancer.Base/Shaders/Tonemap.vert.hlsl
+@@ -0,0 +1,19 @@
++struct Input
++{
++    float4 Position : POSITION;
++    float2 TexCoord : TEXCOORD0;
++};
++
++struct Output
++{
++    float4 Position : SV_Position;
++    float2 TexCoord : TEXCOORD0;
++};
++
++Output main(Input input)
++{
++    Output output;
++    output.Position = input.Position;
++    output.TexCoord = input.TexCoord;
++    return output;
++}
+diff --git a/src/LibreLancer/GameSettings.cs b/src/LibreLancer/GameSettings.cs
+index 78c8375..ae8280d 100644
+--- a/src/LibreLancer/GameSettings.cs
++++ b/src/LibreLancer/GameSettings.cs
+@@ -57,6 +57,8 @@ namespace LibreLancer
+         public bool RenderSunLensGlow = true;
+         [Entry("render_sun_ambient")]
+         public bool RenderSunAmbient = false;
++        [Entry("render_hdr")]
++        public bool RenderHdr = false;
+         [Entry("render_projectile_beams")]
+         public bool RenderProjectileBeams = true;
+         [Entry("render_particle_effects")]
+@@ -111,6 +113,7 @@ namespace LibreLancer
+         bool IRendererSettings.RenderStarsphere => RenderStarsphere;
+         bool IRendererSettings.RenderSunLensGlow => RenderSunLensGlow;
+         bool IRendererSettings.RenderSunAmbient => RenderSunAmbient;
++        bool IRendererSettings.RenderHdr => RenderHdr;
+         bool IRendererSettings.RenderProjectileBeams => RenderProjectileBeams;
+         bool IRendererSettings.RenderParticleEffects => RenderParticleEffects;
+         bool IRendererSettings.RenderTransientEffectLights => RenderTransientEffectLights;
+@@ -156,6 +159,7 @@ namespace LibreLancer
+             writer.WriteLine($"render_starsphere = {(RenderStarsphere ? "true" : "false")}");
+             writer.WriteLine($"render_sun_lens_glow = {RenderSunLensGlow.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_sun_ambient = {RenderSunAmbient.ToString().ToLowerInvariant()}");
++            writer.WriteLine($"render_hdr = {RenderHdr.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_projectile_beams = {RenderProjectileBeams.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_particle_effects = {RenderParticleEffects.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_jump_gate_effects = {RenderJumpGateEffects.ToString().ToLowerInvariant()}");
+@@ -196,6 +200,7 @@ namespace LibreLancer
+                 RenderStarsphere = RenderStarsphere,
+                 RenderSunLensGlow = RenderSunLensGlow,
+                 RenderSunAmbient = RenderSunAmbient,
++                RenderHdr = RenderHdr,
+                 RenderProjectileBeams = RenderProjectileBeams,
+                 RenderParticleEffects = RenderParticleEffects,
+                 RenderJumpGateEffects = RenderJumpGateEffects,
+@@ -234,6 +239,7 @@ namespace LibreLancer
+             RenderStarsphere = other.RenderStarsphere;
+             RenderSunLensGlow = other.RenderSunLensGlow;
+             RenderSunAmbient = other.RenderSunAmbient;
++            RenderHdr = other.RenderHdr;
+             RenderProjectileBeams = other.RenderProjectileBeams;
+             RenderParticleEffects = other.RenderParticleEffects;
+             RenderJumpGateEffects = other.RenderJumpGateEffects;
+diff --git a/src/LibreLancer/Render/IRendererSettings.cs b/src/LibreLancer/Render/IRendererSettings.cs
+index 7dcb22f..cf7e3bd 100644
+--- a/src/LibreLancer/Render/IRendererSettings.cs
++++ b/src/LibreLancer/Render/IRendererSettings.cs
+@@ -16,6 +16,7 @@ public interface IRendererSettings
+     bool RenderStarsphere => true;
+     bool RenderSunLensGlow => true;
+     bool RenderSunAmbient => false;
++    bool RenderHdr => false;
+     bool RenderProjectileBeams => true;
+     bool RenderParticleEffects => true;
+     bool RenderTransientEffectLights => true;
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+index be23545..e8fe8ab 100644
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -282,6 +282,9 @@ namespace LibreLancer.Render
+         private AntialiasTarget? msaa;
+         public long EstimatedAAMemoryBytes => msaa?.EstimatedMemoryBytes ?? 0;
+         private int _mwidth = -1, _mheight = -1;
++        private AntialiasMode _mAaMode = (AntialiasMode)(-1);
++        private bool _mHdrRequested;
++        private bool hdrAllocationFailed;
+         public CommandBuffer Commands;
+         private int _twidth = -1, _theight = -1;
+         private int _dwidth = -1, _dheight = -1;
+@@ -428,18 +431,48 @@ namespace LibreLancer.Render
+ 
+             try
+             {
+-                if (Settings.SelectedAA != AntialiasMode.None)
++                bool hdrRequested = Settings.RenderHdr;
++                bool offscreenRequested = Settings.SelectedAA != AntialiasMode.None || hdrRequested;
++                if (_mwidth != renderWidth || _mheight != renderHeight ||
++                    _mAaMode != Settings.SelectedAA || _mHdrRequested != hdrRequested)
+                 {
+-                    if (_mwidth != renderWidth || _mheight != renderHeight ||
+-                        Settings.SelectedAA != msaa?.Mode)
++                    _mwidth = renderWidth;
++                    _mheight = renderHeight;
++                    _mAaMode = Settings.SelectedAA;
++                    _mHdrRequested = hdrRequested;
++                    hdrAllocationFailed = false;
++                    msaa?.Dispose();
++                    msaa = null;
++                }
++
++                if (offscreenRequested && (msaa == null || (!hdrAllocationFailed && hdrRequested && !msaa.HdrOutputEnabled)))
++                {
++                    try
+                     {
+-                        _mwidth = renderWidth;
+-                        _mheight = renderHeight;
+-                        msaa?.Dispose();
+-                        msaa = new AntialiasTarget(rstate, renderWidth, renderHeight, Settings.SelectedAA);
++                        msaa = new AntialiasTarget(rstate, renderWidth, renderHeight,
++                            Settings.SelectedAA, hdrRequested && !hdrAllocationFailed);
+                         msaa.GpuSubpassMarker = MarkGpuSubpass;
+                     }
++                    catch (Exception ex) when (hdrRequested && !hdrAllocationFailed &&
++                        ex is InvalidOperationException or NotSupportedException)
++                    {
++                        hdrAllocationFailed = true;
++                        FLLog.Warning("Graphics", $"HDR render targets are unavailable; using the LDR renderer. {ex.Message}");
++                        if (Settings.SelectedAA != AntialiasMode.None)
++                        {
++                            msaa = new AntialiasTarget(rstate, renderWidth, renderHeight, Settings.SelectedAA);
++                            msaa.GpuSubpassMarker = MarkGpuSubpass;
++                        }
++                    }
++                }
++                else if (!offscreenRequested && msaa != null)
++                {
++                    msaa.Dispose();
++                    msaa = null;
++                }
+ 
++                if (msaa != null)
++                {
+                     rstate.PushViewport(new Rectangle(0, 0, renderWidth, renderHeight));
+                     aaViewportPushed = true;
+                     aaScissorPushed = rstate.PushScissor(new Rectangle(0, 0, renderWidth, renderHeight), false);
+@@ -690,7 +723,7 @@ namespace LibreLancer.Render
+                 debugLines = [];
+                 DebugRenderer.Render();
+ 
+-                if (Settings.SelectedAA != AntialiasMode.None)
++                if (msaa != null)
+                 {
+                     aaViewportPushed = false;
+                     rstate.PopViewport();
+diff --git a/src/lancer/Program.cs b/src/lancer/Program.cs
+index 34015c5..55045b7 100644
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -34,6 +34,7 @@ internal static class MainClass
+             Console.WriteLine("         --render-starsphere=on|off");
+             Console.WriteLine("         --render-sun-lens-glow=on|off");
+             Console.WriteLine("         --render-sun-ambient=on|off");
++            Console.WriteLine("         --render-hdr=on|off");
+             Console.WriteLine("         --render-projectile-beams=on|off");
+             Console.WriteLine("         --render-particle-effects=on|off");
+             Console.WriteLine("         --render-transient-effect-lights=on|off");
+@@ -219,6 +220,7 @@ internal static class MainClass
+         private bool? starsphere;
+         private bool? sunLensGlow;
+         private bool? sunAmbient;
++        private bool? hdr;
+         private bool? projectileBeams;
+         private bool? particleEffects;
+         private bool? jumpGateEffects;
+@@ -280,6 +282,10 @@ internal static class MainClass
+                     if (!ParseToggle(out var sunAmbientEnabled)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
+                     sunAmbient = sunAmbientEnabled;
+                     return true;
++                case "--render-hdr":
++                    if (!ParseToggle(out var hdrEnabled)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
++                    hdr = hdrEnabled;
++                    return true;
+                 case "--render-dynamic-light-budget":
+                     if (int.TryParse(value, out var lightBudget) && lightBudget is 0 or 8 or 16 or 24 or 32)
+                     {
+@@ -374,6 +380,7 @@ internal static class MainClass
+             if (starsphere.HasValue) settings.RenderStarsphere = starsphere.Value;
+             if (sunLensGlow.HasValue) settings.RenderSunLensGlow = sunLensGlow.Value;
+             if (sunAmbient.HasValue) settings.RenderSunAmbient = sunAmbient.Value;
++            if (hdr.HasValue) settings.RenderHdr = hdr.Value;
+             if (projectileBeams.HasValue) settings.RenderProjectileBeams = projectileBeams.Value;
+             if (particleEffects.HasValue) settings.RenderParticleEffects = particleEffects.Value;
+             if (jumpGateEffects.HasValue) settings.RenderJumpGateEffects = jumpGateEffects.Value;
+diff --git a/uixml/options.lua b/uixml/options.lua
+index 794081c..a813b0f 100644
+--- a/uixml/options.lua
++++ b/uixml/options.lua
+@@ -130,6 +130,13 @@ class options : options_Designer with Modal
+         e.particle_effects.Selected = this.opts.RenderParticleEffects
+         e.sun_lens_glow.Selected = this.opts.RenderSunLensGlow
+         e.sun_ambient.Selected = this.opts.RenderSunAmbient
++        e.hdr.Selected = this.opts.RenderHdr
++        e.hdr.OnClick(() => {
++            this.opts.RenderHdr = e.hdr.Selected
++            local settings = Game.GetCurrentSettings()
++            settings.RenderHdr = e.hdr.Selected
++            Game.ApplySettings(settings)
++        })
+         e.sun_ambient.OnClick(() => {
+             this.opts.RenderSunAmbient = e.sun_ambient.Selected
+             local settings = Game.GetCurrentSettings()
+@@ -180,6 +187,7 @@ class options : options_Designer with Modal
+         this.opts.RenderParticleEffects = e.particle_effects.Selected
+         this.opts.RenderSunLensGlow = e.sun_lens_glow.Selected
+         this.opts.RenderSunAmbient = Game.GetCurrentSettings().RenderSunAmbient
++        this.opts.RenderHdr = Game.GetCurrentSettings().RenderHdr
+         this.opts.RenderNebulae = e.nebulae.Selected
+         this.opts.RenderStarsphere = e.starsphere.Selected
+         this.opts.VSync = e.vsync.Selected
+diff --git a/uixml/options.xml b/uixml/options.xml
+index b4c6d7a..27b3052 100644
+--- a/uixml/options.xml
++++ b/uixml/options.xml
+@@ -37,7 +37,8 @@
+                 <Checkbox id="nebulae" X="18" Y="248" Width="350" Text="NEBULAE"/>
+                 <Checkbox id="starsphere" X="18" Y="276" Width="350" Text="STARSPHERE"/>
+                 <Checkbox id="sun_ambient" X="18" Y="304" Width="350" Text="SUN-COLORED AMBIENT LIGHT"/>
+-                <TextBlock X="18" Y="332" Width="350" Height="34" Text="HDR, BLOOM, SHADOWS AND SSAO ARE STILL PLANNED" TextColor="text" TextShadow="black" TextSize="10"/>
++                <Checkbox id="hdr" X="18" Y="332" Width="350" Text="HDR TONE MAPPING"/>
++                <TextBlock X="18" Y="360" Width="350" Height="20" Text="BLOOM, SHADOWS AND SSAO ARE STILL PLANNED" TextColor="text" TextShadow="black" TextSize="9"/>
+             </Panel>
+             <Panel Width="390" Height="380" ID="win_audio" Visible="false">
+                 <TextBlock Text="AUDIO OPTIONS" Strid="1679" Width="390" Height="22" Y="-22"  Anchor="TopCenter" TextColor="text" TextShadow="black" TextSize="13"/>

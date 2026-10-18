@@ -1,0 +1,144 @@
+diff --git a/src/LibreLancer/Render/Materials/BasicMaterial.cs b/src/LibreLancer/Render/Materials/BasicMaterial.cs
+--- a/src/LibreLancer/Render/Materials/BasicMaterial.cs
++++ b/src/LibreLancer/Render/Materials/BasicMaterial.cs
+@@ -291,7 +291,7 @@
+             public float EnvMapStrength;
+             public float EnvPrefiltered;
+             public float EnvDiffuseEnabled;
+-            public float EnvDiffuseIblEnabled;
++            public float FeatureFlags;
+             public Vector3 Padding;
+         }
+ 
+@@ -389,7 +389,12 @@
+             {
+                 BindTexture(rstate, 1, EtSampler, 1, EtFlags, ResourceManager.NullTextureName);
+             }
+-            if (!DepthOnlyPass && BtEnabled)
++            if (!DepthOnlyPass && pbr)
++            {
++                BindTexture(rstate, 6, BtEnabled ? BtSampler : ResourceManager.WhiteTextureName,
++                    8, BtFlags, ResourceManager.WhiteTextureName);
++            }
++            else if (!DepthOnlyPass && BtEnabled)
+             {
+                 BindTexture(rstate, 4, BtSampler, 4, BtFlags, ResourceManager.NullTextureName);
+             }
+@@ -427,7 +432,9 @@
+                       EnvMapStrength = envMapStrength,
+                       EnvPrefiltered = pbrEnvironmentPrefiltered ? 1.0f : 0.0f,
+                       EnvDiffuseEnabled = pbrDiffuseIrradiance != null ? 1.0f : 0.0f,
+-                      EnvDiffuseIblEnabled = Library?.PbrDiffuseIblEnabled == true ? 1.0f : 0.0f,
++                      // Bit 0 selects diffuse IBL; bit 1 enables the legacy Bt detail map.
++                      FeatureFlags = (Library?.PbrDiffuseIblEnabled == true ? 1.0f : 0.0f) +
++                                     (BtEnabled ? 2.0f : 0.0f),
+                       Padding = new Vector3(AlphaTest || dxt1 ? 1.0f : 0.0f,
+                           pbrEnvironment?.Format == SurfaceFormat.HalfVector4 ? 1.0f : 0.0f,
+                           pbrDiffuseIrradiance?.Format == SurfaceFormat.HalfVector4 ? 1.0f : 0.0f) };
+@@ -465,7 +472,8 @@
+                     : SamplerFlags.Default & ~SamplerFlags.SecondUV;
+                 SetTextureCoordinates(shader, DtFlags, EtFlags, normalFlags,
+                     string.IsNullOrEmpty(MtSampler) && activeSurfaceMetallic != null ? surfaceFlags : MtFlags,
+-                    string.IsNullOrEmpty(RtSampler) && activeSurfaceRoughness != null ? surfaceFlags : RtFlags);
++                    string.IsNullOrEmpty(RtSampler) && activeSurfaceRoughness != null ? surfaceFlags : RtFlags,
++                    BtFlags);
+             }
+             else
+             {
+diff --git a/src/LibreLancer/Shaders/PBR.frag.hlsl b/src/LibreLancer/Shaders/PBR.frag.hlsl
+--- a/src/LibreLancer/Shaders/PBR.frag.hlsl
++++ b/src/LibreLancer/Shaders/PBR.frag.hlsl
+@@ -1,5 +1,6 @@
+ #include "includes/NormalMap.hlsl"
+ #include "includes/Lighting.hlsl"
++#include "includes/Modulate.hlsl"
+ #include "includes/Camera.hlsl"
+ #include "includes/OutputColor.hlsl"
+ 
+@@ -17,6 +18,9 @@
+ 
+ Texture2D<float4> RtTexture : register(t4, TEXTURE_SPACE);
+ SamplerState RtSampler : register(s4, TEXTURE_SPACE);
++
++Texture2D<float4> BtTexture : register(t8, TEXTURE_SPACE);
++SamplerState BtSampler : register(s8, TEXTURE_SPACE);
+ 
+ #ifdef ENVMAP
+ TextureCube<float4> EnvTexture : register(t5, TEXTURE_SPACE);
+@@ -60,7 +64,7 @@
+     float EnvMapStrength;
+     float EnvPrefiltered;
+     float EnvDiffuseEnabled;
+-    float EnvDiffuseIblEnabled;
++    float FeatureFlags;
+     float3 PBRPadding;
+ };
+ 
+@@ -210,6 +214,11 @@
+     float alphaRoughness = perceptualRoughness * perceptualRoughness;
+ 
+     float4 baseTexture = SRGBToLinearOutput(DtTexture.Sample(DtSampler, GetTexCoord(0, input)));
++    if (FeatureFlags >= 2.0)
++    {
++        float3 detail = SRGBToLinearOutput(BtTexture.Sample(BtSampler, GetTexCoord(5, input))).rgb;
++        baseTexture.rgb = Mod2x(baseTexture.rgb, detail);
++    }
+     if (PBRPadding.x > 0.5 && baseTexture.a < 0.5)
+         discard;
+     float4 vertexColor = SRGBToLinearOutput(input.color);
+@@ -324,7 +333,7 @@
+     color += envColor * (specularColor * envBrdf.x + envBrdf.y) * EnvMapStrength;
+     // Surface metadata can provide cosine-convolved irradiance (stored as E/pi).
+     // Older catalogs retain the low-frequency final-mip fallback.
+-    if (EnvDiffuseIblEnabled > 0.5)
++    if (FeatureFlags == 1.0 || FeatureFlags == 3.0)
+     {
+         float4 diffuseEnvironmentSample = EnvDiffuseEnabled > 0.5
+             ? EnvDiffuseTexture.SampleLevel(EnvSampler, n, 0.0)
+diff --git a/src/LibreLancer.Base/Graphics/TextureSlots.cs b/src/LibreLancer.Base/Graphics/TextureSlots.cs
+--- a/src/LibreLancer.Base/Graphics/TextureSlots.cs
++++ b/src/LibreLancer.Base/Graphics/TextureSlots.cs
+@@ -2,7 +2,8 @@
+ 
+ public sealed class TextureSlots
+ {
+-    private Texture?[] slots = new Texture[8];
++    public const int Capacity = 9;
++    private Texture?[] slots = new Texture[Capacity];
+     private RenderContext rc;
+     internal TextureSlots(RenderContext rc)
+     {
+diff --git a/src/LibreLancer.Base/Graphics/SamplerSlots.cs b/src/LibreLancer.Base/Graphics/SamplerSlots.cs
+--- a/src/LibreLancer.Base/Graphics/SamplerSlots.cs
++++ b/src/LibreLancer.Base/Graphics/SamplerSlots.cs
+@@ -2,7 +2,7 @@
+ 
+ public sealed class SamplerSlots
+ {
+-    private SamplerState[] slots = new SamplerState[8];
++    private SamplerState[] slots = new SamplerState[TextureSlots.Capacity];
+     private RenderContext rc;
+     internal SamplerSlots(RenderContext rc)
+     {
+diff --git a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderContext.cs b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderContext.cs
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderContext.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderContext.cs
+@@ -44,8 +44,8 @@
+     Queue<SyncPoint> frameSyncs = new();
+     SyncPoint currentFrame = new();
+     private List<(IntPtr Fence, Action Callback)> Fences = new();
+-    private GLTexture?[] textures = new GLTexture?[8];
+-    private SamplerState[] samplers = new SamplerState[8];
++    private GLTexture?[] textures = new GLTexture?[TextureSlots.Capacity];
++    private SamplerState[] samplers = new SamplerState[TextureSlots.Capacity];
+     private int lastTextureApply = 0;
+ 
+     private static int[] stencilFuncs =
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -320,3 +320,4 @@
+ client 2318-system-renderer-disposal-recovery.patch
+ client 2319-render-context-resource-shutdown.patch
+ client 2320-basic-et-bt-combination.patch
++client 2321-pbr-bt-detail-map.patch

@@ -1,0 +1,58 @@
+diff --git a/src/LibreLancer/Render/SystemLighting.cs b/src/LibreLancer/Render/SystemLighting.cs
+--- a/src/LibreLancer/Render/SystemLighting.cs
++++ b/src/LibreLancer/Render/SystemLighting.cs
+@@ -67,6 +67,10 @@
+             if (!frameStarted)
+                 BeginFrame(frameCameraPosition);
+ 
++            var priority = GetFrameLightPriority(light);
++            if (priority <= 0)
++                return false;
++
+             if (frameLights.Count >= BitArray128.Capacity)
+                 return false;
+ 
+@@ -74,11 +78,10 @@
+             if (transientCount < MaxFrameLights)
+             {
+                 frameLights.Add(light);
+-                frameLightPriorities.Add(GetFrameLightPriority(light));
++                frameLightPriorities.Add(priority);
+                 return true;
+             }
+ 
+-            var priority = GetFrameLightPriority(light);
+             var lowestIndex = transientStart;
+             var lowestPriority = frameLightPriorities[lowestIndex];
+             for (var i = transientStart + 1; i < frameLights.Count; i++)
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -41,6 +41,7 @@
+ | 2065 | Prioritize frame lights by attenuated contribution near the camera |
+ | 2066 | Enable PBR materials and surface roughness/metallic maps on skinned DFM meshes |
+ | 2067 | Keep PBR ambient lighting energy-conserving for metallic materials |
++| 2068 | Reject out-of-range transient lights before they consume frame slots |
+ | 2011 (`lancerdecode`) | Native Vorbis EOF/reset handling |
+ | 2012 (`blurgtext`) | System FreeType without OT-SVG hooks |
+ 
+diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -508,7 +508,7 @@
+   Transparenz und bestehende Freelancer-Nebelparameter erhalten.
+ - [ ] Gerichtete Schatten zuerst mit Kaskaden/PCF, anschließend zusätzliche
+   Lichttypen; Shadow-Depth-Targets und Comparison-Sampler abstrahieren.
+-- [ ] Kurzlebige Effektlichter vervollständigen und messen: Mündungslichter aus `Gun.light_anim` sowie Explosionslichter aus `lgt_effect`/`lgt_radius` und `lgt_time_scale` sind vorhanden. Die per-Objekt-Auswahl priorisiert nach geschätzter Lichtwirkung; der Frame-Pool priorisiert weiter nach Kameradistanz. Offen sind `lgt_range_scale`, explizite Lichtdaten und hardpointgebundene Lebenszyklen für persistentes Feuer, allgemeine Sichtbarkeits-/Occlusion-Priorisierung, Qualitätsbudgets und reproduzierbare NAP-Szenenmessungen. Der Effektpool begrenzt aktive Ereignisse auf 128, der Frame-Pool lokale Lichtquellen auf 32. Siehe [Feuerinventar](evidence/effect-fire-light-input-inventory-20261014.json).
++- [ ] Kurzlebige Effektlichter vervollständigen und messen: Mündungslichter aus `Gun.light_anim` sowie Explosionslichter aus `lgt_effect`/`lgt_radius` und `lgt_time_scale` sind vorhanden. Per-Objekt-Auswahl und Frame-Pool priorisieren nach geschätztem attenuiertem Lichtbeitrag; der Frame-Pool verwirft Quellen außerhalb ihrer Reichweite und ohne positiven Beitrag, bevor sie einen der 32 transienten Slots belegen. Offen sind `lgt_range_scale`, explizite Lichtdaten und hardpointgebundene Lebenszyklen für persistentes Feuer, allgemeine Sichtbarkeits-/Occlusion-Priorisierung, Qualitätsbudgets und reproduzierbare NAP-Szenenmessungen. Der Effektpool begrenzt aktive Ereignisse auf 128. Siehe [Feuerinventar](evidence/effect-fire-light-input-inventory-20261014.json).
+ - [ ] Danach Laser-, Projektil- und Explosionseffekte überarbeiten: Beam- und Trefferdarstellung, Trails, Partikel, Farbverläufe sowie Größen-/Zeitverhalten aufeinander abstimmen und mit dynamischer Beleuchtung integrieren. Originaleffekte und einzeln abschaltbare Qualitätsoptionen erhalten; NAP-Referenzszenen mit Vergleichsbildern und CPU-/GPU-Zeit abnehmen.
+   - [x] `vis_beam`-Querschnittsbasis bleibt bei vertikaler oder ungültiger Richtung endlich und orthonormal; Zugriffe auf den Beam-Puffer sind auf seine Kapazität begrenzt. Vier fokussierte Tests bestehen.
+   - [x] Partikel-/Beam-Schreibzugriffe bleiben im 30.000-Einträge-GPU-Pool; leere Beam-Chunks erzeugen keinen ungültigen Draw. Vier Grenztests bestehen.
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -67,3 +67,4 @@
+ client 2065-frame-light-contribution-priority.patch
+ client 2066-pbr-skinned-materials.patch
+ client 2067-pbr-metallic-ambient.patch
++client 2068-frame-light-range-budget.patch

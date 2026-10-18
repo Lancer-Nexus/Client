@@ -1,0 +1,67 @@
+--- a/src/LibreLancer/Render/Billboards.cs
++++ b/src/LibreLancer/Render/Billboards.cs
+@@ -319,6 +319,7 @@
+         private void DrawCommands(RenderContext rs, int start, int count)
+         {
+             rs.Shader = shaderBasic;
++            var cullEnabled = rs.Cull;
+             rs.Cull = false;
+ 
+             rs.BlendMode = rendat[datindex].BlendMode;
+@@ -332,12 +333,18 @@
+             rs.Textures[0] = rendat[datindex].Texture;
+             rs.Samplers[0] = new SamplerState(rs.PreferredFilterLevel, WrapMode.ClampToEdge, WrapMode.ClampToEdge);
+             var depthEnabled = rs.DepthEnabled;
+-            if (!rendat[datindex].DepthTest)
+-                rs.DepthEnabled = false;
+-            vboBasic.Draw(PrimitiveTypes.TriangleList, 0, start, count / 3);
+-            rs.DepthEnabled = depthEnabled;
+-            rs.Cull = true;
+-            lastDatHash = -1;
++            try
++            {
++                if (!rendat[datindex].DepthTest)
++                    rs.DepthEnabled = false;
++                vboBasic.Draw(PrimitiveTypes.TriangleList, 0, start, count / 3);
++            }
++            finally
++            {
++                rs.DepthEnabled = depthEnabled;
++                rs.Cull = cullEnabled;
++                lastDatHash = -1;
++            }
+         }
+ 
+         private bool _frameStart = true;
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -67,6 +67,7 @@
+   - [x] `AntialiasTarget` registriert alle während des Aufbaus erzeugten GPU-Ressourcen in einem idempotenten `RenderResourceScope`. Teilaufbauten werden auch bei Konstruktionsfehlern in umgekehrter Erzeugungsreihenfolge abgebaut; die Postprocess-Pässe werden vor den von ihnen geliehenen Szenen-/SMAA-Zielen freigegeben. Fehler beim Freigeben einer Ressource verhindern die Freigabe der übrigen nicht. Der `SystemRenderer`-Pfad wurde mit HDR/Bloom/SSAO/SMAA unter OpenGL auf 960×540 → 1280×720 sowie Minimize/Restore geprüft; siehe [Resize-Laufzeitnachweis](evidence/renderer/postprocess-window-resize-20261017/README.md). Editor-/Offscreen-Targets, Fehler-Injektion, Geräteverlust und Cross-Backend-Wiederherstellung bleiben offen.
+   - [x] `SystemRenderer.Draw()` überspringt Frames mit Breite/Höhe 0. Bei geändertem Rendermaß oder AA-Modus gibt es das vorhandene MSAA-Target frei und erstellt es neu. Das belegt nur diesen System-Renderer-Pfad; Editor-/Offscreen-Targets, Wiederherstellungstests und Geräteverlust bleiben offen.
+   - [x] `SystemRenderer.Draw()` und `AntialiasTarget.SMAABlit()` stellen RenderTarget, Viewport-/Scissor-Stacks und ihre geänderten RenderContext-Zustände in `finally` wieder her. `SystemRenderer` stellt auch `ThnCamera.DefaultZ()` zurück und leert die Frame-Objektliste nach Fehlern. Fehler-Injektion und reguläre Resize-/Minimize-/Restore-Läufe bleiben als Laufzeitprüfung offen. Details im [Fehlerpfad-Audit](evidence/renderer/render-target-exception-path-audit-20261015.md).
++  - [x] Billboard-Draws stellen Depth-Test, Cull-Zustand und den Batch-Hash auch dann wieder her, wenn ein Backend-Draw eine Exception wirft. Das schützt nachfolgende transparente Passes vor übernommenem Zustand; eine gezielte Fehler-Injektion im Backend ist noch nicht ausgeführt.
+   - [x] OpenGL prüft die Vollständigkeit normaler, multisample- und resolve Framebuffer beim Anlegen. Bei unvollständigen Zielen werden die erzeugten GL-Objekte freigegeben und der Statushexwert in der Exception ausgegeben; Laufzeitprüfung auf mehreren Treibern bleibt offen.
+   - [x] Bloom und der separable Blur versuchen fehlgeschlagene Target-Erstellung nach einer Änderung der Zielgröße oder des Blur-Formats erneut. Ein Fehler bei unveränderter Konfiguration bleibt bis zur nächsten Größen-/Formatänderung gedrosselt; Wiederherstellung nach Geräteverlust ist damit nicht abgedeckt.
+ - [ ] GPU-Zeit und Speicherverbrauch pro Pass messbar machen; Effekte müssen einzeln abschaltbar und nach Hardwareprofil skalierbar sein.
+--- a/patches/series
++++ b/patches/series
+@@ -263,3 +263,4 @@
+ client 2261-split-diffuse-pbr-ibl-toggle.patch
+ client 2262-correct-pbr-ibl-roadmap-status.patch
+ client 2263-record-diffuse-ibl-kufighter-runtime-ab.patch
++client 2264-restore-billboard-state-on-draw-failure.patch
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 262 Client bundles and two native bundles. Each
++The active series contains 263 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -225,3 +225,4 @@
+ | 2261 | Split diffuse PBR irradiance from specular environment reflections |
+ | 2262 | Correct the documented diffuse IBL implementation status |
+ | 2263 | Record NAP-backed diffuse IBL A/B on Kusari Fighter |
++| 2264 | Restore billboard render state if a draw fails |

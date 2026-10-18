@@ -1,0 +1,214 @@
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLTexture2D.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLTexture2D.cs
+@@ -18,14 +18,12 @@
+     private int glInternalFormat;
+     private int glFormat;
+     private int glType;
+-    private GLRenderContext rc = null!;
+ 
+     private WrapMode modeS = (WrapMode)(-1);
+     private WrapMode modeT = (WrapMode)(-1);
+ 
+     public GLTexture2D(GLRenderContext rc, int width, int height, bool hasMipMaps, SurfaceFormat format) : base(rc)
+     {
+-        this.rc = rc;
+         Width = width;
+         Height = height;
+         Format = format;
+@@ -119,7 +117,7 @@
+ 
+     public Task<byte[]> GetDataAsync()
+     {
+-        var sz = Width * Height * Format.GetSizeEstimate();
++        var sz = checked(Width * Height * Format.GetSizeEstimate());
+         if (!GLExtensions.Sync)
+         {
+             //Fallback when GL_ARB_sync is not supported
+@@ -128,29 +126,113 @@
+             return Task.FromResult(regBytes);
+         }
+         var pbo = GL.GenBuffer();
+-        var fbo = GL.GenFramebuffer();
+-        GL.BindFramebuffer(GL.GL_FRAMEBUFFER, fbo);
+-        AttachForReadback();
+-        GL.BindBuffer(GL.GL_PIXEL_PACK_BUFFER, pbo);
+-        GL.BufferData(GL.GL_PIXEL_PACK_BUFFER, (IntPtr)sz, IntPtr.Zero, GL.GL_STREAM_READ);
+-        GL.ReadPixels(0,0, Width, Height, glFormat, glType, IntPtr.Zero);
+-        RestoreFramebuffer();
+-        GL.DeleteFramebuffer(fbo);
+-        GL.BindBuffer(GL.GL_PIXEL_PACK_BUFFER, 0);
+-        var ts = new TaskCompletionSource<byte[]>();
+-        GL.Flush();
+-        var sync = GL.FenceSync(GL.GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+-        rc?.AddFence(sync, () =>
++        uint fbo = 0;
++        IntPtr sync = IntPtr.Zero;
++        bool fenceRegistered = false;
++        var ts = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
++        try
+         {
++            if (pbo == 0)
++                throw new InvalidOperationException("Texture readback buffer creation failed");
++            fbo = GL.GenFramebuffer();
++            if (fbo == 0)
++                throw new InvalidOperationException("Texture readback framebuffer creation failed");
++            GL.BindFramebuffer(GL.GL_FRAMEBUFFER, fbo);
++            AttachForReadback();
+             GL.BindBuffer(GL.GL_PIXEL_PACK_BUFFER, pbo);
+-            var ptr = GL.MapBufferRange(GL.GL_PIXEL_PACK_BUFFER, IntPtr.Zero, sz, GL.GL_MAP_READ_BIT);
+-            var bytes = new byte[sz];
+-            Marshal.Copy(ptr, bytes, 0, sz);
+-            GL.UnmapBuffer(GL.GL_PIXEL_PACK_BUFFER);
+-            GL.BindBuffer(GL.GL_PIXEL_PACK_BUFFER, 0);
+-            ts.SetResult(bytes);
+-        });
+-        return ts.Task;
++            GL.BufferData(GL.GL_PIXEL_PACK_BUFFER, (IntPtr)sz, IntPtr.Zero, GL.GL_STREAM_READ);
++            GL.ReadPixels(0, 0, Width, Height, glFormat, glType, IntPtr.Zero);
++            GL.Flush();
++            sync = GL.FenceSync(GL.GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
++            if (sync == IntPtr.Zero)
++                throw new InvalidOperationException("Texture readback fence creation failed");
++
++            rc.AddFence(sync, () => CompleteReadback(pbo, sz, ts));
++            fenceRegistered = true;
++            return ts.Task;
++        }
++        catch
++        {
++            if (sync != IntPtr.Zero && !fenceRegistered)
++                GL.DeleteSync(sync);
++            GL.DeleteBuffer(pbo);
++            throw;
++        }
++        finally
++        {
++            try
++            {
++                if (fbo != 0)
++                    RestoreFramebuffer();
++            }
++            finally
++            {
++                try
++                {
++                    GL.BindBuffer(GL.GL_PIXEL_PACK_BUFFER, 0);
++                }
++                finally
++                {
++                    if (fbo != 0)
++                        GL.DeleteFramebuffer(fbo);
++                }
++            }
++        }
++
++        static void CompleteReadback(uint buffer, int size, TaskCompletionSource<byte[]> completion)
++        {
++            byte[]? bytes = null;
++            Exception? error = null;
++            bool mapped = false;
++            try
++            {
++                GL.BindBuffer(GL.GL_PIXEL_PACK_BUFFER, buffer);
++                var ptr = GL.MapBufferRange(GL.GL_PIXEL_PACK_BUFFER, IntPtr.Zero, (IntPtr)size, GL.GL_MAP_READ_BIT);
++                if (ptr == IntPtr.Zero)
++                    throw new InvalidOperationException("Texture readback buffer mapping failed");
++                mapped = true;
++                bytes = new byte[size];
++                Marshal.Copy(ptr, bytes, 0, size);
++                var unmapSucceeded = GL.UnmapBuffer(GL.GL_PIXEL_PACK_BUFFER);
++                mapped = false;
++                if (!unmapSucceeded)
++                    throw new InvalidOperationException("Texture readback buffer became invalid while mapped");
++            }
++            catch (Exception ex)
++            {
++                error = ex;
++            }
++            try
++            {
++                if (mapped && !GL.UnmapBuffer(GL.GL_PIXEL_PACK_BUFFER))
++                    error ??= new InvalidOperationException("Texture readback buffer became invalid while mapped");
++            }
++            catch (Exception ex)
++            {
++                error ??= ex;
++            }
++            try
++            {
++                GL.BindBuffer(GL.GL_PIXEL_PACK_BUFFER, 0);
++            }
++            catch (Exception ex)
++            {
++                error ??= ex;
++            }
++            try
++            {
++                GL.DeleteBuffer(buffer);
++            }
++            catch (Exception ex)
++            {
++                error ??= ex;
++            }
++
++            if (error != null)
++                completion.TrySetException(error);
++            else
++                completion.TrySetResult(bytes!);
++        }
+     }
+ 
+     private int maxLevel = 0;
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -16,6 +16,7 @@
+ | HDR und Tonemapping | Linearisiertes Scene-Target, ACES-Tonemapping, linearisierte PBR-Albedo-/Licht-/Emissionswerte und exakte sRGB-Ausgabe im PBR-LDR-Pfad. System- und Nebel-Clearfarben werden ebenfalls vor dem HDR-Clear linearisiert; LDR bleibt unverändert. | Der sRGB-Vertrag für Retail-INI-Farben ist durch Konvertierungstests, aber noch nicht durch kalibrierte Retail-Bildvergleiche abgenommen. Legacy-Vertexfarben, Transparenz, Fog und zusammengesetzte Effekte benötigen weiterhin eine visuelle Gesamtprüfung. HDR/LDR-Vergleich: `docs/evidence/renderer/postprocess-four-mode-ab-20261017/`; Clear-Farbvertrag: `docs/evidence/renderer/hdr-clear-color-contract-20261018.md`. |
+ | Bloom | HDR-Extraktion mittelt jetzt ein vollständiges 4×4-Quellfenster in Viertelauflösung; aufrundende Zielmaße behalten Randpixel bei ungeraden Fenstergrößen. Basis-, mittlere und breite Blur-Stufen sowie Schwelle, Radius, Auflösung und Kernel sind konfigurierbar. | Die Extraktion beseitigt das bisherige Unterabtasten der zentralen vier Texel. Der Code führt alle drei Stufen aus. Die vorhandene Bloom-Pyramidenaufnahme nennt ein Laufzeitpaket/Manifest vom 18.10. und gilt am Dokumentstand 17.10. nicht als verifizierter NAP-Lauf. Laufzeitabnahme, Halo-Kalibrierung und GPU-Kosten bleiben offen. |
+ | Antialiasing | SMAA-Pässe und MSAA-Auflösung; HDR/LDR-Kombinationen sowie Resize und Minimize/Restore wurden auf OpenGL/Mesa geprüft. | Andere Backends/Treiber, wiederholte Lifecycle-Zyklen und Fehler-Injektion stehen aus. |
++| GPU-Readback | Asynchrones OpenGL-Textur-Readback verwendet PBO und Fence. Fehler beim Setup räumen PBO/FBO/Fence auf; Mapping- und Unmap-Fehler beenden den Task mit Fehler und geben den PBO frei. | Der Quellpfad baut. GL-Fehler-Injektion und ein Laufzeit-Readback auf unterstützten und Sync-losen Treibern sind noch nicht abgenommen. Siehe `docs/evidence/renderer/gl-texture-async-readback-lifecycle-20261018/`. |
+ | Dynamische Lichter und Schatten | Persistente und kurzlebige Lichter werden priorisiert; ein ausgewähltes Richtungslicht läuft durch Shadow-Map-Pass und 3×3-PCF. Alpha-Test-Texturen werden auch in PBR-Depth-/Shadow-Pässen anhand eines Material-Uniforms ausgeschnitten; blendtransparente Materialien werfen keine Schatten. Lichtprojektion ist im Licht-XY-Raum verankert und texelgesnappt; Mesh-Cullingradien berücksichtigen `RenderScale`. | Hi02 belegt Pass, Lichtauswahl und Live-Schaltung auf einer OpenGL-GPU. Kamera-Fit-/Stabilitäts- und RenderScale-Radiustests bestehen. Bias-Kalibrierung, Offscreen-Caster-Abdeckung und Bildqualität über weitere Materialien/Szenen brauchen kontrollierte Vergleiche. Siehe `docs/evidence/renderer/shadow-map-hi02-live-toggle-20261017/`, `docs/evidence/renderer/shadow-camera-stability-20261018.md` und `docs/evidence/renderer/scaled-model-culling-20261018.md`. |
+ | Diagnose | CPU-Framezeitprofile, asynchrone OpenGL-GPU-Passzeiten, Bloom-/Shadow-Passzeiten, Ziel-/Speicherschätzungen und CSV-Ausgabe. Environment-Cubemaps mit mehreren Catalog-Aliasen werden im geschätzten GPU-Texturspeicher nur einmal gezählt und bei Bereinigung auch nur einmal freigegeben. | Langzeitprofile und plattformübergreifende Vergleichsbaselines fehlen. Einzelne asynchrone Samples sind keine FPS-Baseline. |
+ 
+--- /dev/null
++++ b/docs/evidence/renderer/gl-texture-async-readback-lifecycle-20261018/README.md
+@@ -0,0 +1,23 @@
++# OpenGL async texture readback lifecycle (2026-10-18)
++
++`GLTexture2D.GetDataAsync()` queues readback through a pixel-pack buffer and a
++GPU fence. The previous callback copied from the mapped pointer without checking
++whether mapping succeeded, did not release the PBO, and could leave its task
++incomplete after a callback failure. Setup exceptions could also strand the
++framebuffer or pixel-pack binding.
++
++The updated path now:
++
++- checks readback-size arithmetic for overflow;
++- restores the render target and pixel-pack binding and releases the temporary
++  framebuffer on setup exits;
++- deletes the PBO and an unregistered fence if setup or fence registration
++  fails;
++- completes the task asynchronously only after successful map, copy, unmap,
++  unbind and PBO release;
++- faults the task on map/unmap/cleanup failure while still attempting PBO
++  cleanup.
++
++`LibreLancer.Base` builds successfully on .NET 10 with 0 errors. This is source
++and compile evidence only. Fault injection for GL entry points and live
++readback checks on Sync-capable and Sync-less drivers remain open.
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 314 Client bundles and two native bundles. Each
++The active series contains 315 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+--- a/patches/series
++++ b/patches/series
+@@ -315,3 +315,4 @@
+ client 2313-pbr-vertex-tint-and-opacity.patch
+ client 2314-stabilize-directional-shadow-camera.patch
+ client 2315-scaled-model-culling-bounds.patch
++client 2316-gl-async-texture-readback-lifecycle.patch

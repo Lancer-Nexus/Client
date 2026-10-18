@@ -1693,48 +1693,58 @@ index 856e9bf..07f966b 100644
                  GameData = new GameDataManager(new GameItemDb(vfs), Resources);
                  GameData.LoadData(win);
 diff --git a/src/Editor/LancerEdit/MainWindow.cs b/src/Editor/LancerEdit/MainWindow.cs
-index 07387e3..05b4212 100644
 --- a/src/Editor/LancerEdit/MainWindow.cs
 +++ b/src/Editor/LancerEdit/MainWindow.cs
-@@ -35,6 +35,7 @@ using LibreLancer.Render;
+@@ -35,6 +35,7 @@
  using LibreLancer.Resources;
  using LibreLancer.Shaders;
  using LibreLancer.Utf.Ale;
 +using Nexus.Assets;
-
+ 
  namespace LancerEdit
  {
-@@ -75,11 +76,14 @@ namespace LancerEdit
-
+@@ -75,11 +76,14 @@
+ 
          public bool EnableAudioConversion;
-
+ 
 +        private bool initialDataLoadPending;
 +
          private const int LOG_SIZE = 128 * 1024; //128k UTF-16, 256k UTF-8
-
+ 
          Dictionary<string, ResourceUsage> ResourceIndex = new(StringComparer.OrdinalIgnoreCase);
-
+ 
 -        public MainWindow(EditorConfiguration editorConfig, GameConfiguration configuration = null) : base(editorConfig.WindowWidth, editorConfig.WindowHeight, true, configuration)
 +        public MainWindow(EditorConfiguration editorConfig, GameConfiguration configuration = null,
 +            string startupDataPath = null) : base(editorConfig.WindowWidth, editorConfig.WindowHeight, true, configuration)
-
+ 
          {
              Version = "LancerEdit " + Platform.GetInformationalVersion<MainWindow>();
-@@ -103,9 +107,11 @@ namespace LancerEdit
+@@ -103,9 +107,11 @@
              recentFiles = new RecentFilesHandler(OpenFile);
              Updater = new UpdateChecks(this, GetBasePath());
              EnableAudioConversion = Mp3Encoder.EncoderAvailable();
 -            if (!string.IsNullOrWhiteSpace(Config.AutoLoadPath))
+-            {
+-                QueueUIThread(() => LoadGameData(Config.AutoLoadPath));
 +            var dataPath = string.IsNullOrWhiteSpace(startupDataPath) ? Config.AutoLoadPath : startupDataPath;
 +            if (!string.IsNullOrWhiteSpace(dataPath))
-             {
--                QueueUIThread(() => LoadGameData(Config.AutoLoadPath));
++            {
 +                initialDataLoadPending = true;
 +                QueueUIThread(() => LoadGameData(dataPath));
              }
          }
          double errorTimer = 0;
-@@ -190,10 +196,10 @@ namespace LancerEdit
+@@ -173,7 +179,8 @@
+             Audio = new AudioManager(this);
+             Bell.Init(Audio);
+             options = new OptionsWindow(this);
+-            Resources = new GameResourceManager(this, null);
++            // The editor keeps a placeholder resource manager before a data VFS is loaded.
++            Resources = new GameResourceManager(this, new LibreLancer.Data.IO.FileSystem());
+             Commands = new CommandBuffer(RenderContext);
+             Polyline = new PolylineRender(RenderContext, Commands);
+             LineRenderer = new LineRenderer(RenderContext);
+@@ -190,10 +197,10 @@
                  var icon = (Texture2D)LibreLancer.ImageLib.Generic.TextureFromStream(RenderContext, stream);
                  logoTexture = ImGuiHelper.RegisterTexture(icon);
              }
@@ -1749,10 +1759,10 @@ index 07387e3..05b4212 100644
              RichText = RenderContext.Renderer2D.RichText;
              Fonts = new FontManager();
              Fonts.ConstructDefaultFonts();
-@@ -331,6 +337,22 @@ namespace LancerEdit
+@@ -331,6 +338,22 @@
              }
          }
-
+ 
 +        private void OpenInitialFiles()
 +        {
 +            var files = InitOpenFile;
@@ -1770,12 +1780,12 @@ index 07387e3..05b4212 100644
 +        }
 +
          public PopupManager Popups = new PopupManager();
-
+ 
          private int bottomTab = 0;
-@@ -457,11 +479,106 @@ namespace LancerEdit
+@@ -457,11 +480,106 @@
              });
          }
-
+ 
 +        void UnpackNap()
 +        {
 +            FileDialog.Open(packagePath =>
@@ -1879,7 +1889,7 @@ index 07387e3..05b4212 100644
                  return;
              }
              QueueUIThread(() =>
-@@ -484,10 +601,12 @@ namespace LancerEdit
+@@ -484,10 +602,12 @@
                  {
                      OpenDataContext = c;
                      FinishLoadingSpinner();
@@ -1892,7 +1902,7 @@ index 07387e3..05b4212 100644
                  });
              });
          }
-@@ -628,6 +747,14 @@ namespace LancerEdit
+@@ -628,6 +748,14 @@
                          LoadGameData(OpenDataContext!.Folder);
                  }
                  ImGui.Separator();
@@ -1907,10 +1917,11 @@ index 07387e3..05b4212 100644
                  if (Theme.IconMenuItem(Icons.BookOpen, "Infocard Browser", OpenDataContext != null))
                      AddTab(new InfocardBrowserTab(OpenDataContext, this));
                  if (Theme.IconMenuItem(Icons.Globe, "Universe Editor", OpenDataContext != null))
-@@ -663,6 +790,14 @@ namespace LancerEdit
+@@ -662,6 +790,14 @@
+                     {
                          AddTab(new MissionScriptEditorTab(OpenDataContext, this, x));
                      }, AppFilters.IniFilters, GetDataPath());
-                 }
++                }
 +                if (Theme.IconMenuItem(Icons.Calculator, "Trading Planner", OpenDataContext != null))
 +                {
 +                    var fd = TabControl.Tabs.FirstOrDefault(x => x is TradingPlannerTab);
@@ -1918,10 +1929,10 @@ index 07387e3..05b4212 100644
 +                        TabControl.SetSelected(fd);
 +                    else
 +                        AddTab(new TradingPlannerTab(OpenDataContext, this));
-+                }
+                 }
                  ImGui.Separator();
                  if (Theme.IconMenuItem(Icons.Fire, "Projectile Viewer", OpenDataContext != null))
-                     AddTab(new ProjectileViewerTab(this, OpenDataContext));
+
 diff --git a/src/Editor/LancerEdit/ParticleEditor/AleNodeEditor.cs b/src/Editor/LancerEdit/ParticleEditor/AleNodeEditor.cs
 index c425fa1..ae76c02 100644
 --- a/src/Editor/LancerEdit/ParticleEditor/AleNodeEditor.cs
@@ -3049,7 +3060,7 @@ new file mode 100644
 index 0000000..1cc574b
 --- /dev/null
 +++ b/src/Nexus.Assets/NexusPackageFileProvider.cs
-@@ -0,0 +1,354 @@
+@@ -0,0 +1,357 @@
 +using System.Security.Cryptography;
 +using System.Text;
 +using System.Text.Json;
@@ -3335,6 +3346,9 @@ index 0000000..1cc574b
 +            }
 +            value = normalized.ToString();
 +        }
++        // Freelancer's VFS commonly requests paths rooted at "/". NAP paths are
++        // relative to the DATA root, so normalize that virtual root away.
++        value = value.TrimStart('/');
 +        foreach (var prefix in new[] { "EXE/../DATA/", "../DATA/", "DATA/" })
 +            if (value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
 +                return value[prefix.Length..];
@@ -3735,3 +3749,184 @@ index 0000000..4ef3e70
 +        if (File.Exists(temporary)) File.Delete(temporary);
 +    }
 +}
+
+diff --git a/src/Editor/LancerEdit/Utf/UtfTab.cs b/src/Editor/LancerEdit/Utf/UtfTab.cs
+--- a/src/Editor/LancerEdit/Utf/UtfTab.cs
++++ b/src/Editor/LancerEdit/Utf/UtfTab.cs
+@@ -41,6 +41,7 @@
+ 
+         public GameResourceManager DetachedResources;
+         public int DetachedResourceCount;
++        private bool detachedHasGameData;
+ 
+         // Track ImGui expanded/collapsed state
+         Dictionary<LUtfNode, bool> nodeOpenState = new();
+@@ -184,6 +185,119 @@
+             res.AddResources(Utf.Export(), Unique.ToString());
+         }
+ 
++        private GameResourceManager GetPreviewResources()
++        {
++            var dataContext = main.OpenDataContext;
++            if (dataContext == null)
++                return DetachedResources ?? main.Resources;
++
++            if (DetachedResources == null || !detachedHasGameData)
++            {
++                if (DetachedResources != null)
++                {
++                    // Existing viewers still hold this manager. Keep their resources
++                    // alive and refresh the data-backed copy after they close.
++                    if (DetachedResourceCount > 1)
++                        return DetachedResources;
++                    DetachedResources.Dispose();
++                }
++                else
++                {
++                    main.Resources.RemoveResourcesForId(Unique.ToString());
++                }
++
++                DetachedResources = new GameResourceManager(dataContext.Resources);
++                DetachedResources.AddResources(Utf.Export(), Unique.ToString());
++                detachedHasGameData = true;
++            }
++
++            return DetachedResources;
++        }
++
++        private void LoadShipArchetypeLibraries(GameResourceManager resources)
++        {
++            var dataContext = main.OpenDataContext;
++            if (dataContext?.GameData == null || string.IsNullOrWhiteSpace(FilePath))
++                return;
++
++            string modelPath;
++            try
++            {
++                modelPath = NormalizeGamePath(Path.GetRelativePath(dataContext.Folder, FilePath));
++            }
++            catch (ArgumentException)
++            {
++                return;
++            }
++
++            FLLog.Debug("Editor", $"Resolving ship materials for '{modelPath}'");
++
++            var exact = new List<LibreLancer.Data.GameData.Ship>();
++            var suffix = new List<LibreLancer.Data.GameData.Ship>();
++            foreach (var ship in dataContext.GameData.Items.Ships)
++            {
++                var resolvedModel = ship.ModelFile;
++                if (resolvedModel?.ModelFile == null)
++                    continue;
++
++                var candidate = NormalizeGamePath(resolvedModel.ModelFile);
++                if (candidate.Equals(modelPath, StringComparison.OrdinalIgnoreCase))
++                    exact.Add(ship);
++                else if (modelPath.EndsWith("\\" + candidate, StringComparison.OrdinalIgnoreCase))
++                    suffix.Add(ship);
++            }
++
++            var matches = exact.Count > 0 ? exact : suffix;
++            if (matches.Count == 0)
++            {
++                FLLog.Debug("Editor", "Ship material lookup found no matching archetypes");
++                return;
++            }
++
++            var modelNickname = Path.GetFileNameWithoutExtension(modelPath.Replace('\\', Path.DirectorySeparatorChar));
++            var namedMatches = matches.Where(ship => ship.Nickname.Equals(modelNickname, StringComparison.OrdinalIgnoreCase)).ToList();
++            if (namedMatches.Count == 1)
++                matches = namedMatches;
++
++            var librarySets = matches.Select(ship => string.Join("\0",
++                    (ship.ModelFile!.LibraryFiles ?? Array.Empty<string>())
++                    .Select(NormalizeGamePath)
++                    .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)))
++                .Distinct(StringComparer.OrdinalIgnoreCase)
++                .ToArray();
++            if (librarySets.Length != 1)
++            {
++                FLLog.Debug("Editor", $"Ship material lookup is ambiguous across {matches.Count} model archetypes");
++                return;
++            }
++
++            var libraries = matches.SelectMany(ship => ship.ModelFile!.LibraryFiles ?? Array.Empty<string>())
++                .Distinct(StringComparer.OrdinalIgnoreCase);
++            foreach (var library in libraries)
++            {
++                FLLog.Debug("Editor", $"Loading ship material library '{library}' for {matches.Count} matching archetypes");
++                resources.LoadResourceFile(library);
++            }
++        }
++
++        private static string NormalizeGamePath(string path)
++        {
++            var segments = new List<string>();
++            foreach (var segment in path.Replace('/', '\\').Split('\\', StringSplitOptions.RemoveEmptyEntries))
++            {
++                if (segment == ".")
++                    continue;
++                if (segment == "..")
++                {
++                    if (segments.Count > 0)
++                        segments.RemoveAt(segments.Count - 1);
++                    continue;
++                }
++                segments.Add(segment);
++            }
++            return string.Join('\\', segments);
++        }
++
+         public override void OnHotkey(Hotkeys hk, bool shiftPressed)
+         {
+             if (selectedNode == null)
+@@ -275,7 +389,9 @@
+                     hpn.RootNode = Utf.Root;
+                     try
+                     {
+-                        drawable = LibreLancer.Utf.UtfLoader.GetDrawable(Utf.Export(), main.Resources);
++                        var previewResources = GetPreviewResources();
++                        LoadShipArchetypeLibraries(previewResources);
++                        drawable = LibreLancer.Utf.UtfLoader.GetDrawable(Utf.Export(), previewResources);
+                         if (Utf.Root.Children.Any((x) => x.Name.Equals("cmpnd", StringComparison.OrdinalIgnoreCase)))
+                         {
+                             foreach (var child in Utf.Root.Children.Where((x) => x.Name.EndsWith(".3db", StringComparison.OrdinalIgnoreCase)))
+@@ -349,8 +465,10 @@
+                 {
+                     TabColor = TabColor.Alternate;
+                     main.Resources.RemoveResourcesForId(Unique.ToString());
+-                    DetachedResources = new GameResourceManager(main.Resources);
++                    var sourceResources = main.OpenDataContext?.Resources ?? main.Resources;
++                    DetachedResources = new GameResourceManager(sourceResources);
+                     DetachedResources.AddResources(Utf.Export(), Unique.ToString());
++                    detachedHasGameData = main.OpenDataContext != null;
+                 }
+             }
+ 
+diff --git a/src/Editor/LancerEdit/Model/ModelViewer.cs b/src/Editor/LancerEdit/Model/ModelViewer.cs
+index 93f3437fb..cec0590d5 100644
+--- a/src/Editor/LancerEdit/Model/ModelViewer.cs
++++ b/src/Editor/LancerEdit/Model/ModelViewer.cs
+@@ -1104,6 +1104,21 @@ namespace LancerEdit
+         FileDialogFilters pngFilters = new FileDialogFilters(new FileFilter("PNG Files", "png"));
+         unsafe void RenderPanel()
+         {
++            ImGui.Separator();
++            ImGui.Text("Surface Map Preview");
++            bool surfaceNormalMapsEnabled = res.SurfaceNormalMapsEnabled;
++            if (ImGui.Checkbox("Surface normal maps", ref surfaceNormalMapsEnabled))
++                res.SurfaceNormalMapsEnabled = surfaceNormalMapsEnabled;
++            bool generatedTangentsEnabled = res.SurfaceGeneratedTangentsEnabled;
++            ImGui.BeginDisabled(!surfaceNormalMapsEnabled);
++            if (ImGui.Checkbox("Generate missing tangents", ref generatedTangentsEnabled))
++                res.SurfaceGeneratedTangentsEnabled = generatedTangentsEnabled;
++            ImGui.EndDisabled();
++            if (res.SurfaceMaps == null)
++                ImGui.TextDisabled("Load game data to use Surface Maps.");
++            else
++                ImGui.TextDisabled("Toggles apply immediately to the model preview.");
++            ImGui.Separator();
+             ImGui.Text("Render to Image");
+             ImGui.Checkbox("Background?", ref renderBackground);
+             ImGui.InputInt("Width", ref imageWidth);

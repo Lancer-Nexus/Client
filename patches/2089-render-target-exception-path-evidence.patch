@@ -1,0 +1,72 @@
+--- /dev/null
++++ b/docs/evidence/renderer/render-target-exception-path-audit-20261015.md
+@@ -0,0 +1,41 @@
++# Render-Target-Fehlerpfad-Audit
++
++Stand: 2026-10-15. Quellcodeprüfung der normalen und ausnahmebedingten
++Wiederherstellung von Viewport, Scissor und RenderTarget. Es wurde keine
++künstliche Laufzeitausnahme injiziert.
++
++## `SystemRenderer.Draw()`
++
++`SystemRenderer.Draw()` gibt bei Breite/Höhe 0 vor Änderungen zurück. Bei
++aktivem Antialiasing erstellt der Renderer ein passendes `AntialiasTarget`,
++pusht Viewport und Scissor und bindet danach das MSAA-Target. Das reguläre
++Aufräumen poppt beide Stacks, blitted das Ergebnis und setzt `restoreTarget`
++wieder. Diese Schritte liegen nach den Draw-Pässen; die Methode hat keinen
++umschließenden `try/finally`-Block.
++
++Quellstellen: `src/LibreLancer/Render/SystemRenderer.cs`,
++`Draw()` Setup bei 409–425 und reguläre Wiederherstellung bei 634–649.
++
++## `AntialiasTarget.SMAABlit()`
++
++Der SMAA-Pfad merkt Texturen 0–2, Sampler 0–1, RenderTarget, Shader, Blend-,
++Stencil-, Depth- und Cull-Zustand vor. Danach pusht er Viewport und Scissor, führt
++drei Fullscreen-Draws aus und stellt den gespeicherten Zustand erst danach
++wieder her. Auch dieser Ablauf ist nicht in `try/finally` eingeschlossen.
++
++Quellstelle: `src/LibreLancer.Base/Graphics/AntialiasTarget.cs`,
++`SMAABlit()` bei 50–137. Die Stack-Implementierungen für Viewport und Scissor
++liegen in `src/LibreLancer.Base/Graphics/RenderContext.cs` bei 279–358.
++
++## Aussage und nächster Schritt
++
++Wenn zwischen Setup und regulärer Wiederherstellung eine Ausnahme auftritt und
++weiterer Rendercode danach ausgeführt wird, können RenderTarget, Viewport,
++Scissor-Stack oder gespeicherte SMAA-Zustände unausgeglichen bleiben. Das ist
++aus dem Kontrollfluss abgeleitet; ein konkreter Gameplay-Fehler oder eine
++Laufzeitreproduktion ist damit nicht belegt.
++
++Ein Folgepatch sollte die Zustandswiederherstellung auf `finally`-geschützte
++Scopes umstellen und die von jeder Methode tatsächlich veränderten Felder
++wiederherstellen. Danach sind Fehler zwischen den Draw-Pässen sowie normale
++Resize-/Minimize-/Restore-Abläufe zu prüfen.
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -44,7 +44,7 @@
+ - [ ] Render-Passes mit klaren Ein-/Ausgaben und expliziter Farb-/Tiefenpufferverwaltung vorbereiten.
+ - [ ] Render-Target-Resize, minimierte Fenster, Scissor-/Viewport-Wechsel und Geräteverlust für zusätzliche Pässe absichern.
+   - [x] `SystemRenderer.Draw()` überspringt Frames mit Breite/Höhe 0. Bei geändertem Rendermaß oder AA-Modus gibt es das vorhandene MSAA-Target frei und erstellt es neu. Das belegt nur diesen System-Renderer-Pfad; Editor-/Offscreen-Targets, Wiederherstellungstests und Geräteverlust bleiben offen.
+-  - [ ] Renderzustand auch bei Draw-Fehlern wiederherstellen: `SystemRenderer.Draw()` und `AntialiasTarget.SMAABlit()` enthalten Push/Pop- und Target-Restaurierung, aber keinen `finally`-Pfad. Ein Fehler zwischen Setup und regulärem Restore kann Viewport, Scissor oder RenderTarget unausgeglichen zurücklassen.
++  - [ ] Renderzustand auch bei Draw-Fehlern wiederherstellen. Der Quellcode-Audit belegt fehlende `finally`-Pfade in `SystemRenderer.Draw()` und `AntialiasTarget.SMAABlit()`; Aussagegrenzen und Folgeplan stehen im [Fehlerpfad-Audit](evidence/renderer/render-target-exception-path-audit-20261015.md).
+ - [ ] GPU-Zeit und Speicherverbrauch pro Pass messbar machen; Effekte müssen einzeln abschaltbar und nach Hardwareprofil skalierbar sein.
+ - [ ] Referenzszenen und feste Screenshots für Raum, Basis, Sternensystem, Nebel, Partikel und LancerEdit-Vorschau festlegen.
+ 
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -62,6 +62,7 @@
+ | 2086 | Reconcile shader-variant and GL-state cache roadmap with source |
+ | 2087 | Record SystemRenderer zero-size and MSAA target resize handling |
+ | 2088 | Record missing exception-safe render target and stack restoration |
++| 2089 | Add source-level render target exception-path evidence and follow-up |
+ | 2011 (`lancerdecode`) | Native Vorbis EOF/reset handling |
+ | 2012 (`blurgtext`) | System FreeType without OT-SVG hooks |
+ 
+--- a/patches/series
++++ b/patches/series
+@@ -88,3 +88,4 @@
+ client 2086-shader-cache-roadmap-source-audit.patch
+ client 2087-system-renderer-resize-roadmap-audit.patch
+ client 2088-render-target-exception-safety-audit.patch
++client 2089-render-target-exception-path-evidence.patch

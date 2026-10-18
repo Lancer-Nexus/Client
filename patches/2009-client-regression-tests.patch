@@ -3338,7 +3338,7 @@ new file mode 100644
 index 0000000..a404c8d
 --- /dev/null
 +++ b/src/LibreLancer.Tests/MaterialTypeTests.cs
-@@ -0,0 +1,28 @@
+@@ -0,0 +1,29 @@
 +using System.Text;
 +using LibreLancer.Data.Schema;
 +using LibreLancer.Utf;
@@ -3352,6 +3352,7 @@ index 0000000..a404c8d
 +    [Theory]
 +    [InlineData("DcDtBt")]
 +    [InlineData("DcDtBtOcOt")]
++    [InlineData("DcDtBtOcOtTwo")]
 +    [InlineData("DcDtEcEt")]
 +    public void BasicMaterialVariantsAreLoaded(string type)
 +    {
@@ -9637,7 +9638,7 @@ new file mode 100644
 index 0000000..868d739
 --- /dev/null
 +++ b/src/LibreLancer.Tests/NormalMapShaderTests.cs
-@@ -0,0 +1,33 @@
+@@ -0,0 +1,41 @@
 +using System;
 +using System.Reflection;
 +using System.Runtime.InteropServices;
@@ -9663,12 +9664,20 @@ index 0000000..868d739
 +        Assert.Equal(1,material.NormalStrength);
 +    }
 +    [Theory]
-+    [InlineData("BasicParameters",64,48)] [InlineData("PBRParameters",48,44)]
++    [InlineData("BasicParameters",64,48)] [InlineData("PBRParameters",64,44)]
 +    public void UniformLayoutMatchesHlslRegisters(string name,int size,int strengthOffset)
 +    {
 +        var type=typeof(BasicMaterial).GetNestedType(name,BindingFlags.NonPublic)!;
 +        Assert.Equal(size,Marshal.SizeOf(type));
 +        Assert.Equal(strengthOffset,Marshal.OffsetOf(type,"NormalStrength").ToInt32());
++    }
++
++    [Fact]
++    public void PbrEnvironmentMipCountMatchesHlslRegister()
++    {
++        var type=typeof(BasicMaterial).GetNestedType("PBRParameters",BindingFlags.NonPublic)!;
++        Assert.Equal(64,Marshal.SizeOf(type));
++        Assert.Equal(48,Marshal.OffsetOf(type,"EnvMipCount").ToInt32());
 +    }
 +}
 diff --git a/src/LibreLancer.Tests/ShaderLifetimeTests.cs b/src/LibreLancer.Tests/ShaderLifetimeTests.cs
@@ -10117,3 +10126,206 @@ index 0000000..654b39f
 +        onRenderThread = true;
 +    }
 +}
+
+diff --git a/src/LibreLancer.Tests/DfmTangentBuilderTests.cs b/src/LibreLancer.Tests/DfmTangentBuilderTests.cs
+new file mode 100644
+index 000000000..5874eb273
+--- /dev/null
++++ b/src/LibreLancer.Tests/DfmTangentBuilderTests.cs
+@@ -0,0 +1,145 @@
++using System;
++using System.Collections.Generic;
++using System.IO;
++using System.Linq;
++using System.Numerics;
++using System.Text;
++using LibreLancer.Utf;
++using LibreLancer.Utf.Dfm;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class DfmTangentBuilderTests
++{
++    private static DfmVertex Vertex(Vector3 position, Vector2 uv0, Vector2 uv1 = default) =>
++        new(position, Vector3.UnitZ, uv0, uv1, new Vector4(0.25f, 0.75f, 0, 0), 1, 2, 0, 0);
++
++    private static FaceGroup Group(ushort[] indices, bool strip = false)
++    {
++        var bytes = new byte[indices.Length * sizeof(ushort)];
++        Buffer.BlockCopy(indices, 0, bytes, 0, bytes.Length);
++        var children = new List<Node>
++        {
++            new LeafNode("material_name", Encoding.ASCII.GetBytes("test_material\0")),
++            new LeafNode(strip ? "tristrip_indices" : "face_indices", bytes)
++        };
++        return new FaceGroup(new IntermediateNode("group", children));
++    }
++
++    private static DfmVertex[] Triangle(Vector2[]? uv0 = null, Vector2[]? uv1 = null) =>
++    [
++        Vertex(Vector3.Zero, uv0?[0] ?? Vector2.Zero, uv1?[0] ?? Vector2.Zero),
++        Vertex(Vector3.UnitX, uv0?[1] ?? Vector2.UnitX, uv1?[1] ?? Vector2.UnitX),
++        Vertex(Vector3.UnitY, uv0?[2] ?? Vector2.UnitY, uv1?[2] ?? Vector2.UnitY)
++    ];
++
++    [Fact]
++    public void FaceListBuildPreservesVertexAttributesAndCreatesUnitTangent()
++    {
++        var source = Triangle();
++        var result = DfmTangentBuilder.Build(source, Group([0, 1, 2]), 0);
++
++        Assert.Equal(3, result.Length);
++        for (var i = 0; i < result.Length; i++)
++        {
++            Assert.Equal(source[i].Position, result[i].Vertex.Position);
++            Assert.Equal(source[i].Texture1, result[i].Vertex.Texture1);
++            Assert.Equal(source[i].Texture2, result[i].Vertex.Texture2);
++            Assert.Equal(source[i].BoneWeights, result[i].Vertex.BoneWeights);
++            Assert.Equal((byte)1, result[i].Vertex.BoneId1);
++            Assert.Equal((byte)2, result[i].Vertex.BoneId2);
++            var tangent = result[i].Tangent;
++            Assert.True(float.IsFinite(tangent.X) && float.IsFinite(tangent.Y) && float.IsFinite(tangent.Z));
++            Assert.True(Vector3.Distance(new(tangent.X, tangent.Y, tangent.Z), Vector3.UnitX) < 1e-5f);
++            Assert.Equal(1, tangent.W);
++        }
++        Assert.Equal(Vector3.Zero, source[0].Position);
++    }
++
++    [Fact]
++    public void SecondUvChannelDeterminesTangentAndHandedness()
++    {
++        var secondUv = new[] { Vector2.Zero, -Vector2.UnitX, Vector2.UnitY };
++        var source = Triangle(uv1: secondUv);
++        var first = DfmTangentBuilder.Build(source, Group([0, 1, 2]), 0);
++        var second = DfmTangentBuilder.Build(source, Group([0, 1, 2]), 1);
++
++        Assert.True(first[0].Tangent.X > 0.99f);
++        Assert.True(second[0].Tangent.X < -0.99f);
++        Assert.Equal(-1, second[0].Tangent.W);
++    }
++
++    [Fact]
++    public void TriangleStripExpandsWithAlternatingWindingAndSkipsConnectors()
++    {
++        var source = new[]
++        {
++            Vertex(new(0, 0, 0), new(0, 0)),
++            Vertex(new(1, 0, 0), new(1, 0)),
++            Vertex(new(0, 1, 0), new(0, 1)),
++            Vertex(new(1, 1, 0), new(1, 1)),
++            Vertex(new(2, 1, 0), new(2, 1))
++        };
++
++        var regular = DfmTangentBuilder.Build(source, Group([0, 1, 2, 3], strip: true), 0);
++        Assert.Equal(new[] { 0, 1, 2, 2, 1, 3 }, regular.Select(x => (int)Array.IndexOf(source, x.Vertex)).ToArray());
++
++        var connected = DfmTangentBuilder.Build(source, Group([0, 1, 2, 2, 3, 4], strip: true), 0);
++        Assert.Equal(6, connected.Length);
++        Assert.Equal(source[3].Position, connected[3].Vertex.Position);
++        Assert.Equal(source[2].Position, connected[4].Vertex.Position);
++        Assert.Equal(source[4].Position, connected[5].Vertex.Position);
++    }
++
++    [Fact]
++    public void ExpandedCornersKeepIndependentMirroredUvTangents()
++    {
++        var source = new[]
++        {
++            Vertex(new(0, 0, 0), new(0, 0)),
++            Vertex(new(1, 0, 0), new(1, 0)),
++            Vertex(new(0, 1, 0), new(0, 1)),
++            Vertex(new(1, 1, 0), new(0, 0))
++        };
++        var result = DfmTangentBuilder.Build(source, Group([0, 1, 2, 1, 3, 2]), 0);
++
++        Assert.Equal(6, result.Length);
++        Assert.Equal(result[1].Vertex.Position, result[3].Vertex.Position);
++        Assert.True(result[1].Tangent.X > 0.99f);
++        Assert.True(result[3].Tangent.Y < -0.99f);
++        Assert.Equal(-1, result[3].Tangent.W);
++    }
++
++    [Fact]
++    public void DegenerateUvProducesFiniteOrthogonalFallbackBasis()
++    {
++        var source = Triangle(new[] { Vector2.Zero, Vector2.Zero, Vector2.Zero });
++        var result = DfmTangentBuilder.Build(source, Group([0, 1, 2]), 0);
++
++        foreach (var vertex in result)
++        {
++            var tangent = vertex.Tangent;
++            var direction = new Vector3(tangent.X, tangent.Y, tangent.Z);
++            Assert.True(float.IsFinite(tangent.X) && float.IsFinite(tangent.Y) && float.IsFinite(tangent.Z));
++            Assert.True(MathF.Abs(direction.Length() - 1) < 1e-5f);
++            Assert.True(MathF.Abs(Vector3.Dot(direction, vertex.Vertex.Normal)) < 1e-5f);
++        }
++    }
++
++    [Fact]
++    public void InvalidIndicesCountsChannelsAndNonFiniteInputsAreRejected()
++    {
++        var source = Triangle();
++        Assert.Throws<InvalidDataException>(() => DfmTangentBuilder.Build(source, Group([0, 1, 3]), 0));
++        Assert.Throws<InvalidDataException>(() => DfmTangentBuilder.Build(source, Group([0, 1, 2, 0]), 0));
++        Assert.Throws<ArgumentOutOfRangeException>(() => DfmTangentBuilder.Build(source, Group([0, 1, 2]), -1));
++
++        var nonFinite = Triangle();
++        nonFinite[1].Texture1 = new Vector2(float.NaN, 0);
++        Assert.Throws<InvalidDataException>(() => DfmTangentBuilder.Build(nonFinite, Group([0, 1, 2]), 0));
++
++        var oversized = Group(Enumerable.Repeat((ushort)0, DfmTangentBuilder.MaxCorners + 3).ToArray());
++        Assert.Throws<InvalidDataException>(() => DfmTangentBuilder.Build(source, oversized, 0));
++    }
++}
+
+--- a/src/LibreLancer.Tests/DfmTangentBuilderTests.cs
++++ b/src/LibreLancer.Tests/DfmTangentBuilderTests.cs
+@@ -128,6 +128,21 @@
+     }
+ 
+     [Fact]
++    public void DegenerateUvFallbackStaysOrthogonalForAlmostAxisAlignedNormals()
++    {
++        var source = Triangle(new[] { Vector2.Zero, Vector2.Zero, Vector2.Zero });
++        var normal = new Vector3(-1, -0.0002609672f, 8.981041e-12f);
++        foreach (var vertex in source) vertex.Normal = normal;
++
++        var result = DfmTangentBuilder.Build(source, Group([0, 1, 2]), 0);
++        foreach (var vertex in result)
++        {
++            var tangent = new Vector3(vertex.Tangent.X, vertex.Tangent.Y, vertex.Tangent.Z);
++            Assert.True(MathF.Abs(Vector3.Dot(Vector3.Normalize(vertex.Vertex.Normal), tangent)) < 1e-5f);
++        }
++    }
++
++    [Fact]
+     public void InvalidIndicesCountsChannelsAndNonFiniteInputsAreRejected()
+     {
+         var source = Triangle();
+
+--- a/src/LibreLancer.Tests/DfmTangentBuilderTests.cs
++++ b/src/LibreLancer.Tests/DfmTangentBuilderTests.cs
+@@ -132,7 +132,7 @@
+     {
+         var source = Triangle(new[] { Vector2.Zero, Vector2.Zero, Vector2.Zero });
+         var normal = new Vector3(-1, -0.0002609672f, 8.981041e-12f);
+-        foreach (var vertex in source) vertex.Normal = normal;
++        for (var i = 0; i < source.Length; i++) source[i].Normal = normal;
+ 
+         var result = DfmTangentBuilder.Build(source, Group([0, 1, 2]), 0);
+         foreach (var vertex in result)
+
+--- a/src/LibreLancer.Tests/DfmTangentBuilderTests.cs
++++ b/src/LibreLancer.Tests/DfmTangentBuilderTests.cs
+@@ -138,7 +138,9 @@
+         foreach (var vertex in result)
+         {
+             var tangent = new Vector3(vertex.Tangent.X, vertex.Tangent.Y, vertex.Tangent.Z);
+-            Assert.True(MathF.Abs(Vector3.Dot(Vector3.Normalize(vertex.Vertex.Normal), tangent)) < 1e-5f);
++            var normalizedNormal = Vector3.Normalize(vertex.Vertex.Normal);
++            var dot = Vector3.Dot(normalizedNormal, tangent);
++            Assert.True(MathF.Abs(dot) < 1e-5f, $"normal={normalizedNormal} tangent={tangent} dot={dot}");
+         }
+     }
+ 

@@ -1,0 +1,214 @@
+diff --git a/src/LibreLancer/Render/LightEquipRenderer.cs b/src/LibreLancer/Render/LightEquipRenderer.cs
+--- a/src/LibreLancer/Render/LightEquipRenderer.cs
++++ b/src/LibreLancer/Render/LightEquipRenderer.cs
+@@ -197,8 +197,32 @@
+             }
+         }
+ 
++        internal static bool ShouldEmitRangeLight(bool forceCull, bool lightOn, bool showLight,
++            float emitRange, bool rangeIntersectsView) =>
++            !forceCull && lightOn && showLight && float.IsFinite(emitRange) && emitRange > 0 && rangeIntersectsView;
++
+         public override bool PrepareRender(ICamera camera, NebulaRenderer? nr, SystemRenderer sys, bool forceCull)
+         {
++            this.sys = sys;
++            var showLight = !equip.Animated || !lt_on;
++            var emitRange = equip.EmitRange;
++            var rangeIntersectsView = float.IsFinite(emitRange) && emitRange > 0 &&
++                                      camera.FrustumCheck(new BoundingSphere(pos, emitRange));
++            if (ShouldEmitRangeLight(forceCull, LightOn, showLight, emitRange, rangeIntersectsView))
++            {
++                emittedLight.LightGroup = OcclusionOwner?.RenderComponent?.LightGroup ?? 0;
++                emittedLight.Active = true;
++                emittedLight.Light = new RenderLight
++                {
++                    Kind = LightKind.Point,
++                    Position = pos,
++                    Attenuation = equip.EmitAttenuation,
++                    Color = colorGlow,
++                    Range = emitRange
++                };
++                sys.SystemLighting.AddFrameLight(emittedLight);
++            }
++
+             var visible = (
+                 !forceCull &&
+                 LightOn &&
+@@ -206,8 +230,6 @@
+                 camera.FrustumCheck(new BoundingSphere(pos, equip.BulbSize * 3)) &&
+                 GetViewConeFade(forward, camera.Position - pos, equip.FlareCone) > 0
+             );
+-            this.sys = sys;
+-            var showLight = !equip.Animated || !lt_on;
+ 
+             if (visible && sys.World.Physics is { } physics)
+             {
+@@ -225,21 +247,6 @@
+                 }
+             }
+ 
+-            if (visible && equip.EmitRange > 0 && showLight && camera.FrustumCheck(new BoundingSphere(pos, equip.EmitRange)))
+-            {
+-                emittedLight.LightGroup = OcclusionOwner?.RenderComponent?.LightGroup ?? 0;
+-                emittedLight.Active = true;
+-                emittedLight.Light = new RenderLight
+-                {
+-                    Kind = LightKind.Point,
+-                    Position = pos,
+-                    Attenuation = equip.EmitAttenuation,
+-                    Color = colorGlow,
+-                    Range = equip.EmitRange
+-                };
+-                sys.SystemLighting.AddFrameLight(emittedLight);
+-            }
+-
+             if (visible)
+             {
+                 sys.AddObject(this);
+
+diff --git a/src/LibreLancer.Tests/LightEquipmentEmissionTests.cs b/src/LibreLancer.Tests/LightEquipmentEmissionTests.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Tests/LightEquipmentEmissionTests.cs
+@@ -0,0 +1,46 @@
++using LibreLancer.Render;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class LightEquipmentEmissionTests
++{
++    [Fact]
++    public void EmitRangeLightDoesNotDependOnBillboardVisibility()
++    {
++        Assert.True(LightEquipRenderer.ShouldEmitRangeLight(
++            forceCull: false,
++            lightOn: true,
++            showLight: true,
++            emitRange: 50f,
++            rangeIntersectsView: true));
++    }
++
++    [Theory]
++    [InlineData(true, true, true, 50f, true)]
++    [InlineData(false, false, true, 50f, true)]
++    [InlineData(false, true, false, 50f, true)]
++    [InlineData(false, true, true, 0f, true)]
++    [InlineData(false, true, true, -1f, true)]
++    [InlineData(false, true, true, 50f, false)]
++    public void EmitRangeLightHonorsItsOwnActivationAndRangeGates(
++        bool forceCull, bool lightOn, bool showLight, float emitRange, bool rangeIntersectsView)
++    {
++        Assert.False(LightEquipRenderer.ShouldEmitRangeLight(
++            forceCull, lightOn, showLight, emitRange, rangeIntersectsView));
++    }
++
++    [Theory]
++    [InlineData(float.NaN)]
++    [InlineData(float.PositiveInfinity)]
++    [InlineData(float.NegativeInfinity)]
++    public void EmitRangeLightRejectsNonFiniteRanges(float emitRange)
++    {
++        Assert.False(LightEquipRenderer.ShouldEmitRangeLight(
++            forceCull: false,
++            lightOn: true,
++            showLight: true,
++            emitRange: emitRange,
++            rangeIntersectsView: true));
++    }
++}
+
+diff --git a/docs/dynamic-lighting-audit.md b/docs/dynamic-lighting-audit.md
+--- a/docs/dynamic-lighting-audit.md
++++ b/docs/dynamic-lighting-audit.md
+@@ -38,22 +38,21 @@
+   werden beim Zurückkehren gespeichert; die Renderer-Schalter wirken live.
+ - `LightEquipment.EmitRange` und `EmitAttenuation` werden geparst und vom
+   `LightEquipRenderer` als lokale Frame-Lichtquelle registriert. `PrepareRender`
+-  prüft Sichtkegel, Kamerafrustrum und Physik-Occlusion, bevor die Quelle
+-  registriert wird. `SystemLighting.AddFrameLight()` begrenzt die zusätzlichen
++  prüft für die Lichtquelle separat den EmitRange-Frustrum und die aktive
++  Blinkphase; Billboard-Sichtkegel und Physik-Occlusion begrenzen nur das
++  sichtbare Glühbild. `SystemLighting.AddFrameLight()` begrenzt die zusätzlichen
+   Kandidaten auf 32 und wählt bei Überlast anhand der in `RenderHelpers`
+   geschätzten Lichtbeiträge am Kamerapunkt; ein stärkerer Kandidat ersetzt den
+   schwächsten. Das bewertet nicht die tatsächlich beleuchteten Objekte. Die
+   nachfolgende objektspezifische Auswahl bewertet Quellen erneut am
+   objektseitig nächsten Punkt.
+-- Offener Sichtbarkeitspfad (Quellcode-Audit 2026-10-15): `EmitRange` wird in
+-  `LightEquipRenderer.PrepareRender()` nur registriert, wenn das Leucht-Billboard
+-  sichtbar ist. Dieser Sprite-Test enthält zusätzlich Frustum-, Flare-Kegel- und
+-  20.000-Einheiten-Distanz-Culling sowie einen Kamera-zu-Licht-Raytest. Ein
+-  aktiver Licht-Emitter kann deshalb aus dem Frame-Pool fehlen, sobald sein
+-  Billboard nicht gezeichnet wird. Ob `emit_range` in diesen Fällen weiterhin
+-  sichtbare Geometrie beleuchten soll, muss anhand Retail oder einer kontrollierten
+-  A/B-Aufnahme geklärt werden, bevor Sprite- und Licht-Sichtbarkeit getrennt
+-  werden.
++- Sichtbarkeitspfad (Quellcode-Audit 2026-10-15): Die Frame-Lichtquelle wird
++  getrennt von der Billboard-Sichtbarkeit eingetragen. Sie bleibt aktiv, wenn
++  ihr `emit_range`-Kugelvolumen das Kamerafrustrum schneidet und die blinkende
++  Lichtphase aktiv ist, auch wenn `flare_cone`, Billboard-Frustum oder
++  Kamera-zu-Licht-Raytest das Glühbild ausblenden. `SystemLighting` filtert
++  anschließend Reichweite und Budget. Retail-Bildabnahme dieser Trennung sowie
++  Schatten-/Objekt-Occlusion bleiben offen.
+ - `Effect` enthält `lgt_effect`, `lgt_range_scale` und `lgt_radius`; `InitEffects()`
+   übergibt Kurve und beide Zahlenwerte nun an `ResolvedFx`.
+ - `FreelancerData` lädt nun die benannten Kurven aus Retail
+
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -146,7 +146,7 @@
+ - [ ] Screen-Space-Reflections als optionale Ergänzung prüfen; fehlende Bildinformation an Bildschirmrändern und bei verdeckten Objekten muss über den bestehenden PBR-Fallback abgefangen werden.
+ - [ ] Volumetrischen Nebel und volumetrische Lichtstrahlen als eigenständige, skalierbare Qualitätstufe evaluieren; vorhandene Freelancer-Nebelparameter und Transparenzreihenfolge als Referenz verwenden.
+ - [ ] Forward+/Clustered Lighting gegen die aktuelle Beleuchtungsarchitektur und typische Freelancer-Szenen mit vielen Lichtern benchmarken, bevor ein Renderer-Umbau geplant wird.
+-- [ ] Kurzlebige dynamische Lichter für Effekte, Waffenfeuer/Mündungsblitze, Feuer und Explosionen vervollständigen. Vorhanden sind `Gun.light_anim`-Mündungslichter sowie datengetriebene Explosionslichter aus `lgt_effect`/`lgt_radius` einschließlich `lgt_time_scale`. Die Ereignisobergrenze ist nun per `transient_effect_light_budget` beziehungsweise `--render-transient-effect-light-budget=0|32|64|128` einstellbar; das Framebudget begrenzt lokale Quellen auf maximal 32 und lässt sich mit `dynamic_light_budget` beziehungsweise `--render-dynamic-light-budget=0|8|16|24|32` absenken. Beim Absenken werden die schwächsten aktiven Effektlichter nach geschätzter Kamerawirkung entfernt. Die per-Objekt-Auswahl und der Frame-Pool priorisieren nach geschätzter attenuierter Lichtwirkung; der Frame-Pool verwirft lokale Quellen außerhalb ihrer Reichweite und cached die Scores für den aktuellen Frame. `lgt_range_scale` wird bis zum transienten Lichtobjekt durchgereicht, bleibt aber bis zur Semantikklärung ohne Laufzeitwirkung. Offen sind explizite Lichtdaten und hardpointgebundene Lichtlebenszyklen für persistentes Feuer, die Retail-Abnahme des in `LightEquipRenderer` gefundenen Gates zwischen Billboard- und `EmitRange`-Lichtsichtbarkeit, die zielobjektbezogene Sichtbarkeits-/Occlusion-Priorisierung sowie visuelle Messungen in typischen NAP-Szenen ([Feuerinventar](evidence/effect-fire-light-input-inventory-20261014.json), [Lichtpfad-Audit](dynamic-lighting-audit.md)).
++- [ ] Kurzlebige dynamische Lichter für Effekte, Waffenfeuer/Mündungsblitze, Feuer und Explosionen vervollständigen. Vorhanden sind `Gun.light_anim`-Mündungslichter sowie datengetriebene Explosionslichter aus `lgt_effect`/`lgt_radius` einschließlich `lgt_time_scale`. Die Ereignisobergrenze ist nun per `transient_effect_light_budget` beziehungsweise `--render-transient-effect-light-budget=0|32|64|128` einstellbar; das Framebudget begrenzt lokale Quellen auf maximal 32 und lässt sich mit `dynamic_light_budget` beziehungsweise `--render-dynamic-light-budget=0|8|16|24|32` absenken. Beim Absenken werden die schwächsten aktiven Effektlichter nach geschätzter Kamerawirkung entfernt. Die per-Objekt-Auswahl und der Frame-Pool priorisieren nach geschätzter attenuierter Lichtwirkung; der Frame-Pool verwirft lokale Quellen außerhalb ihrer Reichweite und cached die Scores für den aktuellen Frame. `lgt_range_scale` wird bis zum transienten Lichtobjekt durchgereicht, bleibt aber bis zur Semantikklärung ohne Laufzeitwirkung. Die `emit_range`-Registrierung für Lichtequipment ist nun von Billboard-/Flare-Kegel- und Sprite-Occlusion getrennt; die Retail-Bildabnahme bleibt offen. Offen sind explizite Lichtdaten und hardpointgebundene Lichtlebenszyklen für persistentes Feuer, zielobjektbezogene Sichtbarkeits-/Occlusion-Priorisierung sowie visuelle Messungen in typischen NAP-Szenen ([Feuerinventar](evidence/effect-fire-light-input-inventory-20261014.json), [Lichtpfad-Audit](dynamic-lighting-audit.md)).
+ 
+ ### 5. Effektüberarbeitung nach Renderer und dynamischer Beleuchtung
+ 
+
+diff --git a/docs/evidence/renderer/light-equipment-emission-visibility-20261015.md b/docs/evidence/renderer/light-equipment-emission-visibility-20261015.md
+new file mode 100644
+--- /dev/null
++++ b/docs/evidence/renderer/light-equipment-emission-visibility-20261015.md
+@@ -0,0 +1,17 @@
++# Lichtequipment: EmitRange unabhängig vom Billboard (15.10.2026)
++
++## Quellcodebefund
++
++`LightEquipRenderer.PrepareRender()` registrierte `LightEquipment.EmitRange` bisher nur innerhalb des Billboard-Sichtbarkeitspfads. Dazu gehören `flare_cone`, ein Frustumtest auf `BulbSize`, eine 20.000-Einheiten-Sichtweite und ein Kamera-zu-Licht-Physikraycast. Damit entfiel die Frame-Lichtquelle, sobald eines dieser Kriterien das dekorative Glühbild ausblendete, selbst wenn die `EmitRange`-Kugel den sichtbaren Bereich schneidet. `SystemLighting.AddFrameLight()` prüft bereits Lichtreichweite und priorisiert begrenzte Frame-Kandidaten nach geschätztem Beleuchtungsbeitrag.
++
++## Änderung
++
++Die lokale Frame-Lichtquelle wird nun separat registriert, wenn Lichtequipment eingeschaltet ist, seine aktive Blinkphase leuchtet, `EmitRange` positiv ist und die EmitRange-Kugel das Kamerafrustrum schneidet. Billboard-Frustum, Flare-Kegel, Nahsichtdistanz und Kamera-Ray-Occlusion steuern weiterhin nur, ob Bulb/Glow gezeichnet wird. `forceCull` gilt weiter für beide Pfade.
++
++Die Trennung verhindert, dass eine nur für die Darstellung bestimmte Flare-Kegel- oder Sprite-Occlusion-Prüfung die Beleuchtung sichtbarer Objekte abschaltet. Eine Retail-Bildabnahme, Schattenwirkung und objektbezogene Occlusion bleiben offen.
++
++## Prüfung
++
++- `LibreLancer.csproj` Release-Build mit .NET 10: 0 Fehler, 131 Warnungen.
++- Vollständige Client-Patchserienrekonstruktion: 615 Dateien verifiziert.
++- `git diff --check`: sauber.
+
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -76,6 +76,7 @@
+ | 2100 | Render profile-driven gate tunnel geometry and preserve arrival transitions |
+ | 2101 | Audit Tradelane effect dataflow and asset presence |
+ | 2102 | Restore randomized particle spread for the Tradelane cube emitter |
++| 2103 | Decouple LightEquipment emission from billboard visibility |
+ | 2011 (`lancerdecode`) | Native Vorbis EOF/reset handling |
+ | 2012 (`blurgtext`) | System FreeType without OT-SVG hooks |
+ 
+
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -102,3 +102,4 @@
+ client 2100-jump-gate-tunnel-geometry-and-arrival.patch
+ client 2101-document-tradelane-effect-dataflow-audit.patch
+ client 2102-restore-tradelane-cube-emitter-spread.patch
++client 2103-light-equipment-emission-visibility.patch
+

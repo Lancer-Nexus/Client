@@ -1,0 +1,51 @@
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+index 6be5daa..cbd8177 100644
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -124,7 +124,12 @@ Hauptfenster-ID, damit dieses Nebenfenster den Renderer nicht beendet.
+ Der Resize-/Restore-OOM bleibt offen. Vor einem Größen- oder Ressourcen-Guard
+ müssen die Drawable-Abmessungen und derselbe Ablauf mit einem regulären
+ Fenstermanager-Schließsignal sowie auf einem Hardware-GL-Treiber erfasst
+-werden. NAP-Paket und Log des bisherigen Laufs liegen in
++werden. Beim Ersetzen eines AA/HDR/SSAO-Ziels entsorgt der Renderer jetzt zuerst
++den bisherigen vollständigen Zielsatz und legt danach den neuen an. Damit entfällt
++die gleichzeitige GPU-Residency beider Full-Resolution-Zielsätze während Resize
++und Optionswechsel. Ob dies den beobachteten Mesa-OOM behebt, ist ohne denselben
++NAP-Lauf mit festgehaltener Drawable-Größe und Memory-Profil noch nicht bestätigt.
++NAP-Paket und Log des bisherigen Laufs liegen in
+ `/tmp/lancer-renderer-lit-20261018/` und sind nur lokale Diagnoseartefakte.
+ 
+ ## Offene Renderer-Arbeiten
+diff --git a/patches/README.md b/patches/README.md
+index b40c355..370ec38 100644
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -310,3 +310,4 @@ jump-gate route.
+ | 2362 | Define controlled Intel and RTX renderer performance acceptance profiles |
+ | 2363 | Capture a 300-frame render profile without displaying the Debug overlay |
+ | 2364 | Include the initial renderer-option snapshot in frame-profile CSV exports |
++| 2365 | Release old full-resolution render targets before resize reallocation |
+diff --git a/patches/series b/patches/series
+index 8efd1ae..e583e24 100644
+--- a/patches/series
++++ b/patches/series
+@@ -362,3 +362,4 @@ client 2361-render-effects-options-layout.patch
+ client 2362-renderer-performance-acceptance-matrix.patch
+ client 2363-headless-render-profile-capture.patch
+ client 2364-frame-profile-render-options.patch
++client 2365-release-render-targets-before-reallocation.patch
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+index 99fa993..5e5fdbc 100644
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -559,6 +559,10 @@ namespace LibreLancer.Render
+                     msaa.Height != renderHeight || msaa.Mode != Settings.SelectedAA ||
+                     msaa.HdrOutputEnabled != hdrTargetRequested || msaa.SsaoEnabled != ssaoActive))
+                 {
++                    // Release the old framebuffer set before allocating its replacement.
++                    // On resize or option changes, holding both full-resolution sets at
++                    // once can exceed the GPU budget even when either set fits alone.
++                    msaa = null;
+                     try
+                     {
+                         msaa = new AntialiasTarget(rstate, renderWidth, renderHeight,

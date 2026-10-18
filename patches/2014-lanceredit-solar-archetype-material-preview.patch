@@ -1,0 +1,125 @@
+diff --git a/src/Editor/LancerEdit/Utf/UtfTab.cs b/src/Editor/LancerEdit/Utf/UtfTab.cs
+--- a/src/Editor/LancerEdit/Utf/UtfTab.cs
++++ b/src/Editor/LancerEdit/Utf/UtfTab.cs
+@@ -1,4 +1,4 @@
+-﻿// MIT License - Copyright (c) Callum McGing
++﻿// MIT License - Copyright (c) Callum McGing
+ // This file is subject to the terms and conditions defined in
+ // LICENSE, which is part of this source code package
+ 
+@@ -214,7 +214,7 @@
+             return DetachedResources;
+         }
+ 
+-        private void LoadShipArchetypeLibraries(GameResourceManager resources)
++        private void LoadArchetypeLibraries(GameResourceManager resources)
+         {
+             var dataContext = main.OpenDataContext;
+             if (dataContext?.GameData == null || string.IsNullOrWhiteSpace(FilePath))
+@@ -223,59 +223,69 @@
+             string modelPath;
+             try
+             {
+-                modelPath = NormalizeGamePath(Path.GetRelativePath(dataContext.Folder, FilePath));
++                modelPath = NormalizeGamePath(Path.GetFullPath(FilePath));
+             }
+             catch (ArgumentException)
+             {
+                 return;
+             }
+-
+-            FLLog.Debug("Editor", $"Resolving ship materials for '{modelPath}'");
+-
+-            var exact = new List<LibreLancer.Data.GameData.Ship>();
+-            var suffix = new List<LibreLancer.Data.GameData.Ship>();
+-            foreach (var ship in dataContext.GameData.Items.Ships)
++            catch (IOException)
+             {
+-                var resolvedModel = ship.ModelFile;
+-                if (resolvedModel?.ModelFile == null)
+-                    continue;
+-
+-                var candidate = NormalizeGamePath(resolvedModel.ModelFile);
+-                if (candidate.Equals(modelPath, StringComparison.OrdinalIgnoreCase))
+-                    exact.Add(ship);
+-                else if (modelPath.EndsWith("\\" + candidate, StringComparison.OrdinalIgnoreCase))
+-                    suffix.Add(ship);
++                return;
+             }
+ 
+-            var matches = exact.Count > 0 ? exact : suffix;
+-            if (matches.Count == 0)
++            FLLog.Debug("Editor", $"Resolving archetype materials for '{modelPath}'");
++
++            var candidates = dataContext.GameData.Items.Ships
++                .Select(x => (x.Nickname, Model: x.ModelFile))
++                .Concat(dataContext.GameData.Items.Archetypes.Select(x => (x.Nickname, Model: x.ModelFile)))
++                .Where(x => x.Model?.ModelFile != null)
++                .ToArray();
++            var exact = candidates.Where(x => NormalizeGamePath(x.Model!.ModelFile!)
++                .Equals(modelPath, StringComparison.OrdinalIgnoreCase)).ToArray();
++            var matches = exact.Length > 0
++                ? exact
++                : candidates.Where(x =>
++                {
++                    var candidate = NormalizeGamePath(x.Model!.ModelFile!);
++                    if (modelPath.EndsWith("\\" + candidate, StringComparison.OrdinalIgnoreCase))
++                        return true;
++
++                    // NAP assets are opened from Data/NAP/Models, while game data
++                    // archetypes store paths prefixed with DATA/. Compare the
++                    // package-relative asset path as well as the VFS path.
++                    const string dataPrefix = "DATA\\";
++                    return candidate.StartsWith(dataPrefix, StringComparison.OrdinalIgnoreCase) &&
++                           modelPath.EndsWith("\\" + candidate[dataPrefix.Length..], StringComparison.OrdinalIgnoreCase);
++                }).ToArray();
++            if (matches.Length == 0)
+             {
+-                FLLog.Debug("Editor", "Ship material lookup found no matching archetypes");
++                FLLog.Debug("Editor", "No matching ship or solar archetype found for model preview");
+                 return;
+             }
+ 
+-            var modelNickname = Path.GetFileNameWithoutExtension(modelPath.Replace('\\', Path.DirectorySeparatorChar));
+-            var namedMatches = matches.Where(ship => ship.Nickname.Equals(modelNickname, StringComparison.OrdinalIgnoreCase)).ToList();
+-            if (namedMatches.Count == 1)
++            var modelNickname = Path.GetFileNameWithoutExtension(FilePath);
++            var namedMatches = matches.Where(x => x.Nickname.Equals(modelNickname, StringComparison.OrdinalIgnoreCase)).ToArray();
++            if (namedMatches.Length == 1)
+                 matches = namedMatches;
+ 
+-            var librarySets = matches.Select(ship => string.Join("\0",
+-                    (ship.ModelFile!.LibraryFiles ?? Array.Empty<string>())
++            var librarySets = matches.Select(x => string.Join("\0",
++                    (x.Model!.LibraryFiles ?? Array.Empty<string>())
+                     .Select(NormalizeGamePath)
+-                    .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)))
++                    .OrderBy(y => y, StringComparer.OrdinalIgnoreCase)))
+                 .Distinct(StringComparer.OrdinalIgnoreCase)
+                 .ToArray();
+             if (librarySets.Length != 1)
+             {
+-                FLLog.Debug("Editor", $"Ship material lookup is ambiguous across {matches.Count} model archetypes");
++                FLLog.Debug("Editor", $"Archetype material lookup is ambiguous across {matches.Length} models");
+                 return;
+             }
+ 
+-            var libraries = matches.SelectMany(ship => ship.ModelFile!.LibraryFiles ?? Array.Empty<string>())
++            var libraries = matches.SelectMany(x => x.Model!.LibraryFiles ?? Array.Empty<string>())
+                 .Distinct(StringComparer.OrdinalIgnoreCase);
+             foreach (var library in libraries)
+             {
+-                FLLog.Debug("Editor", $"Loading ship material library '{library}' for {matches.Count} matching archetypes");
++                FLLog.Debug("Editor", $"Loading archetype material library '{library}' for {matches.Length} matching models");
+                 resources.LoadResourceFile(library);
+             }
+         }
+@@ -390,7 +392,7 @@
+                     try
+                     {
+                         var previewResources = GetPreviewResources();
+-                        LoadShipArchetypeLibraries(previewResources);
++                        LoadArchetypeLibraries(previewResources);
+                         drawable = LibreLancer.Utf.UtfLoader.GetDrawable(Utf.Export(), previewResources);
+                         if (Utf.Root.Children.Any((x) => x.Name.Equals("cmpnd", StringComparison.OrdinalIgnoreCase)))
+                         {

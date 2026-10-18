@@ -1,0 +1,105 @@
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -871,9 +871,18 @@
+ 
+         private void BeginGpuPass(SystemRenderPass pass)
+         {
+-            var index = GpuPassProfile.GetQueryIndex(pass);
+-            if (index >= 0)
+-                gpuPassQueries?[index]?.Begin(currentGpuProfileFrame);
++            rstate.PushRenderDocMaterialMarker(SystemRenderPasses.Get(pass).Name);
++            try
++            {
++                var index = GpuPassProfile.GetQueryIndex(pass);
++                if (index >= 0)
++                    gpuPassQueries?[index]?.Begin(currentGpuProfileFrame);
++            }
++            catch
++            {
++                rstate.PopRenderDocMaterialMarker();
++                throw;
++            }
+         }
+ 
+         private void BeginGpuPass(SystemRenderPass pass, RenderTarget? sceneTarget)
+@@ -1040,18 +1049,45 @@
+         }
+         private void EndGpuPass(SystemRenderPass pass)
+         {
+-            var index = GpuPassProfile.GetQueryIndex(pass);
+-            if (index >= 0)
+-                gpuPassQueries?[index]?.End();
++            try
++            {
++                var index = GpuPassProfile.GetQueryIndex(pass);
++                if (index >= 0)
++                    gpuPassQueries?[index]?.End();
++            }
++            finally
++            {
++                rstate.PopRenderDocMaterialMarker();
++            }
+         }
+ 
+         private void MarkGpuSubpass(SystemRenderSubpass pass, bool begin)
+         {
+             var index = GpuPassProfile.GetQueryIndex(pass);
+             if (begin)
+-                gpuPassQueries?[index]?.Begin(currentGpuProfileFrame);
++            {
++                rstate.PushRenderDocMaterialMarker(SystemRenderPasses.GetSubpass(pass).Name);
++                try
++                {
++                    gpuPassQueries?[index]?.Begin(currentGpuProfileFrame);
++                }
++                catch
++                {
++                    rstate.PopRenderDocMaterialMarker();
++                    throw;
++                }
++            }
+             else
+-                gpuPassQueries?[index]?.End();
++            {
++                try
++                {
++                    gpuPassQueries?[index]?.End();
++                }
++                finally
++                {
++                    rstate.PopRenderDocMaterialMarker();
++                }
++            }
+         }
+ 
+         private void DisposeGpuPassQueries()
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -269,7 +269,12 @@
+   - [x] Asteroiden-Cube-Batches werden nach Material und UV-Animationsprofil getrennt; `MaterialAnim` wird bei opaken und distanzgeblendeten Draws mitgeführt und pro Frame aktualisiert. Die zusätzlichen Drawcalls pro unterschiedlichem Profil sind noch gegen NAP-Asteroidenfelder zu messen.
+   - [x] `MaterialAnim.Update()` wickelt gültige Laufzeiten in konstanter Zeit um, statt globale Spielzeit durch wiederholtes Subtrahieren abzuarbeiten. Exakte Loop-Endpunkte behalten die bisherige Auswertung; ungültige Dauern und nichtendliche Zeitwerte verhindern Endlosschleifen.
+ - [ ] GPU-Partikel nur dann ergänzen, wenn CPU-/GPU-Profile einen Engpass belegen; bestehende Freelancer-Effekte und CPU-Fallback erhalten.
+-- [ ] RenderDoc-/Debug-Marker pro Render-Pass und lesbare GPU-Fehlerdiagnostik für reproduzierbare Grafikfehler vorsehen.
++- [x] OpenGL-RenderDoc-Debuggruppen verwenden die vorhandenen Passnamen aus
++  `SystemRenderPasses`: Hauptpässe und AA-/Bloom-/Tonemap-Unterpässe werden
++  verschachtelt markiert. GPU-Timer und Debuggruppen werden gemeinsam und auch
++  bei Fehlerpfaden geschlossen. Backends ohne Markerunterstützung bleiben ein
++  No-op; ein RenderDoc-Capture ist noch nicht erstellt.
++- [ ] Lesbare GPU-Fehlerdiagnostik für reproduzierbare Grafikfehler vorsehen.
+ 
+ ### 7. Zeitliche und räumliche Rekonstruktion
+ 
+--- a/patches/series
++++ b/patches/series
+@@ -236,3 +236,4 @@
+ client 2234-ggx-prefiltered-cubemap-ibl.patch
+ client 2235-diffuse-ibl-irradiance-cubes.patch
+ client 2236-ibl-modelviewer-preview-evidence.patch
++client 2237-renderdoc-pass-markers.patch
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -201,3 +201,4 @@
+ | 2234 | Add GGX-prefiltered cubemap mip metadata and PBR sampling |
+ | 2235 | Add cosine-convolved diffuse irradiance cubemaps to PBR IBL |
+ | 2236 | Record LI_ELITE cubemap-preview toggle A/B evidence |
++| 2237 | Add RenderDoc debug groups for render passes |

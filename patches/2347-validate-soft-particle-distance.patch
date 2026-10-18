@@ -1,0 +1,74 @@
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -294,3 +294,4 @@
+ | 2344 | Add SDL_GPU vertex upload, BC5 normal-map sampling, pipeline and pixel readback smoke |
+ | 2345 | Implement mip and region-aware synchronous OpenGL texture readback |
+ | 2346 | Add runtime smoke for OpenGL texture mip and region readback |
++| 2347 | Validate the configured soft-particle depth fade distance |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -346,3 +346,4 @@
+ client 2344-sdl-gpu-swapchain-smoke.patch
+ client 2345-opengl-texture-region-readback.patch
+ client 2346-gl-texture-readback-smoke.patch
++client 2347-validate-soft-particle-distance.patch
+diff --git a/src/LibreLancer/GameSettings.cs b/src/LibreLancer/GameSettings.cs
+--- a/src/LibreLancer/GameSettings.cs
++++ b/src/LibreLancer/GameSettings.cs
+@@ -369,6 +369,12 @@
+ 
+         public void Validate()
+         {
++            var softParticleDistance = NormalizeSoftParticleDistance(SoftParticleDistance);
++            if (softParticleDistance != SoftParticleDistance)
++            {
++                FLLog.Info("Config", $"Soft particle distance {SoftParticleDistance} is unsupported; using 2.");
++                SoftParticleDistance = softParticleDistance;
++            }
+             if (!float.IsFinite(RenderShadowBias) || RenderShadowBias is < 0f or > 0.02f)
+             {
+                 FLLog.Info("Config", $"Shadow bias {RenderShadowBias} is unsupported; using 0.0015.");
+@@ -449,5 +455,8 @@
+                 Anisotropy = 0;
+             }
+         }
++
++        internal static float NormalizeSoftParticleDistance(float value) =>
++            float.IsFinite(value) && value is >= 0.05f and <= 20f ? value : 2f;
+     }
+ }
+diff --git a/src/LibreLancer.Tests/RendererSettingsValidationTests.cs b/src/LibreLancer.Tests/RendererSettingsValidationTests.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Tests/RendererSettingsValidationTests.cs
+@@ -0,0 +1,28 @@
++using LibreLancer;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class RendererSettingsValidationTests
++{
++    [Theory]
++    [InlineData(0.05f)]
++    [InlineData(2f)]
++    [InlineData(20f)]
++    public void SoftParticleDistanceKeepsSupportedValues(float value)
++    {
++        Assert.Equal(value, GameSettings.NormalizeSoftParticleDistance(value));
++    }
++
++    [Theory]
++    [InlineData(-1f)]
++    [InlineData(0f)]
++    [InlineData(20.01f)]
++    [InlineData(float.NaN)]
++    [InlineData(float.PositiveInfinity)]
++    [InlineData(float.NegativeInfinity)]
++    public void SoftParticleDistanceFallsBackForUnsupportedValues(float value)
++    {
++        Assert.Equal(2f, GameSettings.NormalizeSoftParticleDistance(value));
++    }
++}

@@ -1,0 +1,447 @@
+diff --git a/src/LibreLancer.Base/Graphics/SystemRenderPass.cs b/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
+--- a/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
++++ b/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
+@@ -213,17 +213,27 @@
+         public string Name { get; private set; } = string.Empty;
+         public SystemRenderPass? Pass { get; private set; }
+         public SystemRenderResource RequiredReads { get; private set; }
++        public SystemRenderResource Reads { get; private set; }
++        public SystemRenderResource Writes { get; private set; }
++        public SystemRenderResource OptionalReads { get; private set; }
++        public SystemRenderResource OptionalWrites { get; private set; }
+         public Action? Execute { get; private set; }
+         public string? After { get; private set; }
+         public string[]? AdditionalAfter { get; private set; }
+         public int Priority { get; private set; }
+ 
+         public void Configure(string name, SystemRenderPass? pass, SystemRenderResource requiredReads,
+-            Action execute, string? after, string[]? additionalAfter, int priority)
++            SystemRenderResource reads, SystemRenderResource writes, SystemRenderResource optionalReads,
++            SystemRenderResource optionalWrites, Action execute, string? after,
++            string[]? additionalAfter, int priority)
+         {
+             Name = name;
+             Pass = pass;
+             RequiredReads = requiredReads;
++            Reads = reads;
++            Writes = writes;
++            OptionalReads = optionalReads;
++            OptionalWrites = optionalWrites;
+             Execute = execute;
+             After = after;
+             AdditionalAfter = additionalAfter;
+@@ -235,6 +245,10 @@
+             Name = string.Empty;
+             Pass = null;
+             RequiredReads = SystemRenderResource.None;
++            Reads = SystemRenderResource.None;
++            Writes = SystemRenderResource.None;
++            OptionalReads = SystemRenderResource.None;
++            OptionalWrites = SystemRenderResource.None;
+             Execute = null;
+             After = null;
+             AdditionalAfter = null;
+@@ -248,9 +262,11 @@
+     private int nodeCount;
+     private bool[,] edges = new bool[InitialNodeCapacity, InitialNodeCapacity];
+     private int[] indegree = new int[InitialNodeCapacity];
++    private int[] executionOrder = new int[InitialNodeCapacity];
+     private readonly List<int>[] readers = new List<int>[ResourceBitCount];
+     private readonly List<int>[] writers = new List<int>[ResourceBitCount];
+     private bool[] executed = new bool[InitialNodeCapacity];
++    private int topologyVersion;
+ 
+     public SystemRenderPassGraph()
+     {
+@@ -268,6 +284,7 @@
+         for (var i = 0; i < nodeCount; i++)
+             nodes[i].Reset();
+         nodeCount = 0;
++        topologyVersion++;
+     }
+ 
+     public void AddPass(SystemRenderPass pass, Action execute) =>
+@@ -294,7 +311,8 @@
+     {
+         var descriptor = SystemRenderPasses.Get(pass);
+         Add(descriptor.Name, pass, requiredReads, execute, after, additionalAfter,
+-            checked(descriptor.ExecutionOrder * 2));
++            checked(descriptor.ExecutionOrder * 2), SystemRenderResource.None,
++            SystemRenderResource.None, SystemRenderResource.None, SystemRenderResource.None);
+     }
+ 
+     public void AddAction(string name, Action execute, int priority) =>
+@@ -311,8 +329,24 @@
+         Add(name, null, SystemRenderResource.None, execute, first, remaining, priority);
+     }
+ 
++    public void AddResourceAction(string name, Action execute, SystemRenderResource reads,
++        SystemRenderResource writes, SystemRenderResource optionalReads,
++        SystemRenderResource optionalWrites, int priority)
++    {
++        if ((optionalReads & ~reads) != SystemRenderResource.None)
++            throw new ArgumentException("Optional graph reads must also be declared as reads.", nameof(optionalReads));
++        if ((optionalWrites & ~writes) != SystemRenderResource.None)
++            throw new ArgumentException("Optional graph writes must also be declared as writes.", nameof(optionalWrites));
++        Add(name, null, SystemRenderResource.None, execute, null, null, priority,
++            reads, writes, optionalReads, optionalWrites);
++    }
++
+     private void Add(string name, SystemRenderPass? pass, SystemRenderResource requiredReads,
+-        Action execute, string? after, string[]? additionalAfter, int priority)
++        Action execute, string? after, string[]? additionalAfter, int priority,
++        SystemRenderResource reads = SystemRenderResource.None,
++        SystemRenderResource writes = SystemRenderResource.None,
++        SystemRenderResource optionalReads = SystemRenderResource.None,
++        SystemRenderResource optionalWrites = SystemRenderResource.None)
+     {
+         ArgumentException.ThrowIfNullOrWhiteSpace(name);
+         ArgumentNullException.ThrowIfNull(execute);
+@@ -322,12 +356,31 @@
+ 
+         if (nodeCount == nodes.Count)
+             nodes.Add(new Node());
+-        nodes[nodeCount++].Configure(name, pass, requiredReads, execute, after, additionalAfter, priority);
++        nodes[nodeCount++].Configure(name, pass, requiredReads, reads, writes, optionalReads,
++            optionalWrites, execute, after, additionalAfter, priority);
++        topologyVersion++;
+     }
+ 
+     public void Execute(SystemRenderResource externalResources = SystemRenderResource.None)
+     {
++        EnsureCapacity(nodeCount);
++        var count = CompileOrder(externalResources, executionOrder);
++        ExecuteCompiled(executionOrder, count, topologyVersion);
++    }
++
++    public SystemRenderPassSchedule CompileSchedule(
++        SystemRenderResource externalResources = SystemRenderResource.None)
++    {
++        var order = new int[nodeCount];
++        var count = CompileOrder(externalResources, order);
++        return new SystemRenderPassSchedule(this, order, count, topologyVersion);
++    }
++
++    private int CompileOrder(SystemRenderResource externalResources, int[] order)
++    {
+         var count = nodeCount;
++        if (order.Length < count)
++            throw new ArgumentException("The render graph order buffer is too small.", nameof(order));
+         EnsureCapacity(count);
+         Array.Clear(edges);
+         Array.Clear(indegree);
+@@ -373,14 +426,14 @@
+         for (var i = 0; i < count; i++)
+         {
+             var node = nodes[i];
+-            var reads = node.RequiredReads;
+-            var optionalReads = SystemRenderResource.None;
+-            var writes = SystemRenderResource.None;
++            var reads = node.RequiredReads | node.Reads;
++            var optionalReads = node.OptionalReads;
++            var writes = node.Writes;
+             if (node.Pass is { } pass)
+             {
+                 var descriptor = SystemRenderPasses.Get(pass);
+                 reads |= descriptor.Reads;
+-                optionalReads = descriptor.OptionalReads;
++                optionalReads |= descriptor.OptionalReads;
+                 writes = descriptor.Writes;
+             }
+ 
+@@ -439,9 +492,9 @@
+                 }
+ 
+                 var node = nodes[reader];
+-                var optionalReads = node.Pass is { } pass
+-                    ? SystemRenderPasses.Get(pass).OptionalReads
+-                    : SystemRenderResource.None;
++                var optionalReads = node.OptionalReads;
++                if (node.Pass is { } pass)
++                    optionalReads |= SystemRenderPasses.Get(pass).OptionalReads;
+                 if ((node.RequiredReads & resource) == 0 && (optionalReads & resource) != 0)
+                     continue;
+                 throw new InvalidOperationException(
+@@ -462,11 +515,20 @@
+             }
+             if (next < 0)
+                 throw new InvalidOperationException("Render graph contains a dependency cycle.");
+-            nodes[next].Execute!();
++            order[step] = next;
+             executed[next] = true;
+             for (var i = 0; i < count; i++)
+                 if (edges[next, i]) indegree[i]--;
+         }
++        return count;
++    }
++
++    internal void ExecuteCompiled(int[] order, int count, int compiledVersion)
++    {
++        if (compiledVersion != topologyVersion || count != nodeCount || order.Length != count)
++            throw new InvalidOperationException("The render graph changed after its execution schedule was compiled.");
++        for (var i = 0; i < count; i++)
++            nodes[order[i]].Execute!();
+     }
+ 
+     private void EnsureCapacity(int required)
+@@ -477,6 +539,7 @@
+         var capacity = Math.Max(required, checked(indegree.Length * 2));
+         edges = new bool[capacity, capacity];
+         Array.Resize(ref indegree, capacity);
++        Array.Resize(ref executionOrder, capacity);
+         Array.Resize(ref executed, capacity);
+         foreach (var resourceReaders in readers)
+             resourceReaders.Capacity = Math.Max(resourceReaders.Capacity, capacity);
+@@ -485,6 +548,28 @@
+     }
+ 
+     public static string Name(SystemRenderPass pass) => SystemRenderPasses.Get(pass).Name;
++}
++
++/// <summary>An immutable execution order compiled from a SystemRenderPassGraph.</summary>
++public sealed class SystemRenderPassSchedule
++{
++    private readonly SystemRenderPassGraph owner;
++    private readonly int[] order;
++    private readonly int topologyVersion;
++
++    internal SystemRenderPassSchedule(SystemRenderPassGraph owner, int[] order, int count, int topologyVersion)
++    {
++        this.owner = owner;
++        this.order = order;
++        Count = count;
++        this.topologyVersion = topologyVersion;
++    }
++
++    public int Count { get; }
++
++    internal int GetNodeIndex(int scheduleIndex) => order[scheduleIndex];
++
++    public void Execute() => owner.ExecuteCompiled(order, Count, topologyVersion);
+ }
+ 
+ public enum SystemRenderSubpass
+diff --git a/src/LibreLancer.Base/Graphics/PostProcessExecutionPlan.cs b/src/LibreLancer.Base/Graphics/PostProcessExecutionPlan.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Base/Graphics/PostProcessExecutionPlan.cs
+@@ -0,0 +1,167 @@
++using System;
++using System.Collections.Generic;
++
++namespace LibreLancer.Graphics;
++
++[Flags]
++internal enum PostProcessResource
++{
++    None = 0,
++    CurrentColor = 1 << 0,
++    SceneDepth = 1 << 1,
++    BloomBase = 1 << 2,
++    BloomMedium = 1 << 3,
++    BloomWide = 1 << 4,
++    PresentationColor = 1 << 5
++}
++
++internal readonly record struct PostProcessStage(
++    string Name,
++    IPostProcessPass Pass,
++    PostProcessResource Reads,
++    PostProcessResource Writes,
++    PostProcessResource OptionalReads = PostProcessResource.None,
++    PostProcessResource OptionalWrites = PostProcessResource.None);
++
++/// <summary>
++/// Compiles post-process resources with the SystemRenderer frame-graph
++/// scheduler. Target allocation and backend-specific bindings remain owned by
++/// AntialiasTarget.
++/// </summary>
++internal sealed class PostProcessExecutionPlan
++{
++    private const PostProcessResource AllResources =
++        PostProcessResource.CurrentColor | PostProcessResource.SceneDepth |
++        PostProcessResource.BloomBase | PostProcessResource.BloomMedium |
++        PostProcessResource.BloomWide | PostProcessResource.PresentationColor;
++
++    private sealed class RuntimeContext
++    {
++        public PostProcessContext Value;
++    }
++
++    private readonly PostProcessStage[] stages;
++    private readonly SystemRenderPassSchedule schedule;
++    private readonly RuntimeContext runtimeContext;
++
++    private PostProcessExecutionPlan(PostProcessStage[] stages,
++        SystemRenderPassSchedule schedule, RuntimeContext runtimeContext)
++    {
++        this.stages = stages;
++        this.schedule = schedule;
++        this.runtimeContext = runtimeContext;
++    }
++
++    public static PostProcessExecutionPlan Compile(
++        IReadOnlyList<PostProcessStage> stages,
++        PostProcessResource initiallyAvailable)
++    {
++        ArgumentNullException.ThrowIfNull(stages);
++        if ((initiallyAvailable & ~AllResources) != PostProcessResource.None)
++            throw new ArgumentOutOfRangeException(nameof(initiallyAvailable));
++
++        var graph = new SystemRenderPassGraph();
++        var runtimeContext = new RuntimeContext();
++        for (var i = 0; i < stages.Count; i++)
++        {
++            var stage = stages[i];
++            if (string.IsNullOrWhiteSpace(stage.Name))
++                throw new ArgumentException($"Post-process stage {i} has no name.", nameof(stages));
++            ArgumentNullException.ThrowIfNull(stage.Pass);
++            if (((stage.Reads | stage.Writes | stage.OptionalReads | stage.OptionalWrites) & ~AllResources) !=
++                PostProcessResource.None)
++                throw new ArgumentException($"Post-process stage '{stage.Name}' declares an unknown resource.", nameof(stages));
++
++            var capturedStage = stage;
++            graph.AddResourceAction(stage.Name,
++                () => ExecuteStage(runtimeContext, capturedStage),
++                ToFrameResources(stage.Reads), ToFrameResources(stage.Writes),
++                ToFrameResources(stage.OptionalReads), ToFrameResources(stage.OptionalWrites), i);
++        }
++
++        var schedule = graph.CompileSchedule(ToFrameResources(initiallyAvailable));
++        var executionOrder = new PostProcessStage[stages.Count];
++        for (var i = 0; i < executionOrder.Length; i++)
++            executionOrder[i] = stages[schedule.GetNodeIndex(i)];
++        return new PostProcessExecutionPlan(executionOrder, schedule, runtimeContext);
++    }
++
++    private static SystemRenderResource ToFrameResources(PostProcessResource resources)
++    {
++        var mapped = SystemRenderResource.None;
++        if ((resources & PostProcessResource.CurrentColor) != 0)
++            mapped |= SystemRenderResource.SceneColor;
++        if ((resources & PostProcessResource.SceneDepth) != 0)
++            mapped |= SystemRenderResource.SampleableSceneDepth;
++        if ((resources & PostProcessResource.BloomBase) != 0)
++            mapped |= SystemRenderResource.BloomBlurredColor;
++        if ((resources & PostProcessResource.BloomMedium) != 0)
++            mapped |= SystemRenderResource.BloomMediumBlurredColor;
++        if ((resources & PostProcessResource.BloomWide) != 0)
++            mapped |= SystemRenderResource.BloomWideBlurredColor;
++        if ((resources & PostProcessResource.PresentationColor) != 0)
++            mapped |= SystemRenderResource.PresentationColor;
++        return mapped;
++    }
++
++    private static void ExecuteStage(RuntimeContext runtime, PostProcessStage stage)
++    {
++        var context = runtime.Value;
++        var available = context.AvailableResources;
++        var missing = stage.Reads & ~stage.OptionalReads & ~available;
++        if (missing != PostProcessResource.None)
++            throw new InvalidOperationException(
++                $"Post-process stage '{stage.Name}' is missing runtime resources: {missing}.");
++
++        stage.Pass.Execute(ref context);
++
++        // Optional outputs count only when the pass produced their runtime object.
++        var runtimeOutputs = GetRuntimeOutputs(context);
++        var requiredWrites = stage.Writes & ~stage.OptionalWrites;
++        var optionalWrites = stage.Writes & stage.OptionalWrites & runtimeOutputs;
++        context.AvailableResources = available | requiredWrites | optionalWrites;
++        runtime.Value = context;
++    }
++
++    public long EstimatedMemoryBytes
++    {
++        get
++        {
++            long total = 0;
++            foreach (var stage in stages)
++                total = checked(total + stage.Pass.EstimatedMemoryBytes);
++            return total;
++        }
++    }
++
++    public void Execute(ref PostProcessContext context)
++    {
++        runtimeContext.Value = context;
++        try
++        {
++            schedule.Execute();
++            context = runtimeContext.Value;
++        }
++        finally
++        {
++            runtimeContext.Value = default;
++        }
++    }
++
++    private static PostProcessResource GetRuntimeOutputs(in PostProcessContext context)
++    {
++        var available = PostProcessResource.None;
++        if (context.Source != null) available |= PostProcessResource.CurrentColor;
++        if (context.SceneDepth != null) available |= PostProcessResource.SceneDepth;
++        if (context.BloomTexture != null) available |= PostProcessResource.BloomBase;
++        if (context.BloomMediumTexture != null) available |= PostProcessResource.BloomMedium;
++        if (context.BloomWideTexture != null) available |= PostProcessResource.BloomWide;
++        return available;
++    }
++
++    public void Dispose()
++    {
++        for (var i = stages.Length - 1; i >= 0; i--)
++            stages[i].Pass.Dispose();
++    }
++}
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -61,13 +61,13 @@
+   - [x] Bestehende Forward-Aufrufreihenfolge, Opaque-/Transparent-Kommandos, Sterne, Nebel und AA-Resolve im Quellcode erfasst. Der Depth-Prepass-Metadatavertrag ist als optional markiert und liest/schreibt nur SceneDepth; er beansprucht keinen Szenenfarb-Read oder Color-Attachment. Der damals manuelle Hauptpass-Ablauf wurde inzwischen durch den darunter dokumentierten Callback-Scheduler ergänzt. Siehe [Pass-Reihenfolge-Audit](evidence/renderer/forward-pass-order-audit-20261015.md).
+   - [x] Samplebare Tiefentextur als eigenen Graph-Ressourcentyp vom aktiven Szenen-Tiefenattachment getrennt. SSAO und Soft Particles deklarieren und validieren den DepthTexture-Passausgang beim realen Target-Binding; SSAO deklariert dieselbe Ressource als Quelle. Der Depth-Producer wird als Hauptgraph-Callback geplant; die Postprocess-Kette besitzt zusätzlich ihren eigenen Abhängigkeitsplan.
+   - [x] Damaliger Zwischenstand: Laufzeitvalidierung an die tatsächlichen Hauptpass-Aufrufe gebunden; pro Frame werden Reihenfolge, doppelte/fehlende Begin-End-Paare und Pflichtressourcen geprüft; optionale Szene-Tiefe und Schatten bleiben ausdrücklich optional. Der wiederverwendete Validator speichert ausgeführte Pässe als Bitmaske. Zu diesem Zeitpunkt wurden Render-Befehle und Targetwechsel noch manuell ausgeführt; der ausführbare Graph folgte später.
+-  - [x] Laufzeitvalidierung für Postprocess-Subpasses ergänzt: SMAA, SSAO, Bloom und Tonemapping prüfen an ihren tatsächlichen Begin-/End-Aufrufen die Ressourcenabhängigkeiten. Verfügbare Hauptpass-Ressourcen und externe Lookup-/Ausgabeziele bilden den Frame-Anfang; optionale Bloom-Eingaben bleiben für Tonemapping optional. `PostProcessExecutionPlan` führt die konfigurierten Postprocess-Callbacks topologisch aus. Zielbindungen und Ressourcenlebensdauer bleiben backend-/`AntialiasTarget`-seitig; ein gemeinsamer Frame-/Postprocess-Graph und Laufzeit-/Bildabnahme bleiben offen.
++  - [x] Laufzeitvalidierung für Postprocess-Subpasses ergänzt: SMAA, SSAO, Bloom und Tonemapping prüfen an ihren tatsächlichen Begin-/End-Aufrufen die Ressourcenabhängigkeiten. Verfügbare Hauptpass-Ressourcen und externe Lookup-/Ausgabeziele bilden den Frame-Anfang; optionale Bloom-Eingaben bleiben für Tonemapping optional. `PostProcessExecutionPlan` verwendet den gemeinsam mit `SystemRenderer` genutzten `SystemRenderPassGraph`-Scheduler. Zielbindungen und Ressourcenlebensdauer bleiben backend-/`AntialiasTarget`-seitig; die Laufzeit-/Bildabnahme bleibt offen.
+   - [x] Damaliger Zwischenstand: Hauptpasses laufen über `ExecuteGpuPass`, prüfen Zielbindungen, schließen Timer/Marker und veröffentlichen Ressourcen erst nach erfolgreichem Draw und Targetabschluss. Fehlgeschlagene Draws erzeugen keine verfügbaren Ressourcen. Die manuelle Aufrufreihenfolge wurde später durch `SystemRenderPassGraph` ersetzt; die Targetbindung bleibt Teil der Callbacks.
+   - [x] Damaliger Zwischenstand: Laufzeitprüfung der Scene- und Shadow-Map-Attachments folgt den Pflicht-/Optional-Angaben des jeweiligen Passvertrags. Optionale Depth-/Stencil-Attachments werden nicht pauschal verlangt; zwingende Anhänge werden gezielt geprüft. Shadow-Map-Pässe prüfen zusätzlich ihr samplebares Depth-Ziel. Der Scheduler wurde später ergänzt; offene Format- und API-Laufzeitprüfungen sind separat dokumentiert.
+   - [x] Statische Passvertrag-Prüfung verlangt pro Attachment genau eine Ressource und gleicht Store/Resolve-Verhalten mit den deklarierten Writes ab; Resolve ist nur für Color erlaubt. Source-Attachments bleiben Read-Verträge. Die Metadaten steuern weiterhin nicht selbst die API-Aufrufe.
+   - [x] Die statische Passfolgenprüfung wertet optionale Reads wie die Laufzeitprüfung aus und verlangt sie nicht als zwingende Eingaben; so sind sequenzielle Prüfläufe auch ohne optionalen Schatten- oder Tiefenpuffer gültig.
+   - [x] Die Hauptpass-Ausführungsreihenfolge steht in den typisierten Passdeskriptoren und wird von Laufzeitprüfung sowie Scheduler daraus gelesen; der separate Pass-zu-Order-Switch ist entfernt. Der Graph führt die Passcallbacks aus.
+-  - [x] `SystemRenderPassGraph` topologisch sortiert und führt Hauptpässe, Physics-Hook, Debug-Overlay und optionalen AA-/HDR-Resolve anhand deklarierter Read-/Write-Ressourcen und expliziter Abhängigkeiten aus. Ressourcenproduzenten dürfen unabhängig von ihrer Registrierungsreihenfolge stehen; Read-after-write, Write-after-read und Write-after-write werden eingeordnet. Pflicht-Reads ohne Producer, fehlende explizite Vorgänger und Zyklen werden vor Ausführung der Callbacks abgewiesen. Knoten und Abhängigkeitspuffer werden zwischen Frames wiederverwendet; Targetwechsel und Attachments bleiben in den Passcallbacks. Callback-/Closure-Allokationen, Laufzeit-/Bildabnahme und Frame-Profiling bleiben offen.
++  - [x] `SystemRenderPassGraph` topologisch sortiert und führt Hauptpässe, Physics-Hook, Debug-Overlay und optionalen AA-/HDR-Resolve anhand deklarierter Read-/Write-Ressourcen und expliziter Abhängigkeiten aus. Derselbe Scheduler kompiliert und führt den Postprocess-Plan aus. Ressourcenproduzenten dürfen unabhängig von ihrer Registrierungsreihenfolge stehen; Read-after-write, Write-after-read und Write-after-write werden eingeordnet. Pflicht-Reads ohne Producer, fehlende explizite Vorgänger und Zyklen werden vor Ausführung der Callbacks abgewiesen. Knoten und Abhängigkeitspuffer werden zwischen Frames wiederverwendet; Targetwechsel und Attachments bleiben in den Passcallbacks. Callback-/Closure-Allokationen, Laufzeit-/Bildabnahme und Frame-Profiling bleiben offen.
+   - [x] Der Hauptpass-Tracker veröffentlicht nach erfolgreichem Draw nur deklarierte Writes, deren optionale Attachments am konkreten Target vorhanden sind. Fehlende oder unbekannte optionale Anhänge werden nicht als verfügbare Frame-Ressourcen ausgegeben. Die Passplanung erfolgt im Graphen; Targetwechsel bleiben in den jeweiligen Callbacks.
+   - [x] Gebundene Backend-Renderziele stellen Farb-/Tiefen-/Stencil-Präsenz und ein bekanntes Farbformat bereit. `SystemRenderer` weist Ziele zurück, denen laut Passvertrag zwingende Anhänge fehlen; GL-MSAA meldet das Farbformat nur für bekannte sized-Formate. Swapchainformat und Desktop-GLs unsized-MSAA-Storage bleiben unbekannt.
+   - [x] `AntialiasTarget` prüft beim Erzeugen die tatsächlichen aktiven Farb-/Tiefenattachments und für SMAA auch Stencil an Kanten- und Gewichtsziel; bekannte Zielformate müssen dem gewählten LDR-/HDR-Pfad entsprechen. Unbekanntes Desktop-MSAA-Format bleibt zulässig und wird nicht geraten.
+@@ -146,7 +146,7 @@
+ 
+ ### 3. Blur und Post-Processing
+ 
+-- [x] Allgemeine Post-Processing-Pass-Schnittstelle ergänzen; SMAA und bestehende Render-Targets dabei als Referenz für Ressourcenlebensdauer und Skalierung verwenden. Ein ausführbarer Abhängigkeitsgraph ordnet SSAO, Bloom, Tonemapping und SMAA stabil topologisch anhand ihrer Ressourcenreads und -writes. Pflichtressourcen werden beim Planen und unmittelbar vor jedem Pass geprüft; optionale Bloom-Ausgaben gelten nur dann als vorhanden, wenn der Pass sie tatsächlich erzeugt hat. Pässe werden in umgekehrter Ausführungsreihenfolge freigegeben. Ein vollständiger Render Graph mit zentraler Ressourcenplanung und targetübergreifendem Lifecycle bleibt offen.
++- [x] Allgemeine Post-Processing-Pass-Schnittstelle ergänzen; SMAA und bestehende Render-Targets dabei als Referenz für Ressourcenlebensdauer und Skalierung verwenden. Der `SystemRenderPassGraph` kompiliert SSAO, Bloom, Tonemapping und SMAA topologisch anhand ihrer Ressourcenreads und -writes; die immutable Ausführungsreihenfolge wird für jeden Postprocess-Lauf wiederverwendet. Pflichtressourcen werden beim Planen und unmittelbar vor jedem Pass geprüft; optionale Bloom-Ausgaben gelten nur dann als vorhanden, wenn der Pass sie tatsächlich erzeugt hat. Pässe werden in umgekehrter Ausführungsreihenfolge freigegeben. Zentral geplante Render-Targets und ein targetübergreifender GPU-Ressourcen-Lifecycle bleiben offen.
+   - [x] Bloom, Tonemapping und SMAA laufen über eine ausführbare `IPostProcessPass`-Kette in Abhängigkeitsreihenfolge. HDR führt Bloom vor Tonemapping aus; bei HDR-SMAA geht das tonemapte Zwischenbild an den SMAA-Pass. LDR-SMAA nutzt denselben finalen Passpfad. Targets bleiben backendabhängig in `AntialiasTarget`; ein allgemeines Render-Graph-Lifecycle-Modell und weitere Post-Effects bleiben offen.
+   - [x] NAP-only-Laufzeitvergleich der vier Modi LDR/HDR × SMAA/kein AA in derselben M01A-Intro-Kamerafahrt aufgenommen. Debug-Overlay bestätigt die aktiven SMAA-, Bloom- und Tonemap-Pässe samt GPU-Samples; Vergleichsbilder und Bedingungen: [Vier-Modi-Laufzeitvergleich](evidence/renderer/postprocess-four-mode-ab-20261017/README.md). Die vier Starts liegen bei 20,85–22,33 s Weltzeit, sind daher kein pixelgenauer Vergleich oder kontrollierter FPS-Benchmark. Resize 960×540 → 1280×720 und Minimize/Restore liefen in einem HDR+SMAA-OpenGL-Smoke weiter; nach Restore waren 1280×720 und aktive Passsamples sichtbar. Fehler-Injektion, längere Zyklen und weitere GPUs/Backends bleiben offen.
+ - [x] Separable Gaussian Blur als erster kontrollierter Effekt mit variabler Kernelbreite und Auflösungs-Skalierung. Die sichtbare Farb-/Alpha-Halo-Abnahme bleibt offen.
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 272 Client bundles and two native bundles. Each
++The active series contains 273 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -235,3 +235,4 @@
+ | 2271 | Declare system pass execution order in the pass descriptors |
+ | 2272 | Schedule and execute main SystemRenderer passes as a reusable dependency graph |
+ | 2273 | Reuse SystemRenderer pass graph nodes across frames |
++| 2274 | Share the compiled render graph scheduler with post-processing |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -273,3 +273,4 @@
+ client 2271-declare-system-pass-order.patch
+ client 2272-execute-main-pass-graph.patch
+ client 2273-reuse-render-graph-nodes.patch
++client 2274-share-render-graph-with-postprocess.patch

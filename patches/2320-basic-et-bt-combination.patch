@@ -1,0 +1,60 @@
+diff --git a/src/LibreLancer/Render/Materials/BasicMaterial.cs b/src/LibreLancer/Render/Materials/BasicMaterial.cs
+--- a/src/LibreLancer/Render/Materials/BasicMaterial.cs
++++ b/src/LibreLancer/Render/Materials/BasicMaterial.cs
+@@ -186,7 +186,5 @@ namespace LibreLancer.Render.Materials
+             if (EtEnabled || BtEnabled)
+                 caps |= ShaderFeatures.TEX2_ENABLED;
+-            if (EtEnabled && BtEnabled)
+-                throw new NotSupportedException("Bt + Et");
+             if (Fade)
+                 caps |= ShaderFeatures.FADE_ENABLED;
+             if (useEnvMapping)
+@@ -383,9 +383,9 @@ namespace LibreLancer.Render.Materials
+             // EtSampler
+             if (!DepthOnlyPass && EtEnabled)
+             {
+                 BindTexture(rstate, 1, EtSampler, 1, EtFlags, ResourceManager.NullTextureName);
+             }
+-            else if (!DepthOnlyPass && BtEnabled)
++            if (!DepthOnlyPass && BtEnabled)
+             {
+                 BindTexture(rstate, 4, BtSampler, 4, BtFlags, ResourceManager.NullTextureName);
+             }
+@@ -469,7 +466,10 @@ namespace LibreLancer.Render.Materials
+                 var param = new BasicParameters()
+                 {
+                     Dc = dcValue, Ec = Ec, FadeRange = new Vector2(FadeNear, FadeFar), Oc = Oc * OpacityMultiplier,
+-                    Tex2Type = BtEnabled ? 1 : 0, NormalStrength = activeSurfaceNormal != null ? activeSurfaceNormalStrength : NormalStrength,
++                    // 0 = Et only, 1 = Bt only, 2 = both. Keep this selector
++                    // in the existing uniform layout so old material variants remain compatible.
++                    Tex2Type = EtEnabled && BtEnabled ? 2 : BtEnabled ? 1 : 0,
++                    NormalStrength = activeSurfaceNormal != null ? activeSurfaceNormalStrength : NormalStrength,
+                     EnvMapStrength = envMapStrength,
+                     Padding = new Vector2(legacyEnvironment?.Format == SurfaceFormat.HalfVector4 ? 1.0f : 0.0f, 0.0f)
+                 };
+diff --git a/src/LibreLancer/Shaders/Basic.frag.hlsl b/src/LibreLancer/Shaders/Basic.frag.hlsl
+--- a/src/LibreLancer/Shaders/Basic.frag.hlsl
++++ b/src/LibreLancer/Shaders/Basic.frag.hlsl
+@@ -101,6 +101,6 @@ float4 main(Input input) : SV_Target0
+     ec.rgb = LinearizeLegacyInput(ec.rgb);
+ #ifdef TEX2_ENABLED
+-    if (Tex2Type < 1)
++    if (Tex2Type != 1)
+     {
+         float4 emissionTexture = EtTexture.Sample(EtSampler, GetTexCoord(1, input));
+         emissionTexture.rgb = LinearizeLegacyInput(emissionTexture.rgb);
+@@ -123,7 +123,7 @@ float4 main(Input input) : SV_Target0
+ #endif
+ 
+ #ifdef TEX2_ENABLED
+-    if(Tex2Type >= 1)
++    if(Tex2Type != 0)
+     {
+         float4 bt = BtTexture.Sample(BtSampler, GetTexCoord(3, input));
+         bt.rgb = LinearizeLegacyInput(bt.rgb);
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -321,1 +321,2 @@
+ client 2319-render-context-resource-shutdown.patch
++client 2320-basic-et-bt-combination.patch

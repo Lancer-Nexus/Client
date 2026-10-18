@@ -1,0 +1,70 @@
+--- /dev/null
++++ b/docs/evidence/renderer/forward-pass-order-audit-20261015.md
+@@ -0,0 +1,40 @@
++# Forward-Pass-Reihenfolge im SystemRenderer
++
++Stand: 2026-10-15. Quellcode-Audit der Aufrufreihenfolge in
++`SystemRenderer.Draw()`. Dies beschreibt den bestehenden OpenGL/Null-nahen
++Rendererablauf und begründet keine Laufzeit- oder GPU-Leistungsmessung.
++
++## Reihenfolge
++
++1. AA-Ziel bei geänderter Größe/Qualität ersetzen; bei Nullgröße den Draw
++   überspringen.
++2. Kamera, Lichtpool und Nebelzustand aktualisieren.
++3. Objekte und temporäre Effekte vorbereiten; Nebel-/Partikeldaten und Knochen-
++   sowie Quadbuffer streamen.
++4. Farbe, Tiefe und Stencil für das Ziel löschen. In vollständigem Nebel wird
++   die Nebelfarbe als Clear-Farbe verwendet.
++5. Frame-Writer initialisieren und einen Tiefenvorlauf für Game-Objekte zeichnen
++   (`ColorWrite=false`, `DepthFunction=Less`).
++6. Objekte, Beams, Asteroiden, Nebel, Billboards, Effektpool und Polylinien
++   vorbereiten/zeichnen; Teile davon werden im `CommandBuffer` gesammelt.
++7. Opaque-Kommandos ausführen.
++8. Optional Starsphere und Nebelübergang direkt ausgeben.
++9. `OpaqueHook` ausführen; transparente Kommandos mit deaktiviertem Depth-Write
++   ausführen; danach Depth-Write aktivieren.
++10. `PhysicsHook` und Debuggeometrie ausgeben.
++11. Bei AA Viewport/Scissor zurücksetzen, MSAA/SMAA auf das vorherige Ziel blitten
++    und das vorherige RenderTarget wieder binden.
++
++Die Reihenfolge steht in `src/LibreLancer/Render/SystemRenderer.cs`,
++`Draw()`. `CommandBuffer.DrawOpaque()` und `DrawTransparent()` teilen und leeren
++ihre jeweiligen Kommandolisten in `src/LibreLancer/Render/CommandBuffer.cs`.
++
++## Was für einen Render-Graph-Vertrag noch fehlt
++
++Die Aufrufreihenfolge besteht; ein formaler Passvertrag ist nicht vorhanden.
++Passes deklarieren derzeit keine Ressourcenreads/-writes, Farb-/Tiefenformate,
++Load/Store-Operationen, Resolve-Abhängigkeiten oder Lebensdauer/Aliasing von
++Renderzielen. Scene extraction, CPU-Vorbereitung und GPU-Ausgabe sind in
++`SystemRenderer.Draw()` vermischt. Die nächsten Architekturarbeiten sollten
++Passgrenzen zunächst auf diesem Ablauf aufsetzen und danach Resize-, Fehler-
++und Auflösungswechsel explizit modellieren.
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -42,6 +42,7 @@
+ - [x] Ersten CPU-/Frame-Pacing-Messpunkt bereitstellen: Das Debugfenster zeigt gleitende p50/p95/p99-Werte über 300 Frames für die Update-/Draw-/EndFrame-Wandzeit und das Frame-Intervall einschließlich Swap/VSync. Die Messung läuft in SDL2, SDL3 und dem Null-Backend. Sie ist nur eine Diagnosegrundlage; GPU-Zeit, Speicher und reproduzierbare Szenenmessungen sind nicht enthalten.
+ - [ ] Systemweite Stabilität und Laufzeitleistung auf Referenzhardware messen und verbessern: FPS sowie CPU-/GPU-Framezeiten (p50/p95/p99), Speicherverbrauch und Frame-Pacing in festen Raum-, Basis-, System-, Kampf- und UI-Szenen erfassen; Langzeitläufe, Szenenwechsel, Resize, Minimieren/Wiederherstellen und Gerätefehler auf Hänger, Abstürze und Ressourcenlecks prüfen. Erst Messungen gegen einen dokumentierten Ausgangswert gelten als Optimierungsnachweis.
+ - [ ] Render-Passes mit klaren Ein-/Ausgaben und expliziter Farb-/Tiefenpufferverwaltung vorbereiten.
++  - [x] Bestehende Forward-Aufrufreihenfolge, Opaque-/Transparent-Kommandos, Sterne, Nebel und AA-Resolve im Quellcode erfasst; ein formaler Ressourcenvertrag fehlt weiterhin. Siehe [Pass-Reihenfolge-Audit](evidence/renderer/forward-pass-order-audit-20261015.md).
+ - [ ] Render-Target-Resize, minimierte Fenster, Scissor-/Viewport-Wechsel und Geräteverlust für zusätzliche Pässe absichern.
+   - [x] `SystemRenderer.Draw()` überspringt Frames mit Breite/Höhe 0. Bei geändertem Rendermaß oder AA-Modus gibt es das vorhandene MSAA-Target frei und erstellt es neu. Das belegt nur diesen System-Renderer-Pfad; Editor-/Offscreen-Targets, Wiederherstellungstests und Geräteverlust bleiben offen.
+   - [ ] Renderzustand auch bei Draw-Fehlern wiederherstellen. Der Quellcode-Audit belegt fehlende `finally`-Pfade in `SystemRenderer.Draw()` und `AntialiasTarget.SMAABlit()`; Aussagegrenzen und Folgeplan stehen im [Fehlerpfad-Audit](evidence/renderer/render-target-exception-path-audit-20261015.md).
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -63,6 +63,7 @@
+ | 2087 | Record SystemRenderer zero-size and MSAA target resize handling |
+ | 2088 | Record missing exception-safe render target and stack restoration |
+ | 2089 | Add source-level render target exception-path evidence and follow-up |
++| 2090 | Record the SystemRenderer forward-pass order and missing pass contract |
+ | 2011 (`lancerdecode`) | Native Vorbis EOF/reset handling |
+ | 2012 (`blurgtext`) | System FreeType without OT-SVG hooks |
+ 
+--- a/patches/series
++++ b/patches/series
+@@ -89,3 +89,4 @@
+ client 2087-system-renderer-resize-roadmap-audit.patch
+ client 2088-render-target-exception-safety-audit.patch
+ client 2089-render-target-exception-path-evidence.patch
++client 2090-forward-pass-order-audit.patch

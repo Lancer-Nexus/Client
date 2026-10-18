@@ -1,0 +1,144 @@
+--- a/src/LibreLancer/Render/BeamsBuffer.cs
++++ b/src/LibreLancer/Render/BeamsBuffer.cs
+@@ -14,7 +14,7 @@
+ {
+     public unsafe class BeamsBuffer : IDisposable
+     {
+-        public int MAX_BEAMS = 500;
++        private const int MAX_BEAMS = 500;
+ 
+         private VertexBuffer bufferSpear;
+         private VertexBuffer bufferBolt;
+@@ -143,11 +143,11 @@
+         private bool begun = false;
+         public void Begin(CommandBuffer commands, ResourceManager res, ICamera cam)
+         {
++            if(begun) throw new InvalidOperationException();
+             this.commands = commands;
+             this.res = res;
+             verticesSpear = (VertexPositionColorTexture*)bufferSpear.BeginStreaming();
+             verticesBolt = (VertexPositionColorTexture*) bufferBolt.BeginStreaming();
+-            if(begun) throw new InvalidOperationException();
+             begun = true;
+         }
+ 
+@@ -180,12 +180,12 @@
+ 
+         public void AddBeamBolt(Vector3 p, Vector3 normal, BeamBolt bolt, float maxTrailLen)
+         {
++            if (!begun) throw new InvalidOperationException();
++            if (boltCount >= MAX_BEAMS) return;
++
+             // Head
+             CoordsFromTexture(bolt.HeadTexture!, out var tl, out var tr, out var bl, out var br, out var mid);
+-            var right = Vector3.Cross(normal, Vector3.UnitY);
+-            right.Normalize();
+-            var up = Vector3.Cross(right, normal);
+-            up.Normalize();
++            GetBeamBasis(normal, out normal, out var right, out var up);
+             var hRad = bolt.HeadWidth / 2;
+             var cRad = bolt.CoreWidth / 2;
+             var secRad = bolt.SecCoreWidth / 2;
+@@ -238,12 +238,11 @@
+         public void AddBeamSpear(Vector3 p, Vector3 normal, BeamSpear spear, float maxTrailLen)
+         {
+             if(!begun) throw new InvalidOperationException();
++            if (spearCount >= MAX_BEAMS) return;
++
+             // Head
+             CoordsFromTexture(spear.HeadTexture!, out var tl, out var tr, out var bl, out var br, out var mid);
+-            var right = Vector3.Cross(normal, Vector3.UnitY);
+-            right.Normalize();
+-            var up = Vector3.Cross(right, normal);
+-            up.Normalize();
++            GetBeamBasis(normal, out normal, out var right, out var up);
+             var hRad = spear.HeadWidth / 2;
+             var cRad = spear.CoreWidth / 2;
+             // Quad Center
+@@ -276,6 +275,22 @@
+             verticesSpear[vertexCountSpear++] =
+                 new VertexPositionColorTexture(p - (normal * tailLength), spear.TailColor, tr);
+             spearCount++;
++        }
++
++        internal static void GetBeamBasis(Vector3 direction, out Vector3 normalized,
++            out Vector3 right, out Vector3 up)
++        {
++            var lengthSquared = direction.LengthSquared();
++            normalized = lengthSquared > 1e-12f && float.IsFinite(lengthSquared)
++                ? direction / MathF.Sqrt(lengthSquared)
++                : Vector3.UnitZ;
++
++            // Choose an axis that is not parallel to the beam. The fixed Y axis
++            // collapses the cross section for beams traveling along +/-Y.
++            var reference = MathF.Abs(normalized.Y) < 0.99f ? Vector3.UnitY : Vector3.UnitX;
++            right = Vector3.Cross(normalized, reference);
++            right = Vector3.Normalize(right);
++            up = Vector3.Normalize(Vector3.Cross(right, normalized));
+         }
+ 
+         private static void CoordsFromTexture(string tex, out Vector2 tl, out Vector2 tr, out Vector2 bl, out Vector2 br, out Vector2 mid)
+--- a/src/LibreLancer.Tests/BeamBasisTests.cs
++++ b/src/LibreLancer.Tests/BeamBasisTests.cs
+@@ -0,0 +1,32 @@
++using System;
++using System.Numerics;
++using LibreLancer.Render;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class BeamBasisTests
++{
++    [Theory]
++    [InlineData(0f, 1f, 0f)]
++    [InlineData(0f, -1f, 0f)]
++    [InlineData(0.0001f, 1f, 0.0001f)]
++    [InlineData(0f, 0f, 0f)]
++    public void BeamBasisRemainsFiniteAndOrthonormal(float x, float y, float z)
++    {
++        BeamsBuffer.GetBeamBasis(new Vector3(x, y, z), out var direction, out var right, out var up);
++
++        Assert.True(IsFinite(direction));
++        Assert.True(IsFinite(right));
++        Assert.True(IsFinite(up));
++        Assert.InRange(MathF.Abs(direction.Length() - 1f), 0f, 1e-5f);
++        Assert.InRange(MathF.Abs(right.Length() - 1f), 0f, 1e-5f);
++        Assert.InRange(MathF.Abs(up.Length() - 1f), 0f, 1e-5f);
++        Assert.InRange(MathF.Abs(Vector3.Dot(direction, right)), 0f, 1e-5f);
++        Assert.InRange(MathF.Abs(Vector3.Dot(direction, up)), 0f, 1e-5f);
++        Assert.InRange(MathF.Abs(Vector3.Dot(right, up)), 0f, 1e-5f);
++    }
++
++    private static bool IsFinite(Vector3 value) =>
++        float.IsFinite(value.X) && float.IsFinite(value.Y) && float.IsFinite(value.Z);
++}
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -136,6 +136,8 @@
+ ### 5. Effektüberarbeitung nach Renderer und dynamischer Beleuchtung
+ 
+ - [ ] Laser-, Projektil- und Explosionseffekte visuell überarbeiten: Beam- und Trefferdarstellung, Trails, Partikel, Farbverläufe, Größen- und Zeitverhalten sowie Zusammenspiel mit dynamischem Licht. Originale Freelancer-Effekte müssen weiter funktionieren; neue Qualitätseinstellungen sollen einzeln abschaltbar bleiben. Mit reproduzierbaren NAP-Kampfszenen, Vergleichsbildern und GPU-/CPU-Messungen abnehmen.
++  - [x] `vis_beam`-Geometrie gegen parallele/degenerierte Richtungen absichern und Schreibzugriffe auf den 500-Beam-Streamingpuffer begrenzen; vier Geometrietests bestehen.
++  - [ ] Beam-/Explosiondarstellung, Timing, Partikel und Licht in NAP-Referenzszenen visuell vergleichen und die getrennten Qualitätsoptionen ergänzen.
+ 
+ ### 6. Weitere Oberflächeneffekte und Renderer-Betrieb
+ 
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -441,6 +441,8 @@
+   Lichttypen; Shadow-Depth-Targets und Comparison-Sampler abstrahieren.
+ - [ ] Kurzlebige Effektlichter vervollständigen und messen: Mündungslichter aus `Gun.light_anim` sowie Explosionslichter aus `lgt_effect`/`lgt_radius` und `lgt_time_scale` sind vorhanden. Die per-Objekt-Auswahl priorisiert nach geschätzter Lichtwirkung; der Frame-Pool priorisiert weiter nach Kameradistanz. Offen sind `lgt_range_scale`, explizite Lichtdaten und hardpointgebundene Lebenszyklen für persistentes Feuer, allgemeine Sichtbarkeits-/Occlusion-Priorisierung, Qualitätsbudgets und reproduzierbare NAP-Szenenmessungen. Der Effektpool begrenzt aktive Ereignisse auf 128, der Frame-Pool lokale Lichtquellen auf 32. Siehe [Feuerinventar](evidence/effect-fire-light-input-inventory-20261014.json).
+ - [ ] Danach Laser-, Projektil- und Explosionseffekte überarbeiten: Beam- und Trefferdarstellung, Trails, Partikel, Farbverläufe sowie Größen-/Zeitverhalten aufeinander abstimmen und mit dynamischer Beleuchtung integrieren. Originaleffekte und einzeln abschaltbare Qualitätsoptionen erhalten; NAP-Referenzszenen mit Vergleichsbildern und CPU-/GPU-Zeit abnehmen.
++  - [x] `vis_beam`-Querschnittsbasis bleibt bei vertikaler oder ungültiger Richtung endlich und orthonormal; Zugriffe auf den Beam-Puffer sind auf seine Kapazität begrenzt. Vier fokussierte Tests bestehen.
++  - [ ] Sichtprüfung der Beam-/Explosiondarstellung, Timing-/Partikelabstimmung und einzeln schaltbare Qualitätsoptionen anhand von NAP-Referenzszenen.
+ - [ ] SSAO mit Geometrie-/Nebelmasken und Forward+ mit vielen Lichtquellen
+   implementieren; die feste Lichtgrenze erst nach Messung ersetzen.
+ - [ ] Instancing/Batching für Asteroiden, Partikel und wiederholte Objekte
+--- a/patches/series
++++ b/patches/series
+@@ -46,3 +46,4 @@
+ client 2044-renderer-lighting-status.patch
+ client 2045-fire-effect-light-input-audit.patch
+ client 2046-light-contribution-priority-and-effects-todo.patch
++client 2047-beam-effect-safety.patch

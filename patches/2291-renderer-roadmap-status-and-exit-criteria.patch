@@ -1,0 +1,420 @@
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -1,346 +1,78 @@
+-# Renderer-Roadmap
++# Renderer-Pipeline: Ist-Stand und Abschlussplan
+ 
+-Vorhandene A/B-Aufnahmen, Messwerte und ihre Aussagegrenzen stehen in der
+-[Vergleichsgalerie](renderer-comparison-gallery.md).
++Stand: 2026-10-18. Dieser Überblick beschreibt den aktuellen Client-Overlay-Stand.
++Quellcode und Laufzeitnachweise bleiben maßgeblich; ein vorhandener Schalter
++allein gilt nicht als Qualitäts- oder Plattformabnahme.
+ 
+-Die aktuelle Umsetzungsreihenfolge und Abnahme stehen im
+-[Grafik-Umsetzungsplan](graphics-implementation-plan.md).
++## Vorhandene Funktionen
+ 
+-Diese Liste plant moderne Renderer-Erweiterungen für LibreLancer. Sie ist eine Arbeitsliste, keine Zusage, dass die genannten Effekte bereits implementiert oder upstream abgestimmt sind. Bestehende Freelancer-Darstellung und niedrigere Hardwareprofile bleiben Abnahmekriterien.
++| Bereich | Stand | Nachweis / Grenze |
++|---|---|---|
++| Freelancer-Forward-Renderer | Vorhandener OpenGL-Renderpfad mit Depth-Prepass, opaken Objekten, Sternen/Nebeln, Transparenz und AA-Auflösung. | `SystemRenderer.Draw()` und `docs/evidence/renderer/forward-pass-order-audit-20261015.md`. Der Render-Graph beschreibt Verträge; er ersetzt noch nicht alle direkten Backend-Aufrufe. |
++| Normalmaps | MAT-Normalmaps und optionale Surface-Zuordnungen für Meshes und DFM; UV-Auswahl, Tangentenaufbau, Cache und Laufzeitoptionen sind vorhanden. | Viewer-A/B für Schiffe, Basen und DFM liegen unter `docs/evidence/renderer/`. Spielbildqualität und Kosten über weitere Szenen bleiben offen. |
++| Metallic/Roughness | Ergänzende Karten sind in Materialauflösung und PBR-Shader eingebunden; DFM besitzt einen skinned PBR-Pfad. | Kartenwirkung ist asset- und materialabhängig. Vollständige Asset-Abdeckung und systematische Spielabnahme fehlen. |
++| Cubemaps / Reflexion | Bestehende Freelancer-Umgebungscubes können über den Materialpfad gebunden werden; LancerEdit hat Prüf-/Vorschauwerkzeuge. | Eine produktionsreife, diffuse Irradiance- und GGX-prefiltered IBL-Kette ist nicht nachgewiesen. Siehe `surface-maps.md` und `docs/evidence/renderer/pbr-environment-20261014/`. |
++| HDR und Tonemapping | Linearisiertes Scene-Target, ACES-Tonemapping und Ausgabe nach UI-Komposition sind implementiert. | Legacy-Eingangsfarben werden noch nicht durchgängig vor der Beleuchtungsrechnung linearisiert. Ein kontrollierter Vergleich ist unter `docs/evidence/renderer/postprocess-four-mode-ab-20261017/` dokumentiert. |
++| Bloom | Optionale HDR-Extraktion, separabler Blur und Composite mit Laufzeitreglern. | Einfache Viertelauflösungs-Stufe, keine mehrstufige Bloom-Pyramide. Farbkalibrierung und GPU-Kosten sind nicht für mehrere GPUs abgenommen. |
++| Antialiasing | SMAA-Pässe und MSAA-Auflösung; HDR/LDR-Kombinationen sowie Resize und Minimize/Restore wurden auf OpenGL/Mesa geprüft. | Andere Backends/Treiber, wiederholte Lifecycle-Zyklen und Fehler-Injektion stehen aus. |
++| Dynamische Lichter | Persistente und kurzlebige Lichtquellen, priorisierte Framebudgets und getrennte Renderoptionen für Effekte/Weapon-Lichter. | Sichtbarkeit und Beleuchtungsbeitrag einzelner Retail-Effekte brauchen kontrollierte Bildabnahmen. Siehe `docs/dynamic-lighting-audit.md`. |
++| Diagnose | CPU-Framezeitprofile, asynchrone OpenGL-GPU-Passzeiten, Ziel-/Speicherschätzungen und CSV-Ausgabe. | Noch keine langfristigen Szenenprofile oder plattformübergreifenden Vergleichsbaselines. |
+ 
+-## Zielbild und Architekturprinzipien
++## Offene Renderer-Arbeiten
+ 
+-- Originale Freelancer-Assets und Gameplay bleiben ohne Konvertierung nutzbar. HD-Daten und neue Materialkanäle werden optional ergänzt; der Legacy-Look bleibt Referenz und Rückfallprofil.
+-- Die aktuelle Renderbasis bleibt Forward. Clustered/Forward+ wird anhand typischer Kampf- und Transparenzszenen gemessen; ein Deferred-Pfad kommt nur hinzu, wenn Messungen einen konkreten Vorteil zeigen.
+-- Render-Passes und GPU-Ressourcen werden schrittweise über die vorhandenen Schnittstellen geordnet. Ein eigenständiger Render Graph oder ein separates LNR-Modul ist ein Architekturvorschlag und wird erst nach einem funktionierenden Pass-/Lifecycle-Prototyp festgelegt.
+-- OpenGL bleibt das vorhandene Backend, Null bleibt für Headless-Läufe verfügbar. SDL_GPU mit Vulkan-Treiber wird als Spike geprüft; Vulkan wird erst nach einer Retail-Szenenmatrix als primäres Backend festgelegt. Capability-Prüfung und funktionsfähige Rückfallpfade sind Teil der Abnahme.
+-- Neue Effekte erhalten abschaltbare Qualitätsstufen. FPS-Ziele werden erst nach reproduzierbaren Messungen auf festgelegter Referenzhardware als Leistungsziele festgeschrieben.
++1. **Farbvertrag abschließen.** Legacy-Albedo, diffuse Materialfarben, Vertexfarben,
++   Emission, Fog, Partikel, transparente Effekte und Clear-Farben je Pfad
++   eindeutig als sRGB-Eingabe oder lineare Größe behandeln. Beleuchtung und
++   Blending im HDR-Ziel müssen konsistent linear erfolgen; LDR muss unverändert
++   als Rückfallprofil erhalten bleiben.
++2. **PBR/IBL fertigstellen.** Cubemap-Orientierung und Auswahl auf echten
++   Spielmaterialien prüfen, diffuse Umgebungsbeleuchtung ergänzen und
++   Roughness-abhängige Reflexionen mit vorgefilterten Cubes oder einem
++   gleichwertigen messbaren Verfahren umsetzen. Metallic-Energieerhaltung,
++   Normalstärke und fehlende Texturen in einer Materialmatrix prüfen.
++3. **Schattenpfad abnehmen.** Einen klar begrenzten dominanten Lichtpfad für
++   Schiffe und Stationen definieren. Shadow-Target-Erzeugung, Culling,
++   Bias, Cascades, Resize/Lifecycle, Alpha-Materialien und Kosten getrennt
++   messen. Bis zur Bildabnahme darf eine vorhandene Implementierung nicht als
++   fertig gelten.
++4. **Atmosphären und Effekte vervollständigen.** `AtmosphereMaterial.Fade` wird
++   derzeit vom MAT-Parser bis zum Shader-Parameter weitergereicht, im Shader
++   jedoch nicht verwendet. Seine Bedeutung muss gegen Retail-Materialdaten und
++   `shading.dll` geprüft werden, bevor das Verhalten geändert wird. Danach
++   Sonnen-/Planetenatmosphären, Lens Glow, Jump-Gates, Tradelanes, Laser,
++   Explosionen und Partikel in repräsentativen Szenen abnehmen.
++5. **Render-Graph-Vertrag operationalisieren.** Ziel-/Attachment-Abhängigkeiten,
++   Load/Store, Ressourcennutzung, Fehlerpfade und Aliasing backendneutral
++   ausführen lassen. Gegenwärtige Graph-Metadaten und OpenGL-Zustandsaufrufe
++   müssen dieselben Ressourcenverträge tatsächlich erzwingen.
++6. **Vulkan/SDL_GPU-Spike und Backend.** Zuerst eine echte Pipeline mit
++   Freelancer-FVF, BC4/BC5, Cubemaps, Skinning, Renderzielen und Präsentation
++   kompilieren und auf einer Vulkan-GPU starten. Erst nach erfolgreichem Spike
++   den gesamten Spiel- und Editorpfad portieren; OpenGL bleibt währenddessen
++   die Vergleichs- und Rückfallreferenz.
++7. **Stabilität und Performance.** Feste Szenen und Kameras für Intro,
++   Kampf, Nebel, Asteroidenfeld, Basis, Planet und DFM erfassen. CPU/GPU-Zeit,
++   Drawcalls, Uploads, Speicher und Pipeline-Kompilierung mit identischen
++   Optionen vergleichen. Resize, Minimize/Restore, Kontextverlust, Shaderfehler
++   und Ressourcenfreigabe wiederholt prüfen.
++8. **Release-Abnahme.** Linux und Windows auf dokumentierten GPUs/Treibern
++   vergleichen, Profile/Optionen beim Neustart und live prüfen, Fallbacks für
++   fehlende Fähigkeiten validieren und NAP-only-Testpakete auf Herkunft,
++   Manifest und Hashes prüfen.
+ 
+-## Bereits vorhanden
++## Reihenfolge und Abschlusskriterien
+ 
+-- Surface-Normalmaps sind im Grafikeinstellungsmenü optional und standardmäßig
+-  ausgeschaltet. BasicMaterial unterstützt authored FVF3/FVF4-Tangenten und
+-  asynchron generierte VMesh-Tangenten; DFM und QuadSphere besitzen ergänzende
+-  Tangentenpfade. Retail-A/B-Bilder liegen für Schiff, Basis und Planet vor;
+-  DFM-UV0/UV1 wurde mit einer geliehenen Schiffskarte geprüft. Der exakte
+-  CPU/GPU-Abgleich ist im isolierten VMesh-Probe gelungen; Retail-Bildqualität,
+-  vollständige In-Game-Abnahme und Leistungskosten bleiben offen.
++| Schritt | Arbeit | Fertig, wenn |
++|---|---|---|
++| A | Farbvertrag und HDR-Eingänge | Alle Szenen-Shader verwenden dieselben dokumentierten Farbregeln; Material-, Alpha- und Clear-Fixtures bestehen und HDR/LDR-Referenzbilder sind vergleichbar. |
++| B | IBL und Materialqualität | Metall, Lack und nichtmetallische Flächen auf Schiff, Basis, Planet und DFM visuell geprüft sind; Cubemap-Richtung, Roughness und GPU-Kosten dokumentiert sind. |
++| C | Schatten und dynamische Effekte | Beleuchtungs- und Effektpfade eine kontrollierte Retail-Szenenmatrix bestehen und die Kostenbudgets bekannt sind. |
++| D | Render-Graph und Lifecycle | Passverträge mit realen Backend-Operationen übereinstimmen; Resize, Fehler und Wiederherstellung keine Ressourcen- oder Zustandslecks hinterlassen. |
++| E | Vulkan/SDL_GPU | Der vollständige Client- und Editorpfad läuft mit denselben Kernmaterialien; GL/Vulkan-Bild- und Lifecycle-Vergleich ist dokumentiert. |
++| F | Stabilität/Performance/Release | Linux-/Windows-Matrix, langfristige Profile, Fehlerpfade und NAP-only-Paketprüfung dokumentiert und reproduzierbar sind. |
+ 
+-- PBR-Materialpfad in `BasicMaterial` mit Normal-, Roughness- und Metallic-Maps.
+-- Tangent-Space-Normalmapping im regulären FVF-Shaderpfad, sofern das Mesh die passenden Tangentdaten enthält.
+-- SMAA als Antialiasing-Option.
+-- Bewegungsunschärfe für bestimmte Partikeltypen. Das ist keine kamerabasierte Motion Blur für die ganze Szene.
+-- LOD-Auswahl und CPU-seitige Frustum-/Distanz-Culling-Pfade sind vorhanden;
+-  GPU-getriebenes Culling und GPU-Instancing sind nicht implementiert.
+-
+-„Bumpmapping“ wird hier als Normalmapping verstanden. Die Engine hat dafür bereits Teilunterstützung; die Aufgabe ist zuerst, Datenpfade, Mesh-Tangenten, Materialoptionen und Fallbacks auf vollständige Abdeckung zu prüfen, statt einen zweiten konkurrierenden Effekt einzubauen.
+-
+-## Vorgeschlagene Arbeitspakete
+-
+-### 1. Render-Pipeline und Profiling
+-
+-- [x] Ersten CPU-/Frame-Pacing-Messpunkt bereitstellen: Das Debugfenster zeigt gleitende p50/p95/p99-Werte über 300 Frames für die Update-/Draw-/EndFrame-Wandzeit und das Frame-Intervall einschließlich Swap/VSync. Die Messung läuft in SDL2, SDL3 und dem Null-Backend. Die letzten bis zu 300 Samples lassen sich als CSV exportieren; Backend und Fenstermaß werden pro Sample festgehalten und CSV-sicher maskiert. Die Arbeitszeit kann Treiberwartezeit enthalten; GPU-Zeit, Speicher und reproduzierbare Szenenmessungen bleiben offen.
+-- [ ] Systemweite Stabilität und Laufzeitleistung auf Referenzhardware messen und verbessern: FPS sowie CPU-/GPU-Framezeiten (p50/p95/p99), Speicherverbrauch und Frame-Pacing in festen Raum-, Basis-, System-, Kampf- und UI-Szenen erfassen; Langzeitläufe, Szenenwechsel, Resize, Minimieren/Wiederherstellen und Gerätefehler auf Hänger, Abstürze und Ressourcenlecks prüfen. Erst Messungen gegen einen dokumentierten Ausgangswert gelten als Optimierungsnachweis.
+-  - [x] Zwei 300-Frame-Messpunkte in der M01A-Freeport-7-Szene mit CPU-/Frameintervall-Perzentilen und asynchronen GPU-Passzeiten exportiert. Die zweite Messung klappte das Trigger-Fenster ein; beide Profile enthalten weiter den Debug-Overlay-Aufwand und stammen aus unterschiedlichen bewegten Intro-Zeitpunkten. Zusätzlich meldete ein Lauf 11 langsame Serverupdates und 59 verworfene Client-Ticks. Das ist ein Diagnosehinweis, kein isolierter Ursachenbeleg. Rohdaten und Einschränkungen: [M01A-Frameprofil](evidence/renderer/m01a-frame-profile-20261015/README.md).
+-  - [x] Slow-Update-Diagnose in einem separaten Release-Lauf ohne Debug-Overlay nach Serverphasen aufgeschlüsselt. Der größte Startspike lag im queued World-Request und der erste aktive FP7-Update im World-Update; innere Ursachen und Optimierungen sind nicht belegt. Details und Laufzeitgrenzen: [M01A-Frameprofil](evidence/renderer/m01a-frame-profile-20261015/README.md).
+-- [ ] Render-Passes mit klaren Ein-/Ausgaben und expliziter Farb-/Tiefenpufferverwaltung vorbereiten.
+-  - [x] Die sechs aktuell profilierten GPU-Phasen besitzen jetzt typisierte IDs
+-    und einen anfänglichen Farb-/Tiefen-Lese-/Schreibvertrag, der auch die
+-    GPU-Timer-Slots steuert. Zielformate, Stencil, Resolve-Abhängigkeiten und
+-    Ressourcenlebensdauer sind inzwischen beschrieben; Stencil- und
+-    Szenenziel-Bindungen werden geprüft; beim AA-Zielaufbau werden SMAA-
+-    Formate/Maße/Stencil sowie MSAA-Samplezahl/Maße geprüft. Statische Prüfungen kontrollieren Lade-/Schreibabhängigkeiten und Read-before-
+-    write in den Passfolgen; Details im
+-    [Forward-Pass-Audit](evidence/renderer/forward-pass-order-audit-20261015.md).
+-  - [x] OpenGL-Audit der aktuellen Screen-, SMAA- und MSAA-Attachments sowie
+-    ihrer Load-/Store-Semantik abgeschlossen. Caller-defined Ausgabeformate
+-    bleiben abstrakt; vier AA-Unterpassverträge sind beschrieben und teilweise gegen die
+-    GPU-Bindungen geprüft. Caller-Outputformat, Treiber-internal-format-Abfrage und API-Laufzeitprüfung
+-    der Load-/Store-Angaben bleiben offen. Siehe
+-    [Target-Attachment-Audit](evidence/renderer/render-target-attachment-contract-20261016.md).
+-  - [x] Bestehende Forward-Aufrufreihenfolge, Opaque-/Transparent-Kommandos, Sterne, Nebel und AA-Resolve im Quellcode erfasst. Der Depth-Prepass-Metadatavertrag ist als optional markiert und liest/schreibt nur SceneDepth; er beansprucht keinen Szenenfarb-Read oder Color-Attachment. Der damals manuelle Hauptpass-Ablauf wurde inzwischen durch den darunter dokumentierten Callback-Scheduler ergänzt. Siehe [Pass-Reihenfolge-Audit](evidence/renderer/forward-pass-order-audit-20261015.md).
+-  - [x] Samplebare Tiefentextur als eigenen Graph-Ressourcentyp vom aktiven Szenen-Tiefenattachment getrennt. SSAO und Soft Particles deklarieren und validieren den DepthTexture-Passausgang beim realen Target-Binding; SSAO deklariert dieselbe Ressource als Quelle. Der Depth-Producer wird als Hauptgraph-Callback geplant; die Postprocess-Kette besitzt zusätzlich ihren eigenen Abhängigkeitsplan.
+-  - [x] Damaliger Zwischenstand: Laufzeitvalidierung an die tatsächlichen Hauptpass-Aufrufe gebunden; pro Frame werden Reihenfolge, doppelte/fehlende Begin-End-Paare und Pflichtressourcen geprüft; optionale Szene-Tiefe und Schatten bleiben ausdrücklich optional. Der wiederverwendete Validator speichert ausgeführte Pässe als Bitmaske. Zu diesem Zeitpunkt wurden Render-Befehle und Targetwechsel noch manuell ausgeführt; der ausführbare Graph folgte später.
+-  - [x] Laufzeitvalidierung für Postprocess-Subpasses ergänzt: SMAA, SSAO, Bloom und Tonemapping prüfen an ihren tatsächlichen Begin-/End-Aufrufen die Ressourcenabhängigkeiten. Verfügbare Hauptpass-Ressourcen und externe Lookup-/Ausgabeziele bilden den Frame-Anfang; optionale Bloom-Eingaben bleiben für Tonemapping optional. `PostProcessExecutionPlan` verwendet den gemeinsam mit `SystemRenderer` genutzten `SystemRenderPassGraph`-Scheduler. Zielbindungen und Ressourcenlebensdauer bleiben backend-/`AntialiasTarget`-seitig; die Laufzeit-/Bildabnahme bleibt offen.
+-  - [x] Damaliger Zwischenstand: Hauptpasses laufen über `ExecuteGpuPass`, prüfen Zielbindungen, schließen Timer/Marker und veröffentlichen Ressourcen erst nach erfolgreichem Draw und Targetabschluss. Fehlgeschlagene Draws erzeugen keine verfügbaren Ressourcen. Die manuelle Aufrufreihenfolge wurde später durch `SystemRenderPassGraph` ersetzt; die Targetbindung bleibt Teil der Callbacks.
+-  - [x] Damaliger Zwischenstand: Laufzeitprüfung der Scene- und Shadow-Map-Attachments folgt den Pflicht-/Optional-Angaben des jeweiligen Passvertrags. Optionale Depth-/Stencil-Attachments werden nicht pauschal verlangt; zwingende Anhänge werden gezielt geprüft. Shadow-Map-Pässe prüfen zusätzlich ihr samplebares Depth-Ziel. Der Scheduler wurde später ergänzt; offene Format- und API-Laufzeitprüfungen sind separat dokumentiert.
+-  - [x] Statische Passvertrag-Prüfung verlangt pro Attachment genau eine Ressource und gleicht Store/Resolve-Verhalten mit den deklarierten Writes ab; Resolve ist nur für Color erlaubt. Source-Attachments bleiben Read-Verträge. Die Metadaten steuern weiterhin nicht selbst die API-Aufrufe.
+-  - [x] Die statische Passfolgenprüfung wertet optionale Reads wie die Laufzeitprüfung aus und verlangt sie nicht als zwingende Eingaben; so sind sequenzielle Prüfläufe auch ohne optionalen Schatten- oder Tiefenpuffer gültig.
+-  - [x] Die Hauptpass-Ausführungsreihenfolge steht in den typisierten Passdeskriptoren und wird von Laufzeitprüfung sowie Scheduler daraus gelesen; der separate Pass-zu-Order-Switch ist entfernt. Der Graph führt die Passcallbacks aus.
+-  - [x] `SystemRenderPassGraph` topologisch sortiert und führt Hauptpässe, Physics-Hook, Debug-Overlay und optionalen AA-/HDR-Resolve anhand deklarierter Read-/Write-Ressourcen und expliziter Abhängigkeiten aus. Derselbe Scheduler kompiliert und führt den Postprocess-Plan aus. Ressourcenproduzenten dürfen unabhängig von ihrer Registrierungsreihenfolge stehen; Read-after-write, Write-after-read und Write-after-write werden eingeordnet. Pflicht-Reads ohne Producer, fehlende explizite Vorgänger und Zyklen werden vor Ausführung der Callbacks abgewiesen. Knoten und Abhängigkeitspuffer werden zwischen Frames wiederverwendet; bei gleicher exakter Passstruktur und denselben externen Ressourcen wird auch die topologische Ausführungsfolge wiederverwendet. Eine Strukturänderung löst eine erneute Kompilierung aus. Targetwechsel und Attachments bleiben in den Passcallbacks. Die Abhängigkeitsauflösung nutzt keine pro Kompilierung erzeugten lokalen Closure-Helfer mehr. Sämtliche `SystemRenderer`-Framegraph-Callbacks (Setup, Clear, Depth, Opaque, Sterne/Nebel, Transparent, Hooks, Debug und AA-Resolve) sowie der Shadow-Map-Zeichencallback verwenden langlebige Delegates; die Callback-Registrierung dieser GPU-Pässe erzeugt keine pro Frame eingefangenen Lambdas mehr. Laufzeit-/Bildabnahme und Frame-Profiling bleiben offen.
+-  - [x] Der Hauptpass-Tracker veröffentlicht nach erfolgreichem Draw nur deklarierte Writes, deren optionale Attachments am konkreten Target vorhanden sind. Fehlende oder unbekannte optionale Anhänge werden nicht als verfügbare Frame-Ressourcen ausgegeben. Die Passplanung erfolgt im Graphen; Targetwechsel bleiben in den jeweiligen Callbacks.
+-  - [x] Gebundene Backend-Renderziele stellen Farb-/Tiefen-/Stencil-Präsenz und ein bekanntes Farbformat bereit. `SystemRenderer` weist Ziele zurück, denen laut Passvertrag zwingende Anhänge fehlen; GL-MSAA meldet das Farbformat nur für bekannte sized-Formate. Swapchainformat und Desktop-GLs unsized-MSAA-Storage bleiben unbekannt.
+-  - [x] `AntialiasTarget` prüft beim Erzeugen die tatsächlichen aktiven Farb-/Tiefenattachments und für SMAA auch Stencil an Kanten- und Gewichtsziel; bekannte Zielformate müssen dem gewählten LDR-/HDR-Pfad entsprechen. Unbekanntes Desktop-MSAA-Format bleibt zulässig und wird nicht geraten.
+-- [ ] Render-Target-Resize, minimierte Fenster, Scissor-/Viewport-Wechsel und Geräteverlust für zusätzliche Pässe absichern.
+-  - [x] Die aktiven System-Targets für Antialias/HDR, Soft-Particle-Tiefe und Shadow-Maps werden nach Renderer-Rolle in `RendererTargetResources` ersetzt und freigegeben. Ersetzte Ressourcen bleiben bis zur erfolgreichen Konstruktion des Nachfolgers im Owner registriert; aktive Targets und fehlgeschlagene Retirements werden beim Renderer-Abbau in umgekehrter Erwerbsreihenfolge abgearbeitet. Resize-/Minimize-/Restore-Laufzeitabnahme, Geräteverlust und Editor-/Offscreen-Targets bleiben offen.
+-  - [x] `AntialiasTarget` registriert alle während des Aufbaus erzeugten GPU-Ressourcen in einem idempotenten `RenderResourceScope`. Teilaufbauten werden auch bei Konstruktionsfehlern in umgekehrter Erzeugungsreihenfolge abgebaut; die Postprocess-Pässe werden vor den von ihnen geliehenen Szenen-/SMAA-Zielen freigegeben. Fehler beim Freigeben einer Ressource verhindern die Freigabe der übrigen nicht. Der `SystemRenderer`-Pfad wurde mit HDR/Bloom/SSAO/SMAA unter OpenGL auf 960×540 → 1280×720 sowie Minimize/Restore geprüft; siehe [Resize-Laufzeitnachweis](evidence/renderer/postprocess-window-resize-20261017/README.md). Editor-/Offscreen-Targets, Fehler-Injektion, Geräteverlust und Cross-Backend-Wiederherstellung bleiben offen.
+-  - [x] `SystemRenderer.Draw()` überspringt Frames mit Breite/Höhe 0. Bei geänderter Größe oder Konfiguration erstellt es Ersatz-Targets zuerst und übernimmt sie erst nach erfolgreicher Konstruktion; die bisherigen Targets bleiben bis dahin nutzbar. Bei abgeschalteten Funktionen werden nicht mehr benötigte Targets freigegeben. Das belegt nur diesen System-Renderer-Pfad; Editor-/Offscreen-Targets, Wiederherstellungstests und Geräteverlust bleiben offen.
+-  - [x] `SystemRenderer.Draw()` und `AntialiasTarget.SMAABlit()` stellen RenderTarget, Viewport-/Scissor-Stacks und ihre geänderten RenderContext-Zustände in `finally` wieder her. `SystemRenderer` stellt auch `ThnCamera.DefaultZ()` zurück und leert die Frame-Objektliste nach Fehlern. Fehler-Injektion und reguläre Resize-/Minimize-/Restore-Läufe bleiben als Laufzeitprüfung offen. Details im [Fehlerpfad-Audit](evidence/renderer/render-target-exception-path-audit-20261015.md).
+-  - [x] Billboard-Draws stellen Depth-Test, Cull-Zustand und den Batch-Hash auch dann wieder her, wenn ein Backend-Draw eine Exception wirft. Das schützt nachfolgende transparente Passes vor übernommenem Zustand; eine gezielte Fehler-Injektion im Backend ist noch nicht ausgeführt.
+-  - [x] OpenGL prüft die Vollständigkeit normaler, multisample- und resolve Framebuffer beim Anlegen. Bei unvollständigen Zielen werden die erzeugten GL-Objekte freigegeben und der Statushexwert in der Exception ausgegeben; Laufzeitprüfung auf mehreren Treibern bleibt offen.
+-  - [x] Bloom und der separable Blur versuchen fehlgeschlagene Target-Erstellung nach einer Änderung der Zielgröße oder des Blur-Formats erneut. Ein Fehler bei unveränderter Konfiguration bleibt bis zur nächsten Größen-/Formatänderung gedrosselt; Wiederherstellung nach Geräteverlust ist damit nicht abgedeckt.
+-- [ ] GPU-Zeit und Speicherverbrauch pro Pass messbar machen; Effekte müssen einzeln abschaltbar und nach Hardwareprofil skalierbar sein.
+-  - [x] Bereitschaftsaudit abgeschlossen: Timer-Query-API und Query-Aufruf fehlen in OpenGL-/RenderContext-Abstraktion; die lokale Mesa-Laufzeit meldet `GL_ARB_timer_query`. Passgrenzen und eine nicht blockierende Abfragefolge sind dokumentiert. Speicherwerte sind noch nicht als Messung verfügbar. Siehe [GPU-Timer-Query-Audit](evidence/renderer/gpu-timer-query-readiness-audit-20261015.md).
+-  - [x] OpenGL-Timer-Queries für Depth, Opaque, Sterne/Nebel, Transparenz und AA-Resolve eingebaut. Vier Query-Slots pro Pass werden ohne blockierendes Ergebnis-Polling wiederverwendet; das Debug-Overlay zeigt Messwert und Sample-Alter. CSV-Zeilen erfassen den zuletzt verfügbaren GPU-Messwert samt fortlaufend aktualisiertem Alter; nicht verfügbare Samples bleiben leer. Das Alter zählt Aufrufe von `SystemRenderer.Draw()` und hängt nicht von `RenderContext.FrameNumber`/`ClearAll()` ab; ein Regressionstest prüft das Weiterzählen. Die Abfrage läuft nur bei geöffnetem Debug-Overlay. Null und OpenGL ohne Timer-Query melden keine Unterstützung. Das Debug-Overlay zeigt geschätzte geladene Texturbytes, Surface-Map- und Tangentenbytes; das Spiel-Debugfenster zusätzlich die geschätzten Bytes des aktiven System-AA-Ziels. Diese Werte sind unvollständig und keiner Render-Pass-Attribution zugeordnet; Editor-/Offscreen-Targets, beliebige Buffer und Treiberallokationen bleiben offen.
+-  - [x] AA-Zeitmessung in SMAA Edge Detection, Blend Weights, Neighborhood Blend oder MSAA Color Resolve aufgeteilt. Der angezeigte `AA resolve`-Wert bleibt als Summe der drei SMAA-Unterpässe beziehungsweise als MSAA-Resolve-Zeit erhalten. CSV-Spaltennamen folgen jetzt den Passnamen einschließlich Frame-Clear und AA-Unterpässen. Ein NAP-only OpenGL-Profil bestätigt alle drei SMAA-Samples in einer M01A-Intro-Szene; die kontrollierte A/B- und Mehrhardware-Abnahme bleibt offen. Rohdaten: [SMAA-Unterpass-Profil](evidence/renderer/gpu-timer-aa-subpasses-20261016/README.md).
+-  - [x] HDR-Nachbearbeitung besitzt eigene GPU-Timer-Unterpässe für Bloom-Extraktion, horizontalen Blur, vertikalen Blur und Tonemapping. Der MSAA-Timer endet vor dem Tonemapping, damit OpenGL-Zeitqueries nicht verschachtelt laufen. Laufzeitmessungen und FPS-Vergleich bleiben offen.
+-  - [x] Der Debug-Overlay weist den geschätzten Speicher für Bloom-Extraktion/Blur-Targets sowie das dedizierte Tonemap-Ausgabeziel getrennt aus. Es sind Zielgrößen-Schätzungen ohne Treiberallokationen, nicht pro GPU-Pass gemessener Speicher; Speicher für Shader, Buffer und interne Treiberressourcen bleibt im Gesamttotal unvollständig.
+-  - [x] Der Frame-Profil-CSV-Export enthält pro Frame die geschätzten AA-, Bloom- und Tonemap-Zielbytes aus dem Space-Gameplay-Debugfenster. Diese Werte sind Zielgrößen-Schätzungen; Samples außerhalb des Space-Gameplay-Fensters bleiben leer, und Treiber-/interne Allokationen sind nicht erfasst.
+-- [ ] Referenzszenen und feste Screenshots für Raum, Basis, Sternensystem, Nebel, Partikel und LancerEdit-Vorschau festlegen.
+-  - [x] Ein/Aus-Reaktion des Hi02-Schattenpasses im selben pausierten Release-Lauf mit 0,46 s Abstand dokumentiert. Das Performance-Menü verdeckt einen großen Teil des Bildes; Bewegungen in der offenen Szene verhindern eine frame-identische Qualitäts- oder Leistungsaussage. Siehe [Schatten-A/B](evidence/renderer/shadow-map-hi02-live-toggle-20261017/README.md).
+-  - [ ] Abnahmeszenen je Feature mit reproduzierbarem Kamerastand, Simulationszeitpunkt, sauberer HUD-Ausgabe und getrennten Renderer-Kostenprofilen erstellen.
+-
+-### 2. Bumpmapping / Normalmaps vervollständigen
+-
+-- [x] Opt-in Surface-Normalmaps über Metadaten, Settings, CPU-/GPU-Residency und
+-  BasicMaterial anbinden; authored FVF-Tangenten sowie generierte VMesh-/DFM-
+-  Tangenten und prozedurale QuadSphere unterstützen. UV0/UV1 werden für
+-  VMesh/DFM berücksichtigt. Umsetzung und Testgrenzen stehen im
+-  [Grafik-Umsetzungsplan](graphics-implementation-plan.md).
+-- [x] LancerEdit-Live-Schalter für Surface-Normalmaps und generierte Tangenten
+-  ergänzen; Sichtbarkeit ist für repräsentative Retail-Schiff-, Basis- und
+-  Planetenvorschauen nachgewiesen.
+-- [x] CPU-Referenz und GPU-Readback desselben VMesh-Rasterpunkts mit
+-  identischem projiziertem UV, Linear/Repeat-Sampler, Mip 0 und TBN abgleichen.
+-  Der SDL3/OpenGL-Probe mit NAP-BC5-Karte stimmt der CPU-Bilinearsample nach
+-  8-Bit-Quantisierung bis auf 1/255 mit dem GPU-Beleuchtungsreadback überein;
+-  Normalmap-Shader und Texturslot 2 waren aktiv. Synthetischer FVF-VMesh-Draw;
+-  Retail-/In-Game-Bildqualität und Leistung bleiben offen.
+-- [x] Negative World-Skalierungen erhalten die TBN-Händigkeit und kehren bei
+-  einseitigen Materialdraws die aktive Cull-Fläche um. Opaque- und sortierte
+-  Draws stellen den vorherigen Cull-Zustand samt Cull-Fläche auch nach Fehlern
+-  wieder her.
+-- [ ] Kontrollierte In-Game-Bildpaare und GPU-/CPU-Kosten mit festem
+-  Simulationszeitpunkt für mehrere Materialklassen abnehmen. Für DFM eine
+-  passende Charakter-Normalmap verwenden; die bisherige geliehene Schiffskarte
+-  belegt nur den Pfad, nicht die Bildqualität.
+-- [ ] Spiegel-UVs, harte Normalenkanten, degenerierte UVs und nichtuniforme
+-  Skalierungen auf NaNs, Nähte und schwarze Materialien prüfen.
+-  - [x] CPU-Regressionen decken gespiegelte UV-Händigkeit und endliche,
+-    orthogonale Fallback-Tangenten bei degenerierten UVs für VMesh und DFM ab.
+-    Nichtuniforme positive und negative Weltskalierungen behalten im
+-    inverse-transponierten Normalpfad die Tangentenorthogonalität.
+-  - [ ] Visuelle GPU-/NAP-Abnahme von UV-Nähten, harten Normalenkanten,
+-    schwarzen Materialien und negativen Skalierungen bleibt offen.
+-- [x] Materialzuordnung im LancerEdit-Render-Tab anzeigen: Materialtyp,
+-  Diffuse-Textur, MAT-/Surface-Normalmap, UV-Kanal und Stärke sowie vorhandene
+-  Roughness-/Metallic-Werte für CMP-/VMesh- und DFM-Modelle.
+-- [x] Surface-Profil in LancerEdit auswählbar und dauerhaft in der Editor-
+-  Konfiguration speichern; beim Datenladen/Neuladen anwenden. Der Model Viewer
+-  zeigt das aktive Profil und Katalogdiagnosen.
+-- [x] Ergänzende Surface-Zuordnungen im LancerEdit-Render-Tab bearbeiten,
+-  Referenzknoten aus den geladenen Texturbibliotheken validieren und in einer
+-  separaten INI im Editor-Workspace speichern. Im NAP-Modus liegt sie im
+-  exportierten Workspace-Overlay; nach dem Speichern ist „Reload Data“ nötig.
+-- [ ] Editor-Ablauf im laufenden UI visuell abnehmen und den exportierten
+-  NAP-Stand in einer Client-Installation mit passendem `surface_maps`-Eintrag
+-  laden. MAT-eigene Normalmaps bleiben schreibgeschützt und haben Vorrang.
+-- [ ] Filterung, BC5-Kompression und Mip-Stufen auf Schimmern und
+-  Specular-Artefakte untersuchen; Farbräume dokumentieren.
+-- [ ] Height-/Bump-Daten inventarisieren. MAT-Schema- und Retail-Bestandssuche
+-  fand bislang keinen bestätigten Height-/Bump-Map-Slot oder benannten Asset;
+-  die Suche schließt nicht-textuelle Namen und Höheninformation in normalen
+-  Bilddaten nicht aus. Semantische Texturprüfung steht noch aus; siehe
+-  [Inventar](evidence/renderer/height-bump-inventory-20261015.md). Parallax
+-  bleibt optional und wird nur bei belegten Assets und gemessenen Kosten
+-  prototypisiert.
+-
+-### 3. Blur und Post-Processing
+-
+-- [x] Allgemeine Post-Processing-Pass-Schnittstelle ergänzen; SMAA und bestehende Render-Targets dabei als Referenz für Ressourcenlebensdauer und Skalierung verwenden. Der `SystemRenderPassGraph` kompiliert SSAO, Bloom, Tonemapping und SMAA topologisch anhand ihrer Ressourcenreads und -writes; die immutable Ausführungsreihenfolge wird für jeden Postprocess-Lauf wiederverwendet. Pflichtressourcen werden beim Planen und unmittelbar vor jedem Pass geprüft; optionale Bloom-Ausgaben gelten nur dann als vorhanden, wenn der Pass sie tatsächlich erzeugt hat. Pässe werden in umgekehrter Ausführungsreihenfolge freigegeben. Zentral geplante Render-Targets und ein targetübergreifender GPU-Ressourcen-Lifecycle bleiben offen.
+-  - [x] Bloom, Tonemapping und SMAA laufen über eine ausführbare `IPostProcessPass`-Kette in Abhängigkeitsreihenfolge. HDR führt Bloom vor Tonemapping aus; bei HDR-SMAA geht das tonemapte Zwischenbild an den SMAA-Pass. LDR-SMAA nutzt denselben finalen Passpfad. Targets bleiben backendabhängig in `AntialiasTarget`; ein allgemeines Render-Graph-Lifecycle-Modell und weitere Post-Effects bleiben offen.
+-  - [x] NAP-only-Laufzeitvergleich der vier Modi LDR/HDR × SMAA/kein AA in derselben M01A-Intro-Kamerafahrt aufgenommen. Debug-Overlay bestätigt die aktiven SMAA-, Bloom- und Tonemap-Pässe samt GPU-Samples; Vergleichsbilder und Bedingungen: [Vier-Modi-Laufzeitvergleich](evidence/renderer/postprocess-four-mode-ab-20261017/README.md). Die vier Starts liegen bei 20,85–22,33 s Weltzeit, sind daher kein pixelgenauer Vergleich oder kontrollierter FPS-Benchmark. Resize 960×540 → 1280×720 und Minimize/Restore liefen in einem HDR+SMAA-OpenGL-Smoke weiter; nach Restore waren 1280×720 und aktive Passsamples sichtbar. Fehler-Injektion, längere Zyklen und weitere GPUs/Backends bleiben offen.
+-- [x] Separable Gaussian Blur als erster kontrollierter Effekt mit variabler Kernelbreite und Auflösungs-Skalierung. Die sichtbare Farb-/Alpha-Halo-Abnahme bleibt offen.
+-  - [x] Den horizontalen/vertikalen separablen Gauß-Blur als wiederverwendbaren `SeparableGaussianBlurPass` aus Bloom herausgelöst. Die Zielauflösung ist von 1/8 bis 1/1 einstellbar (`render_bloom_resolution_scale`, CLI und Effekte-Regler); die bilinear gepaarten Gaussian-Taps sind von 1 bis 4 Paaren einstellbar (`render_bloom_kernel_pairs`, CLI und Effekte-Regler; Standard 2 erhält den bisherigen Kernel). Bloom-Extraktion bleibt bei Viertelauflösung. Visuelle Farb-/Alpha-Halo-Abnahme und GPU-Kostenmessung bleiben offen.
+-- [ ] Verwendungsfälle getrennt spezifizieren: weicher UI-/Vorschau-Hintergrund, selektiver Tiefenunschärfe-Effekt und kamerabasierte Bewegungsunschärfe sind unterschiedliche Effekte.
+-- [ ] Für kamerabasierte Motion Blur Bewegungsvektoren und Disocclusion-Artefakte untersuchen; vorhandene Partikel-Motion-Blur nicht als Ersatz behandeln.
+-- [ ] Optionalen Radial-/Zoom-Blur für klar begrenzte Cutscene- oder Effektfälle prüfen.
+-
+-### 4. Licht, Tonemapping und Bildqualität
+-
+-- [x] M01A-Intro: Die fast schwarzen Stations- und Schiffsrümpfe in Freeport 7
+-  kamen vom ungebundenen EnvMap-Cube (`ResourceId::0`) im `DcDt`-Shader bei
+-  `EnvMapStrength = 1`; RenderDoc zeigte zugleich einen gültigen Diffuse-Sample,
+-  fünf Lichter und einen schwarzen Shaderausgang. `BasicMaterial.Use()` hatte
+-  den aufgelösten `TextureCube` an einen 2D-only-Binder übergeben. Patch 2123
+-  bindet den Cube direkt. Der Release-Build und ein NAP-only-Lauf mit
+-  ausgeschalteten Normalmaps erreichten die M01A-Cutscene; die Station wird
+-  sichtbar beleuchtet gezeichnet. Eine zusätzliche Laufzeitaufnahme zeigt auch
+-  Schiffe und Effekte. Die Aufnahmen sind wegen unterschiedlicher Kamera- und
+-  Szenenzeitpunkte kein pixelgenauer A/B-Vergleich. Vollständige Retail-Parität
+-  und weitere Materialien bleiben eigene Prüfpunkte. Siehe
+-  [Vergleichsbilder und NAP-Laufzeitnachweis](renderer-comparison-gallery.md#intro-m01a-freeport-7-cubemap-fehlerbehebung),
+-  [Laufzeitdetails](evidence/renderer/intro-m01a-runtime-20261015/README.md)
+-  und [RenderDoc-Befund](evidence/renderer/intro-m01a-dark-objects-20261015.md).
+-- [ ] Bekannten Intro-Grafikfehler prüfen: Beim frontseitig gezeigten
+-  `ge_large_transport` scheinen blinkende Hecklichter/Glows durch den Rumpf.
+-  Der Fehler bestand bereits vor den jüngsten Renderer-Änderungen. Den
+-  Billboard-Tiefentest aus
+-  [ship-light-occlusion.md](ship-light-occlusion.md) in der gemeldeten frontalen
+-  Kameraperspektive visuell abnehmen. THN und M01A-Lauf bestätigen
+-  `ship_ge_large_transport_1` auf `Path_1`; die vorhandenen schrägen Frames zeigen
+-  den langen Transporter-Rumpf vor Freeport 7. In Frame 885 bestehen zwei
+-  Sprite-Draws den aktiven `LessEqual`-Tiefentest. Der Pixel-Draw schreibt bei
+-  Tiefe `0.99183` über zuvor gespeicherte Tiefe `0.99824`. Die per Draw
+-  ausgelesenen Vertexpositionen liegen bei `(3599.778, 1172.608, -20999.902)`,
+-  nahe der Freeport-7-Position `(3600, 1000, -21000)`. Diese Pixel-History
+-  betrifft Stationslichter und belegt keinen Transporter-Hecklichtfehler.
+-  Frontwinkel mit den tatsächlichen Hecklichtern und Tiefenvergleich bleiben
+-  offen. Ein NAP-only-Lauf am 2026-10-18 bestätigt `fp7_transport1` in der
+-  aktiven M01A-Szene, aber noch nicht den sichtbaren Rumpf oder die Blinkpixel;
+-  siehe [Lauf 20](evidence/renderer/ship-light-occlusion-m01a-run20-20261018/README.md).
+-  RenderDoc-Einmal-Replay und
+-  Pixel-History am Backbuffer funktionieren. Die finale frontale Aufnahme sowie
+-  Hardpoint-/Transformprüfung sind offen. Die
+-  tatsächlich von `transport_large.cmp` verwendeten Materialien aus
+-  `utility_transport.mat` sind `DcDt`/`DcDtEt` und damit im aktuellen
+-  `BasicMaterial`-Pfad opak; transparente Rumpfteile sind als Ursache nicht
+-  belegt. Die THN-Kamera folgt `Path_shot1` 35 Sekunden; Details der offenen
+-  Reproduktion stehen in [ship-light-occlusion.md](ship-light-occlusion.md).
+-- [x] HDR-Belichtungskompensation `render_hdr_exposure` (-4 bis +4 EV, Standard 0) ergänzt. Sie wird vor ACES via `exp2(EV)` angewandt, ist über `--render-hdr-exposure` und den Effekte-Regler steuerbar und bleibt bei HDR aus wirkungslos. Visuelle Kalibrierung und GPU-Kostenmessung für mehrere Szenen bleiben offen.
+-- [x] Opt-in HDR-Ausgabestufe mit Half-Float-Szenenziel, float MSAA/SMAA-Eingang und ACES-Tonemapping; per `render_hdr`, `--render-hdr=on|off` und Effects-Checkbox schaltbar. Alle 18 aktuellen Client-Fragmentshader schreiben im HDR-Ziel lineare RGB-Werte, PBR bleibt nativ linear, und Clear-Farben werden nach sRGB-EOTF dekodiert. Dadurch erfolgt auch transparentes Blending im linearen Ziel. Die UI folgt im Spielzustand nach `SystemRenderer.Draw()` und damit nach dem Tonemapping. Beleuchtete Legacy-Materialeingänge sind in der nachfolgenden Stufe ergänzt. Ein frischer NAP-only-Lauf belegt die sichtbare Tonemap-Ausgabe auf OpenGL/Mesa Intel HD Graphics 4600; nicht beleuchtete Effektshader sowie andere Backends und GPUs bleiben offen. Details: [HDR-Linear-Ausgabe](evidence/renderer/hdr-linear-output-implementation-20261016.md) und [HDR/Bloom-Laufzeitprüfung](evidence/renderer/hdr-bloom-nap-ab-20261016/README.md).
+-- [x] HDR-Linear-Eingänge in den sieben beleuchteten Legacy-Materialfragmentshadern sowie den zehn zusammengesetzten Legacy-/Effektfragmentshadern: diffuse, Material-, Vertex-, Licht- und Fogfarben sowie Sprite-, Nebel-, Sonnenstrahl-, Zone-, Navmap- und Nomad-Farben werden vor Beleuchtung oder Farbverrechnung linearisiert. Alpha bleibt erhalten; der HDR-aus-Pfad ist unverändert. Die sRGB-Annahme für Licht-/Fogfarbdaten und die sichtbare Wirkung sind noch nicht mit einer NAP-Laufzeitaufnahme bestätigt.
+-- [x] Erste HDR-Bloom-Stufe mit luminanzbasierter Schwelle, Viertelauflösung und horizontalem/vertikalem Gauß-Blur; separat per `render_bloom` und `--render-bloom=on|off` steuerbar, erfordert `render_hdr`.
+-- [x] Schwelle (`render_bloom_threshold`, 0–8, Standard 1) und Stärke (`render_bloom_strength`, 0–2, Standard 0,18) in der Clientkonfiguration und per CLI-Override einstellbar; Werte werden validiert.
+-- [x] Effekte-Tab-Regler für Schwelle und Stärke; Werte werden beim Bestätigen der Optionsseite übernommen und gespeichert.
+-- [x] Gauß-Blur-Radius des Bloom-Passes von 0,25 bis 4,0 einstellbar gemacht; Menü, Clientkonfiguration und `--render-bloom-radius` verwenden denselben validierten Wert (Standard 1,0). Die normalisierten Fünf-Tap-Kernelgewichte bleiben konstant, nur der Abtastabstand skaliert.
+-- [ ] Bloom visuell kalibrieren und die einfache Viertelauflösung bei Bedarf durch eine mehrstufige Pyramide ersetzen.
+-  - [x] NAP-only-M01A-Lauf zeigt den Radius-Effekt: Radius 4 erzeugt einen breiteren Sonnenhalo als 0,25. Separate Starts mit bewegter Kamera; kein pixelgenauer A/B oder FPS-Nachweis. Bilder und Bedingungen: [Bloom-Radius-Lauf](evidence/renderer/bloom-radius-runtime-20261017/README.md).
+-  - [x] HDR-Bloom verwendet jetzt drei gefilterte Auflösungsstufen (1/4, 1/8 und 1/16 des Szenenbildes), mischt sie gewichtet im Tonemapper und fällt bei fehlenden kleinen Targets auf verfügbare Stufen zurück. Jede Blur-Richtung ist separat GPU-profiliert; die zusätzlichen Renderziele fließen in die Bloom-Speicherschätzung ein. Release-Testbuild und fünf Bloom-Passvertragstests bestehen. Der NAP-only-Hi02-Smoke auf OpenGL 4.6/Mesa bestätigt alle drei Stufen; der Einzelcapture zeigt 0,048/0,012 ms für Medium und 0,005/0,005 ms für Wide. Er lief bei ca. 30,7 FPS mit offenem Debug-Overlay und Simulations-Overload; das ist keine FPS- oder Bildqualitätsabnahme. Same-pose-Vergleich und Gewichtungs-/Radiuskalibrierung bleiben offen: [Bloom-Pyramiden-Smoke](evidence/renderer/bloom-pyramid-hi02-20261017/README.md).
+-- [ ] Sonnen-Lens-Glow anhand reproduzierbarer NAP-Szenen visuell abnehmen; `lens_flare` und die Stern-Intensitäts-/Zonen-Fades bleiben separate offene Datenpfade ([Parser-/Laufzeitabgleich](data-client-plan.md)).
+-  - [x] `lens_flare`-Datenpfad auditiert: `StararchIni` und `Star` parsen Profile/Referenzen, aber `GameItemDb.InitStars` übernimmt nur StarGlow, LensGlow und Spines; `Sun` und `SunRenderer` haben keinen Flare-Pfad. Retail-Funktion `FUN_00511248` ruft beim Einlesen eines Star-`lens_flare`-Verweises `FUN_0050f3a0` auf und wertet deren Rückgabewert für den Parse-Status aus. Der Parser liest Shape, Min-/Max-Radius und sechs Floatwerte je Bead. `Data/NAP/World/solar/StarArch.ini` enthält 7 Profile mit 61 Beads, auf die 38 Sterne verweisen. Die Bedeutung der Bead-Komponenten und der Retail-Zeichnung ist noch nicht nachgewiesen; siehe [Retail-Stringtrace](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-15-lens-flare-trace/Freelancer-lens-flare.md>) und [Parser-Aufrufer](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-15-lens-flare-trace/Freelancer-lens-flare-loader-caller.md>).
+-  - [x] `lens_glow`-Form, Farbe und Radius aus `StarArch.ini` bis zum `SunRenderer` durchreichen und über `render_sun_lens_glow` / `--render-sun-lens-glow=on|off` einzeln schaltbar machen.
+-  - [x] Lens-Glow-Farben wie `StarGlow` als Floatfarben 0–1 parsen; Retail und NAP liefern für alle 14 RGB-Farbwerte 0–1. Die vorherige 255er-Normierung machte die Farben zu dunkel.
+-  - [x] `glow_fade_in_seconds` / `glow_fade_out_seconds` übernehmen und beim Eintritt in bzw. Austritt aus dem Kamerafrustum anwenden.
+-  - [x] Nichtendliche Fade-Dauern führen zu einem direkten Zustandswechsel; nichtendliche oder negative Framezeiten erzeugen keinen NaN-Alpha.
+-  - [x] M01A-Laufzeitprobe: `--render-sun-lens-glow=on|off` verändert die sichtbare Sonnendarstellung; beide NAP-only-Aufnahmen entstanden zwei Sekunden nach `timer_escort_launch`. Bewegte Kamera und fehlender Originalvergleich verhindern eine pixelgenaue Abnahme. Siehe [Laufzeitnachweis](evidence/renderer/sun-lens-glow-ab-20261015/README.md).
+-  - [ ] Renderer-A/B-Bilder bei sichtbarer und verdeckter Sonne aufnehmen und Radius, Farbe, Blendmodus sowie Fade-Verhalten gegen das Original abstimmen.
+-- [ ] Image-Based Lighting und konsistente Umgebungsreflexionen für den PBR-Pfad prüfen.
+-  - [x] Der Data-Generator erzeugt deterministische GGX-vorgefilterte Specular-Mips für die drei NAP-Cubemaps; `[CubeMap] prefiltered=true` wählt ihre Roughness-Stufen im PBR-Shader. Legacy-Cubes ohne Metadatum samplen für Specular weiter Level 0. Diffuse Irradiance, Bildqualität an einem cubemapgebundenen Retail-Modell und GPU-Kosten bleiben offen.
+-  - [x] Separate 16×16-Cubemaps liefern cosine-konvolvierte diffuse Irradiance (E/pi); `[CubeMap] irradiance_file` wird im PBR-Shader unabhängig von der GGX-Specular-Kette ausgewertet. Legacy-Kataloge behalten den bisherigen letzten-Mip-Fallback. Visuelle Retail-Abnahme und GPU-Kosten bleiben offen.
+-  - [x] Surface-Normalmaps, generierte Tangenten, Roughness/Metallic-Maps und PBR-Cubemap-Reflexionen lassen sich im laufenden Client einzeln umschalten. Änderungen werden sofort auf den aktiven ResourceManager angewendet; beim Abschalten werden nicht mehr benötigte Tangenten-/Surface-Texturressourcen freigegeben. Alle vier Schalter und die sofortige Konfigurationsaktualisierung sind im selben NAP-only-Spielprozess geprüft; siehe [Laufzeitnachweis](evidence/renderer/ibl-live-options-20261018/README.md).
+-  - [x] Diffuse Irradiance ist nun getrennt von Specular-Reflexionen steuerbar (`pbr_diffuse_ibl`, `--render-pbr-diffuse-ibl=on|off`, Performance-Option und LancerEdit ModelViewer). Der kontrollierte ModelViewer-A/B auf Ku-Fighter bestätigt die sichtbare diffuse IBL-Reaktion; eine In-Game-Abnahme und GPU-Kostenmessung stehen offen.
+-  - [ ] Sichtbare PBR-/IBL-Wirkung mit fester Kamera an einem bekannten, cubemapgebundenen Schiff oder Modell vergleichen. Im pausierten M01A-Lauf änderten sich im sichtbaren Objektcrop außerhalb des Menüs 5.931 Pixel (mittlere RGB-Abweichung 1,44/255), während der Hintergrundcrop pixelgleich blieb. Das belegt eine Same-Pose-Reaktion auf den Live-Schalter, aber weder die MAT-Cubemapbindung des Objekts noch die Reflexionsqualität; Details: [Laufzeitnachweis](evidence/renderer/ibl-live-options-20261018/README.md).
+-  - [x] LancerEdit-Vorschau: beim LI_ELITE-Mesh änderte der Environment-Reflection-Schalter im festen Viewport 39.467 Pixel im Objektcrop; der Hintergrund blieb pixelgleich. Das bestätigt eine lokale Cubemap-Reaktion, aber keine Retail-Orientierung, isolierte diffuse Irradiance/GGX-Mipqualität oder GPU-Kosten. [Aufnahmen und Bedingungen](evidence/renderer/ibl-modelviewer-ab-20261017/README.md).
+-  - [x] LancerEdit-Vorschau: beim Ku-Fighter mit aktiven Surface-Roughness/Metallic-Maps und `envcube_space` als Preview-Override änderte der isolierte Diffuse-IBL-Schalter 6.405 Pixel im Schiffausschnitt; der Hintergrundausschnitt blieb pixelgleich. Das bestätigt den separaten Shaderbeitrag für ein PBR-Material. Es ist keine Retail-Umgebungszuordnung, In-Game-Bildqualitäts- oder GPU-Kostenabnahme. [NAP-Lauf und Bilder](evidence/renderer/pbr-diffuse-ibl-kufighter-20261018/README.md).
+-- [ ] Systemweite Umgebungsbeleuchtung an Farbe und Intensität der jeweiligen Sonne koppeln. Unterschiedliche Sonnenfarben (z. B. grün, rot oder weiß) sollen die diffuse Grundbeleuchtung aller passenden Szenenobjekte konsistent beeinflussen; Datenquelle, Legacy-Fallback und Zusammenspiel mit PBR/IBL anhand reproduzierbarer NAP-Szenen prüfen.
+-  - [x] Datenpfad-Audit: Systemambient, persistente `LightSource`-Farben und sichtbare `StarGlow`-Sprites sind getrennt; ein einzelner Farbmittelwert scheitert bei Mehrfachsonnen. Anforderungen und Retail-Gegenproben: [Sonnen-Ambient-Audit](evidence/renderer/sun-colored-ambient-audit-20261015.md).
+-  - [x] Opt-in Sonnenfarbanteil pro Objekt aus persistenten Systemlichtquellen ergänzt. Der lokal nach Attenuation gewichtete Lichtfarbmittelwert wird mit 25% Stärke in das authored Ambient überblendet; eine Rec.-709-Skalierung erhält die Ambient-Luminanz, solange der Wertebereich es zulässt. LDR-Werte bleiben auf 1 begrenzt; Half-Float-HDR darf Werte über 1 an die Tonemap-Stufe weitergeben. Transiente Effekte bleiben ausgeschlossen. `render_sun_ambient` und `--render-sun-ambient=on|off` schalten ihn separat. Siehe [Datenpfad-Audit](evidence/renderer/sun-colored-ambient-audit-20261015.md).
+-  - [x] Fünf fokussierte Regressionstests für den ausgeschalteten Legacy-Pfad, rote/grüne/weiße Lichtfarben und lokale Mehrfachlicht-Gewichtung bestanden.
+-  - [x] Sonnenambient im Effekte-Tab sofort auf die laufende Szene anwenden und dauerhaft speichern, ohne die Pause zu verlassen; dadurch sind A/B-Wechsel bei identischer Szene möglich.
+-  - [x] Der Klickpfad aktualisiert den Options-Snapshot `this.opts`. Ein NAP-Rücktest fand dennoch eine Überschreibung in `do_goback()`; Patch 2154 übernimmt dort jetzt den aktuell angewendeten Rendererwert.
+-  - [x] NAP-Laufzeitrücktest bestanden: Sonnenambient im pausierten Effekte-Tab ausgeschaltet, zum Spiel zurückgekehrt und Optionen erneut geöffnet; `client.ini` blieb `false` und die Checkbox war weiterhin leer. Der Rückweg übernimmt jetzt den aktuellen Rendererwert statt einen abweichenden Widgetwert. Details: [Option-Persistenzprüfung](evidence/renderer/sun-ambient-option-persistence-20261016/README.md).
+-  - [x] Die 25%-Mischung überblendet das authored Ambient mit dem attenuierten Sonnenfarbmittelwert, statt Ambient und Sonnenfarbe kanalweise zu multiplizieren. Rec.-709-Luminanz wird im möglichen Wertebereich erhalten; LDR wird begrenzt und Half-Float-HDR darf Highlights über 1 behalten. Rot-/Grün-/Weiß-Regressionen und der HDR/LDR-Grenzfall prüfen die Formel; die same-pose Laufzeitkalibrierung bleibt offen.
+-  - [x] Erste NAP-only-Laufzeitbilder für BR02 (weiß), HI02 (rot) und zwei EW06-Lichtbereiche (rot/grün) mit an/aus aufgenommen. Archive und `Data/NAP`-Quellen geprüft; die EW06-Ansichten liegen in der Nebelübersteuerung, die getrennten Starts ändern Pose/Frame. Diese Bilder sind explorativ, nicht zur 25%-Kalibrierung geeignet. Details: [Laufzeitbilder und Grenzen](evidence/renderer/sun-colored-ambient-ab-20261015/README.md).
+-  - [x] HI02-Livewechsel im selben Prozess: Checkbox und `client.ini` wechseln zwischen aus/an, die Screenshots zeigen denselben Spielstand. Am Schiff ist kein klarer Farbwechsel sichtbar; kurze Bewegungsabschnitte verhindern eine genaue Pixelkalibrierung. Der Livepfad ist belegt, die sichtbare Wirkung nicht.
+-  - [x] Sonnenambient-Mischstärke ist jetzt von 0 bis 1 in `client.ini` (`render_sun_ambient_strength`), über `--render-sun-ambient-strength=0..1` und im Effekte-Tab einstellbar. Der Standard bleibt bei 0,25, bis eine ruhige rote/grüne/weiße Vergleichsszene kalibriert ist.
+-  - [x] Die Sonnenambient-Begrenzung folgt dem tatsächlich aktiven Ziel: LDR und HDR-Target-Fallback bleiben auf normalisierte Ambientwerte begrenzt; das aktive Half-Float-HDR-Szenenziel darf luminanzerhaltende Mischkanäle über 1 an die Tonemap-Stufe weitergeben. Visuelle Kalibrierung in roten/grünen Szenen bleibt offen.
+-  - [ ] Den wirksamen Ambient-Beitrag an einem ruhigen, nicht nebelüberschriebenen NAP-Objekt bei gleicher Kamerapose messen und die Standardmischung so abstimmen, dass rote und grüne Lichtfarben sichtbar, aber nicht übersteuert wirken.
+-  - [x] Vorherige Quellformel geprüft: normalisierte NAP-Lichtfarben konnten mit dem damaligen 25%-Produktblend keinen Ambient-Kanal aufhellen. Der Messbefund gilt für die BW04-Bilder vor der luminanzerhaltenden Änderung; Details stehen im [Kanalwirkungs-Audit](evidence/renderer/sun-ambient-channel-math-20261016.md).
+-  - [x] Teststart geprüft: `--load-save` lädt den kopierten lokalen Autosave NAP-only bis in FP7/Freeport 7. Der Missionsstand verlangt noch „Look for a job in the bar“ und führt nicht in einen freien Weltraumstart; das Bild dokumentiert nur diesen ungeeigneten Ausgangszustand, keine Ambient-Abnahme. Details: [Save-Start-Audit](evidence/renderer/sun-ambient-save-startup-20261016/README.md).
+-  - [x] Freien NAP-only-Start in `Hi02` hergestellt: Der Save muss `Hi02` aus `Universe.ini` verwenden, nicht `HI02_system`. Die World-Callback- und Eintrittslogs sind vorhanden. Getrennte Starts mit Ambient an/aus ergeben wegen anderer Kamera-/Kampfframes keinen gültigen A/B; Bilder und genaue Grenzen: [HI02-Startdiagnose](evidence/renderer/sun-colored-ambient-hi02-diagnostic-20261016/README.md).
+-  - [x] Ruhiger BW04-NAP-only-Ein/Aus-Abgleich mit demselben statischen Save erstellt. Der statische Hintergrund ist pixelgleich; im Schiffsausschnitt sinkt der RGB-Mittelwert bei eingeschaltetem Effekt nur leicht. Die getrennten Prozessstarts belegen keinen Same-Frame-Effekt, aber die Änderung bleibt in dieser Szene schwach und kein Kanal wird sichtbar heller. Details und Bilder: [BW04-Laufzeitvergleich](evidence/renderer/sun-colored-ambient-bw04-ab-20261016/README.md).
+-  - [x] NAP-only-A/B mit der luminanzerhaltenden Mischung auf demselben BW04-Save durchgeführt. Der Schiffsbereich ändert sich nur geringfügig (mittlere absolute Abweichung 1,07/255); die visuelle Kalibrierung bleibt offen. Details und Bilder: [BW04-A/B nach der Luminanzkorrektur](evidence/renderer/sun-ambient-luminance-bw04-ab-20261016/README.md).
+-  - [x] HDR-Laufzeitversuch am 17.10.2026: Beide Starts laden denselben BW04-Save-Klon mit `--render-hdr=on`, einmal mit Sonnenambient an und einmal aus; der Paketmanifest- und NAP-Archivstand wurde geprüft. Zufällige Explosionen und Effekte unterscheiden sich zwischen den Prozessen, deshalb sind die Bilder ausdrücklich kein gültiger A/B-Nachweis und kalibrieren die Ambientwirkung nicht. Start- und Bildgrenzen: [Explorativer BW04-HDR-Lauf](evidence/renderer/sun-colored-ambient-bw04-ab-20261017/README.md).
+-  - [ ] NAP-A/B für weiße, rote, grüne und mehrfach vorhandene Sonnen mit der überblendenden, luminanzerhaltenden Mischung aufnehmen; Effektstärke und distanzgewichtete Farbmischung visuell kalibrieren. Nebelüberschreibung und Legacy-Ausgabe bei ausgeschaltetem Schalter in der Laufzeit prüfen.
+-  - [x] Hi02-Stärkeproben bei 0,25 und 1,0 mit identischem NAP-Save aufgenommen. 1,0 überstrahlt die Sonnen-/Nebelregion sichtbar; wegen unterschiedlicher Prozessframes ist dies keine Same-frame-Kalibrierung. Bilder: [Stärkeproben](evidence/renderer/sun-ambient-strength-probes-20261017/README.md).
+-- [x] SSAO als optionalen Forward-/Post-Processing-Pass mit separat abschaltbarem, sampleablem Depth-Prepass integrieren. Der Shader rekonstruiert View-Space-Positionen aus der inversen Projektion, schätzt Nachbarnormalen depth-adaptiv und gewichtet Okklusion nach Raumabstand. None/SMAA/MSAA und HDR/LDR werden unterstützt; Startparameter und Menüschalter sind vorhanden. Nicht unterstützte Depth-Targets fallen auf den bisherigen Renderer zurück.
+-  - [x] Qualitätseinstellungen für Radius, Stärke und Occlusion-Bias ergänzt: INI und Startparameter `--render-ssao-radius`, `--render-ssao-strength` sowie `--render-ssao-bias` verwenden validierte Wertebereiche und behalten die bisherigen Shader-Standardwerte. Ein/Aus bleibt unabhängig steuerbar. Die Performance-Seite bietet Radius-, Stärke- und Occlusion-Bias-Regler, übernimmt sie mit „Zurück“ in die laufenden Einstellungen und speichert sie. NAP-only-Hi02-Lauf zeigt alle Regler bei 1280x720; das SSAO-Kontrollkästchen wurde aktiviert und als `render_ssao = true` gespeichert. Änderungen und Speicherung nicht voreingestellter Reglerwerte sind noch nicht bestätigt. Siehe [Layout- und Toggle-Nachweis](evidence/renderer/ssao-quality-options-layout-20261017/README.md). Bildkalibrierung je Szenentyp bleibt offen.
+-  - [x] NAP-only OpenGL/Mesa-Lauf in Hi02 bestätigt die SSAO-Pass-Ausführung mit einem asynchronen Sample von 0,759 ms auf Intel HD Graphics 4600. Ein exploratives On/Off-Paar mit gleicher Save-Kameraposition liegt vor; die Todesmeldung verdeckt einen Teil des Bildes und FPS-/Szenenmesswerte sind wegen unterschiedlicher Prozessframes nicht vergleichbar. Siehe [SSAO-Hi02-Smoke](evidence/renderer/ssao-viewspace-hi02-20261017/README.md).
+-  - [x] OpenGL-Tiefenabbildung aus der inversen Projektion korrigiert: `System.Numerics` verwendet Clip-Z 0–1, OpenGL speichert diesen Bereich standardmäßig in 0,5–1; SSAO wandelt den abgetasteten Tiefenwert vor der View-Space-Rekonstruktion zurück. Dieselbe Abbildung ist im Shadow-Receiver-Shader dokumentiert. Frische Release-/NAP-only-Läufe erreichen Hi02; der Live-Spielstand mit `--invulnerable=on` bestätigt den aktiven SSAO-Pass (1,111 ms asynchron) sowie den ausgeschalteten Pfad ohne Depth-/SSAO-Pass. Screenshot-Paare sind prozessübergreifend und nicht für FPS oder Same-frame-Bildqualität vergleichbar. Siehe [SSAO-Hi02-Smoke](evidence/renderer/ssao-viewspace-hi02-20261017/README.md). GLES-Verifikation steht aus.
+-  - [ ] Normalenrichtung und Bildqualität/Kosten in NAP-Vanilla-Szenen prüfen: Halo-/Seam-Artefakte, Nebelübergänge, DFM-Modelle, Alpha-Test sowie kontrollierter Same-Pose/FPS-Vergleich. Die Abnahme bleibt offen.
+-- [ ] Echtzeit-Schatten (zunächst gerichtete Lichter, Kaskaden und PCF) anhand vorhandener Freelancer-Lichtdaten und der GPU-Kosten bewerten.
+-  - [x] Sampleable Depth-only-Renderziele im OpenGL-Backend und no-op-Ziele im Null-Backend bereitgestellt; Release-Build sowie OpenGL-4.6/Mesa-NAP-Smoke für FBO, Clear und Depth-Readback bestanden. GLES, Shader-Sampling und PCF bleiben offen; siehe [Depth-only-Smoke](evidence/renderer/depth-only-target-smoke-20261017/README.md).
+-  - [x] `DirectionalShadowCamera` kann den aktiven Kamerafrustum bis zu einer begrenzten Sichtweite in einen Lichtfrustum überführen und die orthografische XY-Projektion auf Shadow-Map-Texel rasten. Der Build prüft die Kompilierung; ein Laufzeit- oder Schattenbildnachweis fehlt. Die Kamera wird noch nicht vom `SystemRenderer` verwendet.
+-  - [x] Opake, sichtbare Model-Meshes schreiben optional im Main-Camera-Depth-Prepass mit LOD und World-Matrix; transparente Teile bleiben ausgeschlossen. `render_depth_prepass` und `--render-depth-prepass=on|off` steuern den Pass, der standardmäßig aus ist. Basic/PBR-Materialien verwenden Depth-only-Fragmentvarianten; Alpha-Test wird im Basic-Pfad beibehalten, Normal-/Emissive-/Beleuchtungsarbeit entfällt. Nicht unterstützte Materialtypen nutzen ihren vorhandenen Shader-Fallback. Der Pass wirft keine Schatten; Laufzeit- und FPS-Abnahme stehen aus.
+-  - [x] Erste integrierte OpenGL-Stufe: `render_shadows` / `--render-shadows=on|off` wählt die stärkste aktive gerichtete Systemlichtquelle anhand ihrer Rec.-709-Direkthelligkeit, statt die Reihenfolge der INI-Einträge zu verwenden. Das ist relevant: NAP Hi02 definiert zuerst `Hi02_system_light` mit (232, 80, 0; Y=106,54), danach `Hi02_walkerlight` mit (210, 118, 26; Y=130,92). Eine einzelne Shadow-Map bildet damit die stärkere direkte Quelle ab. Der NAP-only-Lauf mit temporär auf Hi02 gesetztem Spielstand erreichte `SpawnFlow: Initial spawn requested`, verifizierte aber nicht, welche Lichtquelle der Renderer tatsächlich auswählte; die Bildschirmaufnahme war auf der getesteten Intel/Mesa-Konfiguration schwarz. Details und Grenzen im [Hi02-Laufzeitnachweis zur Lichtauswahl](evidence/renderer/shadow-dominant-light-hi02-20261017/README.md). Das Debug-Overlay zeigt den aktiven Shadow-Map-Status, die gewählte Lichtfarbe und den berechneten Helligkeitswert. Den sichtbaren Lauf dokumentiert [dieser Diagnosenachweis](evidence/renderer/shadow-map-diagnostics-20261017/README.md); die Auswahl ist damit bei einem erneuten Lauf direkt prüfbar. Der Pfad zeichnet opake aktive Teile aller vorbereiteten `ModelRenderer` in ein 1024²-Depth-Target und bindet die Lichtmatrix samt 3×3-PCF in Basic- und PBR-Receiver. Shadow-Map-Draws gehen in die GPU-Passzeiten ein; Schatten bleiben standardmäßig aus. Das ist eine einzelne Karte ohne Kaskaden; Modelle außerhalb des Kamerabildes werden als Caster separat gesammelt und gegen das Lichtfrustum geprüft. Der NAP-only-M01A-Smoke auf OpenGL 4.6/Mesa 23.2.1 bestätigt den Passlauf (ein Debug-Sample mit `DEPTH_COMPONENT32F`: 0,184 ms); das Bild belegt keine Schattenqualität oder kontrollierte FPS-Differenz. Siehe [Shadow-map-Laufzeitnachweis](evidence/renderer/shadow-map-runtime-20261017/README.md). Ein NAP-only-GLES-3.2/Mesa-Smoke erreichte dieselbe Intro-Szene nach Wechsel auf `DEPTH_COMPONENT32F`/`FLOAT`; GLES bietet hier keine GPU-Pass-Timer. Siehe [Shadow-map-Laufzeitnachweis](evidence/renderer/shadow-map-runtime-20261017/README.md). Andere GLES-3.1-Treiber und Materialfamilien sind nicht abgedeckt. Der Live-Schalter „DIRECTIONAL SHADOW MAPS (BASIC / PBR)“ ist in den Performance-Optionen ergänzt und im selben NAP-only-M01A-Prozess an/aus sowie über erneutes Öffnen des Menüs geprüft; die ausgeschaltete Einstellung blieb in `render_shadows = false` erhalten. Siehe [Live-Schalter-Laufzeitprüfung](evidence/renderer/shadow-map-live-toggle-20261017/README.md). Ein identischer Szenenvergleich mit Ein/Aus und Bild-/Leistungsmessung steht noch aus.
+-  - [x] NAP-only-Hi02-Lauf bestätigt den aktiven Shadow-Map-Pass mit 0,216 ms auf Intel HD Graphics 4600. Im selben pausierten Prozess wurde der Performance-Schalter live ausgeschaltet; ein separater Lauf mit Schatten aus meldet `Shadow map: waiting for GPU`. Der obere linke Szenenausschnitt außerhalb von Menü/HUD ändert in den beiden Optionsaufnahmen 9.723 von 26.000 Pixeln um mehr als 2/255 (mittlere absolute RGB-Abweichung 9,91/255). Das belegt eine sichtbare Same-session-Reaktion, aber wegen fehlender Zeitstempel keine frame-identische Schattenqualität oder isolierte FPS-Kosten. Siehe [Hi02-Live-Schalternachweis](evidence/renderer/shadow-map-hi02-live-toggle-20261017/README.md).
+-  - [x] Die Shadow-Map-Diagnose zeigt nun zusätzlich den Nickname der ausgewählten persistenten Lichtquelle. Release-Build und NAP-only-Lauf bestätigen für Hi02 `Hi02_walkerlight` als Auswahl (RGB 0,824/0,463/0,102; Rec.-709-Helligkeit 0,513; Shadow-Map-Pass 0,111 ms). Der Code wählt damit nachvollziehbar die nach Rec. 709 hellere der zwei gerichteten Quellen; ob dies die retail-getreue Schattenquelle ist, bleibt visuell zu prüfen. Siehe [Debugaufnahme](evidence/renderer/shadow-map-hi02-live-toggle-20261017/shadow-selected-light-debug.png).
+-  - [x] Die Lichtquelle lässt sich zur Abnahme über `render_shadow_source` beziehungsweise `--render-shadow-source=auto|<nickname>` festlegen. `auto` behält die Helligkeitsauswahl; ein expliziter Nickname akzeptiert nur eine aktive gerichtete Systemlichtquelle und schaltet den Pass mit Diagnose aus, wenn sie im System fehlt. NAP-only-Hi02-Läufe bestätigen `auto` → `Hi02_walkerlight` (Y=0,513), CLI-Override und INI-Wert `render_shadow_source = Hi02_system_light` → `Hi02_system_light` (Y=0,418). Das prüft die Auswahl, nicht die retail-getreue Schattenqualität. Siehe [Laufzeitnachweis](evidence/renderer/shadow-map-hi02-live-toggle-20261017/README.md).
+-  - [ ] Kontrollierten Same-pose-NAP-A/B für Schiffe und Basen aufnehmen; Bias, Sichtweite und Filterung kalibrieren, GLES auf weiteren Implementierungen und Shader-Sampling visuell prüfen, weitere Materialfamilien anbinden und Kaskaden ergänzen. FPS-Kosten in repräsentativen Szenen gegen dieselbe Szene ohne Schatten messen.
+-- [ ] Screen-Space-Reflections als optionale Ergänzung prüfen; fehlende Bildinformation an Bildschirmrändern und bei verdeckten Objekten muss über den bestehenden PBR-Fallback abgefangen werden.
+-- [ ] Volumetrischen Nebel und volumetrische Lichtstrahlen als eigenständige, skalierbare Qualitätstufe evaluieren; vorhandene Freelancer-Nebelparameter und Transparenzreihenfolge als Referenz verwenden.
+-- [ ] Forward+/Clustered Lighting gegen die aktuelle Beleuchtungsarchitektur und typische Freelancer-Szenen mit vielen Lichtern benchmarken, bevor ein Renderer-Umbau geplant wird.
+-- [ ] Kurzlebige dynamische Lichter für Effekte, Waffenfeuer/Mündungsblitze, Feuer und Explosionen vervollständigen. Vorhanden sind `Gun.light_anim`-Mündungslichter sowie datengetriebene Explosionslichter aus `lgt_effect`/`lgt_radius` einschließlich `lgt_time_scale`. Die Ereignisobergrenze ist per `transient_effect_light_budget` beziehungsweise `--render-transient-effect-light-budget=0|32|64|128` einstellbar; das Framebudget begrenzt lokale Quellen auf maximal 32 und lässt sich mit `dynamic_light_budget` beziehungsweise `--render-dynamic-light-budget=0|8|16|24|32` absenken. Beim Absenken werden die schwächsten aktiven Effektlichter nach geschätzter Kamerawirkung entfernt. Die per-Objekt-Auswahl und der Frame-Pool priorisieren nach geschätzter attenuierter Lichtwirkung; der Frame-Pool verwirft lokale Quellen außerhalb ihrer Reichweite und cached die Scores für den aktuellen Frame. Wenn ein aktiver Nebelblitz einen zusätzlichen Shader-Lichtslot benötigt, wird ein Slot der lokalen Lichtauswahl dafür reserviert; der Blitz wird in den Shader-Lichtpuffer übernommen, statt bei acht lokalen Lichtern einen Rendererabsturz auszulösen. Gerichtete `LightSource`-Einträge behalten ihren Typ auch bei zusätzlichem `atten_curve`-Metadatum; nur Punktlichter werden durch eine Kurve zu `PointAttenCurve`. `lgt_range_scale` wird bis zum transienten Lichtobjekt durchgereicht, bleibt aber bis zur Semantikklärung ohne Laufzeitwirkung. Die `emit_range`-Registrierung ist von Billboard-/Flare-Kegel- und Sprite-Frustum getrennt; der vorhandene Kamera-Licht-Raytest unterdrückt weiterhin sichtlinienblockierte Quellen und verhindert so unverschattetes Durchleuchten. Eine Retail-Bildabnahme bleibt offen. Angehängte `SpawnedEffect`-Lichter nutzen dieselben Daten am Objekt-/Hardpoint-Transform, werten persistente Lichtkurven wiederholt aus und folgen dem Netzwerk- sowie Rendererlebenszyklus. Für die 45 NAP-Engine-Feuerprofile sind orange Lichtkurven und die bestehenden Effekt-Radien 7,5/25 eingetragen. `gf_continuous_fire` erhält dieselbe Kurve mit Radius 20 und wird von 52 Fuse-Aktionen genutzt. Lokale `Engine`-Trail-/Flame-Renderer reichen dieselben aufgelösten Daten an ihre hardpointgebundenen Renderer weiter. Das Hi02-Bildpaar belegt den NAP-Start mit Effektlichtern an/aus, isoliert den visuellen Lichtbeitrag wegen der laufenden Kampfszene aber nicht. Eine normale LI-Jägerzerstörung zeigt jetzt ebenfalls sichtbar den ALE-Effekt ([NAP-only-Nachweis](evidence/renderer/explosion-fighter-destruction-20261016/README.md)); der Lichtbeitrag dieses Effekts ist noch nicht isoliert. Die visuelle Kalibrierung und zielobjektbezogene Sichtbarkeits-/Occlusion-Priorisierung bleiben offen ([Feuerinventar](evidence/effect-fire-light-input-inventory-20261014.json), [Lichtpfad-Audit](dynamic-lighting-audit.md)).
+-
+-### 5. Effektüberarbeitung nach Renderer und dynamischer Beleuchtung
+-
+-- [ ] Den Sprungtor-Übergangseffekt anhand von `Freelancer.ini` (`jump_effect`), `fx/Jumpeffect.ini`, `fx/Effects.ini` und `fx/GateTunnel.ini` vollständig abnehmen. Toranimation, Tunnel/Innenansicht sowie Ein- und Austritt sind implementiert; reproduzierbare NAP-Szenen, Bildvergleich und visuelle Bestätigung fehlen noch. Die Funktion bleibt separat abschaltbar.
+-  - [x] Integrationsaudit: `Universe.SystemObject.jump_effect` wurde vor der Implementierung nur ins Laufzeitmodell kopiert und `DockAction.Tunnel` nur serialisiert. Der lokale Callback liegt vor dem Systemwechsel, der Cluster-Callback vor dem asynchronen Gateway-Transfer. Diese Reihenfolge bestimmt den Übergabepunkt der Implementierung.
+-  - [x] Datenfundament: `FreelancerData` lädt die in `Freelancer.ini` konfigurierten `jump_effect`- und `gate_tunnels`-Pfade optional in typisierte Modelle für Gate-/Schiffseffekte, Tunnelparameter und Tunnel-Layer. `GameItemDb` löst `SystemObject.jump_effect` und dessen `jump_tunnel` case-insensitiv auf; beide Profile sind über `GameObject.SystemObject` erreichbar.
+-  - [x] Der konfigurierte `jump_tunnel_effect` startet beim lokalen Sprung sowie bei einem zulässigen Cluster-Sprung am Spielerschiff. Der Client startet ihn direkt im RPC-Update, bevor ein `SpawnPlayer`-Paket die aktuelle Szene austauschen kann. Die Quelle wird über das nächstgelegene Sprungtor mit passendem Zielsystem gesucht. Der Effekt ist mit `render_jump_gate_effects` beziehungsweise `--render-jump-gate-effects=on|off` separat schaltbar; die Loop-Sounddauer folgt den INI-Zeiten.
+-  - [x] `glow_ring_effect`, `glow_ring_hp` und `glow_create_time` werden aus den INIs geladen. Die konfigurierten FX starten zu ihren Zeitpunkten an den Gate-Hardpoints und werden nach Ende vom Objekt entfernt.
+-  - [x] `jump_tunnel` wird gegen das geladene `GateTunnel.ini` aufgelöst. Der Renderer erzeugt profilgesteuerte Tunnel-Layer mit den NAP-Parametern für Kontrollpunkte, Mesh-Auflösung, Radius, Farbe, Alpha, UV-Bewegung und Geschwindigkeit. `write_depth_buffer` wird unterstützt; die verwendeten NAP-Profile schreiben keine Tiefe.
+-  - [x] Der Übergang trägt Quell- und Zielsystem über den Szenenwechsel. Nach erfolgreichem Eintritt startet die Ankunftssequenz mit dem Gegentorprofil, falls vorhanden, sonst mit dem gespeicherten Abflugprofil. Stagingfehler und ein Spawn in einem anderen System verwerfen den ausstehenden Zustand.
+-  - [ ] Tunnel und Ringe mit einer NAP-Laufzeitaufnahme für Eintritt, Fahrt und Austritt visuell gegen das Original abnehmen. Die aktuellen Belege umfassen Datenpfadprüfung und erfolgreichen Client-Build, noch keine Laufzeitbilder.
+-- [ ] Tradelane-Reiseeffekt gegen das Original vergleichen und die vereinfachte Darstellung korrigieren. Der Client hängt `PlayerTravel` als `ParticleEffectRenderer` an; anhand von `basic_tl_player_travel`/`EFT_LANE_SHIP_TRAVEL` und `tradelaneinship01` prüfen, welche ALE-Geometrie, Partikel, Bewegung, Skalierung oder Schichtung für die originale Tunnelansicht fehlen. Mit NAP-Referenzbildern für Eintritt, Fahrt und Austritt abnehmen.
+-  - [x] Daten- und Laufzeitpfad auditiert: `tl_player_travel` lädt `basic_tl_player_travel`/`tradelaneinship01` als normale `ParticleEffectRenderer`-Instanz am Spielerschiff; `tl_ship_travel` läuft separat über den serverseitigen Netzwerk-FX-Pfad. Beide referenzierten INI-/ALE-Dateien sind in `Data/NAP/` vorhanden. Die statische Prüfung bestätigt die Datenauflösung, aber keine optische Gleichheit. Details: [Tradelane-FX-Audit](evidence/renderer/tradelane-effect-dataflow-audit-20261015.md).
+-  - [x] ALE-Auswertung fand im `tradelanedonutshooter` einen `FxCubeEmitter` mit NAP-Spread 0–15 Grad, dessen Clientcode zuvor stets `UnitY` zurückgab. Patch 2102 reaktiviert die vorhandene zufällige Spread-Berechnung. Das grenzt einen konkreten Unterschied ein; der vollständige Bildvergleich mit dem Original bleibt offen. Details: [Cube-Emitter-Audit](evidence/renderer/tradelane-cube-emitter-spread-20261015.md).
+-- [ ] Laser-, Projektil- und Explosionseffekte visuell überarbeiten: Beam- und Trefferdarstellung, Trails, Partikel, Farbverläufe, Größen- und Zeitverhalten sowie Zusammenspiel mit dynamischem Licht. Originale Freelancer-Effekte müssen weiter funktionieren; neue Qualitätseinstellungen sollen einzeln abschaltbar bleiben. Mit reproduzierbaren NAP-Kampfszenen, Vergleichsbildern und GPU-/CPU-Messungen abnehmen.
+-  - [x] Partikel-Vertexshader berechnet pro Vertex nur noch die benötigte Quad-Ecke statt alle vier Ecken und UVs erneut aufzubauen. Motion-Blur-Basis behandelt Nullgeschwindigkeit und nahezu kamera-parallele Bewegung endlich; die Streckung nutzt direkt die Kreuzproduktlänge statt `atan2`/`sin`. Shader-Build bestätigt die Kompilierung; Laufzeitbild und GPU-Zeitvergleich bleiben offen.
+-  - [x] `vis_beam`-Geometrie gegen parallele/degenerierte Richtungen absichern und Schreibzugriffe auf den 500-Beam-Streamingpuffer begrenzen; vier Geometrietests bestehen.
+-  - [x] Partikel- und Beam-Punkte gegen den 30.000-Einträge-Pool begrenzen und leere Beam-Chunks ohne ungültigen Draw überspringen; vier Grenztests bestehen.
+-  - [x] Geparste `head_brightness`-/`trail_brightness`-Werte auf Beam-Alpha anwenden und für fehlende Werte die bisherige volle Intensität erhalten; die 55 NAP-Beamdefinitionen liegen im Bereich 0 bis 1.
+-  - [x] Beam-, Partikel-, transiente Effektlicht- und Mündungslichtdarstellung besitzen unabhängige Config- und Startparameter (`render_projectile_beams`, `render_particle_effects`, `render_transient_effect_lights`, `render_weapon_muzzle_lights`); Parser, CLI-Overrides und jeweilige Rendererpfade sind verbunden.
+-  - [ ] Beam-/Explosiondarstellung, Timing, Partikel und Licht in NAP-Referenzszenen visuell vergleichen und die getrennten Qualitätsoptionen ergänzen. Der zentrale `ResolvedFx`-Pfad einschließlich aller untersuchten Aufrufer ist statisch verbunden; für weitere Szenen siehe [Effekt-Audit](beam-and-explosion-effects-audit.md).
+-  - [x] Gemeldeten Ausfall eingegrenzt: `render_particle_effects=false` unterdrückt die Partikelgeometrie im isolierten Diagnoseprofil. Ein frischer Release-Lauf ohne diesen Eintrag und ohne Kommandozeilen-Override erreicht mit 13 verifizierten NAP-Paketen den M01A-Trigger `fp7_base_explode`; orange Explosionssprites und Rauch sind sichtbar. Damit ist der gemeldete Ausfall im Standardpfad dieser Szene nicht reproduzierbar; der frühere `false`-Wert erklärt nur das Diagnoseprofil. Das belegt weder alle Explosionstypen noch die Ursache des früheren lokalen Laufs. Weitere Kampfszenen und visuelle Retail-Parität bleiben offen. Beleg: [NAP-Lauf mit Standard-Partikeleinstellung](evidence/renderer/explosion-default-particles-20261016/README.md).
+-  - [x] NAP-Inventar für Schiffsexplosionen: 69 `explosion_arch`-Verweise und die verknüpften Effektprofile geprüft; keine fehlenden Profile oder ALE-Dateien. 17 Einträge besitzen laut INI keinen direkten Effekt, fünf Profile sind audio-only. Großschiffe verwenden zusätzliche netzwerkübertragene Fuse-Effekte. Die getrennten Laufzeitbilder fehlen weiterhin; siehe [Inventar und Abnahmefälle](evidence/renderer/explosion-nap-profile-inventory-20261016.md).
+-
+-### 6. Weitere Oberflächeneffekte und Renderer-Betrieb
+-
+-- [ ] Decals für Einschläge, Verschmutzung und Missionsmarkierungen untersuchen; Sortierung, Z-Fighting und DFM-/Animierungsfälle abdecken.
+-- [ ] Shader-Kompilierung und Zustandswechsel auf Start- und Szenenwechsel-Ruckler profilieren; fehlende Cachepfade gezielt ergänzen und Backend-Fehler vermeiden.
+-  - [x] Bei aktiviertem Debug-Log erfasst der Built-in-Shaderpfad die Wandzeit je Shader-Bundle und für den vollständigen Satz. Die Messung umfasst Shaderbereitstellung und Treiberaufrufe; sie ist keine reine GPU-Zeit und wurde in diesem Lauf nicht auf Referenzhardware gemessen.
+-  - [x] Eingebaute Shader-Featurevarianten werden beim `AllShaders.Compile()` in `ShaderBundle` geladen und danach per Featuremaske wiederverwendet. `GLRenderContext.ApplyState()` sendet nur geänderte GL-Zustände. Das belegt Varianten- und Zustandswiederverwendung, aber keine gemessene Ruckelfreiheit oder persistente Treiber-Binary-Caches.
+-  - [x] Lifecycle-Audit: `AllShaders` speichert Bundles und Compile-Status global; nach `DisposeShaders()` ist ein neuer RenderContext im selben Prozess mit diesem Cache nicht wiederverwendbar. Kontextwechsel-/Gerätewiederherstellung ist derzeit nicht belegt; siehe [Shader-Lifecycle](shader-lifecycle.md).
+-  - [ ] Eingebaute Shader-Bundles vor Multi-Context- oder Gerätewiederherstellung per `RenderContext` besitzen; Neuaufbau und Fehlerrollback anhand der Kriterien in [Shader-Lifecycle](shader-lifecycle.md) abnehmen.
+-  - [ ] Start, Wechsel zwischen Raum/Basis/Editor und Wiederherstellung nach minimiertem Fenster auf Shader-Compile-Spitzen, CPU-/GPU-Zeit und Backendfehler messen.
+-- [ ] GPU-Instancing, GPU-Culling und gezieltes Batching für wiederholte Asteroiden, Schiffe, Partikel und Basisobjekte anhand CPU-/GPU-Profilen bewerten; vorhandene CPU-Frustum-/Distanz-Culling- und LOD-Pfade als Vergleichsbasis verwenden.
+-  - [x] Asteroiden-Cube-Batches werden nach Material und UV-Animationsprofil getrennt; `MaterialAnim` wird bei opaken und distanzgeblendeten Draws mitgeführt und pro Frame aktualisiert. Die zusätzlichen Drawcalls pro unterschiedlichem Profil sind noch gegen NAP-Asteroidenfelder zu messen.
+-  - [x] `MaterialAnim.Update()` wickelt gültige Laufzeiten in konstanter Zeit um, statt globale Spielzeit durch wiederholtes Subtrahieren abzuarbeiten. Exakte Loop-Endpunkte behalten die bisherige Auswertung; ungültige Dauern und nichtendliche Zeitwerte verhindern Endlosschleifen.
+-- [ ] GPU-Partikel nur dann ergänzen, wenn CPU-/GPU-Profile einen Engpass belegen; bestehende Freelancer-Effekte und CPU-Fallback erhalten.
+-- [x] OpenGL-RenderDoc-Debuggruppen verwenden die vorhandenen Passnamen aus
+-  `SystemRenderPasses`: Hauptpässe und AA-/Bloom-/Tonemap-Unterpässe werden
+-  verschachtelt markiert. GPU-Timer und Debuggruppen werden gemeinsam und auch
+-  bei Fehlerpfaden geschlossen. Backends ohne Markerunterstützung bleiben ein
+-  No-op; ein markeraktivierter NAP-only-OpenGL-Lauf erreichte `FP7_system`
+-  ohne Absturz oder GL-Fehler. Ein RenderDoc-Capture ist noch nicht erstellt;
+-  Bedingungen und Grenzen: [Laufzeit-Smoke](evidence/renderer/renderdoc-markers-nap-20261017/README.md).
+-- [ ] Lesbare GPU-Fehlerdiagnostik für reproduzierbare Grafikfehler vorsehen.
+-  - [x] OpenGL `KHR_debug` protokolliert Treiberfehler mit Meldungs-ID, Quelle, Typ und Schweregrad als Fehler/Warnung; unbekannte Enumwerte bleiben hexadezimal sichtbar. Andere Backendfehler, Debugkontextzuordnung zu Render-Pässen und ein Laufzeitfehler-Injektionsnachweis bleiben offen.
+-
+-### 7. Zeitliche und räumliche Rekonstruktion
+-
+-- [ ] TAA erst nach stabilen Bewegungsvektoren, Kamerajitter und History-Buffer-Lifecycle evaluieren.
+-- [ ] Upscaling nur nach reproduzierbaren Auflösungs-/Performance-Messungen ergänzen; Native-Auflösung und SMAA bleiben verfügbar.
+-- [ ] Nebel, Transparenz, Partikel und HUD-Komposition in jeder zeitlichen Rekonstruktion separat auf Ghosting prüfen.
+-
+-Raytracing, Mesh Shader und Virtual Texturing bleiben optionale spätere Prüfungen.
+-Sie erhalten erst dann eigene Arbeitspakete, wenn Zielhardware, passende Assets
+-und ein messbarer Nutzen gegenüber den vorhandenen Pfaden feststehen.
+-
+-## Abnahmekriterien für jedes Paket
+-
+-- [ ] Bestehende Freelancer-Materialien und Szenen bleiben visuell plausibel; Abweichungen werden mit Bildpaaren dokumentiert.
+-- [ ] OpenGL und weitere aktiv unterstützte Backends liefern konsistente Ergebnisse; Null-Backend und Headless-Läufe bleiben möglich.
+-- [ ] Resize, Alt-Tab, minimiertes Fenster und mehrfaches Öffnen/Schließen von Vorschauen hinterlassen keine GL-Fehler oder Ressourcenlecks.
+-- [ ] Jeder Effekt hat einen Qualitätsschalter, sinnvolle Standardwerte und einen messbaren Kosten-/Qualitätsvergleich.
+-- [ ] Änderungen am Engine-Renderer bleiben in einem fokussierten Patch unter `patches/` und in `patches/series` registriert.
+-
+-## Backends und Priorisierung (Vorschlag, nur Aufgabenliste)
+-
+-Stand der Sichtung 2026-10-12. Vorhanden sind die Backends `OpenGL` und `Null`; die Render-Schnittstellen (`IRenderContext`, `IShader`, `ITextureCube`, `IStorageBuffer` …) sind abstrahiert, die Shader liegen als HLSL vor und laufen über `LLShaderCompiler` (SPIRV-Cross). Das Spiel ist ein Weltraumspiel mit viel Transparenz (Nebel, Partikel, Triebwerke, Schilde) und wenigen Lichtquellen.
+-
+-- [ ] **Zuerst die Pipeline (Abschnitte 1, 3, 4):** Render-Passes, HDR-Zwischenpuffer, Tonemapping und Bloom. Größter sichtbarer Gewinn für Sonnen, Triebwerke, Schüsse und Schilde, ohne neues Backend.
+-- [ ] **Forward oder Clustered Forward statt Deferred:** Transparenz und MSAA/SMAA sprechen gegen Deferred. Forward+ gegen die aktuelle Beleuchtung benchmarken.
+-- [x] **Cubemap-Grundpfad:** Surface-Katalog-Cubes `envcube_*` bedarfsgesteuert laden und `[CubeMap] strength` im opt-in PBR-Pfad anwenden; kontrollierte Produktionsshader-GPU-Proben sind dokumentiert.
+-- [x] **Cubemap-Aliasauflösung:** NAP-Cube-MATs verwenden denselben internen `envmapbasic`-Namen. Der Ressourcenmanager registriert nun je Quelldatei den zugehörigen Surface-Katalog-Nickname, damit die drei Cubes nicht miteinander kollidieren.
+-- [x] **Diffuse IBL-Grundbeitrag:** Separate cosine-konvolvierte Irradiance-Cubemaps (`irradiance_file`) werden im opt-in PBR-Pfad für den nichtmetallischen Anteil ausgewertet; Legacy-Kataloge fallen auf den letzten Mip der Specular-Cubemap zurück. Retail-Bildqualität und GPU-Kosten bleiben offen.
+-- [x] **Split-Sum-BRDF-Grundbeitrag:** Die PBR-Umgebungsreflexion wertet den analytischen Epic-BRDF-Fit für `NdotV` und Rauheit aus; eine BRDF-LUT-Textur ist dafür nicht erforderlich. Der Fit ersetzt keine GGX-vorgefilterte Radiance-Cubemap.
+-- [x] **Weltfeste Reflexionsrichtung:** Der PBR-Cube-Lookup verwendet jetzt die Reflexionsrichtung aus Welt-Normale und Welt-Blickvektor, statt den Cube mit der View-Matrix zu drehen. Die DDS-Z-Achsenkonvention bleibt erhalten; die sichtbare Retail-Orientierung muss noch abgenommen werden.
+-- [ ] **Image-Based Lighting:** Retail-Orientierung und sichtbare Cubemap-Reflexion im Spiel abnehmen; drei generierte NAP-Cubemaps haben GGX-vorgefilterte Specular-Mips (`prefiltered`) und separate cosine-konvolvierte diffuse Irradiance (`irradiance_file`). Legacy-Kataloge behalten ihre letzten-Mip-Approximation. Retail-Bildqualität, weitere cubemapgebundene Assets und GPU-Kosten bleiben offen. Die gleichen-szenischen LancerEdit-Aufnahmen zeigen 15.229–17.729 veränderte Viewportpixel für die drei Katalog-Cubes; der pausierte M01A-Live-Schalter ändert 5.931 Pixel im sichtbaren Objektcrop. Das belegt cubemapabhängige Ausgabe, nicht die Retail-Orientierung oder ausreichende Bildqualität. NAP-only-Verfahren und Grenzen: [Reflexionsrichtungsprüfung](evidence/renderer/pbr-world-reflection-20261017/README.md), [Live-Options-A/B](evidence/renderer/ibl-live-options-20261018/README.md) und [Cubemap-A/B](evidence/renderer/pbr-cubemap-live-ab-20261017/README.md).
+-- [ ] **Volumetrische Nebel und Soft Particles:** Ein opt-in Soft-Particle-Pfad blendet Partikelsprites und Partikelstrahlen gegen die samplebare Szenentiefe aus; `render_soft_particles` und `render_soft_particle_distance` steuern ihn. Ohne verfügbaren Tiefenpuffer bleibt der Legacy-Look aktiv. Die GPU-/Bildqualität und der NAP-Lauf sind noch abzunehmen. Nebelfelder sind ein Merkmal des Spiels und benötigen weiterhin eine eigene Qualitätsstufe mit Fallback.
+-- [ ] **Vulkan-Backend (Spike):** Prüfen, wie weit `IRenderContext` und die HLSL→SPIR-V-Kette tragen. Nutzen: Linux/Steam Deck, Mehrkern-Befehlsaufzeichnung für viele Schiffe, RenderDoc, MoltenVK für macOS. Aufwand und Risiko groß, vorher messen.
+-- [ ] **Direct3D 11 und Metal nur bei konkretem Bedarf:** D3D11 nur, wenn OpenGL unter Windows Probleme macht; Metal besser über MoltenVK.
+-- [ ] **Profil „Original-Look“** ohne Zusatzeffekte als Fallback und Referenz für Screenshot-Vergleiche erhalten.
+-- [ ] Offene Messung: GPU-Zeit je Pass auf Zielhardware (Abschnitt 1), bevor ein Backend-Umbau entschieden wird.
++Die fachliche Reihenfolge entspricht dem ausführlicheren
++[Grafik-Umsetzungsplan](graphics-implementation-plan.md). Änderungen am Client
++bleiben patch-only in `patches/`; nach jeder Änderung muss eine vollständige
++Overlay-Rekonstruktion erfolgen. NAP-Container für Client-/Editor-Laufzeitprüfungen
++werden ausschließlich aus Dateien unter `Data/NAP/` gebaut.

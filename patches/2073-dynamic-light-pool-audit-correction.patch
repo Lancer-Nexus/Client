@@ -1,0 +1,71 @@
+diff --git a/docs/dynamic-lighting-audit.md b/docs/dynamic-lighting-audit.md
+--- a/docs/dynamic-lighting-audit.md
++++ b/docs/dynamic-lighting-audit.md
+@@ -1,6 +1,6 @@
+ # Audit: dynamisches Licht für Effekte
+ 
+-Stand: 2026-10-14. Der Renderer unterstützt statische Systemlichter,
++Stand: 2026-10-15. Der Renderer unterstützt statische Systemlichter,
+ THN-Lichter, Lichtequipment, animierte Waffen-Mündungslichter und kurzlebige
+ Lichter an Effekten, die eine `lgt_effect`-Kurve und `lgt_radius` angeben.
+ Effektfeuer ohne solche Daten wird weiterhin nicht künstlich beleuchtet.
+@@ -15,14 +15,23 @@
+   diffuse/ambient Helligkeit multipliziert mit der Punktlicht- oder
+   Kurvenattenuation am objektseitig nächsten Punkt. Die Shader unterstützen
+   neun Slots, von denen ein weiterer für Nebelblitze vorgesehen ist. Der
+-  vorgelagerte Frame-Pool priorisiert weiter nach Kameradistanz; eine allgemeine
+-  Sichtbarkeits-/Occlusion-Priorisierung fehlt.
++  vorgelagerte Frame-Pool priorisiert bis zu 32 transiente Quellen nach ihrem
++  geschätzten Beitrag am Kamerapunkt und verwirft Beiträge außerhalb der
++  Reichweite oder ohne positive Intensität. Das ist eine Vorauswahl, keine
++  objektspezifische Bewertung aller sichtbaren Lichtquellen. Für `LightEquipment`
++  prüft `PrepareRender` Frustum und Physik-Occlusion; Effektlichter besitzen
++  keine entsprechende allgemeine Sichtbarkeits-/Occlusion-Priorisierung.
+ - `Settings.DynamicLighting` schaltet den bestehenden Beleuchtungspfad global
+   ein oder aus.
+ - `LightEquipment.EmitRange` und `EmitAttenuation` werden geparst und vom
+-  `LightEquipRenderer` nun als lokale Frame-Lichtquelle registriert. Der Pool
+-  begrenzt diese zusätzlichen Quellen pro Frame auf 32 und behält die dem
+-  Kameraort nächsten Kandidaten.
++  `LightEquipRenderer` als lokale Frame-Lichtquelle registriert. `PrepareRender`
++  prüft Sichtkegel, Kamerafrustrum und Physik-Occlusion, bevor die Quelle
++  registriert wird. `SystemLighting.AddFrameLight()` begrenzt die zusätzlichen
++  Kandidaten auf 32 und wählt bei Überlast anhand der in `RenderHelpers`
++  geschätzten Lichtbeiträge am Kamerapunkt; ein stärkerer Kandidat ersetzt den
++  schwächsten. Das bewertet nicht die tatsächlich beleuchteten Objekte. Die
++  nachfolgende objektspezifische Auswahl bewertet Quellen erneut am
++  objektseitig nächsten Punkt.
+ - `Effect` enthält `lgt_effect`, `lgt_range_scale` und `lgt_radius`; `InitEffects()`
+   übergibt Kurve und beide Zahlenwerte nun an `ResolvedFx`.
+ - `FreelancerData` lädt nun die benannten Kurven aus Retail
+@@ -52,8 +61,9 @@
+   angehängt und besitzen in den aktuellen NAP-INIs keine Lichtdaten. Dieser
+   Pfad erzeugt deshalb derzeit keine dynamischen Effektlichter.
+ - Kurzlebige Effektlichter teilen sich ein deterministisches Limit von 128
+-  aktiven Ereignissen; der Frame-Lichtpool wählt weiterhin die kameranächsten
+-  Kandidaten.
++  aktiven Ereignissen. Der Frame-Lichtpool bewertet diese wie weitere
++  transiente Quellen anhand des geschätzten Beitrags am Kamerapunkt; für
++  Effektlichter gibt es keine separate Sichtbarkeits-/Occlusion-Priorisierung.
+ - THN-Lichter werden direkt in `SystemLighting.Lights` registriert. Sie nutzen
+   also die bestehende globale Lichtliste, aber keinen kurzlebigen Effektpool.
+ 
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -46,6 +46,7 @@
+ | 2070 | Normalize invalid system-renderer frame deltas before effect updates |
+ | 2071 | Parse star lens-glow colors as normalized float RGB values |
+ | 2072 | Prioritize transient effect lights and visible beam geometry within fixed pools; add independent beam, particle, transient-light, and weapon-muzzle-light toggles; document retail flash_size evidence |
++| 2073 | Correct dynamic-lighting audit to match attenuated-contribution frame-pool selection |
+ | 2011 (`lancerdecode`) | Native Vorbis EOF/reset handling |
+ | 2012 (`blurgtext`) | System FreeType without OT-SVG hooks |
+ 
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -72,3 +72,4 @@
+ client 2070-system-renderer-delta-guard.patch
+ client 2071-lens-glow-float-colors.patch
+ client 2072-renderer-effect-pool-prioritization.patch
++client 2073-dynamic-light-pool-audit-correction.patch

@@ -1,0 +1,1112 @@
+diff --git a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+@@ -0,0 +1,670 @@
++using System;
++using System.Text;
++using System.IO;
++using System.Runtime.InteropServices;
++using System.Threading;
++using LibreLancer.Graphics;
++using LibreLancer;
++
++namespace LibreLancer.Platforms;
++
++/// <summary>
++/// Small standalone SDL_GPU device and swapchain check. This deliberately lives
++/// outside the game renderer so the GPU API and native driver can be exercised
++/// before porting the renderer's resource and command contracts.
++/// </summary>
++public static class SDL3GpuSmoke
++{
++    private const string ShaderBundleResource = "SDLGPUSmoke.bin";
++
++    public static unsafe int Run()
++    {
++        if (!SDL3.Supported)
++        {
++            Console.Error.WriteLine("SDL_GPU smoke requires SDL3.");
++            return 2;
++        }
++
++        if (!SDL3.SDL_Init(SDL3.SDL_InitFlags.SDL_INIT_VIDEO))
++        {
++            Console.Error.WriteLine($"SDL video initialization failed: {SDL3.SDL_GetError()}");
++            return 1;
++        }
++
++        IntPtr window = IntPtr.Zero;
++        IntPtr device = IntPtr.Zero;
++        IntPtr commandBuffer = IntPtr.Zero;
++        IntPtr renderPass = IntPtr.Zero;
++        IntPtr copyPass = IntPtr.Zero;
++        IntPtr readbackBuffer = IntPtr.Zero;
++        IntPtr fence = IntPtr.Zero;
++        IntPtr vertexShader = IntPtr.Zero;
++        IntPtr fragmentShader = IntPtr.Zero;
++        IntPtr pipeline = IntPtr.Zero;
++        IntPtr vertexBuffer = IntPtr.Zero;
++        IntPtr transferBuffer = IntPtr.Zero;
++        IntPtr diffuseTexture = IntPtr.Zero;
++        IntPtr textureUploadBuffer = IntPtr.Zero;
++        IntPtr occludedTexture = IntPtr.Zero;
++        IntPtr occludedTextureUploadBuffer = IntPtr.Zero;
++        IntPtr depthTexture = IntPtr.Zero;
++        IntPtr normalSampler = IntPtr.Zero;
++        bool windowClaimed = false;
++        try
++        {
++            window = SDL3.SDL_CreateWindow("Lancer Nexus SDL_GPU smoke", 640, 360,
++                SDL3.SDL_WindowFlags.SDL_WINDOW_RESIZABLE |
++                SDL3.SDL_WindowFlags.SDL_WINDOW_HIGH_PIXEL_DENSITY);
++            if (window == IntPtr.Zero)
++                throw Failure("Window creation failed");
++
++            var shaderFormats = SDL3.SDL_GPUShaderFormat.SDL_GPU_SHADERFORMAT_SPIRV |
++                                SDL3.SDL_GPUShaderFormat.SDL_GPU_SHADERFORMAT_DXIL |
++                                SDL3.SDL_GPUShaderFormat.SDL_GPU_SHADERFORMAT_MSL;
++            device = SDL3.SDL_CreateGPUDevice(shaderFormats, false, null!);
++            if (device == IntPtr.Zero)
++                throw Failure("SDL_GPU device creation failed");
++
++            var driver = SDL3.SDL_GetGPUDeviceDriver(device);
++            var supportedFormats = SDL3.SDL_GetGPUShaderFormats(device);
++            Console.WriteLine($"SDL_GPU driver: {driver}");
++            Console.WriteLine($"SDL_GPU shader formats: {supportedFormats}");
++            if ((supportedFormats & SDL3.SDL_GPUShaderFormat.SDL_GPU_SHADERFORMAT_SPIRV) == 0)
++                throw new InvalidOperationException("The selected SDL_GPU driver does not support the bundled SPIR-V probe shaders.");
++
++            (vertexShader, fragmentShader) = CreateShaders(device);
++
++            if (!SDL3.SDL_ClaimWindowForGPUDevice(device, window))
++                throw Failure("Claiming the window for SDL_GPU failed");
++            windowClaimed = true;
++
++            if (!SDL3.SDL_SetGPUSwapchainParameters(device, window,
++                    SDL3.SDL_GPUSwapchainComposition.SDL_GPU_SWAPCHAINCOMPOSITION_SDR,
++                    SDL3.SDL_GPUPresentMode.SDL_GPU_PRESENTMODE_VSYNC))
++                throw Failure("Setting SDL_GPU swapchain parameters failed");
++
++            (vertexBuffer, transferBuffer) = CreateVertexBuffer(device);
++            Console.WriteLine("Created SDL_GPU vertex buffer.");
++            (diffuseTexture, textureUploadBuffer) = CreateNormalTexture(device);
++            Console.WriteLine("Uploaded SDL_GPU BC5 normal texture.");
++            (occludedTexture, occludedTextureUploadBuffer) = CreateNormalTexture(device, 153, 153);
++            Console.WriteLine("Uploaded alternate BC5 texture for the depth rejection check.");
++            normalSampler = CreateDiffuseSampler(device);
++            Console.WriteLine("Created SDL_GPU normal-map sampler.");
++            pipeline = CreatePipeline(device, vertexShader, fragmentShader,
++                SDL3.SDL_GetGPUSwapchainTextureFormat(device, window));
++            if (pipeline == IntPtr.Zero)
++                throw Failure("Creating the SDL_GPU smoke graphics pipeline failed");
++
++            commandBuffer = SDL3.SDL_AcquireGPUCommandBuffer(device);
++            if (commandBuffer == IntPtr.Zero)
++                throw Failure("Acquiring an SDL_GPU command buffer failed");
++
++            if (!SDL3.SDL_WaitAndAcquireGPUSwapchainTexture(commandBuffer, window,
++                    out var swapchainTexture, out var width, out var height))
++                throw Failure("Acquiring the SDL_GPU swapchain texture failed");
++            if (swapchainTexture == IntPtr.Zero || width == 0 || height == 0)
++                throw Failure("SDL_GPU returned an empty swapchain image");
++            depthTexture = CreateDepthTexture(device, width, height);
++            Console.WriteLine($"Created SDL_GPU D32 depth target at {width}x{height}.");
++            var swapchainFormat = SDL3.SDL_GetGPUSwapchainTextureFormat(device, window);
++            if (SDL3.SDL_GPUTextureFormatTexelBlockSize(swapchainFormat) != 4)
++                throw new InvalidOperationException($"SDL_GPU smoke readback expects a 4-byte SDR format, got {swapchainFormat}.");
++            readbackBuffer = SDL3.SDL_CreateGPUTransferBuffer(device, new SDL3.SDL_GPUTransferBufferCreateInfo
++            {
++                usage = SDL3.SDL_GPUTransferBufferUsage.SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD,
++                size = 4
++            });
++            if (readbackBuffer == IntPtr.Zero)
++                throw Failure("Creating the SDL_GPU pixel readback buffer failed");
++
++            Span<SDL3.SDL_GPUColorTargetInfo> colorTargets = stackalloc SDL3.SDL_GPUColorTargetInfo[1];
++            colorTargets[0] = new SDL3.SDL_GPUColorTargetInfo
++            {
++                texture = swapchainTexture,
++                clear_color = new SDL3.SDL_FColor { r = 0.08f, g = 0.32f, b = 0.62f, a = 1.0f },
++                load_op = SDL3.SDL_GPULoadOp.SDL_GPU_LOADOP_CLEAR,
++                store_op = SDL3.SDL_GPUStoreOp.SDL_GPU_STOREOP_STORE
++            };
++            var depthTarget = new SDL3.SDL_GPUDepthStencilTargetInfo
++            {
++                texture = depthTexture,
++                clear_depth = 1.0f,
++                load_op = SDL3.SDL_GPULoadOp.SDL_GPU_LOADOP_CLEAR,
++                store_op = SDL3.SDL_GPUStoreOp.SDL_GPU_STOREOP_DONT_CARE,
++                stencil_load_op = SDL3.SDL_GPULoadOp.SDL_GPU_LOADOP_DONT_CARE,
++                stencil_store_op = SDL3.SDL_GPUStoreOp.SDL_GPU_STOREOP_DONT_CARE
++            };
++            renderPass = SDL3.SDL_BeginGPURenderPass(commandBuffer, colorTargets, 1,
++                (IntPtr)(&depthTarget));
++            if (renderPass == IntPtr.Zero)
++                throw Failure("Beginning the SDL_GPU draw pass failed");
++            SDL3.SDL_BindGPUGraphicsPipeline(renderPass, pipeline);
++            Span<SDL3.SDL_GPUBufferBinding> vertexBindings = stackalloc SDL3.SDL_GPUBufferBinding[1];
++            vertexBindings[0] = new SDL3.SDL_GPUBufferBinding { buffer = vertexBuffer, offset = 0 };
++            SDL3.SDL_BindGPUVertexBuffers(renderPass, 0, vertexBindings, 1);
++            Span<SDL3.SDL_GPUTextureSamplerBinding> textureBindings = stackalloc SDL3.SDL_GPUTextureSamplerBinding[1];
++            textureBindings[0] = new SDL3.SDL_GPUTextureSamplerBinding
++            {
++                texture = diffuseTexture,
++                sampler = normalSampler
++            };
++            SDL3.SDL_BindGPUFragmentSamplers(renderPass, 0, textureBindings, 1);
++            SDL3.SDL_DrawGPUPrimitives(renderPass, 3, 1, 0, 0);
++            // Equal depth must fail LESS after the first draw wrote depth. The alternate
++            // BC5 texture would change the center pixel if depth testing or writes failed.
++            textureBindings[0] = new SDL3.SDL_GPUTextureSamplerBinding
++            {
++                texture = occludedTexture,
++                sampler = normalSampler
++            };
++            SDL3.SDL_BindGPUFragmentSamplers(renderPass, 0, textureBindings, 1);
++            SDL3.SDL_DrawGPUPrimitives(renderPass, 3, 1, 0, 0);
++            SDL3.SDL_EndGPURenderPass(renderPass);
++            renderPass = IntPtr.Zero;
++
++            copyPass = SDL3.SDL_BeginGPUCopyPass(commandBuffer);
++            if (copyPass == IntPtr.Zero)
++                throw Failure("Beginning the SDL_GPU pixel readback pass failed");
++            var centerPixel = new SDL3.SDL_GPUTextureRegion
++            {
++                texture = swapchainTexture,
++                mip_level = 0,
++                layer = 0,
++                x = width / 2,
++                y = height / 2,
++                z = 0,
++                w = 1,
++                h = 1,
++                d = 1
++            };
++            var pixelDestination = new SDL3.SDL_GPUTextureTransferInfo
++            {
++                transfer_buffer = readbackBuffer,
++                offset = 0,
++                pixels_per_row = 0,
++                rows_per_layer = 0
++            };
++            SDL3.SDL_DownloadFromGPUTexture(copyPass, centerPixel, pixelDestination);
++            SDL3.SDL_EndGPUCopyPass(copyPass);
++            copyPass = IntPtr.Zero;
++
++            fence = SDL3.SDL_SubmitGPUCommandBufferAndAcquireFence(commandBuffer);
++            if (fence == IntPtr.Zero)
++                throw Failure("Submitting the SDL_GPU draw and readback failed");
++            commandBuffer = IntPtr.Zero;
++            Span<IntPtr> fences = stackalloc IntPtr[1];
++            fences[0] = fence;
++            if (!SDL3.SDL_WaitForGPUFences(device, true, fences, 1))
++                throw Failure("Waiting for SDL_GPU pixel readback failed");
++            var mappedPixel = SDL3.SDL_MapGPUTransferBuffer(device, readbackBuffer, false);
++            if (mappedPixel == IntPtr.Zero)
++                throw Failure("Mapping the SDL_GPU pixel readback buffer failed");
++            var channel0 = Marshal.ReadByte(mappedPixel);
++            var green = Marshal.ReadByte(mappedPixel, 1);
++            var channel2 = Marshal.ReadByte(mappedPixel, 2);
++            var alpha = Marshal.ReadByte(mappedPixel, 3);
++            SDL3.SDL_UnmapGPUTransferBuffer(device, readbackBuffer);
++            var isBgra = swapchainFormat is SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM or
++                SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM_SRGB;
++            var isSrgb = swapchainFormat is SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB or
++                SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM_SRGB;
++            var expectedRed = isSrgb ? 231 : 204;
++            var expectedGreen = isSrgb ? 203 : 153;
++            var expectedBlue = isSrgb ? 242 : 226;
++            var red = isBgra ? channel2 : channel0;
++            var blue = isBgra ? channel0 : channel2;
++            if (alpha < 240 || Math.Abs(red - expectedRed) > 24 ||
++                Math.Abs(green - expectedGreen) > 24 || Math.Abs(blue - expectedBlue) > 24)
++                throw new InvalidOperationException(
++                    $"SDL_GPU sampled texture center pixel mismatch for {swapchainFormat}: " +
++                    $"({red}, {green}, {blue}, {alpha}); expected approximately " +
++                    $"({expectedRed}, {expectedGreen}, {expectedBlue}, 255).");
++
++            Console.WriteLine($"Presented SDL_GPU BC5 normal-mapped, depth-tested vertex-buffer draw at {width}x{height}; " +
++                              $"center pixel ({red}, {green}, {blue}, {alpha}) passed.");
++            Thread.Sleep(750);
++            return 0;
++        }
++        catch (Exception ex)
++        {
++            Console.Error.WriteLine(ex.Message);
++            return 1;
++        }
++        finally
++        {
++            if (renderPass != IntPtr.Zero)
++                SDL3.SDL_EndGPURenderPass(renderPass);
++            if (copyPass != IntPtr.Zero)
++                SDL3.SDL_EndGPUCopyPass(copyPass);
++            if (commandBuffer != IntPtr.Zero)
++                SDL3.SDL_CancelGPUCommandBuffer(commandBuffer);
++            if (device != IntPtr.Zero)
++            {
++                SDL3.SDL_WaitForGPUIdle(device);
++                if (fence != IntPtr.Zero)
++                    SDL3.SDL_ReleaseGPUFence(device, fence);
++                if (readbackBuffer != IntPtr.Zero)
++                    SDL3.SDL_ReleaseGPUTransferBuffer(device, readbackBuffer);
++                if (normalSampler != IntPtr.Zero)
++                    SDL3.SDL_ReleaseGPUSampler(device, normalSampler);
++                if (diffuseTexture != IntPtr.Zero)
++                    SDL3.SDL_ReleaseGPUTexture(device, diffuseTexture);
++                if (textureUploadBuffer != IntPtr.Zero)
++                    SDL3.SDL_ReleaseGPUTransferBuffer(device, textureUploadBuffer);
++                if (occludedTexture != IntPtr.Zero)
++                    SDL3.SDL_ReleaseGPUTexture(device, occludedTexture);
++                if (occludedTextureUploadBuffer != IntPtr.Zero)
++                    SDL3.SDL_ReleaseGPUTransferBuffer(device, occludedTextureUploadBuffer);
++                if (depthTexture != IntPtr.Zero)
++                    SDL3.SDL_ReleaseGPUTexture(device, depthTexture);
++                if (pipeline != IntPtr.Zero)
++                    SDL3.SDL_ReleaseGPUGraphicsPipeline(device, pipeline);
++                if (vertexBuffer != IntPtr.Zero)
++                    SDL3.SDL_ReleaseGPUBuffer(device, vertexBuffer);
++                if (transferBuffer != IntPtr.Zero)
++                    SDL3.SDL_ReleaseGPUTransferBuffer(device, transferBuffer);
++                if (vertexShader != IntPtr.Zero)
++                    SDL3.SDL_ReleaseGPUShader(device, vertexShader);
++                if (fragmentShader != IntPtr.Zero)
++                    SDL3.SDL_ReleaseGPUShader(device, fragmentShader);
++                if (windowClaimed)
++                    SDL3.SDL_ReleaseWindowFromGPUDevice(device, window);
++                SDL3.SDL_DestroyGPUDevice(device);
++            }
++            if (window != IntPtr.Zero)
++                SDL3.SDL_DestroyWindow(window);
++            SDL3.SDL_Quit();
++        }
++    }
++
++    private readonly record struct CompiledStage(uint Samplers, uint StorageTextures, uint StorageBuffers,
++        uint UniformBuffers, string Entrypoint, byte[] Code);
++
++    private static (IntPtr Vertex, IntPtr Fragment) CreateShaders(IntPtr device)
++    {
++        using var stream = typeof(SDL3GpuSmoke).Assembly.GetManifestResourceStream(ShaderBundleResource)
++                           ?? throw new FileNotFoundException($"Missing embedded SDL_GPU smoke shader bundle: {ShaderBundleResource}");
++        var bundle = BytecodesBundle.FromStream(stream);
++        var program = ShaderBytecodes.GetSPIRV(bundle.GetShader(0));
++        var offset = 0;
++        var vertex = ReadStage(program, ref offset);
++        var fragment = ReadStage(program, ref offset);
++        Console.WriteLine($"SDL_GPU shader bindings: vertex samplers={vertex.Samplers}, fragment samplers={fragment.Samplers}");
++        if (offset != program.Length)
++            throw new InvalidDataException("Unexpected trailing data in SDL_GPU smoke SPIR-V bundle");
++        var vertexHandle = CreateSpirvShader(device, vertex, SDL3.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_VERTEX);
++        try
++        {
++            var fragmentHandle = CreateSpirvShader(device, fragment, SDL3.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_FRAGMENT);
++            return (vertexHandle, fragmentHandle);
++        }
++        catch
++        {
++            if (vertexHandle != IntPtr.Zero)
++                SDL3.SDL_ReleaseGPUShader(device, vertexHandle);
++            throw;
++        }
++    }
++
++    private static CompiledStage ReadStage(ReadOnlySpan<byte> program, ref int offset)
++    {
++        uint samplers = ReadVarUInt32(program, ref offset);
++        uint storageTextures = ReadVarUInt32(program, ref offset);
++        uint storageBuffers = ReadVarUInt32(program, ref offset);
++        uint uniformBuffers = ReadVarUInt32(program, ref offset);
++        var entrypointLength = checked((int)ReadVarUInt32(program, ref offset));
++        EnsureAvailable(program, offset, entrypointLength);
++        var entrypoint = Encoding.UTF8.GetString(program.Slice(offset, entrypointLength));
++        offset += entrypointLength;
++        var codeLength = checked((int)ReadVarUInt32(program, ref offset));
++        EnsureAvailable(program, offset, codeLength);
++        var code = program.Slice(offset, codeLength).ToArray();
++        offset += codeLength;
++        return new CompiledStage(samplers, storageTextures, storageBuffers, uniformBuffers, entrypoint, code);
++    }
++
++    private static uint ReadVarUInt32(ReadOnlySpan<byte> data, ref int offset)
++    {
++        EnsureAvailable(data, offset, 1);
++        var b = data[offset++];
++        uint value = (uint)(b & 0x7F);
++        var extraCount = 0;
++        while ((b & 0x80) != 0 && extraCount < 4)
++        {
++            EnsureAvailable(data, offset, 1);
++            b = data[offset++];
++            var shift = 7 * (++extraCount);
++            var mask = extraCount == 4 ? 0x0F : 0x7F;
++            value |= (uint)(b & mask) << shift;
++        }
++        value += extraCount switch
++        {
++            1 => 128u,
++            2 => 16512u,
++            3 => 2113663u,
++            4 => 270549119u,
++            _ => 0u
++        };
++        if ((b & 0x80) != 0)
++            throw new InvalidDataException("Invalid variable-length integer in SDL_GPU smoke shader bundle");
++        return value;
++    }
++
++    private static void EnsureAvailable(ReadOnlySpan<byte> data, int offset, int count)
++    {
++        if (offset < 0 || count < 0 || offset > data.Length - count)
++            throw new InvalidDataException("Truncated SDL_GPU smoke shader bundle");
++    }
++
++    private static unsafe IntPtr CreateSpirvShader(IntPtr device, CompiledStage stage, SDL3.SDL_GPUShaderStage shaderStage)
++    {
++        var entrypoint = Encoding.UTF8.GetBytes(stage.Entrypoint + "\0");
++        fixed (byte* codePtr = stage.Code)
++        fixed (byte* entrypointPtr = entrypoint)
++        {
++            var info = new SDL3.SDL_GPUShaderCreateInfo
++            {
++                code_size = (UIntPtr)stage.Code.Length,
++                code = codePtr,
++                entrypoint = entrypointPtr,
++                format = SDL3.SDL_GPUShaderFormat.SDL_GPU_SHADERFORMAT_SPIRV,
++                stage = shaderStage,
++                num_samplers = stage.Samplers,
++                num_storage_textures = stage.StorageTextures,
++                num_storage_buffers = stage.StorageBuffers,
++                num_uniform_buffers = stage.UniformBuffers
++            };
++            var shader = SDL3.SDL_CreateGPUShader(device, info);
++            if (shader == IntPtr.Zero)
++                throw Failure($"Creating the SDL_GPU {shaderStage} shader failed");
++            return shader;
++        }
++    }
++
++    private static unsafe (IntPtr VertexBuffer, IntPtr TransferBuffer) CreateVertexBuffer(IntPtr device)
++    {
++        // Interleaved clip-space position, depth and UV exercise a real 3D vertex layout.
++        ReadOnlySpan<float> vertices =
++        [
++            -0.7f, -0.65f, 0.5f, 0.0f, 0.0f,
++             0.7f, -0.65f, 0.5f, 1.0f, 0.0f,
++             0.0f,  0.75f, 0.5f, 0.5f, 1.0f
++        ];
++        const uint byteSize = (uint)(15 * sizeof(float));
++        var vertexBuffer = SDL3.SDL_CreateGPUBuffer(device, new SDL3.SDL_GPUBufferCreateInfo
++        {
++            usage = SDL3.SDL_GPUBufferUsageFlags.SDL_GPU_BUFFERUSAGE_VERTEX,
++            size = byteSize
++        });
++        if (vertexBuffer == IntPtr.Zero)
++            throw Failure("Creating the SDL_GPU vertex buffer failed");
++
++        var transferBuffer = SDL3.SDL_CreateGPUTransferBuffer(device, new SDL3.SDL_GPUTransferBufferCreateInfo
++        {
++            usage = SDL3.SDL_GPUTransferBufferUsage.SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
++            size = byteSize
++        });
++        if (transferBuffer == IntPtr.Zero)
++        {
++            SDL3.SDL_ReleaseGPUBuffer(device, vertexBuffer);
++            throw Failure("Creating the SDL_GPU vertex upload buffer failed");
++        }
++
++        var mapped = SDL3.SDL_MapGPUTransferBuffer(device, transferBuffer, false);
++        if (mapped == IntPtr.Zero)
++        {
++            SDL3.SDL_ReleaseGPUBuffer(device, vertexBuffer);
++            SDL3.SDL_ReleaseGPUTransferBuffer(device, transferBuffer);
++            throw Failure("Mapping the SDL_GPU vertex upload buffer failed");
++        }
++
++        fixed (float* source = vertices)
++            Buffer.MemoryCopy(source, (void*)mapped, byteSize, byteSize);
++        SDL3.SDL_UnmapGPUTransferBuffer(device, transferBuffer);
++
++        IntPtr commandBuffer = SDL3.SDL_AcquireGPUCommandBuffer(device);
++        if (commandBuffer == IntPtr.Zero)
++        {
++            SDL3.SDL_ReleaseGPUBuffer(device, vertexBuffer);
++            SDL3.SDL_ReleaseGPUTransferBuffer(device, transferBuffer);
++            throw Failure("Acquiring a command buffer for vertex upload failed");
++        }
++
++        var copyPass = SDL3.SDL_BeginGPUCopyPass(commandBuffer);
++        if (copyPass == IntPtr.Zero)
++        {
++            SDL3.SDL_CancelGPUCommandBuffer(commandBuffer);
++            SDL3.SDL_ReleaseGPUBuffer(device, vertexBuffer);
++            SDL3.SDL_ReleaseGPUTransferBuffer(device, transferBuffer);
++            throw Failure("Beginning the SDL_GPU vertex upload pass failed");
++        }
++        var sourceLocation = new SDL3.SDL_GPUTransferBufferLocation { transfer_buffer = transferBuffer, offset = 0 };
++        var destination = new SDL3.SDL_GPUBufferRegion { buffer = vertexBuffer, offset = 0, size = byteSize };
++        SDL3.SDL_UploadToGPUBuffer(copyPass, sourceLocation, destination, false);
++        SDL3.SDL_EndGPUCopyPass(copyPass);
++        if (!SDL3.SDL_SubmitGPUCommandBuffer(commandBuffer))
++        {
++            SDL3.SDL_ReleaseGPUBuffer(device, vertexBuffer);
++            SDL3.SDL_ReleaseGPUTransferBuffer(device, transferBuffer);
++            throw Failure("Submitting the SDL_GPU vertex upload failed");
++        }
++        return (vertexBuffer, transferBuffer);
++    }
++
++
++    private static unsafe (IntPtr Texture, IntPtr TransferBuffer) CreateNormalTexture(IntPtr device,
++        byte red = 204, byte green = 153)
++    {
++        // Two constant BC4 blocks form a deterministic BC5 RG normal block.
++        if (!SDL3.SDL_GPUTextureSupportsFormat(device,
++                SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_BC5_RG_UNORM,
++                SDL3.SDL_GPUTextureType.SDL_GPU_TEXTURETYPE_2D,
++                SDL3.SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_SAMPLER))
++            throw new InvalidOperationException("The selected SDL_GPU driver does not support sampleable BC5 normal textures.");
++        ReadOnlySpan<byte> block = [red, red, 0, 0, 0, 0, 0, 0, green, green, 0, 0, 0, 0, 0, 0];
++        var texture = SDL3.SDL_CreateGPUTexture(device, new SDL3.SDL_GPUTextureCreateInfo
++        {
++            type = SDL3.SDL_GPUTextureType.SDL_GPU_TEXTURETYPE_2D,
++            format = SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_BC5_RG_UNORM,
++            usage = SDL3.SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_SAMPLER,
++            width = 4,
++            height = 4,
++            layer_count_or_depth = 1,
++            num_levels = 1,
++            sample_count = SDL3.SDL_GPUSampleCount.SDL_GPU_SAMPLECOUNT_1
++        });
++        if (texture == IntPtr.Zero)
++            throw Failure("Creating the SDL_GPU diffuse texture failed");
++
++        var transfer = SDL3.SDL_CreateGPUTransferBuffer(device, new SDL3.SDL_GPUTransferBufferCreateInfo
++        {
++            usage = SDL3.SDL_GPUTransferBufferUsage.SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
++            size = (uint)block.Length
++        });
++        if (transfer == IntPtr.Zero)
++        {
++            SDL3.SDL_ReleaseGPUTexture(device, texture);
++            throw Failure("Creating the SDL_GPU texture upload buffer failed");
++        }
++        var mapped = SDL3.SDL_MapGPUTransferBuffer(device, transfer, false);
++        if (mapped == IntPtr.Zero)
++        {
++            SDL3.SDL_ReleaseGPUTexture(device, texture);
++            SDL3.SDL_ReleaseGPUTransferBuffer(device, transfer);
++            throw Failure("Mapping the SDL_GPU texture upload buffer failed");
++        }
++        for (var i = 0; i < block.Length; i++)
++            Marshal.WriteByte(mapped, i, block[i]);
++        SDL3.SDL_UnmapGPUTransferBuffer(device, transfer);
++
++        var commandBuffer = SDL3.SDL_AcquireGPUCommandBuffer(device);
++        if (commandBuffer == IntPtr.Zero)
++        {
++            SDL3.SDL_ReleaseGPUTexture(device, texture);
++            SDL3.SDL_ReleaseGPUTransferBuffer(device, transfer);
++            throw Failure("Acquiring a command buffer for texture upload failed");
++        }
++        var copyPass = SDL3.SDL_BeginGPUCopyPass(commandBuffer);
++        if (copyPass == IntPtr.Zero)
++        {
++            SDL3.SDL_CancelGPUCommandBuffer(commandBuffer);
++            SDL3.SDL_ReleaseGPUTexture(device, texture);
++            SDL3.SDL_ReleaseGPUTransferBuffer(device, transfer);
++            throw Failure("Beginning the SDL_GPU texture upload pass failed");
++        }
++        var source = new SDL3.SDL_GPUTextureTransferInfo
++        {
++            transfer_buffer = transfer,
++            offset = 0,
++            pixels_per_row = 4,
++            rows_per_layer = 4
++        };
++        var destination = new SDL3.SDL_GPUTextureRegion
++        {
++            texture = texture,
++            mip_level = 0,
++            layer = 0,
++            x = 0,
++            y = 0,
++            z = 0,
++            w = 4,
++            h = 4,
++            d = 1
++        };
++        SDL3.SDL_UploadToGPUTexture(copyPass, source, destination, false);
++        SDL3.SDL_EndGPUCopyPass(copyPass);
++        if (!SDL3.SDL_SubmitGPUCommandBuffer(commandBuffer))
++        {
++            SDL3.SDL_ReleaseGPUTexture(device, texture);
++            SDL3.SDL_ReleaseGPUTransferBuffer(device, transfer);
++            throw Failure("Submitting the SDL_GPU texture upload failed");
++        }
++        return (texture, transfer);
++    }
++
++    private static IntPtr CreateDepthTexture(IntPtr device, uint width, uint height)
++    {
++        var format = SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
++        var usage = SDL3.SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET;
++        if (!SDL3.SDL_GPUTextureSupportsFormat(device, format,
++                SDL3.SDL_GPUTextureType.SDL_GPU_TEXTURETYPE_2D, usage))
++            throw new InvalidOperationException("The selected SDL_GPU driver does not support a D32 depth target.");
++        var texture = SDL3.SDL_CreateGPUTexture(device, new SDL3.SDL_GPUTextureCreateInfo
++        {
++            type = SDL3.SDL_GPUTextureType.SDL_GPU_TEXTURETYPE_2D,
++            format = format,
++            usage = usage,
++            width = width,
++            height = height,
++            layer_count_or_depth = 1,
++            num_levels = 1,
++            sample_count = SDL3.SDL_GPUSampleCount.SDL_GPU_SAMPLECOUNT_1
++        });
++        if (texture == IntPtr.Zero)
++            throw Failure("Creating the SDL_GPU depth texture failed");
++        return texture;
++    }
++
++    private static IntPtr CreateDiffuseSampler(IntPtr device)
++    {
++        var sampler = SDL3.SDL_CreateGPUSampler(device, new SDL3.SDL_GPUSamplerCreateInfo
++        {
++            min_filter = SDL3.SDL_GPUFilter.SDL_GPU_FILTER_NEAREST,
++            mag_filter = SDL3.SDL_GPUFilter.SDL_GPU_FILTER_NEAREST,
++            mipmap_mode = SDL3.SDL_GPUSamplerMipmapMode.SDL_GPU_SAMPLERMIPMAPMODE_NEAREST,
++            address_mode_u = SDL3.SDL_GPUSamplerAddressMode.SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
++            address_mode_v = SDL3.SDL_GPUSamplerAddressMode.SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
++            address_mode_w = SDL3.SDL_GPUSamplerAddressMode.SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
++            max_anisotropy = 1.0f,
++            min_lod = 0.0f,
++            max_lod = 0.0f
++        });
++        if (sampler == IntPtr.Zero)
++            throw Failure("Creating the SDL_GPU normal-map sampler failed");
++        return sampler;
++    }
++
++    private static unsafe IntPtr CreatePipeline(IntPtr device, IntPtr vertexShader, IntPtr fragmentShader,
++        SDL3.SDL_GPUTextureFormat colorFormat)
++    {
++        var vertexBuffer = new SDL3.SDL_GPUVertexBufferDescription
++        {
++            slot = 0,
++            pitch = 5 * sizeof(float),
++            input_rate = SDL3.SDL_GPUVertexInputRate.SDL_GPU_VERTEXINPUTRATE_VERTEX,
++            instance_step_rate = 0
++        };
++        SDL3.SDL_GPUVertexAttribute* attributes = stackalloc SDL3.SDL_GPUVertexAttribute[2];
++        attributes[0] = new SDL3.SDL_GPUVertexAttribute
++        {
++            location = 0,
++            buffer_slot = 0,
++            format = SDL3.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2,
++            offset = 0
++        };
++        attributes[1] = new SDL3.SDL_GPUVertexAttribute
++        {
++            location = 1,
++            buffer_slot = 0,
++            format = SDL3.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2,
++            offset = 3 * sizeof(float)
++        };
++        var blend = new SDL3.SDL_GPUColorTargetBlendState
++        {
++            color_write_mask = SDL3.SDL_GPUColorComponentFlags.SDL_GPU_COLORCOMPONENT_R |
++                               SDL3.SDL_GPUColorComponentFlags.SDL_GPU_COLORCOMPONENT_G |
++                               SDL3.SDL_GPUColorComponentFlags.SDL_GPU_COLORCOMPONENT_B |
++                               SDL3.SDL_GPUColorComponentFlags.SDL_GPU_COLORCOMPONENT_A,
++            enable_color_write_mask = true
++        };
++        var colorTarget = new SDL3.SDL_GPUColorTargetDescription
++        {
++            format = colorFormat,
++            blend_state = blend
++        };
++        var info = new SDL3.SDL_GPUGraphicsPipelineCreateInfo
++        {
++            vertex_shader = vertexShader,
++            fragment_shader = fragmentShader,
++            vertex_input_state = new SDL3.SDL_GPUVertexInputState
++            {
++                vertex_buffer_descriptions = &vertexBuffer,
++                num_vertex_buffers = 1,
++                vertex_attributes = attributes,
++                num_vertex_attributes = 2
++            },
++            primitive_type = SDL3.SDL_GPUPrimitiveType.SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
++            rasterizer_state = new SDL3.SDL_GPURasterizerState
++            {
++                fill_mode = SDL3.SDL_GPUFillMode.SDL_GPU_FILLMODE_FILL,
++                cull_mode = SDL3.SDL_GPUCullMode.SDL_GPU_CULLMODE_NONE,
++                front_face = SDL3.SDL_GPUFrontFace.SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE,
++                enable_depth_clip = true
++            },
++            multisample_state = new SDL3.SDL_GPUMultisampleState
++            {
++                sample_count = SDL3.SDL_GPUSampleCount.SDL_GPU_SAMPLECOUNT_1
++            },
++            depth_stencil_state = new SDL3.SDL_GPUDepthStencilState
++            {
++                compare_op = SDL3.SDL_GPUCompareOp.SDL_GPU_COMPAREOP_LESS,
++                enable_depth_test = true,
++                enable_depth_write = true
++            }
++        };
++        info.target_info.color_target_descriptions = &colorTarget;
++        info.target_info.num_color_targets = 1;
++        info.target_info.depth_stencil_format = SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
++        info.target_info.has_depth_stencil_target = true;
++        return SDL3.SDL_CreateGPUGraphicsPipeline(device, info);
++    }
++
++    private static InvalidOperationException Failure(string message)
++    {
++        var error = SDL3.SDL_GetError();
++        return new InvalidOperationException(string.IsNullOrEmpty(error)
++            ? message
++            : $"{message}: {error}");
++    }
++}
+diff --git a/src/LibreLancer.Base/Shaders/SDLGPUSmoke.txt b/src/LibreLancer.Base/Shaders/SDLGPUSmoke.txt
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Base/Shaders/SDLGPUSmoke.txt
+@@ -0,0 +1,3 @@
++vertex SDLGPUSmoke.vert.hlsl
++fragment SDLGPUSmoke.frag.hlsl
++nolegacy true
+diff --git a/src/LibreLancer.Base/Shaders/SDLGPUSmoke.frag.hlsl b/src/LibreLancer.Base/Shaders/SDLGPUSmoke.frag.hlsl
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Base/Shaders/SDLGPUSmoke.frag.hlsl
+@@ -0,0 +1,9 @@
++Texture2D<float2> NormalTexture : register(t0, TEXTURE_SPACE);
++SamplerState DiffuseSampler : register(s0, TEXTURE_SPACE);
++
++float4 main(float2 uv : TEXCOORD0) : SV_Target0
++{
++    float2 xy = NormalTexture.Sample(DiffuseSampler, uv).rg * 2.0 - 1.0;
++    float3 normal = normalize(float3(xy, sqrt(max(1.0 - dot(xy, xy), 0.0))));
++    return float4(normal * 0.5 + 0.5, 1.0);
++}
+diff --git a/src/LibreLancer.Base/Shaders/SDLGPUSmoke.vert.hlsl b/src/LibreLancer.Base/Shaders/SDLGPUSmoke.vert.hlsl
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Base/Shaders/SDLGPUSmoke.vert.hlsl
+@@ -0,0 +1,19 @@
++struct Input
++{
++    [[vk::location(0)]] float3 position : TEXCOORD0;
++    [[vk::location(1)]] float2 uv : TEXCOORD1;
++};
++
++struct Output
++{
++    float2 uv : TEXCOORD0;
++    float4 position : SV_Position;
++};
++
++Output main(Input input)
++{
++    Output output;
++    output.position = float4(input.position, 1.0);
++    output.uv = input.uv;
++    return output;
++}
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -262,11 +262,17 @@
+ `lancer --sdl-gpu-smoke` initialisiert SDL3, erstellt ein SDL_GPU-Gerät,
+ beansprucht ein Fenster ohne OpenGL-Flag und erwirbt ein Swapchain-Bild. Der
+ normale Shader-Build erzeugt ein SPIR-V-Vertex-/Fragmentpaar. Der Probe lädt
+-einen interleavten Vertexbuffer aus `FLOAT2`-Position und `FLOAT2`-UV über
++einen interleavten Vertexbuffer aus `FLOAT3`-Position mit Clip-Space-Tiefe und
++`FLOAT2`-UV über
+ einen Transferbuffer hoch und richtet das Vertexlayout ein. Zusätzlich lädt er
+ einen bekannten 4×4-BC5-Block mit konstanten Normal-XY-Werten hoch, bindet
+ einen Nearest-Sampler und rekonstruiert die Z-Komponente im Fragmentshader.
+-Vor der Anlage wird die Formatfähigkeit des SDL_GPU-Geräts abgefragt. Der Shadercompiler übergibt nun die aus SPIR-V
++Ein geprüftes D32-Depth-Target wird auf Swapchain-Größe angelegt und im Pass
++mit `LESS` sowie Depth-Write verwendet. Ein zweiter Draw gleicher Tiefe bindet
++eine andere BC5-Textur; die Pixelabnahme muss den ersten Draw behalten. Damit
++weist derselbe Readback auch nach, dass Depth-Target, Depth-Test und Depth-Write
++wirksam sind. Vor der Anlage wird die Formatfähigkeit des SDL_GPU-Geräts
++abgefragt. Der Shadercompiler übergibt nun die aus SPIR-V
+ reflektierten Sampler-, Storage- und Uniformbuffer-Zahlen korrekt an SDL_GPU;
+ zuvor blieben diese Felder trotz vorhandener Reflektion auf null.
+ 
+@@ -284,6 +290,13 @@
+ unvollständige Haswell-Vulkan-Unterstützung. Der konstante BC5-Block prüft den
+ komprimierten Formatpfad, aber keine Freelancer-Texturen, Tangentenbasis,
+ Freelancer-FVF-Layouts oder Bildqualität in einer Spielszene.
++
++Der erweiterte Depth-Probe bestand am selben Tag erneut mit beiden Treibern.
++Er prüft den Mittelpunkt nach zwei überlappenden, gleich tiefen Draws mit
++unterschiedlichen BC5-Texturen; `(204, 153, 226, 255)` bestätigt, dass der
++zweite Draw durch `LESS` abgewiesen und der erste Depth-Wert geschrieben wurde.
++Der Release-Build bestand mit 0 Fehlern und 180 Warnungen. Das bleibt ein
++SDL_GPU-API-Probe und kein Port des Freelancer-Rendergraphen.
+ 
+ ## Backend-Grenzen
+ 
+diff --git a/src/LibreLancer.Base/Shaders/SDLGPUCopy.txt b/src/LibreLancer.Base/Shaders/SDLGPUCopy.txt
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Base/Shaders/SDLGPUCopy.txt
+@@ -0,0 +1,3 @@
++vertex SDLGPUSmoke.vert.hlsl
++fragment SDLGPUCopy.frag.hlsl
++nolegacy true
+diff --git a/src/LibreLancer.Base/Shaders/SDLGPUCopy.frag.hlsl b/src/LibreLancer.Base/Shaders/SDLGPUCopy.frag.hlsl
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Base/Shaders/SDLGPUCopy.frag.hlsl
+@@ -0,0 +1,21 @@
++Texture2D<float4> SceneColor : register(t0, TEXTURE_SPACE);
++SamplerState SceneSampler : register(s0, TEXTURE_SPACE);
++
++float3 AcesFitted(float3 color)
++{
++    const float a = 2.51;
++    const float b = 0.03;
++    const float c = 2.43;
++    const float d = 0.59;
++    const float e = 0.14;
++    return saturate((color * (a * color + b)) / (color * (c * color + d) + e));
++}
++
++float4 main(float2 uv : TEXCOORD0) : SV_Target0
++{
++    float4 source = SceneColor.Sample(SceneSampler, uv);
++    // Values above 1.0 must survive the RGBA16F scene target and texture sample.
++    // Apply the same fitted ACES curve used by the game's Tonemap shader.
++    float3 hdr = max(source.rgb, 0.0);
++    return float4(AcesFitted(hdr), source.a);
++}
+diff --git a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+--- a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
++++ b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+@@ -16,6 +16,7 @@
+ public static class SDL3GpuSmoke
+ {
+     private const string ShaderBundleResource = "SDLGPUSmoke.bin";
++    private const string CopyShaderBundleResource = "SDLGPUCopy.bin";
+ 
+     public static unsafe int Run()
+     {
+@@ -40,7 +41,10 @@
+         IntPtr fence = IntPtr.Zero;
+         IntPtr vertexShader = IntPtr.Zero;
+         IntPtr fragmentShader = IntPtr.Zero;
++        IntPtr copyVertexShader = IntPtr.Zero;
++        IntPtr copyFragmentShader = IntPtr.Zero;
+         IntPtr pipeline = IntPtr.Zero;
++        IntPtr copyPipeline = IntPtr.Zero;
+         IntPtr vertexBuffer = IntPtr.Zero;
+         IntPtr transferBuffer = IntPtr.Zero;
+         IntPtr diffuseTexture = IntPtr.Zero;
+@@ -48,6 +52,7 @@
+         IntPtr occludedTexture = IntPtr.Zero;
+         IntPtr occludedTextureUploadBuffer = IntPtr.Zero;
+         IntPtr depthTexture = IntPtr.Zero;
++        IntPtr hdrSceneTexture = IntPtr.Zero;
+         IntPtr normalSampler = IntPtr.Zero;
+         bool windowClaimed = false;
+         try
+@@ -73,6 +78,7 @@
+                 throw new InvalidOperationException("The selected SDL_GPU driver does not support the bundled SPIR-V probe shaders.");
+ 
+             (vertexShader, fragmentShader) = CreateShaders(device);
++            (copyVertexShader, copyFragmentShader) = CreateShaders(device, CopyShaderBundleResource);
+ 
+             if (!SDL3.SDL_ClaimWindowForGPUDevice(device, window))
+                 throw Failure("Claiming the window for SDL_GPU failed");
+@@ -91,10 +97,6 @@
+             Console.WriteLine("Uploaded alternate BC5 texture for the depth rejection check.");
+             normalSampler = CreateDiffuseSampler(device);
+             Console.WriteLine("Created SDL_GPU normal-map sampler.");
+-            pipeline = CreatePipeline(device, vertexShader, fragmentShader,
+-                SDL3.SDL_GetGPUSwapchainTextureFormat(device, window));
+-            if (pipeline == IntPtr.Zero)
+-                throw Failure("Creating the SDL_GPU smoke graphics pipeline failed");
+ 
+             commandBuffer = SDL3.SDL_AcquireGPUCommandBuffer(device);
+             if (commandBuffer == IntPtr.Zero)
+@@ -107,7 +109,16 @@
+                 throw Failure("SDL_GPU returned an empty swapchain image");
+             depthTexture = CreateDepthTexture(device, width, height);
+             Console.WriteLine($"Created SDL_GPU D32 depth target at {width}x{height}.");
++            var hdrFormat = SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
++            hdrSceneTexture = CreateHdrSceneTexture(device, width, height, hdrFormat);
++            Console.WriteLine($"Created sampleable RGBA16F scene target at {width}x{height}.");
+             var swapchainFormat = SDL3.SDL_GetGPUSwapchainTextureFormat(device, window);
++            pipeline = CreatePipeline(device, vertexShader, fragmentShader, hdrFormat, true);
++            if (pipeline == IntPtr.Zero)
++                throw Failure("Creating the SDL_GPU scene graphics pipeline failed");
++            copyPipeline = CreatePipeline(device, copyVertexShader, copyFragmentShader, swapchainFormat, false);
++            if (copyPipeline == IntPtr.Zero)
++                throw Failure("Creating the SDL_GPU scene-copy graphics pipeline failed");
+             if (SDL3.SDL_GPUTextureFormatTexelBlockSize(swapchainFormat) != 4)
+                 throw new InvalidOperationException($"SDL_GPU smoke readback expects a 4-byte SDR format, got {swapchainFormat}.");
+             readbackBuffer = SDL3.SDL_CreateGPUTransferBuffer(device, new SDL3.SDL_GPUTransferBufferCreateInfo
+@@ -121,7 +132,7 @@
+             Span<SDL3.SDL_GPUColorTargetInfo> colorTargets = stackalloc SDL3.SDL_GPUColorTargetInfo[1];
+             colorTargets[0] = new SDL3.SDL_GPUColorTargetInfo
+             {
+-                texture = swapchainTexture,
++                texture = hdrSceneTexture,
+                 clear_color = new SDL3.SDL_FColor { r = 0.08f, g = 0.32f, b = 0.62f, a = 1.0f },
+                 load_op = SDL3.SDL_GPULoadOp.SDL_GPU_LOADOP_CLEAR,
+                 store_op = SDL3.SDL_GPUStoreOp.SDL_GPU_STOREOP_STORE
+@@ -156,6 +167,28 @@
+             textureBindings[0] = new SDL3.SDL_GPUTextureSamplerBinding
+             {
+                 texture = occludedTexture,
++                sampler = normalSampler
++            };
++            SDL3.SDL_BindGPUFragmentSamplers(renderPass, 0, textureBindings, 1);
++            SDL3.SDL_DrawGPUPrimitives(renderPass, 3, 1, 0, 0);
++            SDL3.SDL_EndGPURenderPass(renderPass);
++            renderPass = IntPtr.Zero;
++
++            colorTargets[0] = new SDL3.SDL_GPUColorTargetInfo
++            {
++                texture = swapchainTexture,
++                clear_color = new SDL3.SDL_FColor { r = 0.0f, g = 0.0f, b = 0.0f, a = 1.0f },
++                load_op = SDL3.SDL_GPULoadOp.SDL_GPU_LOADOP_CLEAR,
++                store_op = SDL3.SDL_GPUStoreOp.SDL_GPU_STOREOP_STORE
++            };
++            renderPass = SDL3.SDL_BeginGPURenderPass(commandBuffer, colorTargets, 1, IntPtr.Zero);
++            if (renderPass == IntPtr.Zero)
++                throw Failure("Beginning the SDL_GPU postprocess pass failed");
++            SDL3.SDL_BindGPUGraphicsPipeline(renderPass, copyPipeline);
++            SDL3.SDL_BindGPUVertexBuffers(renderPass, 0, vertexBindings, 1);
++            textureBindings[0] = new SDL3.SDL_GPUTextureSamplerBinding
++            {
++                texture = hdrSceneTexture,
+                 sampler = normalSampler
+             };
+             SDL3.SDL_BindGPUFragmentSamplers(renderPass, 0, textureBindings, 1);
+@@ -209,9 +242,9 @@
+                 SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM_SRGB;
+             var isSrgb = swapchainFormat is SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB or
+                 SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM_SRGB;
+-            var expectedRed = isSrgb ? 231 : 204;
+-            var expectedGreen = isSrgb ? 203 : 153;
+-            var expectedBlue = isSrgb ? 242 : 226;
++            var expectedRed = ToOutputByte(AcesFitted(1.6f), isSrgb);
++            var expectedGreen = ToOutputByte(AcesFitted(1.2f), isSrgb);
++            var expectedBlue = ToOutputByte(AcesFitted(2.0f * (0.5f + 0.5f * MathF.Sqrt(0.6f))), isSrgb);
+             var red = isBgra ? channel2 : channel0;
+             var blue = isBgra ? channel0 : channel2;
+             if (alpha < 240 || Math.Abs(red - expectedRed) > 24 ||
+@@ -221,7 +254,7 @@
+                     $"({red}, {green}, {blue}, {alpha}); expected approximately " +
+                     $"({expectedRed}, {expectedGreen}, {expectedBlue}, 255).");
+ 
+-            Console.WriteLine($"Presented SDL_GPU BC5 normal-mapped, depth-tested vertex-buffer draw at {width}x{height}; " +
++            Console.WriteLine($"Presented SDL_GPU BC5 normal-mapped scene through an RGBA16F target and depth-tested pass at {width}x{height}; " +
+                               $"center pixel ({red}, {green}, {blue}, {alpha}) passed.");
+             Thread.Sleep(750);
+             return 0;
+@@ -260,6 +293,10 @@
+                     SDL3.SDL_ReleaseGPUTexture(device, depthTexture);
+                 if (pipeline != IntPtr.Zero)
+                     SDL3.SDL_ReleaseGPUGraphicsPipeline(device, pipeline);
++                if (copyPipeline != IntPtr.Zero)
++                    SDL3.SDL_ReleaseGPUGraphicsPipeline(device, copyPipeline);
++                if (hdrSceneTexture != IntPtr.Zero)
++                    SDL3.SDL_ReleaseGPUTexture(device, hdrSceneTexture);
+                 if (vertexBuffer != IntPtr.Zero)
+                     SDL3.SDL_ReleaseGPUBuffer(device, vertexBuffer);
+                 if (transferBuffer != IntPtr.Zero)
+@@ -268,6 +305,10 @@
+                     SDL3.SDL_ReleaseGPUShader(device, vertexShader);
+                 if (fragmentShader != IntPtr.Zero)
+                     SDL3.SDL_ReleaseGPUShader(device, fragmentShader);
++                if (copyVertexShader != IntPtr.Zero)
++                    SDL3.SDL_ReleaseGPUShader(device, copyVertexShader);
++                if (copyFragmentShader != IntPtr.Zero)
++                    SDL3.SDL_ReleaseGPUShader(device, copyFragmentShader);
+                 if (windowClaimed)
+                     SDL3.SDL_ReleaseWindowFromGPUDevice(device, window);
+                 SDL3.SDL_DestroyGPUDevice(device);
+@@ -281,10 +322,11 @@
+     private readonly record struct CompiledStage(uint Samplers, uint StorageTextures, uint StorageBuffers,
+         uint UniformBuffers, string Entrypoint, byte[] Code);
+ 
+-    private static (IntPtr Vertex, IntPtr Fragment) CreateShaders(IntPtr device)
+-    {
+-        using var stream = typeof(SDL3GpuSmoke).Assembly.GetManifestResourceStream(ShaderBundleResource)
+-                           ?? throw new FileNotFoundException($"Missing embedded SDL_GPU smoke shader bundle: {ShaderBundleResource}");
++    private static (IntPtr Vertex, IntPtr Fragment) CreateShaders(IntPtr device,
++        string shaderBundleResource = ShaderBundleResource)
++    {
++        using var stream = typeof(SDL3GpuSmoke).Assembly.GetManifestResourceStream(shaderBundleResource)
++                           ?? throw new FileNotFoundException($"Missing embedded SDL_GPU smoke shader bundle: {shaderBundleResource}");
+         var bundle = BytecodesBundle.FromStream(stream);
+         var program = ShaderBytecodes.GetSPIRV(bundle.GetShader(0));
+         var offset = 0;
+@@ -566,6 +608,30 @@
+         return texture;
+     }
+ 
++    private static IntPtr CreateHdrSceneTexture(IntPtr device, uint width, uint height,
++        SDL3.SDL_GPUTextureFormat format)
++    {
++        var usage = SDL3.SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
++                    SDL3.SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_SAMPLER;
++        if (!SDL3.SDL_GPUTextureSupportsFormat(device, format,
++                SDL3.SDL_GPUTextureType.SDL_GPU_TEXTURETYPE_2D, usage))
++            throw new InvalidOperationException($"The selected SDL_GPU driver does not support a sampleable {format} color target.");
++        var texture = SDL3.SDL_CreateGPUTexture(device, new SDL3.SDL_GPUTextureCreateInfo
++        {
++            type = SDL3.SDL_GPUTextureType.SDL_GPU_TEXTURETYPE_2D,
++            format = format,
++            usage = usage,
++            width = width,
++            height = height,
++            layer_count_or_depth = 1,
++            num_levels = 1,
++            sample_count = SDL3.SDL_GPUSampleCount.SDL_GPU_SAMPLECOUNT_1
++        });
++        if (texture == IntPtr.Zero)
++            throw Failure($"Creating the SDL_GPU {format} scene texture failed");
++        return texture;
++    }
++
+     private static IntPtr CreateDiffuseSampler(IntPtr device)
+     {
+         var sampler = SDL3.SDL_CreateGPUSampler(device, new SDL3.SDL_GPUSamplerCreateInfo
+@@ -586,7 +652,7 @@
+     }
+ 
+     private static unsafe IntPtr CreatePipeline(IntPtr device, IntPtr vertexShader, IntPtr fragmentShader,
+-        SDL3.SDL_GPUTextureFormat colorFormat)
++        SDL3.SDL_GPUTextureFormat colorFormat, bool depthTest)
+     {
+         var vertexBuffer = new SDL3.SDL_GPUVertexBufferDescription
+         {
+@@ -600,7 +666,7 @@
+         {
+             location = 0,
+             buffer_slot = 0,
+-            format = SDL3.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2,
++            format = SDL3.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3,
+             offset = 0
+         };
+         attributes[1] = new SDL3.SDL_GPUVertexAttribute
+@@ -646,17 +712,19 @@
+             {
+                 sample_count = SDL3.SDL_GPUSampleCount.SDL_GPU_SAMPLECOUNT_1
+             },
+-            depth_stencil_state = new SDL3.SDL_GPUDepthStencilState
++            depth_stencil_state = depthTest ? new SDL3.SDL_GPUDepthStencilState
+             {
+                 compare_op = SDL3.SDL_GPUCompareOp.SDL_GPU_COMPAREOP_LESS,
+                 enable_depth_test = true,
+                 enable_depth_write = true
+-            }
++            } : default
+         };
+         info.target_info.color_target_descriptions = &colorTarget;
+         info.target_info.num_color_targets = 1;
+-        info.target_info.depth_stencil_format = SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
+-        info.target_info.has_depth_stencil_target = true;
++        info.target_info.depth_stencil_format = depthTest
++            ? SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_D32_FLOAT
++            : default;
++        info.target_info.has_depth_stencil_target = depthTest;
+         return SDL3.SDL_CreateGPUGraphicsPipeline(device, info);
+     }
+ 
+@@ -667,4 +735,24 @@
+             ? message
+             : $"{message}: {error}");
+     }
++
++    private static float AcesFitted(float color)
++    {
++        const float a = 2.51f;
++        const float b = 0.03f;
++        const float c = 2.43f;
++        const float d = 0.59f;
++        const float e = 0.14f;
++        return Math.Clamp((color * (a * color + b)) / (color * (c * color + d) + e), 0f, 1f);
++    }
++
++    private static byte ToOutputByte(float linear, bool srgbTarget)
++    {
++        var display = srgbTarget
++            ? linear <= 0.0031308f
++                ? linear * 12.92f
++                : 1.055f * MathF.Pow(linear, 1f / 2.4f) - 0.055f
++            : linear;
++        return (byte)Math.Clamp((int)MathF.Round(display * 255f), 0, 255);
++    }
+ }
+diff --git a/src/LibreLancer.Base/LibreLancer.Base.csproj b/src/LibreLancer.Base/LibreLancer.Base.csproj
+--- a/src/LibreLancer.Base/LibreLancer.Base.csproj
++++ b/src/LibreLancer.Base/LibreLancer.Base.csproj
+@@ -47,6 +47,7 @@
+     <Shader Include="Shaders\BloomBlur.txt" />
+     <Shader Include="Shaders\ScreenSpaceAmbientOcclusion.txt" />
+     <Shader Include="Shaders\SDLGPUSmoke.txt" />
++    <Shader Include="Shaders\SDLGPUCopy.txt" />
+   </ItemGroup>
+ 
+   <ItemGroup>
+diff --git a/src/LibreLancer.Base/Shaders/SDLGPUSmoke.frag.hlsl b/src/LibreLancer.Base/Shaders/SDLGPUSmoke.frag.hlsl
+--- a/src/LibreLancer.Base/Shaders/SDLGPUSmoke.frag.hlsl
++++ b/src/LibreLancer.Base/Shaders/SDLGPUSmoke.frag.hlsl
+@@ -5,5 +5,5 @@
+ {
+     float2 xy = NormalTexture.Sample(DiffuseSampler, uv).rg * 2.0 - 1.0;
+     float3 normal = normalize(float3(xy, sqrt(max(1.0 - dot(xy, xy), 0.0))));
+-    return float4(normal * 0.5 + 0.5, 1.0);
++    return float4((normal * 0.5 + 0.5) * 2.0, 1.0);
+ }
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -298,6 +298,17 @@
+ Der Release-Build bestand mit 0 Fehlern und 180 Warnungen. Das bleibt ein
+ SDL_GPU-API-Probe und kein Port des Freelancer-Rendergraphen.
+ 
++Der folgende Probe-Schritt rendert den BC5-Draw in ein samplebares
++`R16G16B16A16_FLOAT`-Farbziel. Der Fragmentshader schreibt RGB-Werte über 1;
++ein zweiter Pass liest diese Werte zurück und wendet die ACES-Fitted-Kurve an,
++bevor er in die SDR-Swapchain zeichnet. Das abschließende Pixel-Readback prüft
++damit Ressourcenformat, Offscreen-Pass, Depth-Ziel, Textursampling, HDR-Werte
++über 1, Tonemapping und Präsentation zusammen. Der Release-Smoke lief auf
++Mesa/Vulkan Intel Haswell und Lavapipe bei 640×360; beide lieferten den für die
++ACES-Abbildung erwarteten Mittelpunktpixel `(226, 214, 230, 255)` innerhalb
++der Format-Toleranz.
++Auch dieser Probe verwendet keine Produktionsshader oder Freelancer-Meshes.
++
+ ## Backend-Grenzen
+ 
+ Der Screenshotpfad ist von SDL2/SDL3 nach `RenderContext.ReadBackbuffer`
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -349,3 +349,4 @@
+ client 2347-validate-soft-particle-distance.patch
+ client 2348-offset-soft-particle-viewport-uvs.patch
+ client 2349-hi02-intel-renderer-profile-evidence.patch
++client 2350-sdl-gpu-depth-target-smoke.patch
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -297,3 +297,4 @@
+ | 2347 | Validate the configured soft-particle depth fade distance |
+ | 2348 | Offset soft-particle depth UVs for nonzero viewport origins |
+ | 2349 | Record a 300-frame Hi02 GPU profile on Intel HD 4600 |
++| 2350 | Add SDL_GPU depth and HDR scene-copy smoke coverage |

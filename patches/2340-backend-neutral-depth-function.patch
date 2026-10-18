@@ -1,0 +1,299 @@
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -567,6 +567,11 @@
+ 
+ - [ ] Backendneutrale Vertex-/Wrap-/Depth-Aufzählungen, Screenshot-/Readback-
+   Schnittstelle und backendabhängige SDL-Fenstererzeugung einführen.
++  - [x] `DepthFunction` verwendet neutrale Enum-Werte; OpenGL bildet `Less` und
++    `LessEqual` auf eigene Vergleichsoperatoren ab und wendet Laufzeitänderungen
++    in `ApplyState` an. Drei fokussierte Mappings-/Validierungstests bestehen.
++    Vertexelement-, Wrap-, Screenshot-/Readback- und Fensterverträge bleiben
++    offen.
+ - [ ] SDL3-Mindestversion und native Bereitstellung pro Plattform festlegen;
+   SDL2/GLES/Null-Pfade erhalten. Geräte-/Formatfähigkeiten beim Start prüfen
+   und eine nicht verfügbare Auswahl verständlich auf einen gültigen Backend
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -197,6 +197,15 @@
+ 
+ ## Aktueller Renderer-Fix (2026-10-18)
+ 
++`DepthFunction` wurde im OpenGL-Backend bisher nur bei der Kontextinitialisierung
++gesetzt. Spätere Anforderungen für `Less` und `LessEqual` erreichten deshalb den
++GPU-Zustand nicht. Patch `2340-backend-neutral-depth-function.patch` ordnet die
++Vergleiche backendneutralen Enum-Werten zu, mappt sie im OpenGL-Backend und
++wendet Änderungen bei `ApplyState` an. Drei Regressionstests prüfen die beiden
++Mappings und die Zurückweisung ungültiger Enumwerte. Der Laufzeitpfad ist damit
++im Code geschlossen; eine GL-Frame-Capture-Abnahme folgt mit der Renderer-
++Szenenmatrix.
++
+ Der HDR-NAP-Lauf zeigte einen doppelten Letterbox-Versatz: Wenn SSAO in ein
+ Zwischenziel schreibt, muss dessen Viewport bei `(0,0)` beginnen. Der Aufrufer
+ übergibt für die THN-Szene einen Drawable-Offset von `(0,101)` bei einer
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 338 Client bundles and two native bundles. Each
++The active series contains 339 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -285,3 +285,4 @@
+ | 2337 | Distinguish near-plane and middle-depth shadow fit failures |
+ | 2338 | Record Hi02 shadow-fit fix and directional bias A/B evidence |
+ | 2339 | Document soft-particle implementation and outstanding scene acceptance |
++| 2340 | Apply depth comparison changes and make depth functions backend-neutral |
+--- a/patches/series
++++ b/patches/series
+@@ -339,3 +339,4 @@
+ client 2337-identify-shadow-frustum-unprojection-stage.patch
+ client 2338-hi02-shadow-bias-runtime-evidence.patch
+ client 2339-document-soft-particle-acceptance.patch
++client 2340-backend-neutral-depth-function.patch
+--- a/src/LibreLancer.Base/Graphics/Backends/Null/NullRenderContext.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/Null/NullRenderContext.cs
+@@ -1,7 +1,6 @@
+ using System;
+ using System.Numerics;
+ using LibreLancer.Graphics;
+-using LibreLancer.Graphics.Backends.OpenGL;
+ using LibreLancer.Graphics.Vertices;
+ 
+ namespace LibreLancer.Graphics.Backends.Null;
+@@ -27,7 +26,7 @@
+         requested.CullFaces = CullFaces.Back;
+         requested.BlendMode = BlendMode.Normal;
+         requested.ScissorEnabled = false;
+-        requested.DepthFunction = GL.GL_LEQUAL;
++        requested.DepthFunction = (int)DepthFunction.LessEqual;
+         requested.DepthRange = new Vector2(0, 1);
+         requested.ColorWrite = true;
+         requested.DepthWrite = true;
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/EnumConversions.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/EnumConversions.cs
+@@ -4,6 +4,13 @@
+ 
+ internal static class EnumConversions
+ {
++    internal static int ToGL(this DepthFunction function) => function switch
++    {
++        DepthFunction.Less => GL.GL_LESS,
++        DepthFunction.LessEqual => GL.GL_LEQUAL,
++        _ => throw new ArgumentOutOfRangeException(nameof(function), function, null)
++    };
++
+     public static int ToGL(this CubeMapFace face)
+     {
+         switch (face)
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderContext.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderContext.cs
+@@ -236,7 +236,7 @@
+         applied.CullFaces = CullFaces.Back;
+         applied.BlendMode = BlendMode.Normal;
+         applied.ScissorEnabled = false;
+-        applied.DepthFunction = GL.GL_LEQUAL;
++        applied.DepthFunction = (int)DepthFunction.LessEqual;
+         applied.DepthRange = new Vector2(0, 1);
+         applied.ColorWrite = true;
+         applied.DepthWrite = true;
+@@ -424,6 +424,12 @@
+             applied.DepthEnabled = requested.DepthEnabled;
+         }
+ 
++        if (requested.DepthFunction != applied.DepthFunction)
++        {
++            GL.DepthFunc(((DepthFunction)requested.DepthFunction).ToGL());
++            applied.DepthFunction = requested.DepthFunction;
++        }
++
+ 
+         if (requested.CullEnabled != applied.CullEnabled)
+         {
+--- a/src/LibreLancer.Base/Graphics/RenderContext.cs
++++ b/src/LibreLancer.Base/Graphics/RenderContext.cs
+@@ -14,8 +14,8 @@
+ 
+ public enum DepthFunction
+ {
+-    Less = 0x201,
+-    LessEqual = 0x203
++    Less,
++    LessEqual
+ }
+ 
+ //OpenGL Render States
+--- a/src/LibreLancer.Base/LibreLancer.Base.csproj
++++ b/src/LibreLancer.Base/LibreLancer.Base.csproj
+@@ -1,70 +1,70 @@
+-<Project Sdk="Microsoft.NET.Sdk">
+-  <ImportGroup>
+-    <Import Project="../CommonVersion.props" />
+-  </ImportGroup>
+-  <PropertyGroup>
+-    <TargetFramework>net10.0</TargetFramework>
+-    <Version>0.0.3</Version>
+-    <Title>Librelancer Base Library</Title>
+-    <Authors>Librelancer contributors</Authors>
+-    <Copyright>Copyright (c) Callum McGing, Librelancer Contributors 2013-2026</Copyright>
+-    <PackageProjectUrl>https://librelancer.net/</PackageProjectUrl>
+-    <PackageLicenseUrl>https://github.com/Librelancer/Librelancer/blob/main/LICENSE</PackageLicenseUrl>
+-    <RepositoryUrl>https://github.com/Librelancer/Librelancer</RepositoryUrl>
+-    <RootNamespace>LibreLancer</RootNamespace>
+-    <LangVersion>default</LangVersion>
+-    <Nullable>enable</Nullable>
+-  </PropertyGroup>
+-
+-  <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
+-    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+-  </PropertyGroup>
+-
+-  <PropertyGroup Condition=" '$(Configuration)' == 'Release' ">
+-    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+-  </PropertyGroup>
+-
+-  <Import Project="..\Shader.targets"/>
+-
+-  <ItemGroup>
+-    <Folder Include="Properties" />
+-    <InternalsVisibleTo Include="LibreLancer.Tests" />
+-  </ItemGroup>
+-
+-  <ItemGroup>
+-    <ProjectReference Include="..\..\extern\bepuphysics2\BepuUtilities\BepuUtilities.csproj" />
+-    <ProjectReference Include="..\..\extern\blurgtext\dotnet\BlurgText\BlurgText.csproj" />
+-  </ItemGroup>
+-
+-  <ItemGroup>
+-    <Shader Include="Shaders\Shader2D.txt" />
+-    <Shader Include="Shaders\FSTint.txt"/>
+-    <Shader Include="Shaders\SMAAEdgeDetection.txt"/>
+-    <Shader Include="Shaders\SMAABlendingWeightCalculation.txt"/>
+-    <Shader Include="Shaders\SMAANeighborhoodBlending.txt"/>
+-    <Shader Include="Shaders\Tonemap.txt"/>
+-    <Shader Include="Shaders\BloomExtract.txt" />
+-    <Shader Include="Shaders\BloomBlur.txt" />
+-    <Shader Include="Shaders\ScreenSpaceAmbientOcclusion.txt" />
+-  </ItemGroup>
+-
+-  <ItemGroup>
+-    <PackageReference Include="StbImageSharp" Version="2.30.15" />
+-    <PackageReference Include="ZstdSharp.Port" Version="0.8.6" />
+-  </ItemGroup>
+-
+-  <ItemGroup>
+-    <EmbeddedResource Include="Shaders\AreaTexDX10.dds" />
+-    <EmbeddedResource Include="Shaders\SearchTex.dds" />
+-  </ItemGroup>
+-
+-  <ItemGroup>
+-    <ClCompile Include="Shaders\SMAABlendingWeightCalculation.frag.hlsl" />
+-    <ClCompile Include="Shaders\SMAABlendingWeightCalculation.vert.hlsl" />
+-    <ClCompile Include="Shaders\SMAAIntegration.hlsl" />
+-    <ClCompile Include="Shaders\SMAANeighborhoodBlending.frag.hlsl" />
+-    <ClCompile Include="Shaders\SMAANeighborhoodBlending.vert.hlsl" />
+-    <ClCompile Include="Shaders\ScreenSpaceAmbientOcclusion.frag.hlsl" />
+-    <ClCompile Include="Shaders\ScreenSpaceAmbientOcclusion.vert.hlsl" />
+-  </ItemGroup>
+-</Project>
++<Project Sdk="Microsoft.NET.Sdk">
++  <ImportGroup>
++    <Import Project="../CommonVersion.props" />
++  </ImportGroup>
++  <PropertyGroup>
++    <TargetFramework>net10.0</TargetFramework>
++    <Version>0.0.3</Version>
++    <Title>Librelancer Base Library</Title>
++    <Authors>Librelancer contributors</Authors>
++    <Copyright>Copyright (c) Callum McGing, Librelancer Contributors 2013-2026</Copyright>
++    <PackageProjectUrl>https://librelancer.net/</PackageProjectUrl>
++    <PackageLicenseUrl>https://github.com/Librelancer/Librelancer/blob/main/LICENSE</PackageLicenseUrl>
++    <RepositoryUrl>https://github.com/Librelancer/Librelancer</RepositoryUrl>
++    <RootNamespace>LibreLancer</RootNamespace>
++    <LangVersion>default</LangVersion>
++    <Nullable>enable</Nullable>
++  </PropertyGroup>
++
++  <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
++    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
++  </PropertyGroup>
++
++  <PropertyGroup Condition=" '$(Configuration)' == 'Release' ">
++    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
++  </PropertyGroup>
++
++  <Import Project="..\Shader.targets"/>
++
++  <ItemGroup>
++    <Folder Include="Properties" />
++    <InternalsVisibleTo Include="LibreLancer.Tests" />
++  </ItemGroup>
++
++  <ItemGroup>
++    <ProjectReference Include="..\..\extern\bepuphysics2\BepuUtilities\BepuUtilities.csproj" />
++    <ProjectReference Include="..\..\extern\blurgtext\dotnet\BlurgText\BlurgText.csproj" />
++  </ItemGroup>
++
++  <ItemGroup>
++    <Shader Include="Shaders\Shader2D.txt" />
++    <Shader Include="Shaders\FSTint.txt"/>
++    <Shader Include="Shaders\SMAAEdgeDetection.txt"/>
++    <Shader Include="Shaders\SMAABlendingWeightCalculation.txt"/>
++    <Shader Include="Shaders\SMAANeighborhoodBlending.txt"/>
++    <Shader Include="Shaders\Tonemap.txt"/>
++    <Shader Include="Shaders\BloomExtract.txt" />
++    <Shader Include="Shaders\BloomBlur.txt" />
++    <Shader Include="Shaders\ScreenSpaceAmbientOcclusion.txt" />
++  </ItemGroup>
++
++  <ItemGroup>
++    <PackageReference Include="StbImageSharp" Version="2.30.15" />
++    <PackageReference Include="ZstdSharp.Port" Version="0.8.6" />
++  </ItemGroup>
++
++  <ItemGroup>
++    <EmbeddedResource Include="Shaders\AreaTexDX10.dds" />
++    <EmbeddedResource Include="Shaders\SearchTex.dds" />
++  </ItemGroup>
++
++  <ItemGroup>
++    <ClCompile Include="Shaders\SMAABlendingWeightCalculation.frag.hlsl" />
++    <ClCompile Include="Shaders\SMAABlendingWeightCalculation.vert.hlsl" />
++    <ClCompile Include="Shaders\SMAAIntegration.hlsl" />
++    <ClCompile Include="Shaders\SMAANeighborhoodBlending.frag.hlsl" />
++    <ClCompile Include="Shaders\SMAANeighborhoodBlending.vert.hlsl" />
++    <ClCompile Include="Shaders\ScreenSpaceAmbientOcclusion.frag.hlsl" />
++    <ClCompile Include="Shaders\ScreenSpaceAmbientOcclusion.vert.hlsl" />
++  </ItemGroup>
++</Project>
+--- /dev/null
++++ b/src/LibreLancer.Tests/DepthFunctionBackendTests.cs
+@@ -0,0 +1,27 @@
++using System;
++using LibreLancer.Graphics;
++using LibreLancer.Graphics.Backends.OpenGL;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class DepthFunctionBackendTests
++{
++    [Fact]
++    public void Less_MapsToOpenGlLess()
++    {
++        Assert.Equal(GL.GL_LESS, DepthFunction.Less.ToGL());
++    }
++
++    [Fact]
++    public void LessEqual_MapsToOpenGlLessEqual()
++    {
++        Assert.Equal(GL.GL_LEQUAL, DepthFunction.LessEqual.ToGL());
++    }
++
++    [Fact]
++    public void InvalidDepthFunction_IsRejected()
++    {
++        Assert.Throws<ArgumentOutOfRangeException>(() => ((DepthFunction)99).ToGL());
++    }
++}

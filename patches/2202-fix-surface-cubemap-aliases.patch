@@ -1,0 +1,59 @@
+--- a/src/LibreLancer/Resources/GameResourceManager.cs
++++ b/src/LibreLancer/Resources/GameResourceManager.cs
+@@ -545,11 +545,34 @@
+ 
+     private void AddTextures(TxmFile t, string filename)
+     {
++        var normalizedFilename = filename.Replace('\\', '/');
++        var environmentAliases = SurfaceMaps.CubeMaps.Values
++            .Where(cube => string.Equals(cube.File.Replace('\\', '/'), normalizedFilename,
++                StringComparison.OrdinalIgnoreCase))
++            .Select(cube => cube.Nickname)
++            .ToArray();
++
+         foreach (var tex in t.Textures)
+         {
++            var v = tex.Value;
++            if (environmentAliases.Length > 0)
++            {
++                // Surface cubemap MAT files reuse the internal name `envmapbasic`.
++                // Initialize each file independently and expose its catalog nickname so
++                // loading one cube cannot make the other catalog entries alias it.
++                v.Initialize(GLWindow.RenderContext);
++                if (v.Texture is TextureCube cubeTexture)
++                {
++                    foreach (var alias in environmentAliases)
++                    {
++                        textures[alias] = cubeTexture;
++                        texturefiles.TryAdd(alias, filename);
++                    }
++                }
++            }
++
+             if (!textures.TryGetValue(tex.Key, out var existing) || existing == null)
+             {
+-                var v = tex.Value;
+                 v.Initialize(GLWindow.RenderContext);
+ 
+                 if (v.Texture != null)
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -276,9 +276,10 @@
+ - [ ] **Zuerst die Pipeline (Abschnitte 1, 3, 4):** Render-Passes, HDR-Zwischenpuffer, Tonemapping und Bloom. Größter sichtbarer Gewinn für Sonnen, Triebwerke, Schüsse und Schilde, ohne neues Backend.
+ - [ ] **Forward oder Clustered Forward statt Deferred:** Transparenz und MSAA/SMAA sprechen gegen Deferred. Forward+ gegen die aktuelle Beleuchtung benchmarken.
+ - [x] **Cubemap-Grundpfad:** Surface-Katalog-Cubes `envcube_*` bedarfsgesteuert laden und `[CubeMap] strength` im opt-in PBR-Pfad anwenden; kontrollierte Produktionsshader-GPU-Proben sind dokumentiert.
++- [x] **Cubemap-Aliasauflösung:** NAP-Cube-MATs verwenden denselben internen `envmapbasic`-Namen. Der Ressourcenmanager registriert nun je Quelldatei den zugehörigen Surface-Katalog-Nickname, damit die drei Cubes nicht miteinander kollidieren.
+ - [x] **Diffuse IBL-Grundbeitrag:** Im opt-in PBR-Pfad wird die niedrigste Cubemap-Mipstufe als kostengünstige diffuse Umgebungsfarbe ausgewertet und Fresnel-/Metallic-gewichtet zum direkten Licht addiert. Das ist eine Laufzeit-Approximation, keine vorberechnete diffuse Irradiance.
+ - [x] **Split-Sum-BRDF-Grundbeitrag:** Die PBR-Umgebungsreflexion wertet den analytischen Epic-BRDF-Fit für `NdotV` und Rauheit aus; eine BRDF-LUT-Textur ist dafür nicht erforderlich. Der Fit ersetzt keine GGX-vorgefilterte Radiance-Cubemap.
+-- [ ] **Image-Based Lighting:** Retail-Orientierung und sichtbare Cubemap-Reflexion im Spiel abnehmen; GGX-Reflexionsfilterung und konvolvierte diffuse Irradiance bleiben offen. Die LI_ELITE-ModelViewer-A/B änderte bislang 0 Modellpixel; die inzwischen verdrahtete Preview-Auswahl muss mit einem frischen visuellen Vergleich erneut geprüft werden.
++- [ ] **Image-Based Lighting:** Retail-Orientierung und sichtbare Cubemap-Reflexion im Spiel abnehmen; GGX-Reflexionsfilterung und konvolvierte diffuse Irradiance bleiben offen. Der aktuelle gleiche-Szene-ModelViewer-Vergleich änderte vor dem Alias-Fix 0 Modellpixel und zeigte `envcube_space` als unresolved. Nach dem Fix ist ein neuer Laufzeitvergleich erforderlich.
+ - [ ] **Volumetrische Nebel und Soft Particles:** Nebelfelder sind ein Merkmal des Spiels; als eigene Qualitätsstufe mit Fallback.
+ - [ ] **Vulkan-Backend (Spike):** Prüfen, wie weit `IRenderContext` und die HLSL→SPIR-V-Kette tragen. Nutzen: Linux/Steam Deck, Mehrkern-Befehlsaufzeichnung für viele Schiffe, RenderDoc, MoltenVK für macOS. Aufwand und Risiko groß, vorher messen.
+ - [ ] **Direct3D 11 und Metal nur bei konkretem Bedarf:** D3D11 nur, wenn OpenGL unter Windows Probleme macht; Metal besser über MoltenVK.
+--- a/patches/series
++++ b/patches/series
+@@ -201,3 +201,4 @@
+ client 2199-bloom-radius-runtime-evidence.patch
+ client 2200-approximate-diffuse-ibl.patch
+ client 2201-analytic-split-sum-brdf.patch
++client 2202-fix-surface-cubemap-aliases.patch

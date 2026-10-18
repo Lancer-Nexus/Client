@@ -1,0 +1,237 @@
+client 2213-executable-hdr-postprocess-pipeline.patch
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+index db6f1bf..271c5ec 100644
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -128,6 +128,7 @@ Diese Liste plant moderne Renderer-Erweiterungen für LibreLancer. Sie ist eine
+ ### 3. Blur und Post-Processing
+ 
+ - [ ] Allgemeine Post-Processing-Pass-Schnittstelle ergänzen; SMAA und bestehende Render-Targets dabei als Referenz für Ressourcenlebensdauer und Skalierung verwenden.
++  - [x] HDR-Bloom und Tonemapping laufen jetzt über eine ausführbare `IPostProcessPass`-Schnittstelle. Die Pipeline führt Bloom vor Tonemapping aus, übergibt Ziel, Viewport, Einstellungen und GPU-Marker pro Frame und aggregiert den Pass-Speicherbedarf. AA/SMAA und die übrigen Render-Pässe bleiben außerhalb dieser HDR-Pipeline; Backend-unabhängige Targets, ein allgemeines Render-Graph-Lifecycle-Modell und weitere Post-Effects bleiben offen.
+ - [ ] Separable Gaussian Blur als erster kontrollierter Effekt: variable Kernelbreite, Auflösungs-Skalierung und keine Farb-/Alpha-Halos.
+   - [x] Den horizontalen/vertikalen 5-Tap-Gauß-Blur als wiederverwendbaren `SeparableGaussianBlurPass` aus Bloom herausgelöst. Der Pass akzeptiert Radius und eine begrenzte Zielauflösung von 1/8 bis 1/1 der Quelle. `render_bloom_resolution_scale` sowie `--render-bloom-resolution-scale=0.125..1` und der Regler „BLUR RESOLUTION“ steuern die Blur-Zielauflösung; Bloom-Extraktion bleibt bei Viertelauflösung. Variable Kernellänge, Halo-Abnahme, visuelle Qualitätsabnahme und GPU-Kostenmessung bleiben offen.
+ - [ ] Verwendungsfälle getrennt spezifizieren: weicher UI-/Vorschau-Hintergrund, selektiver Tiefenunschärfe-Effekt und kamerabasierte Bewegungsunschärfe sind unterschiedliche Effekte.
+diff --git a/patches/README.md b/patches/README.md
+index 3917b4a..78954a6 100644
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 211 Client bundles and two native bundles. Each
++The active series contains 212 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -120,6 +120,7 @@ jump-gate route.
+ | 2115 | Validate OpenGL framebuffer completeness and release failed allocations |
+ | 2211 | Add scaled target resolution to the reusable separable Gaussian blur |
+ | 2212 | Expose Bloom blur resolution scale through runtime settings, CLI and Effects options |
++| 2213 | Add executable pass interface for Bloom and HDR tone mapping |
+ | 2116 | Estimate active SMAA and MSAA render-target memory |
+ | 2117 | Record the M01A dark station and ship lighting report |
+ | 2118 | Apply THN ambient and dynamic lights to shared gameplay lighting, then remove them on cleanup |
+diff --git a/patches/series b/patches/series
+index 21f12c4..f4e743f 100644
+--- a/patches/series
++++ b/patches/series
+@@ -212,3 +212,4 @@ client 2209-reusable-separable-gaussian-blur.patch
+ client 2210-hdr-postprocess-gpu-profile.patch
+ client 2211-configurable-postprocess-resolution.patch
+ client 2212-bloom-resolution-control.patch
++client 2213-executable-hdr-postprocess-pipeline.patch
+diff --git a/src/LibreLancer.Base/Graphics/AntialiasTarget.cs b/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
+index fe57226..c1d6973 100644
+--- a/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
++++ b/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
+@@ -30,7 +30,7 @@ public class AntialiasTarget : RenderTarget
+         _ => SystemRenderAttachmentFormat.OpenGlMsaaColor
+     };
+     public long EstimatedMemoryBytes => (msaa?.EstimatedMemoryBytes ?? 0) +
+-        (bloom?.EstimatedMemoryBytes ?? 0) +
++        (postProcess?.EstimatedMemoryBytes ?? 0) +
+         (long)(smaa?.Texture.EstimatedTextureMemory ?? 0) +
+         (smaaEdges?.Texture.EstimatedTextureMemory ?? 0) +
+         (smaaBlend?.Texture.EstimatedTextureMemory ?? 0) +
+@@ -47,7 +47,7 @@ public class AntialiasTarget : RenderTarget
+     private RenderTarget2D? hdrScene;
+     private RenderTarget2D? hdrResolve;
+     private RenderTarget2D? ldrToneMapped;
+-    private BloomPass? bloom;
++    private PostProcessPipeline? postProcess;
+     private DepthBuffer? depthStencil;
+     private RenderContext renderContext;
+ 
+@@ -60,7 +60,7 @@ public class AntialiasTarget : RenderTarget
+         Mode = mode;
+         HdrOutputEnabled = hdrOutput;
+         if (hdrOutput)
+-            bloom = new BloomPass(renderContext);
++            postProcess = new PostProcessPipeline(renderContext);
+         try
+         {
+             if (mode == AntialiasMode.None && hdrOutput)
+@@ -378,18 +378,24 @@ public class AntialiasTarget : RenderTarget
+ 
+     private void ToneMap(Texture2D source, RenderTarget? target, int width, int height, Point offset)
+     {
+-        if (bloom != null)
+-            bloom.GpuSubpassMarker = GpuSubpassMarker;
+-        var bloomTexture = BloomEnabled && bloom != null
+-            ? bloom.Process(source, BloomThreshold, BloomRadius, BloomResolutionScale)
+-            : null;
+-        BeginGpuSubpass(SystemRenderSubpass.ToneMap);
+-        try
++        if (postProcess == null)
++            throw new InvalidOperationException("HDR post-processing was not initialized.");
++        var context = new PostProcessContext
+         {
+-            TonemapPass.Draw(renderContext, source, target, width, height, offset, bloomTexture,
+-                bloomTexture != null ? BloomStrength : 0f);
+-        }
+-        finally { EndGpuSubpass(SystemRenderSubpass.ToneMap); }
++            Graphics = renderContext,
++            Source = source,
++            Target = target,
++            Width = width,
++            Height = height,
++            Offset = offset,
++            BloomEnabled = BloomEnabled,
++            BloomThreshold = BloomThreshold,
++            BloomStrength = BloomStrength,
++            BloomRadius = BloomRadius,
++            BloomResolutionScale = BloomResolutionScale,
++            GpuSubpassMarker = GpuSubpassMarker
++        };
++        postProcess.Execute(ref context);
+     }
+ 
+     public override void Dispose()
+@@ -401,7 +407,7 @@ public class AntialiasTarget : RenderTarget
+         hdrScene?.Dispose();
+         hdrResolve?.Dispose();
+         ldrToneMapped?.Dispose();
+-        bloom?.Dispose();
++        postProcess?.Dispose();
+         depthStencil?.Dispose();
+     }
+ }
+diff --git a/src/LibreLancer.Base/Graphics/BloomPass.cs b/src/LibreLancer.Base/Graphics/BloomPass.cs
+index 7de4a9a..2a27f5c 100644
+--- a/src/LibreLancer.Base/Graphics/BloomPass.cs
++++ b/src/LibreLancer.Base/Graphics/BloomPass.cs
+@@ -3,7 +3,7 @@ using System.Numerics;
+ 
+ namespace LibreLancer.Graphics;
+ 
+-internal sealed class BloomPass : System.IDisposable
++internal sealed class BloomPass : IPostProcessPass
+ {
+     private readonly RenderContext context;
+     private RenderTarget2D? extracted;
+@@ -20,6 +20,15 @@ internal sealed class BloomPass : System.IDisposable
+         blur = new SeparableGaussianBlurPass(context);
+     }
+ 
++    public void Execute(ref PostProcessContext context)
++    {
++        GpuSubpassMarker = context.GpuSubpassMarker;
++        context.BloomTexture = context.BloomEnabled
++            ? Process(context.Source, context.BloomThreshold, context.BloomRadius,
++                context.BloomResolutionScale)
++            : null;
++    }
++
+     public Texture2D? Process(Texture2D source, float threshold, float radius, float resolutionScale)
+     {
+         radius = float.IsFinite(radius) ? System.Math.Clamp(radius, 0.25f, 4f) : 1f;
+diff --git a/src/LibreLancer.Base/Graphics/PostProcessPipeline.cs b/src/LibreLancer.Base/Graphics/PostProcessPipeline.cs
+new file mode 100644
+index 0000000..7b92d25
+--- /dev/null
++++ b/src/LibreLancer.Base/Graphics/PostProcessPipeline.cs
+@@ -0,0 +1,84 @@
++using System;
++
++namespace LibreLancer.Graphics;
++
++/// <summary>Per-frame inputs and outputs shared by executable post-process passes.</summary>
++internal struct PostProcessContext
++{
++    public RenderContext Graphics;
++    public Texture2D Source;
++    public RenderTarget? Target;
++    public int Width;
++    public int Height;
++    public Point Offset;
++    public bool BloomEnabled;
++    public float BloomThreshold;
++    public float BloomStrength;
++    public float BloomRadius;
++    public float BloomResolutionScale;
++    public Texture2D? BloomTexture;
++    public Action<SystemRenderSubpass, bool>? GpuSubpassMarker;
++}
++
++/// <summary>A resource-owning stage in the HDR post-process sequence.</summary>
++internal interface IPostProcessPass : IDisposable
++{
++    long EstimatedMemoryBytes { get; }
++    void Execute(ref PostProcessContext context);
++}
++
++/// <summary>Runs post-process stages in dependency order after AA resolve.</summary>
++internal sealed class PostProcessPipeline : IDisposable
++{
++    private readonly IPostProcessPass[] passes;
++
++    public long EstimatedMemoryBytes
++    {
++        get
++        {
++            long total = 0;
++            foreach (var pass in passes)
++                total += pass.EstimatedMemoryBytes;
++            return total;
++        }
++    }
++
++    public PostProcessPipeline(RenderContext graphics)
++    {
++        passes = [new BloomPass(graphics), new ToneMapPostProcessPass()];
++    }
++
++    public void Execute(ref PostProcessContext context)
++    {
++        foreach (var pass in passes)
++            pass.Execute(ref context);
++    }
++
++    public void Dispose()
++    {
++        foreach (var pass in passes)
++            pass.Dispose();
++    }
++}
++
++internal sealed class ToneMapPostProcessPass : IPostProcessPass
++{
++    public long EstimatedMemoryBytes => 0;
++
++    public void Execute(ref PostProcessContext context)
++    {
++        context.GpuSubpassMarker?.Invoke(SystemRenderSubpass.ToneMap, true);
++        try
++        {
++            TonemapPass.Draw(context.Graphics, context.Source, context.Target,
++                context.Width, context.Height, context.Offset, context.BloomTexture,
++                context.BloomTexture != null ? context.BloomStrength : 0f);
++        }
++        finally
++        {
++            context.GpuSubpassMarker?.Invoke(SystemRenderSubpass.ToneMap, false);
++        }
++    }
++
++    public void Dispose() { }
++}

@@ -1,0 +1,506 @@
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+index 0c47577..f8bc3c4 100644
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -323,7 +323,7 @@ Stand der Sichtung 2026-10-12. Vorhanden sind die Backends `OpenGL` und `Null`;
+ - [x] **Split-Sum-BRDF-Grundbeitrag:** Die PBR-Umgebungsreflexion wertet den analytischen Epic-BRDF-Fit für `NdotV` und Rauheit aus; eine BRDF-LUT-Textur ist dafür nicht erforderlich. Der Fit ersetzt keine GGX-vorgefilterte Radiance-Cubemap.
+ - [x] **Weltfeste Reflexionsrichtung:** Der PBR-Cube-Lookup verwendet jetzt die Reflexionsrichtung aus Welt-Normale und Welt-Blickvektor, statt den Cube mit der View-Matrix zu drehen. Die DDS-Z-Achsenkonvention bleibt erhalten; die sichtbare Retail-Orientierung muss noch abgenommen werden.
+ - [ ] **Image-Based Lighting:** Retail-Orientierung und sichtbare Cubemap-Reflexion im Spiel abnehmen; drei generierte NAP-Cubemaps haben GGX-vorgefilterte Specular-Mips (`prefiltered`) und separate cosine-konvolvierte diffuse Irradiance (`irradiance_file`). Legacy-Kataloge behalten ihre alten Sampling-Fallbacks. Retail-Bildqualität, weitere cubemapgebundene Assets und GPU-Kosten bleiben offen. Die gleichen-szenischen LancerEdit-Aufnahmen zeigen 15.229–17.729 veränderte Viewportpixel für die drei Katalog-Cubes; der pausierte M01A-Live-Schalter ändert 5.931 Pixel im sichtbaren Objektcrop. Das belegt cubemapabhängige Ausgabe, nicht die Retail-Orientierung oder ausreichende Bildqualität. NAP-only-Verfahren und Grenzen: [Reflexionsrichtungsprüfung](evidence/renderer/pbr-world-reflection-20261017/README.md), [Live-Options-A/B](evidence/renderer/ibl-live-options-20261018/README.md) und [Cubemap-A/B](evidence/renderer/pbr-cubemap-live-ab-20261017/README.md).
+-- [ ] **Volumetrische Nebel und Soft Particles:** Nebelfelder sind ein Merkmal des Spiels; als eigene Qualitätsstufe mit Fallback.
++- [ ] **Volumetrische Nebel und Soft Particles:** Ein opt-in Soft-Particle-Pfad blendet Partikelsprites und Partikelstrahlen gegen die samplebare Szenentiefe aus; `render_soft_particles` und `render_soft_particle_distance` steuern ihn. Ohne verfügbaren Tiefenpuffer bleibt der Legacy-Look aktiv. Die GPU-/Bildqualität und der NAP-Lauf sind noch abzunehmen. Nebelfelder sind ein Merkmal des Spiels und benötigen weiterhin eine eigene Qualitätsstufe mit Fallback.
+ - [ ] **Vulkan-Backend (Spike):** Prüfen, wie weit `IRenderContext` und die HLSL→SPIR-V-Kette tragen. Nutzen: Linux/Steam Deck, Mehrkern-Befehlsaufzeichnung für viele Schiffe, RenderDoc, MoltenVK für macOS. Aufwand und Risiko groß, vorher messen.
+ - [ ] **Direct3D 11 und Metal nur bei konkretem Bedarf:** D3D11 nur, wenn OpenGL unter Windows Probleme macht; Metal besser über MoltenVK.
+ - [ ] **Profil „Original-Look“** ohne Zusatzeffekte als Fallback und Referenz für Screenshot-Vergleiche erhalten.
+diff --git a/patches/README.md b/patches/README.md
+index 1d88e44..5171337 100644
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 253 Client bundles and two native bundles. Each
++The active series contains 254 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+diff --git a/patches/series b/patches/series
+index de1ee3f..23d98cf 100644
+--- a/patches/series
++++ b/patches/series
+@@ -254,3 +254,4 @@ client 2251-ssao-live-radius-persistence-evidence.patch
+ client 2252-executable-postprocess-dependency-plan.patch
+ client 2253-structured-opengl-debug-diagnostics.patch
+ client 2254-record-m01a-ship-light-occlusion-runtime-attempt.patch
++client 2255-soft-particles.patch
+diff --git a/src/LibreLancer.Base/Graphics/SystemRenderPass.cs b/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
+index a925322..efa335f 100644
+--- a/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
++++ b/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
+@@ -12,7 +12,8 @@ public enum SystemRenderPass
+     StarsAndNebula,
+     Transparent,
+     AntialiasResolve,
+-    SsaoDepthPrepass
++    SsaoDepthPrepass,
++    ParticleDepthPrepass
+ }
+ 
+ [Flags]
+@@ -177,6 +178,12 @@ public static class SystemRenderPasses
+                 SystemRenderLoadOperation.Load, SystemRenderStoreOperation.Store), null, null,
+             Conditional: true),
+         new(SystemRenderPass.SsaoDepthPrepass, "SSAO depth prepass",
++            SystemRenderResource.None, SystemRenderResource.SceneDepth,
++            SystemRenderTargetRole.PostProcess, null,
++            new(SystemRenderResource.SceneDepth, SystemRenderAttachmentFormat.DepthTexture,
++                SystemRenderLoadOperation.Clear, SystemRenderStoreOperation.Store), null,
++            Conditional: true),
++        new(SystemRenderPass.ParticleDepthPrepass, "Particle depth prepass",
+             SystemRenderResource.None, SystemRenderResource.SceneDepth,
+             SystemRenderTargetRole.PostProcess, null,
+             new(SystemRenderResource.SceneDepth, SystemRenderAttachmentFormat.DepthTexture,
+diff --git a/src/LibreLancer/GameSettings.cs b/src/LibreLancer/GameSettings.cs
+index 2ad8b27..db8a9e5 100644
+--- a/src/LibreLancer/GameSettings.cs
++++ b/src/LibreLancer/GameSettings.cs
+@@ -73,6 +73,10 @@ namespace LibreLancer
+         public string RenderShadowSource = "auto";
+         [Entry("render_ssao")]
+         public bool RenderSsao = false;
++        [Entry("render_soft_particles")]
++        public bool RenderSoftParticles = false;
++        [Entry("render_soft_particle_distance")]
++        public float SoftParticleDistance = 2f;
+         [Entry("render_ssao_radius")]
+         public float SsaoRadius = 3f;
+         [Entry("render_ssao_strength")]
+@@ -151,6 +155,8 @@ namespace LibreLancer
+         bool IRendererSettings.RenderShadows => RenderShadows;
+         string IRendererSettings.RenderShadowSource => RenderShadowSource;
+         bool IRendererSettings.RenderSsao => RenderSsao;
++        bool IRendererSettings.RenderSoftParticles => RenderSoftParticles;
++        float IRendererSettings.SoftParticleDistance => SoftParticleDistance;
+         float IRendererSettings.SsaoRadius => SsaoRadius;
+         float IRendererSettings.SsaoStrength => SsaoStrength;
+         float IRendererSettings.SsaoBias => SsaoBias;
+@@ -212,6 +218,8 @@ namespace LibreLancer
+             writer.WriteLine($"render_shadows = {RenderShadows.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_shadow_source = {RenderShadowSource}");
+             writer.WriteLine($"render_ssao = {RenderSsao.ToString().ToLowerInvariant()}");
++            writer.WriteLine($"render_soft_particles = {RenderSoftParticles.ToString().ToLowerInvariant()}");
++            writer.WriteLine($"render_soft_particle_distance = {Fmt(SoftParticleDistance)}");
+             writer.WriteLine($"render_ssao_radius = {Fmt(SsaoRadius)}");
+             writer.WriteLine($"render_ssao_strength = {Fmt(SsaoStrength)}");
+             writer.WriteLine($"render_ssao_bias = {Fmt(SsaoBias)}");
+@@ -268,6 +276,8 @@ namespace LibreLancer
+                 RenderShadows = RenderShadows,
+                 RenderShadowSource = RenderShadowSource,
+                 RenderSsao = RenderSsao,
++                RenderSoftParticles = RenderSoftParticles,
++                SoftParticleDistance = SoftParticleDistance,
+                 SsaoRadius = SsaoRadius,
+                 SsaoStrength = SsaoStrength,
+                 SsaoBias = SsaoBias,
+@@ -322,6 +332,8 @@ namespace LibreLancer
+             RenderShadows = other.RenderShadows;
+             RenderShadowSource = other.RenderShadowSource;
+             RenderSsao = other.RenderSsao;
++            RenderSoftParticles = other.RenderSoftParticles;
++            SoftParticleDistance = other.SoftParticleDistance;
+             SsaoRadius = other.SsaoRadius;
+             SsaoStrength = other.SsaoStrength;
+             SsaoBias = other.SsaoBias;
+diff --git a/src/LibreLancer/Render/GpuPassProfile.cs b/src/LibreLancer/Render/GpuPassProfile.cs
+index acf8a3e..59dfc9c 100644
+--- a/src/LibreLancer/Render/GpuPassProfile.cs
++++ b/src/LibreLancer/Render/GpuPassProfile.cs
+@@ -16,7 +16,8 @@ public static class GpuPassProfile
+         SystemRenderPass.Opaque,
+         SystemRenderPass.StarsAndNebula,
+         SystemRenderPass.Transparent,
+-        SystemRenderPass.SsaoDepthPrepass
++        SystemRenderPass.SsaoDepthPrepass,
++        SystemRenderPass.ParticleDepthPrepass
+     ];
+     private static readonly GpuPassSample?[] Samples =
+         new GpuPassSample?[SystemRenderPasses.Count + SystemRenderPasses.SubpassCount];
+diff --git a/src/LibreLancer/Render/IRendererSettings.cs b/src/LibreLancer/Render/IRendererSettings.cs
+index 16aa380..80fe3dc 100644
+--- a/src/LibreLancer/Render/IRendererSettings.cs
++++ b/src/LibreLancer/Render/IRendererSettings.cs
+@@ -24,6 +24,8 @@ public interface IRendererSettings
+     bool RenderShadows => false;
+     string RenderShadowSource => "auto";
+     bool RenderSsao => false;
++    bool RenderSoftParticles => false;
++    float SoftParticleDistance => 2f;
+     float SsaoRadius => 3f;
+     float SsaoStrength => 1.1f;
+     float SsaoBias => 0.025f;
+diff --git a/src/LibreLancer/Render/Materials/ParticleBeamMaterial.cs b/src/LibreLancer/Render/Materials/ParticleBeamMaterial.cs
+index 87e0b58..b2ce4d2 100644
+--- a/src/LibreLancer/Render/Materials/ParticleBeamMaterial.cs
++++ b/src/LibreLancer/Render/Materials/ParticleBeamMaterial.cs
+@@ -1,4 +1,6 @@
++using System;
+ using System.Collections.Generic;
++using System.Numerics;
+ using LibreLancer.Graphics;
+ using LibreLancer.Graphics.Vertices;
+ using LibreLancer.Shaders;
+@@ -24,6 +26,13 @@ public class ParticleBeamMaterial(StorageBuffer buffer) : RenderMaterial(null)
+         var shader = AllShaders.ParticleBeam.Get(0);
+         rstate.Textures[0] = Parameters[userData].texture;
+         rstate.Samplers[0] = new SamplerState(rstate.PreferredFilterLevel, WrapMode.ClampToEdge, WrapMode.ClampToEdge);
++        rstate.Textures[1] = RenderMaterial.ParticleSceneDepthTexture;
++        rstate.Samplers[1] = new SamplerState(TextureFiltering.Nearest, WrapMode.ClampToEdge, WrapMode.ClampToEdge);
++        var softness = RenderMaterial.ParticleSceneDepthTexture == null ? 0f : RenderMaterial.ParticleSoftness;
++        var softParameters = new Vector4(softness,
++            1f / Math.Max(1, RenderMaterial.ParticleSceneDepthTexture?.Width ?? 1),
++            1f / Math.Max(1, RenderMaterial.ParticleSceneDepthTexture?.Height ?? 1), 0f);
++        shader.SetUniformBlock(4, ref softParameters);
+         int dk = Parameters[userData].rotate ? 1 : 0;
+         shader.SetUniformBlock(3, ref dk);
+         rstate.BlendMode = Parameters[userData].blendMode;
+diff --git a/src/LibreLancer/Render/Materials/ParticleMaterial.cs b/src/LibreLancer/Render/Materials/ParticleMaterial.cs
+index 6166ed3..21e535c 100644
+--- a/src/LibreLancer/Render/Materials/ParticleMaterial.cs
++++ b/src/LibreLancer/Render/Materials/ParticleMaterial.cs
+@@ -1,4 +1,6 @@
++using System;
+ using System.Collections.Generic;
++using System.Numerics;
+ using LibreLancer.Graphics;
+ using LibreLancer.Graphics.Vertices;
+ using LibreLancer.Shaders;
+@@ -30,6 +32,13 @@ public class ParticleMaterial(StorageBuffer buffer) : RenderMaterial(null)
+         var shader = AllShaders.Particle.Get(0);
+         rstate.Textures[0] = Parameters[userData].texture;
+         rstate.Samplers[0] = new SamplerState(rstate.PreferredFilterLevel, WrapMode.ClampToEdge, WrapMode.ClampToEdge);
++        rstate.Textures[1] = RenderMaterial.ParticleSceneDepthTexture;
++        rstate.Samplers[1] = new SamplerState(TextureFiltering.Nearest, WrapMode.ClampToEdge, WrapMode.ClampToEdge);
++        var softness = RenderMaterial.ParticleSceneDepthTexture == null ? 0f : RenderMaterial.ParticleSoftness;
++        var softParameters = new Vector4(softness,
++            1f / Math.Max(1, RenderMaterial.ParticleSceneDepthTexture?.Width ?? 1),
++            1f / Math.Max(1, RenderMaterial.ParticleSceneDepthTexture?.Height ?? 1), 0f);
++        shader.SetUniformBlock(4, ref softParameters);
+         var dk = Parameters[userData].drawKind;
+         shader.SetUniformBlock(3, ref dk);
+         rstate.BlendMode = Parameters[userData].blendMode;
+diff --git a/src/LibreLancer/Render/RenderMaterial.cs b/src/LibreLancer/Render/RenderMaterial.cs
+index bf4b943..ea8447f 100644
+--- a/src/LibreLancer/Render/RenderMaterial.cs
++++ b/src/LibreLancer/Render/RenderMaterial.cs
+@@ -24,6 +24,8 @@ namespace LibreLancer.Render
+         public static Texture2D? ShadowDepthTexture;
+         public static Matrix4x4 ShadowViewProjection;
+         public static float ShadowMapTexelSize;
++        public static Texture2D? ParticleSceneDepthTexture;
++        public static float ParticleSoftness;
+ 
+         public int Key { get; private set; }
+ 
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+index 4a93c88..bbf977d 100644
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -304,8 +304,11 @@ namespace LibreLancer.Render
+         private AntialiasMode _mAaMode = (AntialiasMode)(-1);
+         private bool _mHdrRequested;
+         private bool _mSsaoRequested;
++        private bool _mSoftParticlesRequested;
+         private bool hdrAllocationFailed;
+         private bool ssaoAllocationFailed;
++        private bool softParticleDepthAllocationFailed;
++        private RenderTarget2D? softParticleDepthTarget;
+         public CommandBuffer Commands;
+         private int _twidth = -1, _theight = -1;
+         private int _dwidth = -1, _dheight = -1;
+@@ -453,25 +456,33 @@ namespace LibreLancer.Render
+             bool thnDefaultZActive = false;
+             RenderMaterial.ShadowLight = null;
+             RenderMaterial.ShadowDepthTexture = null;
++            RenderMaterial.ParticleSceneDepthTexture = null;
+ 
+             try
+             {
+                 bool hdrRequested = Settings.RenderHdr;
+                 bool ssaoRequested = Settings.RenderSsao;
++                bool softParticlesRequested = Settings.RenderSoftParticles && Settings.RenderParticleEffects;
+                 if (_mwidth != renderWidth || _mheight != renderHeight ||
+-                    _mAaMode != Settings.SelectedAA || _mHdrRequested != hdrRequested || _mSsaoRequested != ssaoRequested)
++                    _mAaMode != Settings.SelectedAA || _mHdrRequested != hdrRequested || _mSsaoRequested != ssaoRequested ||
++                    _mSoftParticlesRequested != softParticlesRequested)
+                 {
+                     _mwidth = renderWidth;
+                     _mheight = renderHeight;
+                     _mAaMode = Settings.SelectedAA;
+                     _mHdrRequested = hdrRequested;
+                     _mSsaoRequested = ssaoRequested;
++                    _mSoftParticlesRequested = softParticlesRequested;
+                     hdrAllocationFailed = false;
+                     ssaoAllocationFailed = false;
++                    softParticleDepthAllocationFailed = false;
++                    softParticleDepthTarget?.Dispose();
++                    softParticleDepthTarget = null;
+                     msaa?.Dispose();
+                     msaa = null;
+                 }
+                 bool ssaoActive = ssaoRequested && !ssaoAllocationFailed;
++                bool softParticlesActive = softParticlesRequested && !softParticleDepthAllocationFailed;
+                 bool offscreenRequested = Settings.SelectedAA != AntialiasMode.None || hdrRequested || ssaoActive;
+ 
+                 if (offscreenRequested && (msaa == null ||
+@@ -531,6 +542,20 @@ namespace LibreLancer.Render
+                     msaa = null;
+                 }
+ 
++                if (softParticlesActive && msaa?.SsaoDepthTarget == null && softParticleDepthTarget == null)
++                {
++                    try
++                    {
++                        softParticleDepthTarget = new RenderTarget2D(rstate, renderWidth, renderHeight, SurfaceFormat.Depth);
++                    }
++                    catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException)
++                    {
++                        softParticleDepthAllocationFailed = true;
++                        softParticlesActive = false;
++                        FLLog.Warning("Graphics", $"Soft particle depth target is unavailable; using legacy particle edges. {ex.Message}");
++                    }
++                }
++
+                 if (msaa != null)
+                 {
+                     if (ssaoActive && Matrix4x4.Invert(camera.Projection, out var inverseProjection))
+@@ -663,7 +688,9 @@ namespace LibreLancer.Render
+                 // Clear depth buffer for game objects
+                 billboards.Begin(camera, Commands);
+                 SystemLighting.NumberOfTilesX = -1;
+-                if (Settings.RenderSsao && msaa?.SsaoDepthTarget is { } ssaoDepthTarget)
++                var sampleableSceneDepth = ssaoActive ? msaa?.SsaoDepthTarget : null;
++                sampleableSceneDepth ??= softParticlesActive ? softParticleDepthTarget : null;
++                if (sampleableSceneDepth is { } sceneDepthTarget)
+                 {
+                     var savedTarget = rstate.RenderTarget;
+                     var savedColorWrite = rstate.ColorWrite;
+@@ -677,7 +704,7 @@ namespace LibreLancer.Render
+                         rstate.PushViewport(new Rectangle(0, 0, renderWidth, renderHeight));
+                         ssaoViewportPushed = true;
+                         ssaoScissorPushed = rstate.PushScissor(new Rectangle(0, 0, renderWidth, renderHeight), false);
+-                        rstate.RenderTarget = ssaoDepthTarget;
++                        rstate.RenderTarget = sceneDepthTarget;
+                         rstate.SetCamera(camera);
+                         Commands.Camera = camera;
+                         rstate.DepthEnabled = true;
+@@ -685,7 +712,10 @@ namespace LibreLancer.Render
+                         rstate.DepthFunction = DepthFunction.Less;
+                         rstate.ColorWrite = false;
+                         rstate.ClearDepth();
+-                        BeginGpuPass(SystemRenderPass.SsaoDepthPrepass, ssaoDepthTarget);
++                        var depthPass = ssaoActive
++                            ? SystemRenderPass.SsaoDepthPrepass
++                            : SystemRenderPass.ParticleDepthPrepass;
++                        BeginGpuPass(depthPass, sceneDepthTarget);
+                         try
+                         {
+                             Commands.DepthOnlyPass = true;
+@@ -694,7 +724,7 @@ namespace LibreLancer.Render
+                         finally
+                         {
+                             Commands.DepthOnlyPass = false;
+-                            EndGpuPass(SystemRenderPass.SsaoDepthPrepass, ssaoDepthTarget);
++                            EndGpuPass(depthPass, sceneDepthTarget);
+                         }
+                     }
+                     finally
+@@ -851,9 +881,16 @@ namespace LibreLancer.Render
+                 OpaqueHook?.Invoke();
+                 // Transparent Pass
+                 rstate.DepthWrite = false;
++                RenderMaterial.ParticleSceneDepthTexture = softParticlesActive ? sampleableSceneDepth?.Texture : null;
++                RenderMaterial.ParticleSoftness = Settings.SoftParticleDistance;
+                 BeginGpuPass(SystemRenderPass.Transparent, sceneTarget);
+                 try { Commands.DrawTransparent(rstate); }
+-                finally { EndGpuPass(SystemRenderPass.Transparent, sceneTarget); }
++                finally
++                {
++                    EndGpuPass(SystemRenderPass.Transparent, sceneTarget);
++                    RenderMaterial.ParticleSceneDepthTexture = null;
++                    RenderMaterial.ParticleSoftness = 0f;
++                }
+                 rstate.DepthWrite = true;
+                 rstate.DepthEnabled = true;
+                 PhysicsHook?.Invoke();
+@@ -926,6 +963,8 @@ namespace LibreLancer.Render
+                     rstate.ClearColor = restoreClearColor;
+                     RenderMaterial.ShadowLight = null;
+                     RenderMaterial.ShadowDepthTexture = null;
++                    RenderMaterial.ParticleSceneDepthTexture = null;
++                    RenderMaterial.ParticleSoftness = 0f;
+                 }
+             }
+         }
+@@ -1215,6 +1254,7 @@ namespace LibreLancer.Render
+         {
+             DisposeGpuPassQueries();
+             msaa?.Dispose();
++            softParticleDepthTarget?.Dispose();
+             shadowTarget?.Dispose();
+             RenderMaterial.ShadowLight = null;
+             RenderMaterial.ShadowDepthTexture = null;
+diff --git a/src/LibreLancer/Shaders/Particle.frag.hlsl b/src/LibreLancer/Shaders/Particle.frag.hlsl
+new file mode 100644
+index 0000000..0476573
+--- /dev/null
++++ b/src/LibreLancer/Shaders/Particle.frag.hlsl
+@@ -0,0 +1,43 @@
++#include "includes/Camera.hlsl"
++#include "includes/OutputColor.hlsl"
++
++Texture2D<float4> Texture : register(t0, TEXTURE_SPACE);
++Texture2D<float> SceneDepth : register(t1, TEXTURE_SPACE);
++SamplerState Sampler : register(s0, TEXTURE_SPACE);
++SamplerState DepthSampler : register(s1, TEXTURE_SPACE);
++
++cbuffer SoftParticleParameters : register(b4, UNIFORM_SPACE)
++{
++    float Softness;
++    float InvWidth;
++    float InvHeight;
++    float _padding;
++};
++
++struct PSInput
++{
++    float2 texCoord : TEXCOORD0;
++    float4 color : TEXCOORD1;
++    float viewDepth : TEXCOORD2;
++    float4 position : SV_Position;
++};
++
++float4 main(PSInput input) : SV_Target0
++{
++    float4 texel = Texture.Sample(Sampler, input.texCoord);
++    float alpha = texel.a * input.color.a;
++    if (Softness > 0.0)
++    {
++        float2 uv = input.position.xy * float2(InvWidth, InvHeight);
++        float sceneDepth = SceneDepth.Sample(DepthSampler, uv);
++        if (sceneDepth < 0.999999)
++        {
++            float ndcDepth = sceneDepth * 2.0 - 1.0;
++            float sceneViewDepth = abs(Projection[3][2] /
++                max(abs(ndcDepth + Projection[2][2]), 1e-6));
++            alpha *= saturate((sceneViewDepth - input.viewDepth) / Softness);
++        }
++    }
++    return ToLinearSceneOutput(float4(
++        LinearizeLegacyInput(texel.rgb) * LinearizeLegacyInput(input.color.rgb), alpha));
++}
+diff --git a/src/LibreLancer/Shaders/Particle.txt b/src/LibreLancer/Shaders/Particle.txt
+index db3ef7d..bc5f1c9 100644
+--- a/src/LibreLancer/Shaders/Particle.txt
++++ b/src/LibreLancer/Shaders/Particle.txt
+@@ -1,2 +1,2 @@
+ vertex Particle.vert.hlsl
+-fragment Sprite.frag.hlsl
++fragment Particle.frag.hlsl
+diff --git a/src/LibreLancer/Shaders/Particle.vert.hlsl b/src/LibreLancer/Shaders/Particle.vert.hlsl
+index d44bf21..edebe27 100644
+--- a/src/LibreLancer/Shaders/Particle.vert.hlsl
++++ b/src/LibreLancer/Shaders/Particle.vert.hlsl
+@@ -32,6 +32,7 @@ struct Output
+ {
+     float2 texCoord : TEXCOORD0;
+     float4 color : TEXCOORD1;
++    float viewDepth : TEXCOORD2;
+     float4 position : SV_Position;
+ };
+ 
+@@ -188,6 +189,7 @@ Output main(int vertexID: SV_VertexID)
+ 
+     Output output;
+     output.position = mul(float4(position, 1.0), ViewProjection);
++    output.viewDepth = abs(mul(float4(position, 1.0), View).z);
+     output.texCoord = uv;
+     output.color = color;
+     return output;
+diff --git a/src/LibreLancer/Shaders/ParticleBeam.txt b/src/LibreLancer/Shaders/ParticleBeam.txt
+index d0f3cd9..bdaa94e 100644
+--- a/src/LibreLancer/Shaders/ParticleBeam.txt
++++ b/src/LibreLancer/Shaders/ParticleBeam.txt
+@@ -1,2 +1,2 @@
+ vertex ParticleBeam.vert.hlsl
+-fragment Sprite.frag.hlsl
++fragment Particle.frag.hlsl
+diff --git a/src/LibreLancer/Shaders/ParticleBeam.vert.hlsl b/src/LibreLancer/Shaders/ParticleBeam.vert.hlsl
+index a42e893..f52fa6d 100644
+--- a/src/LibreLancer/Shaders/ParticleBeam.vert.hlsl
++++ b/src/LibreLancer/Shaders/ParticleBeam.vert.hlsl
+@@ -25,6 +25,7 @@ struct Output
+ {
+     float2 texCoord : TEXCOORD0;
+     float4 color : TEXCOORD1;
++    float viewDepth : TEXCOORD2;
+     float4 position : SV_Position;
+ };
+ 
+@@ -58,6 +59,7 @@ Output main(int vertexID: SV_VertexID)
+ 
+     Output output;
+     output.position = mul(float4(position, 1.0), ViewProjection);
++    output.viewDepth = abs(mul(float4(position, 1.0), View).z);
+     output.texCoord = uvs[uvIndex];
+     output.color = particle.color;
+     return output;
+diff --git a/src/lancer/Program.cs b/src/lancer/Program.cs
+index 5adb3b2..f8fc17b 100644
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -43,6 +43,8 @@ internal static class MainClass
+             Console.WriteLine("         --render-depth-prepass=on|off");
+             Console.WriteLine("         --render-shadow-source=auto|<light-nickname>");
+             Console.WriteLine("         --render-ssao=on|off");
++            Console.WriteLine("         --render-soft-particles=on|off");
++            Console.WriteLine("         --render-soft-particle-distance=0.05..20");
+             Console.WriteLine("         --render-ssao-radius=0.05..50");
+             Console.WriteLine("         --render-ssao-strength=0..4");
+             Console.WriteLine("         --render-ssao-bias=0.0001..0.25");
+@@ -244,6 +246,8 @@ internal static class MainClass
+         private bool? shadows;
+         private string? shadowSource;
+         private bool? ssao;
++        private bool? softParticles;
++        private float? softParticleDistance;
+         private float? ssaoRadius;
+         private float? ssaoStrength;
+         private float? ssaoBias;
+@@ -359,6 +363,19 @@ internal static class MainClass
+                     if (!ParseToggle(out var ssaoEnabled)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
+                     ssao = ssaoEnabled;
+                     return true;
++                case "--render-soft-particles":
++                    if (!ParseToggle(out var softParticlesEnabled)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
++                    softParticles = softParticlesEnabled;
++                    return true;
++                case "--render-soft-particle-distance":
++                    if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var softParticleDistanceValue) &&
++                        float.IsFinite(softParticleDistanceValue) && softParticleDistanceValue is >= 0.05f and <= 20f)
++                    {
++                        softParticleDistance = softParticleDistanceValue;
++                        return true;
++                    }
++                    error = $"{name} accepts a finite number from 0.05 through 20.";
++                    return false;
+                 case "--render-ssao-radius":
+                     if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var ssaoRadiusValue) &&
+                         float.IsFinite(ssaoRadiusValue) && ssaoRadiusValue is >= 0.05f and <= 50f)
+@@ -533,6 +550,8 @@ internal static class MainClass
+             if (shadows.HasValue) settings.RenderShadows = shadows.Value;
+             if (shadowSource is not null) settings.RenderShadowSource = shadowSource;
+             if (ssao.HasValue) settings.RenderSsao = ssao.Value;
++            if (softParticles.HasValue) settings.RenderSoftParticles = softParticles.Value;
++            if (softParticleDistance.HasValue) settings.SoftParticleDistance = softParticleDistance.Value;
+             if (ssaoRadius.HasValue) settings.SsaoRadius = ssaoRadius.Value;
+             if (ssaoStrength.HasValue) settings.SsaoStrength = ssaoStrength.Value;
+             if (ssaoBias.HasValue) settings.SsaoBias = ssaoBias.Value;

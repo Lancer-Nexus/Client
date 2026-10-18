@@ -1,0 +1,1432 @@
+--- a/docs/beam-and-explosion-effects-audit.md
++++ b/docs/beam-and-explosion-effects-audit.md
+@@ -70,12 +70,17 @@
+   `flash_size`-Zweig mit drittem Argument null erreicht, ist noch offen.
+ - `FUN_004fc8b0` setzt `this+0x80` auf
+   `(core_length + tail_length + 7.5) / speed`; ohne Effektdefinition ist der
+-  Zähler `7.5`. `speed` ist der Betrag des Vektors, den der Beam-Kontext über
+-  VTable-Offset `+0x54` vom zugeordneten `CObject` abfragt. In `common.dll` ist
+-  dieser Slot als `CObject::get_velocity` identifiziert und gibt
+-  `PhySys::GetVelocity` zurück. `this+0x80` ist damit eine Dauer für die Beam-
+-  Strecke bei dieser Objektgeschwindigkeit, nicht eine Summe aus Länge und
+-  Geschwindigkeit. Bei Bit `0x02` oder Fortschrittsfaktor `0` setzt der
++  Zähler `7.5`. `speed` ist der Betrag des Vektors, den `FUN_0053f340` über
++  VTable-Offset `+0x54` vom Objekt in Wrapperfeld `+0x10` abfragt. Der Pfad
++  prüft dort Klasse `0x67`; `CObject::Alloc(0x67)` erzeugt einen `CBeam`, dessen
++  VTable-Slot `+0x54` auf `CBeam::get_velocity` zeigt. Diese Methode liefert
++  die Felder `+0xf8..+0x100`; `CBeam::init_physics` kopiert seinen ersten
++  Vector-Parameter dorthin. `CObject::get_velocity` und dessen Physikzeiger
++  `+0x54` bestimmen diesen dynamischen Aufruf also nicht. Welche Routine den
++  Kontextvektor initialisiert und welcher Vektor übergeben wird, ist noch
++  offen. `this+0x80` ist eine Dauer für die Beam-Strecke bei diesem Objektvektor,
++  nicht eine Summe aus Länge und Geschwindigkeit. Bei Bit `0x02` oder
++  Fortschrittsfaktor `0` setzt der
+   Wrapper den zweiten Geometrieparameter auf `0`; den dritten Countdownwert
+   übergibt er separat. Archetypwert `0` führt zu `FUN_004fa270`,
+   Wert `1` zu `FUN_004fb1e0`. Exporte: [CObject-Vftable](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/common-CObject-vtable-slots.txt>), [CObject::get_velocity](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/common-CObject-get_velocity.md>) und [CArchGroup::GetVelocity](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/common-CArchGroup-GetVelocity.md>).
+@@ -146,12 +151,15 @@
+   akkumuliert für Projektile denselben Zeitwert in `Projectile.Time`; die
+   äquivalente Strecke lässt sich aus `Projectile.Normal.Length() * Time`
+   bilden. Der Retail-Aufruf bindet den Beam-Kontext über `FUN_0053f2f0` an ein
+-  separat alloziertes `CObject` der Klasse `0x67`, das mit dem `Root` des
+-  feuernden Schiffs erzeugt wird. `CObject::open` speichert diesen `Root` bei
+-  `+0x88`. `CObject::get_velocity` liest dagegen die Physikkomponente bei
+-  `+0x54` dieses Kontextobjekts und liefert null, falls sie fehlt. Die
+-  vorliegenden Setter belegen nicht, dass diese Physikkomponente mit der des
+-  ursprünglichen Schiffs geteilt oder daraus befüllt wird. `Archetype::Root::create_instance`
++  separat alloziertes Objekt der Klasse `0x67` (`CBeam`), das mit dem `Root` des
++  feuernden Schiffs erzeugt wird. Die Geschwindigkeitsabfrage dispatcht auf
++  `CBeam::get_velocity`, das `+0xf8..+0x100` zurückgibt; `CBeam::init_physics`
++  kopiert seinen ersten Vector-Parameter in diese Felder. `CSimple::open` ruft
++  `CObject::open` auf, speichert den `Root` bei `+0x88` und setzt zusätzlich
++  `+0xe0`. Der bisherige Aufrufpfad belegt nicht, ob `CBeam::init_physics` für
++  dieses Hilfsobjekt läuft oder welcher Vektor dabei übergeben wird. Die
++  Physikkomponente `CObject+0x54` ist nicht die Quelle dieses dynamischen
++  Getters. `Archetype::Root::create_instance`
+   delegiert die eigentliche Instanzerzeugung bei geladenem Archetyp an den
+   `IEngine`-VTable-Slot `+0x5c`; `DALib::Startup` erwirbt `IEngine` über DACOM.
+   Die Freelancer-`dacom.ini` lädt `EngBase.dll` und listet darunter die
+@@ -163,15 +171,16 @@
+   auf dieselbe Objektbasis zeigen. Der zugehörige Interface-VTable-Eintrag bei
+   `+0x5c` zeigt auf `FUN_06622400`. Diese Funktion liest Archetype-Daten bei
+   `+0x1c/+0x20` und liefert einen booleschen Verfügbarkeitswert; sie schreibt
+-  keinen Physikzeiger. Damit ist EngBase als Anbieter dieses `IEngine`-Objekts
+-  belegt, aber die gesuchte Übernahme der Physikkomponente weiterhin nicht.
++  weder den `CObject`-Physikzeiger noch den `CBeam`-Geschwindigkeitsvektor.
++  Damit ist EngBase als Anbieter dieses `IEngine`-Objekts belegt; die
++  Initialisierung des `CBeam`-Geschwindigkeitsvektors bleibt offen.
+   Die benachbarten Verbraucher `FUN_06625e00` (`HardPoint::Initialize`) und
+   `FUN_06616d40` fragen das Interface zusätzlich ab. Belege: [DACOM-Konfiguration](</home/masterbee/Dokumente/FL/EXE/dacom.ini>), [EngBase-IEngine-Xrefs](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/engbase-IEngine-xrefs.md>), [Interface-Methode und Slot](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/engbase-IEngine-implementation-06622400.md>), [EngBase-IEngine-Verbraucher](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/engbase-IEngine-referencing-functions.md>), [Root-Factory](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/common-Root-create_instance.md>) und [DALib-Startup](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/DALib-Engine-startup-shutdown.md>).
+   Eine Gleichsetzung
+   des Retail-Speed mit `Projectile.Owner` ist deshalb noch nicht abgesichert.
+   Der dritte Rendererparameter bleibt separat zuzuordnen. `flash_size`
+   pauschal als Mündungsblitz zu interpretieren wäre weiterhin unbelegt.
+-  Details: [Kontext-VTable und Setter](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/Freelancer-beam-owner-binding-slot.md>), [Kontextobjekt-Erzeugung](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/Freelancer-beam-owner-base-setter.md>) und [CObject::open](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/common-CObject-open.md>).
++  Details: [CBeam-Dispatch und Geschwindigkeitsinitialisierung](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/common-CBeam-velocity-dispatch.md>), [Kontext-VTable und Setter](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/Freelancer-beam-owner-binding-slot.md>), [Kontextobjekt-Erzeugung](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/Freelancer-beam-owner-base-setter.md>) und [CObject::open](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/common-CObject-open.md>).
+ - Die Parser- und Renderer-Auszüge mit Decompiler-Ausgabe liegen lokal in der
+   [Freelancer-Reverse-Engineering-Ablage](/home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-14-light-range/Freelancer-beam-parser-0042e4a0.md),
+   zusammen mit einem Hash- und Interpretationshinweis. Der Renderpfad steht in
+@@ -238,20 +247,20 @@
+ 4. [x] Den Marker `DAT_00678ba4` dem `first_person`-Eintrag des
+    Kamera-Managers zuordnen. `FUN_0054bc80()` prüft, ob dieser Eintrag aktiv ist.
+    [View-Update-Instruktionen](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/Freelancer-view-update-instructions-0054b900.md>) und [Modusauswahl](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/Freelancer-camera-mode-neighborhood-00549e70.md>).
+-5. [x] Den Besitzer-Vektor als physikalische Geschwindigkeit zuordnen und
+-   Bit `0x08` auf das Spieler-Schiff zurückführen. Der Retail-Renderer liest
+-   diesen Beamzweig nur außerhalb von `first_person`.
++5. [ ] Den über `CBeam::get_velocity` gelesenen Vektor seiner Initialisierung
++   zuordnen und mit der Geschwindigkeit des feuernden Schiffs vergleichen.
++   Bit `0x08` ist auf das Spieler-Schiff zurückgeführt; der Retail-Renderer
++   liest diesen Beamzweig nur außerhalb von `first_person`.
+ 6. [x] Das Updateargument ist Frame-Zeit aus `FUN_004f7480` (maximal `0.1`),
+    und `this+0x80` ist die aus Beam-Länge und Kontextgeschwindigkeit
+    berechnete Dauer. Der Fortschrittsfaktor ist `elapsed / duration`, begrenzt
+    auf `1`. Exporte: [Beam-Update-Aufrufer](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/Freelancer-beam-update-callers.md>), [Frame-Update-Instruktionen](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/Freelancer-beam-frame-update-instructions.md>) und [Kontext-Setter](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/Freelancer-beam-setter-context.md>).
+-7. [ ] Verfolgen, ob das separat erzeugte Retail-Kontextobjekt seine
+-   Physikkomponente aus dem feuernden Schiff übernimmt; erst dann den Speed mit
+-   `Projectile.Owner` vergleichen und `elapsed / duration` gegen `currDist`
+-   prüfen. Der bisherige Setterpfad bindet nur den Schiff-`Root`; `open` speichert
+-   ihn, aber die Übernahme des Physikzeigers ist nicht belegt. EngBase stellt
+-   das `IEngine`-Objekt und Slot `+0x5c` bereit, dessen Funktion aber selbst
+-   keinen Physikzeiger schreibt. Außerdem klären,
++7. [ ] Verfolgen, ob `CBeam::init_physics` für das separat erzeugte
++   Kontextobjekt aufgerufen wird und welchen ersten Vector-Parameter es erhält;
++   dann den resultierenden `CBeam::get_velocity`-Vektor mit `Projectile.Owner`
++   vergleichen und `elapsed / duration` gegen `currDist` prüfen. Der bisherige
++   Setterpfad bindet den Schiff-`Root`; `CSimple::open` speichert ihn, setzt
++   aber keinen Geschwindigkeitsvektor. Außerdem klären,
+    ob der `flash_size`-Zweig mit drittem Argument null über einen anderen Pfad
+    erreichbar ist; der bisherige Wrapperpfad setzt `param_2=0` und führt den
+    Nullwert von `param_3` nicht zum Renderer. Das Countdownverhalten von
+--- a/docs/evidence/renderer/forward-pass-order-audit-20261015.md
++++ b/docs/evidence/renderer/forward-pass-order-audit-20261015.md
+@@ -15,26 +15,42 @@
+    die Nebelfarbe als Clear-Farbe verwendet.
+ 5. Frame-Writer initialisieren und einen Tiefenvorlauf für Game-Objekte zeichnen
+    (`ColorWrite=false`, `DepthFunction=Less`).
+-6. Objekte, Beams, Asteroiden, Nebel, Billboards, Effektpool und Polylinien
+-   vorbereiten/zeichnen; Teile davon werden im `CommandBuffer` gesammelt.
+-7. Opaque-Kommandos ausführen.
+-8. Optional Starsphere und Nebelübergang direkt ausgeben.
+-9. `OpaqueHook` ausführen; transparente Kommandos mit deaktiviertem Depth-Write
++6. Die eigentliche Szenengeometrie ausgeben: `Beams.Begin`, Objekt-Draws,
++   Asteroiden, Nebel und das Befüllen von Billboards, Effektpool und Polylinien.
++   Opaque-Aufrufe aus `CommandBuffer.AddCommand` zeichnen sofort; transparente
++   Befehle werden gesammelt.
++7. Optional Starsphere und Nebelübergang direkt ausgeben.
++8. `OpaqueHook` ausführen; transparente Kommandos mit deaktiviertem Depth-Write
+    ausführen; danach Depth-Write aktivieren.
+-10. `PhysicsHook` und Debuggeometrie ausgeben.
+-11. Bei AA Viewport/Scissor zurücksetzen, MSAA/SMAA auf das vorherige Ziel blitten
++9. `PhysicsHook` und Debuggeometrie ausgeben.
++10. Bei AA Viewport/Scissor zurücksetzen, MSAA/SMAA auf das vorherige Ziel blitten
+     und das vorherige RenderTarget wieder binden.
+ 
+-Die Reihenfolge steht in `src/LibreLancer/Render/SystemRenderer.cs`,
+-`Draw()`. `CommandBuffer.DrawOpaque()` und `DrawTransparent()` teilen und leeren
+-ihre jeweiligen Kommandolisten in `src/LibreLancer/Render/CommandBuffer.cs`.
++Die Reihenfolge steht in `src/LibreLancer/Render/SystemRenderer.cs`, `Draw()`.
++`CommandBuffer.DrawOpaque()` rendert keine opaque Geometrie: Es sortiert die
++transparenten Befehle und bereitet Billboard-Indizes vor. `DrawTransparent()`
++führt danach die gesammelten transparenten Befehle aus. Opaque Materialdraws
++werden synchron bei `CommandBuffer.AddCommand()` ausgegeben.
+ 
+-## Was für einen Render-Graph-Vertrag noch fehlt
++## Erster Passvertrag im Quellcode
+ 
+-Die Aufrufreihenfolge besteht; ein formaler Passvertrag ist nicht vorhanden.
+-Passes deklarieren derzeit keine Ressourcenreads/-writes, Farb-/Tiefenformate,
+-Load/Store-Operationen, Resolve-Abhängigkeiten oder Lebensdauer/Aliasing von
+-Renderzielen. Scene extraction, CPU-Vorbereitung und GPU-Ausgabe sind in
+-`SystemRenderer.Draw()` vermischt. Die nächsten Architekturarbeiten sollten
+-Passgrenzen zunächst auf diesem Ablauf aufsetzen und danach Resize-, Fehler-
+-und Auflösungswechsel explizit modellieren.
++`SystemRenderPasses` beschreibt sechs GPU-Phasen des SystemRenderer:
++Frame-Clear, Depth, Opaque, Stars/Nebel, Transparent und AA Resolve. Der Clear
++wird nun zusammen mit den übrigen Phasen asynchron gemessen. Der Opaque-Timer
++umfasst die synchrone Geometrieausgabe innerhalb der Draw-Submission; zuvor lag
++er fälschlich um `CommandBuffer.DrawOpaque()`, das keine opaque Meshes zeichnet.
++Die Zeitmessung umfasst GPU-Arbeit innerhalb dieses Blocks, nicht CPU-Update-
++oder Vorbereitungszeit. Die typisierten IDs steuern die Query-Slots; die
++Deskriptoren halten zusätzlich abstrakte Farb-/Tiefenressourcen fest. Stars/Nebel
++und Resolve sind bedingt. Die Angaben sind ein Startvertrag für den bestehenden
++Forward-Pfad und werden nicht automatisch ausgeführt oder validiert.
++
++## Was für einen vollständigen Render-Graph-Vertrag noch fehlt
++
++Der [Target- und Attachment-Audit](render-target-attachment-contract-20261016.md)
++hat die derzeitigen OpenGL-Zielformate, Stencilpfade und Load-/Store-Semantik
++nachverfolgt. Diese Angaben stehen noch nicht maschinenlesbar im
++`SystemRenderPassDescriptor`. Swapchain-/Fremdziel-Formate, die drei getrennten
++SMAA-Unterpässe und generische AA-Ausgaben bleiben offene Vertragspunkte.
++Scene extraction, CPU-Vorbereitung und GPU-Ausgabe sind in
++`SystemRenderer.Draw()` vermischt.
+--- /dev/null
++++ b/docs/evidence/renderer/render-target-attachment-contract-20261016.md
+@@ -0,0 +1,90 @@
++# Render-Target- und Attachment-Vertrag im SystemRenderer
++
++Stand: 2026-10-16. Quellcode-Audit von `SystemRenderer.Draw()`,
++`AntialiasTarget`, den OpenGL-Render-Targets und `RenderContext`.
++Die Angaben beschreiben den aktuellen Pfad; sie sind keine Laufzeitmessung.
++
++## Zielauswahl
++
++`SystemRenderer.Draw()` speichert zuerst das aktuell gebundene Ziel. Ohne AA
++bleibt dieses Ziel während der Szene aktiv: Es ist entweder die Swapchain
++(`RenderContext.RenderTarget == null`) oder ein vom Aufrufer gebundenes Ziel.
++Mit SMAA/MSAA zeichnet der Renderer zunächst in ein eigenes `AntialiasTarget`
++und gibt das Bild anschließend auf der Swapchain oder dem ursprünglichen
++`RenderTarget2D` aus. Viewport und Scissor werden für das AA-Ziel gesetzt und
++vor dem Resolve zurückgestellt. Der äußere `finally`-Pfad stellt außerdem das
++zuvor gebundene Ziel wieder her.
++
++## Belegte OpenGL-Zielformate
++
++| Ziel | Farbe | Tiefe | Stencil | Nachweis |
++|---|---|---|---|---|
++| Systemziel ohne AA | Vom Aufrufer oder Backend bestimmt. Ein normales `RenderTarget2D` erstellt seine `Texture2D` mit `SurfaceFormat.Bgra8`; ein Ziel ohne Wrapper ist hier nicht abfragbar. | Vom gebundenen Ziel bestimmt. Der Standard-`RenderTarget2D` verwendet `DepthBuffer` ohne Stencil. | Nur falls das gebundene Ziel es bereitstellt. | `RenderTarget2D`, `Texture2D`, `DepthBuffer`, `GLRenderTarget2D` |
++| SMAA-Szenenziel | `SurfaceFormat.Bgra8` | D24, ohne Stencil | Nein | `AntialiasTarget` erstellt `new RenderTarget2D(context, width, height)` |
++| SMAA-Kanten- und Gewichtsziel | Je `SurfaceFormat.Bgra8` | Gemeinsamer D24S8-Puffer | Ja, geteilt zwischen beiden Zielen | `smaaEdges` und `smaaBlend` teilen `depthStencil` |
++| MSAA-Szenenziel | OpenGL GLES: `GL_RGBA8`; Desktop-OpenGL: unformatiertes internes `GL_RGBA` | D24 | Nein | `GLMultisampleTarget` |
++| MSAA-Resolve-Textur | OpenGL-Resolve-FBO mit internem `GL_RGBA` | Keiner | Nein | `GLMultisampleTarget.CreateResolveFbo()` |
++| Ausgabe nach AA | Swapchain oder vom Aufrufer gebundenes `RenderTarget2D`; dessen Zielformat ist hier nicht allgemein abfragbar. | Resolve kopiert keine Tiefe. | Resolve kopiert kein Stencil. | Blits verwenden ausschließlich `GL_COLOR_BUFFER_BIT` |
++
++Die Oberflächenformate der wrapper-erzeugten 2D-Ziele kommen vom Defaultparameter
++`Texture2D(..., SurfaceFormat.Bgra8)`. Die Desktop-MSAA-Angabe bleibt bewusst
++`GL_RGBA`: der Code fordert dort kein explizites sized internal format an.
++Das Null-Backend erzeugt keine echten GPU-Attachments und bestätigt daher keine
++Format- oder Lebensdauersemantik.
++
++## Load-/Store-Semantik des vorhandenen Ablaufs
++
++| Phase | Ziel und Operation | Erhaltene Inhalte |
++|---|---|---|
++| Frame clear | Setzt `ColorWrite` und `DepthWrite` auf `true`, löscht dann Farbe und Tiefe. OpenGL löscht zusätzlich Stencil, wenn das gebundene Ziel `HasStencil` meldet; das optionale Szenen-Stencil ist nun als eigene Ressource im Vertrag aufgeführt. Der Clear folgt dem aktiven Scissorbereich. | Danach werden Farbe und Tiefe im Szenenziel gespeichert. |
++| Depth prepass | Lädt die zuvor gelöschte Tiefe, testet und schreibt sie; `ColorWrite=false` erhält die Szenenfarbe. | Szenenfarbe bleibt unverändert, Tiefe bleibt für folgende Phasen verfügbar. |
++| Opaque | Lädt vorhandene Szene-/Tiefenwerte; synchrone opake Materialdraws schreiben Farbe und können Tiefe schreiben. | Die Szene bleibt für Stars und transparente Draws erhalten. |
++| Stars / nebula | Zeichnet bedingt auf dasselbe Szenenziel und liest den vorhandenen Tiefeninhalt. | Vorhandene Szenenfarbe bleibt durch die normalen Draw-/Blendregeln erhalten. |
++| Transparent | `DepthWrite=false`; transparente Befehle verwenden den Szenentiefenpuffer und blenden in die vorhandene Szenenfarbe. | Tiefe bleibt erhalten; Farbe wird fortgeschrieben. |
++| MSAA resolve | Blittet Farbe aus dem multisampled Ziel in den Ausgabebereich. | Pixel außerhalb des Blit-Rechtecks bleiben erhalten; Tiefe/Stencils werden nicht kopiert. |
++| SMAA resolve | Edge-Detection schreibt Kantenfarbe und Stencil; der Gewichtspass löscht zuerst die Gewichtsfarbe auf transparent schwarz, liest dann Kanten und Stencil und schreibt Gewichte; Neighborhood-Blending liest Szenenfarbe plus Gewichte und schreibt in den Ausgabebereich. | Der interne `ClearDepth()` setzt `DepthWrite` vorübergehend auf `true` und löscht beim Edge-Ziel sowohl die Depth- als auch die Stencil-Komponente des gemeinsamen D24S8-Attachments. Beide Aspekte sind im Vertrag getrennt ausgewiesen; die Farbe des Edge-Ziels wird durch den anschließenden Vollbild-Draw geschrieben. Ausgabe außerhalb des betroffenen Viewports bleibt erhalten. |
++
++Diese Load-/Store-Begriffe beschreiben die beobachtete OpenGL-Semantik. Vor
++Frame-Clear setzt `SystemRenderer` die Farb- und Tiefenmaske explizit; sein
++äußerer `finally`-Pfad stellt die zuvor vom Aufrufer verwendeten Masken wieder
++her. Der SMAA-Gewichtspass setzt vor seinem stencil-maskierten Draw die Farbmaske auf
++Schreiben und löscht das Gewichtsziel auf transparent schwarz, damit unberührte
++Pixel keine Werte aus dem vorherigen Frame behalten. Clearfarbe und Farbmaske
++werden im `finally` wiederhergestellt. Auch der SMAA-interne Tiefen-/Stencil-
++Clear stellt seine Tiefenmaske bei Fehlern wieder her. Die Grafikabstraktion stellt dafür noch keine expliziten
++Attachment-Operationen bereit; die SMAA-Gewichtsfarbe wird direkt im bestehenden
++Pfad bereinigt. SMAA besitzt drei interne Draw-Pässe, die derzeit gemeinsam unter
++`AntialiasResolve` gemessen werden; MSAA hat an dieser Stelle einen Farbblit.
++`SystemRenderPasses` beschreibt nun die sechs gemessenen Hauptphasen sowie vier
++AA-Unterpass-Verträge mit Zielrolle, Attachmentformat, Load-/Store-Operationen
++und Ressourcenabhängigkeiten. Statische Vertragschecks erzwingen für `Load` eine vorherige Leseabhängigkeit,
++für gespeicherte `Clear`-/`DontCare`-Attachments eine Schreibabhängigkeit und
++prüfen Read-before-write in der Hauptpassfolge, der SMAA-Kette und dem separaten
++MSAA-Resolve-Zweig. Präsentationsziel und SMAA-Lookup-Texturen gelten dabei als
++importierte externe Ressourcen. Diese Einträge sind Metadaten und führen OpenGL-Bindungen noch nicht selbst aus.
++Der `SystemRenderer` prüft vor und nach den Szenenphasen, dass das aktive Ziel
++weiterhin dem zu Beginn gewählten Szenenziel entspricht. Die SMAA-Bindung prüft Zielrolle und Stencil-Anforderung. Beim Erzeugen eines
++AA-Ziels prüft `AntialiasTarget` außerdem SMAA-Format, Maße und gemeinsamen
++Stencil-Puffer sowie für MSAA Samplezahl, Maße und das Fehlen eines Stencil-
++Attachments. Der MSAA-Color-Storage-Vertrag unterscheidet die angeforderte GLES-`GL_RGBA8`-
++Variante von Desktop-OpenGLs implementation-defined unsized `GL_RGBA`. Das vom
++Treiber realisierte sized internal format wird nicht separat abgefragt.
++
++## Offene Architekturpunkte
++
++- Backendneutraler Swapchainformatzugriff fehlt; caller-definierte Ziele bleiben
++  format-agnostisch. SMAA-Bgra8-Formate werden beim Zielaufbau geprüft. Die
++  MSAA-Samplezahl ist als `ModeSelected` im Quellattachmentvertrag markiert und
++  gegen den gewählten AA-Modus geprüft; die vom Treiber realisierte Zahl wird
++  nicht separat abgefragt.
++- Der MSAA-Offscreen-Pfad nimmt als Elternziel `RenderTarget2D`; ein anderer
++  `RenderTarget`-Typ wird an dieser Stelle nicht allgemein unterstützt.
++- Resize erzeugt das interne AA-Ziel bei geänderter Größe oder Qualität neu.
++  Ressourcenlebensdauer, Sharing/Aliasing und Fehler beim Wechsel sind noch
++  kein Render-Graph-Vertrag.
++
++Offen bleiben der backendneutrale Abgleich caller-definierter Zielformate, eine
++Abfrage des vom Treiber gewählten MSAA-internal-format, die Prüfung von
++Load-/Store-Verhalten gegen API-Aufrufe sowie eine vollständige
++Passreihenfolgevalidierung. Darauf kann später die Render-Graph-Ausführung für
++Load/Store, Formate, Abhängigkeiten und Resize-Lebensdauer aufbauen.
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -458,6 +458,31 @@
+ 
+ ### P4 – Pässe und Post-Processing
+ 
++- [x] Typisierte IDs und erste abstrakte Lese-/Schreibzugriffe für die sechs
++  gemessenen SystemRenderer-GPU-Phasen angelegt; Frame-Clear wird nun ebenfalls
++  gemessen. Diese Metadaten steuern auch
++  die GPU-Timer-Slots. Es ist noch kein Render Graph. Zielrollen,
++  Attachmentformate und Load-/Store-Angaben sind hinterlegt. Die
++  Szenenzielidentität wird vor/nach Szenenphasen und die SMAA-Stencil-Anforderung
++  beim Binden geprüft. Statische Vertragsprüfungen erzwingen Lade-/Schreibabhängigkeiten und Read-before-
++  write in Hauptpassfolge, SMAA-Kette und MSAA-Resolve-Zweig.
++  Caller-Formate, Treiber-MSAA-Format und API-Laufzeitabgleich fehlen. Details im
++  [Forward-Pass-Audit](evidence/renderer/forward-pass-order-audit-20261015.md).
++- [x] Opaque-GPU-Timing über die tatsächlichen synchronen Materialdraws in der
++  Geometrieausgabe gelegt; `CommandBuffer.DrawOpaque()` sortiert nur die
++  transparenten Befehle und füllt Billboard-Indizes. Der CPU-Aufwand des
++  Geometrieaufbaus wird dadurch nicht als GPU-Zeit ausgewiesen.
++- [x] OpenGL-Zielformate und Load-/Store-Verhalten der aktuellen Screen-, SMAA-
++  und MSAA-Pfade aus den Implementierungen abgeleitet. Die Verträge unterscheiden
++  Caller-defined Ausgabeziele und bilden drei SMAA-Draw-Pässe sowie den MSAA-
++  Farbresolve getrennt ab. Die Hauptphasen prüfen ihre Szenenziel-Bindung; SMAA
++  prüft Zielrollen und angeforderte Stencil-Attachments. Beim Anlegen des AA-
++  Ziels werden SMAA-Formate/Maße/Stencil sowie MSAA-Samplezahl/Maße geprüft.
++  Caller-Formate, die vom Treiber gewählte sized-MSAA-Storage, API-Laufzeit-
++  validierung und Render-Graph-Ausführung stehen aus. Zusätzlich leert SMAA jetzt vor dem stencil-maskierten
++  Gewichtspass das Gewichtsziel auf transparent schwarz, um veraltete Pixel aus
++  vorherigen Frames auszuschließen.
++  Details im [Target-Attachment-Audit](evidence/renderer/render-target-attachment-contract-20261016.md).
+ - [ ] Pass-Ein-/Ausgaben, Farb-/Tiefen-/Stencil-Lebensdauer, Clears, Resolve,
+   Resize und minimierte Fenster explizit machen; Debug-Marker und Timings
+   hinzufügen. Offscreen-Widgets und Editor-Viewports einbeziehen.
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -44,7 +44,21 @@
+   - [x] Zwei 300-Frame-Messpunkte in der M01A-Freeport-7-Szene mit CPU-/Frameintervall-Perzentilen und asynchronen GPU-Passzeiten exportiert. Die zweite Messung klappte das Trigger-Fenster ein; beide Profile enthalten weiter den Debug-Overlay-Aufwand und stammen aus unterschiedlichen bewegten Intro-Zeitpunkten. Zusätzlich meldete ein Lauf 11 langsame Serverupdates und 59 verworfene Client-Ticks. Das ist ein Diagnosehinweis, kein isolierter Ursachenbeleg. Rohdaten und Einschränkungen: [M01A-Frameprofil](evidence/renderer/m01a-frame-profile-20261015/README.md).
+   - [x] Slow-Update-Diagnose in einem separaten Release-Lauf ohne Debug-Overlay nach Serverphasen aufgeschlüsselt. Der größte Startspike lag im queued World-Request und der erste aktive FP7-Update im World-Update; innere Ursachen und Optimierungen sind nicht belegt. Details und Laufzeitgrenzen: [M01A-Frameprofil](evidence/renderer/m01a-frame-profile-20261015/README.md).
+ - [ ] Render-Passes mit klaren Ein-/Ausgaben und expliziter Farb-/Tiefenpufferverwaltung vorbereiten.
+-  - [x] Bestehende Forward-Aufrufreihenfolge, Opaque-/Transparent-Kommandos, Sterne, Nebel und AA-Resolve im Quellcode erfasst; ein formaler Ressourcenvertrag fehlt weiterhin. Siehe [Pass-Reihenfolge-Audit](evidence/renderer/forward-pass-order-audit-20261015.md).
++  - [x] Die sechs aktuell profilierten GPU-Phasen besitzen jetzt typisierte IDs
++    und einen anfänglichen Farb-/Tiefen-Lese-/Schreibvertrag, der auch die
++    GPU-Timer-Slots steuert. Zielformate, Stencil, Resolve-Abhängigkeiten und
++    Ressourcenlebensdauer sind inzwischen beschrieben; Stencil- und
++    Szenenziel-Bindungen werden geprüft; beim AA-Zielaufbau werden SMAA-
++    Formate/Maße/Stencil sowie MSAA-Samplezahl/Maße geprüft. Statische Prüfungen kontrollieren Lade-/Schreibabhängigkeiten und Read-before-
++    write in den Passfolgen; Details im
++    [Forward-Pass-Audit](evidence/renderer/forward-pass-order-audit-20261015.md).
++  - [x] OpenGL-Audit der aktuellen Screen-, SMAA- und MSAA-Attachments sowie
++    ihrer Load-/Store-Semantik abgeschlossen. Caller-defined Ausgabeformate
++    bleiben abstrakt; vier AA-Unterpassverträge sind beschrieben und teilweise gegen die
++    GPU-Bindungen geprüft. Caller-Outputformat, Treiber-internal-format-Abfrage und API-Laufzeitprüfung
++    der Load-/Store-Angaben bleiben offen. Siehe
++    [Target-Attachment-Audit](evidence/renderer/render-target-attachment-contract-20261016.md).
++  - [x] Bestehende Forward-Aufrufreihenfolge, Opaque-/Transparent-Kommandos, Sterne, Nebel und AA-Resolve im Quellcode erfasst; ein ausführbarer Ressourcenvertrag fehlt weiterhin. Siehe [Pass-Reihenfolge-Audit](evidence/renderer/forward-pass-order-audit-20261015.md).
+ - [ ] Render-Target-Resize, minimierte Fenster, Scissor-/Viewport-Wechsel und Geräteverlust für zusätzliche Pässe absichern.
+   - [x] `SystemRenderer.Draw()` überspringt Frames mit Breite/Höhe 0. Bei geändertem Rendermaß oder AA-Modus gibt es das vorhandene MSAA-Target frei und erstellt es neu. Das belegt nur diesen System-Renderer-Pfad; Editor-/Offscreen-Targets, Wiederherstellungstests und Geräteverlust bleiben offen.
+   - [x] `SystemRenderer.Draw()` und `AntialiasTarget.SMAABlit()` stellen RenderTarget, Viewport-/Scissor-Stacks und ihre geänderten RenderContext-Zustände in `finally` wieder her. `SystemRenderer` stellt auch `ThnCamera.DefaultZ()` zurück und leert die Frame-Objektliste nach Fehlern. Fehler-Injektion und reguläre Resize-/Minimize-/Restore-Läufe bleiben als Laufzeitprüfung offen. Details im [Fehlerpfad-Audit](evidence/renderer/render-target-exception-path-audit-20261015.md).
+@@ -52,6 +66,7 @@
+ - [ ] GPU-Zeit und Speicherverbrauch pro Pass messbar machen; Effekte müssen einzeln abschaltbar und nach Hardwareprofil skalierbar sein.
+   - [x] Bereitschaftsaudit abgeschlossen: Timer-Query-API und Query-Aufruf fehlen in OpenGL-/RenderContext-Abstraktion; die lokale Mesa-Laufzeit meldet `GL_ARB_timer_query`. Passgrenzen und eine nicht blockierende Abfragefolge sind dokumentiert. Speicherwerte sind noch nicht als Messung verfügbar. Siehe [GPU-Timer-Query-Audit](evidence/renderer/gpu-timer-query-readiness-audit-20261015.md).
+   - [x] OpenGL-Timer-Queries für Depth, Opaque, Sterne/Nebel, Transparenz und AA-Resolve eingebaut. Vier Query-Slots pro Pass werden ohne blockierendes Ergebnis-Polling wiederverwendet; das Debug-Overlay zeigt Messwert und Sample-Alter. CSV-Zeilen erfassen den zuletzt verfügbaren GPU-Messwert samt fortlaufend aktualisiertem Alter; nicht verfügbare Samples bleiben leer. Das Alter zählt Aufrufe von `SystemRenderer.Draw()` und hängt nicht von `RenderContext.FrameNumber`/`ClearAll()` ab; ein Regressionstest prüft das Weiterzählen. Die Abfrage läuft nur bei geöffnetem Debug-Overlay. Null und OpenGL ohne Timer-Query melden keine Unterstützung. Das Debug-Overlay zeigt geschätzte geladene Texturbytes, Surface-Map- und Tangentenbytes; das Spiel-Debugfenster zusätzlich die geschätzten Bytes des aktiven System-AA-Ziels. Diese Werte sind unvollständig und keiner Render-Pass-Attribution zugeordnet; Editor-/Offscreen-Targets, beliebige Buffer und Treiberallokationen bleiben offen.
++  - [x] AA-Zeitmessung in SMAA Edge Detection, Blend Weights, Neighborhood Blend oder MSAA Color Resolve aufgeteilt. Der angezeigte `AA resolve`-Wert bleibt als Summe der drei SMAA-Unterpässe beziehungsweise als MSAA-Resolve-Zeit erhalten. CSV-Spaltennamen folgen jetzt den Passnamen einschließlich Frame-Clear und AA-Unterpässen. Laufzeitmessung nach dieser Aufteilung steht noch aus.
+ - [ ] Referenzszenen und feste Screenshots für Raum, Basis, Sternensystem, Nebel, Partikel und LancerEdit-Vorschau festlegen.
+ 
+ ### 2. Bumpmapping / Normalmaps vervollständigen
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 153 Client bundles and two native bundles. Each
++The active series contains 164 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -155,3 +155,5 @@
+ | 2152 | Verify normal map tangent edge cases under world transforms |
+ | 2153 | Record luminance-preserving sun ambient runtime A/B and calibration limits |
+ | 2154 | Preserve the applied sun ambient value when leaving graphics options |
++| 2155–2164 | Trace BeamEffect state, owner context, elapsed progress and retail CBeam velocity dispatch |
++| 2165 | Add typed SystemRenderer passes, time actual opaque draws, audit render-target attachments, and trace Retail CBeam velocity |
+--- a/patches/series
++++ b/patches/series
+@@ -164,3 +164,4 @@
+ client 2162-document-beam-engine-provider-candidate.patch
+ client 2163-correct-engbase-provider-evidence.patch
+ client 2164-document-engbase-iengine-slot.patch
++client 2165-system-render-pass-contract-and-beam-velocity-trace.patch
+--- a/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
++++ b/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
+@@ -13,6 +13,15 @@
+     public int Width { get; private set; }
+     public int Height { get; private set; }
+     public AntialiasMode Mode { get; private set; }
++    public Action<SystemRenderSubpass, bool>? GpuSubpassMarker { get; set; }
++    public int Samples => msaa?.Samples ?? 1;
++    public SystemRenderAttachmentFormat MultisampleStorageFormat => msaa?.RequestedColorFormat switch
++    {
++        MultisampleColorFormat.Rgba8 => SystemRenderAttachmentFormat.OpenGlRgba8,
++        MultisampleColorFormat.RgbaImplementationDefined =>
++            SystemRenderAttachmentFormat.OpenGlRgbaImplementationDefined,
++        _ => SystemRenderAttachmentFormat.OpenGlMsaaColor
++    };
+     public long EstimatedMemoryBytes => msaa?.EstimatedMemoryBytes ??
+         (long)(smaa?.Texture.EstimatedTextureMemory ?? 0) +
+         (smaaEdges?.Texture.EstimatedTextureMemory ?? 0) +
+@@ -51,6 +60,60 @@
+             smaaBlend = new(renderContext, width, height, depthStencil, false);
+             Target = smaa.Target;
+         }
++
++        try
++        {
++            ValidateAttachmentContracts();
++        }
++        catch
++        {
++            Dispose();
++            throw;
++        }
++    }
++
++    private void ValidateAttachmentContracts()
++    {
++        if (msaa != null)
++        {
++            var resolve = SystemRenderPasses.GetSubpass(SystemRenderSubpass.MsaaColorResolve);
++            var expectedSamples = Mode switch
++            {
++                AntialiasMode.MSAA4x => 4,
++                AntialiasMode.MSAA8x => 8,
++                _ => 2
++            };
++            var sourceColor = resolve.SourceColor;
++            var storageFormat = MultisampleStorageFormat;
++            var supportedStorageFormat = storageFormat is
++                SystemRenderAttachmentFormat.OpenGlMsaaColor or
++                SystemRenderAttachmentFormat.OpenGlRgba8 or
++                SystemRenderAttachmentFormat.OpenGlRgbaImplementationDefined;
++            if (resolve.Color?.Format != SystemRenderAttachmentFormat.CallerDefined ||
++                sourceColor?.Format != SystemRenderAttachmentFormat.OpenGlMsaaColor ||
++                sourceColor?.Samples != SystemRenderSampleCount.ModeSelected ||
++                resolve.SourceDepth != null || !supportedStorageFormat ||
++                msaa.RequestedDepthBits != 24 ||
++                msaa.Samples != expectedSamples || msaa.Width != Width || msaa.Height != Height ||
++                msaa.HasStencil)
++                throw new InvalidOperationException("MSAA target does not satisfy its resolve contract.");
++            return;
++        }
++
++        var edges = SystemRenderPasses.GetSubpass(SystemRenderSubpass.SmaaEdgeDetection);
++        var weights = SystemRenderPasses.GetSubpass(SystemRenderSubpass.SmaaBlendWeights);
++        if (smaa == null || smaaEdges == null || smaaBlend == null || depthStencil == null ||
++            edges.Color?.Format != SystemRenderAttachmentFormat.Bgra8 ||
++            weights.Color?.Format != SystemRenderAttachmentFormat.Bgra8 ||
++            edges.Stencil?.Format != SystemRenderAttachmentFormat.Depth24Stencil8 ||
++            weights.Stencil?.Format != SystemRenderAttachmentFormat.Depth24Stencil8 ||
++            smaaEdges.Texture.Format != SurfaceFormat.Bgra8 ||
++            smaaBlend.Texture.Format != SurfaceFormat.Bgra8 ||
++            smaaEdges.Width != Width || smaaEdges.Height != Height ||
++            smaaBlend.Width != Width || smaaBlend.Height != Height ||
++            !ReferenceEquals(smaaEdges.DepthBuffer, depthStencil) ||
++            !ReferenceEquals(smaaBlend.DepthBuffer, depthStencil) || !depthStencil.HasStencil)
++            throw new InvalidOperationException("SMAA targets do not satisfy their attachment contracts.");
+     }
+ 
+     void SMAABlit(RenderTarget? tgt, Point offset)
+@@ -71,6 +134,9 @@
+         var stencil = renderContext.Stencil;
+         var stencilEnabled = renderContext.StencilEnabled;
+         bool depth = renderContext.DepthEnabled;
++        bool depthWrite = renderContext.DepthWrite;
++        bool colorWrite = renderContext.ColorWrite;
++        var clearColor = renderContext.ClearColor;
+         bool cull = renderContext.Cull;
+         bool viewportPushed = false;
+         bool scissorPushed = false;
+@@ -95,46 +161,66 @@
+             renderContext.Samplers[0] = new(TextureFiltering.Linear, WrapMode.ClampToEdge, WrapMode.ClampToEdge);
+             renderContext.Samplers[1] = new (TextureFiltering.Nearest, WrapMode.ClampToEdge, WrapMode.ClampToEdge);
+             // Edge detection pass
+-            renderContext.RenderTarget = smaaEdges;
+-            renderContext.Textures[0] = smaa.Texture;
+-            renderContext.BlendMode = BlendMode.Opaque;
+-            renderContext.DepthEnabled = false;
+-            renderContext.Shader = edgeDetection;
+-            renderContext.StencilEnabled = true;
+-            renderContext.Stencil = new(StencilFunction.Always, StencilOperation.Replace, StencilOperation.Replace,
+-                StencilOperation.Replace, 1, 0xFFFFFFFF);
+-            renderContext.ClearDepth(); // clear stencil buffer
+-            renderContext.FullScreenTriangle.Draw(PrimitiveTypes.TriangleList, 1);
++            BeginGpuSubpass(SystemRenderSubpass.SmaaEdgeDetection);
++            try
++            {
++                BindSubpassTarget(SystemRenderSubpass.SmaaEdgeDetection, smaaEdges);
++                renderContext.Textures[0] = smaa.Texture;
++                renderContext.BlendMode = BlendMode.Opaque;
++                renderContext.DepthEnabled = false;
++                renderContext.Shader = edgeDetection;
++                renderContext.StencilEnabled = true;
++                renderContext.Stencil = new(StencilFunction.Always, StencilOperation.Replace, StencilOperation.Replace,
++                    StencilOperation.Replace, 1, 0xFFFFFFFF);
++                renderContext.DepthWrite = true;
++                renderContext.ClearDepth(); // clear depth and stencil
++                renderContext.FullScreenTriangle.Draw(PrimitiveTypes.TriangleList, 1);
++            }
++            finally { EndGpuSubpass(SystemRenderSubpass.SmaaEdgeDetection); }
+             // Blending weight pass
+-            renderContext.RenderTarget = smaaBlend;
+-            renderContext.Textures[0] = smaaEdges.Texture;
+-            renderContext.Textures[1] = renderContext.SMAAAreaTex;
+-            renderContext.Textures[2] = renderContext.SMAASearchTex;
+-            renderContext.Stencil = new(StencilFunction.Equal, StencilOperation.Keep, StencilOperation.Keep,
+-                StencilOperation.Keep, 1, 0xFFFFFFFF);
+-            renderContext.Shader = blendingWeightCalculation;
+-            renderContext.FullScreenTriangle.Draw(PrimitiveTypes.TriangleList, 1);
++            BeginGpuSubpass(SystemRenderSubpass.SmaaBlendWeights);
++            try
++            {
++                BindSubpassTarget(SystemRenderSubpass.SmaaBlendWeights, smaaBlend);
++                // The stencil test limits writes to edge pixels. Clear the complete
++                // weight target first so untouched pixels cannot retain old-frame data.
++                renderContext.ColorWrite = true;
++                renderContext.ClearColor = Color4.TransparentBlack;
++                renderContext.ClearColorOnly();
++                renderContext.Textures[0] = smaaEdges.Texture;
++                renderContext.Textures[1] = renderContext.SMAAAreaTex;
++                renderContext.Textures[2] = renderContext.SMAASearchTex;
++                renderContext.Stencil = new(StencilFunction.Equal, StencilOperation.Keep, StencilOperation.Keep,
++                    StencilOperation.Keep, 1, 0xFFFFFFFF);
++                renderContext.Shader = blendingWeightCalculation;
++                renderContext.FullScreenTriangle.Draw(PrimitiveTypes.TriangleList, 1);
++            }
++            finally { EndGpuSubpass(SystemRenderSubpass.SmaaBlendWeights); }
+             //Neighborhood blending pass
+-            renderContext.StencilEnabled = false;
+-
+-            renderContext.RenderTarget = tgt;
+-            renderContext.Textures[0] = smaa.Texture;
+-            renderContext.Textures[1] = smaaBlend.Texture;
+-            renderContext.Shader = neighborhoodBlending;
+-            if (offset != Point.Zero)
+-            {
+-                renderContext.PushViewport(offset.X, offset.Y, Width, Height);
+-                offsetViewportPushed = true;
+-                offsetScissorPushed = renderContext.PushScissor(new(offset.X, offset.Y, Width, Height), false);
++            BeginGpuSubpass(SystemRenderSubpass.SmaaNeighborhoodBlend);
++            try
++            {
++                renderContext.StencilEnabled = false;
++                BindSubpassTarget(SystemRenderSubpass.SmaaNeighborhoodBlend, tgt);
++                renderContext.Textures[0] = smaa.Texture;
++                renderContext.Textures[1] = smaaBlend.Texture;
++                renderContext.Shader = neighborhoodBlending;
++                if (offset != Point.Zero)
++                {
++                    renderContext.PushViewport(offset.X, offset.Y, Width, Height);
++                    offsetViewportPushed = true;
++                    offsetScissorPushed = renderContext.PushScissor(new(offset.X, offset.Y, Width, Height), false);
++                }
++                renderContext.FullScreenTriangle.Draw(PrimitiveTypes.TriangleList, 1);
++                if (offset != Point.Zero)
++                {
++                    offsetScissorPushed = false;
++                    renderContext.PopScissor();
++                    offsetViewportPushed = false;
++                    renderContext.PopViewport();
++                }
+             }
+-            renderContext.FullScreenTriangle.Draw(PrimitiveTypes.TriangleList, 1);
+-            if (offset != Point.Zero)
+-            {
+-                offsetScissorPushed = false;
+-                renderContext.PopScissor();
+-                offsetViewportPushed = false;
+-                renderContext.PopViewport();
+-            }
++            finally { EndGpuSubpass(SystemRenderSubpass.SmaaNeighborhoodBlend); }
+         }
+         finally
+         {
+@@ -149,6 +235,9 @@
+             renderContext.RenderTarget = sTgt;
+             renderContext.Shader = shdr;
+             renderContext.DepthEnabled = depth;
++            renderContext.DepthWrite = depthWrite;
++            renderContext.ColorWrite = colorWrite;
++            renderContext.ClearColor = clearColor;
+             renderContext.Cull = cull;
+             renderContext.Stencil = stencil;
+             renderContext.StencilEnabled = stencilEnabled;
+@@ -157,11 +246,40 @@
+         }
+     }
+ 
++    private void BindSubpassTarget(SystemRenderSubpass pass, RenderTarget? target)
++    {
++        var descriptor = SystemRenderPasses.GetSubpass(pass);
++        var expectedTarget = descriptor.Target switch
++        {
++            SystemRenderTargetRole.SmaaEdges => smaaEdges,
++            SystemRenderTargetRole.SmaaBlendWeights => smaaBlend,
++            SystemRenderTargetRole.Presentation => target,
++            _ => null
++        };
++        if (!ReferenceEquals(target, expectedTarget))
++            throw new InvalidOperationException(
++                $"SMAA subpass '{descriptor.Name}' was bound to an unexpected target.");
++        if (descriptor.Target is SystemRenderTargetRole.SmaaEdges or
++            SystemRenderTargetRole.SmaaBlendWeights && target is not RenderTarget2D)
++            throw new InvalidOperationException(
++                $"SMAA subpass '{descriptor.Name}' requires a 2D render target.");
++        if (descriptor.Stencil.HasValue &&
++            (target is not RenderTarget2D target2D || target2D.DepthBuffer?.HasStencil != true))
++            throw new InvalidOperationException(
++                $"SMAA subpass '{descriptor.Name}' requires its declared depth/stencil attachment.");
++        renderContext.RenderTarget = target;
++    }
++
++    private void BeginGpuSubpass(SystemRenderSubpass pass) => GpuSubpassMarker?.Invoke(pass, true);
++    private void EndGpuSubpass(SystemRenderSubpass pass) => GpuSubpassMarker?.Invoke(pass, false);
++
+     public void BlitToScreen(Point offset)
+     {
+         if (msaa != null)
+         {
+-            msaa.BlitToScreen(offset);
++            BeginGpuSubpass(SystemRenderSubpass.MsaaColorResolve);
++            try { msaa.BlitToScreen(offset); }
++            finally { EndGpuSubpass(SystemRenderSubpass.MsaaColorResolve); }
+         }
+         else
+         {
+@@ -173,7 +291,9 @@
+     {
+         if (msaa != null)
+         {
+-            msaa.BlitToRenderTarget(rTarget.Backing);
++            BeginGpuSubpass(SystemRenderSubpass.MsaaColorResolve);
++            try { msaa.BlitToRenderTarget(rTarget.Backing); }
++            finally { EndGpuSubpass(SystemRenderSubpass.MsaaColorResolve); }
+         }
+         else
+         {
+--- a/src/LibreLancer.Base/Graphics/Backends/IMultisampleTarget.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/IMultisampleTarget.cs
+@@ -1,10 +1,20 @@
+ 
+ namespace LibreLancer.Graphics.Backends;
++
++internal enum MultisampleColorFormat
++{
++    Unknown,
++    Rgba8,
++    RgbaImplementationDefined
++}
+ 
+ internal interface IMultisampleTarget : IRenderTarget
+ {
+     int Width { get; }
+     int Height { get; }
++    int Samples { get; }
++    MultisampleColorFormat RequestedColorFormat { get; }
++    int RequestedDepthBits { get; }
+     long EstimatedMemoryBytes { get; }
+     void BlitToScreen(Point offset);
+     void BlitToRenderTarget(IRenderTarget2D rTarget);
+--- a/src/LibreLancer.Base/Graphics/Backends/Null/NullMultisampleTarget.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/Null/NullMultisampleTarget.cs
+@@ -3,13 +3,11 @@
+ 
+ internal class NullMultisampleTarget : IMultisampleTarget
+ {
+-    private readonly int samples;
+-
+     public NullMultisampleTarget(int width, int height, int samples)
+     {
+         Width = width;
+         Height = height;
+-        this.samples = samples;
++        Samples = samples;
+     }
+ 
+     public void Dispose()
+@@ -18,7 +16,10 @@
+ 
+     public int Width { get; }
+     public int Height { get; }
+-    public long EstimatedMemoryBytes => (long)Width * Height * samples * 8;
++    public int Samples { get; }
++    public MultisampleColorFormat RequestedColorFormat => MultisampleColorFormat.Unknown;
++    public int RequestedDepthBits => 24;
++    public long EstimatedMemoryBytes => (long)Width * Height * Samples * 8;
+     public void BlitToScreen(Point offset)
+     {
+     }
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLMultisampleTarget.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLMultisampleTarget.cs
+@@ -13,9 +13,11 @@
+     private uint depthID;
+     public int Width { get; private set; }
+     public int Height { get; private set; }
+-    public long EstimatedMemoryBytes => checked((long)Width * Height * samples * 8 +
++    public MultisampleColorFormat RequestedColorFormat { get; }
++    public int RequestedDepthBits => 24;
++    public long EstimatedMemoryBytes => checked((long)Width * Height * Samples * 8 +
+         (resolveTexID != 0 ? (long)Width * Height * 4 : 0));
+-    private readonly int samples;
++    public int Samples { get; }
+ 
+     private GLRenderContext context;
+ 
+@@ -29,7 +31,10 @@
+         this.context = context;
+         Width = width;
+         Height = height;
+-        this.samples = samples;
++        Samples = samples;
++        RequestedColorFormat = GL.GLES
++            ? MultisampleColorFormat.Rgba8
++            : MultisampleColorFormat.RgbaImplementationDefined;
+         try
+         {
+             texID = GL.GenTexture();
+--- a/src/LibreLancer.Base/Graphics/DepthBuffer.cs
++++ b/src/LibreLancer.Base/Graphics/DepthBuffer.cs
+@@ -11,9 +11,12 @@
+ {
+     internal IDepthBuffer Backing;
+     public long EstimatedMemoryBytes { get; }
++    /// <summary>Whether this buffer was created with a stencil attachment.</summary>
++    public bool HasStencil { get; }
+     public DepthBuffer(RenderContext context, int width, int height, bool stencil = false)
+     {
+         EstimatedMemoryBytes = (long)width * height * 4;
++        HasStencil = stencil;
+         Backing = context.Backend.CreateDepthBuffer(width, height, stencil);
+     }
+     public void Dispose()
+--- /dev/null
++++ b/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
+@@ -0,0 +1,319 @@
++using System;
++
++namespace LibreLancer.Graphics;
++
++/// <summary>GPU phases currently exposed by the system renderer.</summary>
++public enum SystemRenderPass
++{
++    FrameClear,
++    DepthPrepass,
++    Opaque,
++    StarsAndNebula,
++    Transparent,
++    AntialiasResolve
++}
++
++[Flags]
++public enum SystemRenderResource
++{
++    None = 0,
++    SceneColor = 1 << 0,
++    SceneDepth = 1 << 1,
++    PresentationColor = 1 << 2,
++    SmaaEdges = 1 << 3,
++    SmaaWeights = 1 << 4,
++    SmaaStencil = 1 << 5,
++    SmaaLookupTextures = 1 << 6,
++    SmaaDepth = 1 << 7,
++    SceneStencil = 1 << 8
++}
++
++public enum SystemRenderTargetRole
++{
++    Scene,
++    Presentation,
++    SmaaEdges,
++    SmaaBlendWeights
++}
++
++public enum SystemRenderAttachmentFormat
++{
++    ActiveTarget,
++    CallerDefined,
++    Bgra8,
++    OpenGlMsaaColor,
++    OpenGlRgba8,
++    OpenGlRgbaImplementationDefined,
++    Depth24,
++    Depth24Stencil8
++}
++
++public enum SystemRenderLoadOperation { None, Load, Clear, DontCare }
++public enum SystemRenderStoreOperation { None, Store, ResolveColor }
++public enum SystemRenderSampleCount { Single, ModeSelected }
++
++/// <summary>Describes one attachment's format and content lifetime in a pass.</summary>
++public readonly record struct SystemRenderAttachmentContract(
++    SystemRenderResource Resource,
++    SystemRenderAttachmentFormat Format,
++    SystemRenderLoadOperation Load,
++    SystemRenderStoreOperation Store,
++    bool Optional = false,
++    SystemRenderSampleCount Samples = SystemRenderSampleCount.Single);
++
++/// <summary>
++/// Metadata for the current forward renderer path. This is not an executing
++/// render graph; target bindings remain owned by the existing renderer.
++/// </summary>
++public readonly record struct SystemRenderPassDescriptor(
++    SystemRenderPass Pass,
++    string Name,
++    SystemRenderResource Reads,
++    SystemRenderResource Writes,
++    SystemRenderTargetRole Target,
++    SystemRenderAttachmentContract? Color,
++    SystemRenderAttachmentContract? Depth,
++    SystemRenderAttachmentContract? Stencil,
++    bool Conditional = false);
++
++public enum SystemRenderSubpass
++{
++    SmaaEdgeDetection,
++    SmaaBlendWeights,
++    SmaaNeighborhoodBlend,
++    MsaaColorResolve
++}
++
++public readonly record struct SystemRenderSubpassDescriptor(
++    SystemRenderSubpass Pass,
++    string Name,
++    SystemRenderTargetRole Target,
++    SystemRenderResource Reads,
++    SystemRenderResource Writes,
++    SystemRenderAttachmentContract? Color,
++    SystemRenderAttachmentContract? Depth,
++    SystemRenderAttachmentContract? Stencil,
++    bool Conditional = true,
++    SystemRenderAttachmentContract? SourceColor = null,
++    SystemRenderAttachmentContract? SourceDepth = null);
++
++public static class SystemRenderPasses
++{
++    private static readonly SystemRenderPassDescriptor[] Descriptors =
++    [
++        new(SystemRenderPass.FrameClear, "Clear", SystemRenderResource.None,
++            SystemRenderResource.SceneColor | SystemRenderResource.SceneDepth |
++            SystemRenderResource.SceneStencil,
++            SystemRenderTargetRole.Scene,
++            new(SystemRenderResource.SceneColor, SystemRenderAttachmentFormat.ActiveTarget,
++                SystemRenderLoadOperation.Clear, SystemRenderStoreOperation.Store),
++            new(SystemRenderResource.SceneDepth, SystemRenderAttachmentFormat.ActiveTarget,
++                SystemRenderLoadOperation.Clear, SystemRenderStoreOperation.Store, Optional: true),
++            new(SystemRenderResource.SceneStencil, SystemRenderAttachmentFormat.ActiveTarget,
++                SystemRenderLoadOperation.Clear, SystemRenderStoreOperation.Store, Optional: true)),
++        new(SystemRenderPass.DepthPrepass, "Depth",
++            SystemRenderResource.SceneColor | SystemRenderResource.SceneDepth,
++            SystemRenderResource.SceneDepth, SystemRenderTargetRole.Scene,
++            new(SystemRenderResource.SceneColor, SystemRenderAttachmentFormat.ActiveTarget,
++                SystemRenderLoadOperation.Load, SystemRenderStoreOperation.Store),
++            new(SystemRenderResource.SceneDepth, SystemRenderAttachmentFormat.ActiveTarget,
++                SystemRenderLoadOperation.Load, SystemRenderStoreOperation.Store, Optional: true), null),
++        new(SystemRenderPass.Opaque, "Opaque",
++            SystemRenderResource.SceneColor | SystemRenderResource.SceneDepth,
++            SystemRenderResource.SceneColor | SystemRenderResource.SceneDepth,
++            SystemRenderTargetRole.Scene,
++            new(SystemRenderResource.SceneColor, SystemRenderAttachmentFormat.ActiveTarget,
++                SystemRenderLoadOperation.Load, SystemRenderStoreOperation.Store),
++            new(SystemRenderResource.SceneDepth, SystemRenderAttachmentFormat.ActiveTarget,
++                SystemRenderLoadOperation.Load, SystemRenderStoreOperation.Store, Optional: true), null),
++        new(SystemRenderPass.StarsAndNebula, "Stars / nebula",
++            SystemRenderResource.SceneColor | SystemRenderResource.SceneDepth,
++            SystemRenderResource.SceneColor, SystemRenderTargetRole.Scene,
++            new(SystemRenderResource.SceneColor, SystemRenderAttachmentFormat.ActiveTarget,
++                SystemRenderLoadOperation.Load, SystemRenderStoreOperation.Store),
++            new(SystemRenderResource.SceneDepth, SystemRenderAttachmentFormat.ActiveTarget,
++                SystemRenderLoadOperation.Load, SystemRenderStoreOperation.Store, Optional: true), null,
++            Conditional: true),
++        new(SystemRenderPass.Transparent, "Transparent",
++            SystemRenderResource.SceneColor | SystemRenderResource.SceneDepth,
++            SystemRenderResource.SceneColor, SystemRenderTargetRole.Scene,
++            new(SystemRenderResource.SceneColor, SystemRenderAttachmentFormat.ActiveTarget,
++                SystemRenderLoadOperation.Load, SystemRenderStoreOperation.Store),
++            new(SystemRenderResource.SceneDepth, SystemRenderAttachmentFormat.ActiveTarget,
++                SystemRenderLoadOperation.Load, SystemRenderStoreOperation.Store, Optional: true), null),
++        new(SystemRenderPass.AntialiasResolve, "AA resolve",
++            SystemRenderResource.SceneColor | SystemRenderResource.PresentationColor,
++            SystemRenderResource.PresentationColor, SystemRenderTargetRole.Presentation,
++            new(SystemRenderResource.PresentationColor, SystemRenderAttachmentFormat.CallerDefined,
++                SystemRenderLoadOperation.Load, SystemRenderStoreOperation.Store), null, null,
++            Conditional: true)
++    ];
++
++    private static readonly SystemRenderSubpassDescriptor[] Subpasses =
++    [
++        new(SystemRenderSubpass.SmaaEdgeDetection, "SMAA edge detection",
++            SystemRenderTargetRole.SmaaEdges, SystemRenderResource.SceneColor,
++            SystemRenderResource.SmaaEdges | SystemRenderResource.SmaaDepth |
++            SystemRenderResource.SmaaStencil,
++            new(SystemRenderResource.SmaaEdges, SystemRenderAttachmentFormat.Bgra8,
++                SystemRenderLoadOperation.DontCare, SystemRenderStoreOperation.Store),
++            new(SystemRenderResource.SmaaDepth, SystemRenderAttachmentFormat.Depth24Stencil8,
++                SystemRenderLoadOperation.Clear, SystemRenderStoreOperation.Store),
++            new(SystemRenderResource.SmaaStencil, SystemRenderAttachmentFormat.Depth24Stencil8,
++                SystemRenderLoadOperation.Clear, SystemRenderStoreOperation.Store)),
++        new(SystemRenderSubpass.SmaaBlendWeights, "SMAA blend weights",
++            SystemRenderTargetRole.SmaaBlendWeights,
++            SystemRenderResource.SmaaEdges | SystemRenderResource.SmaaDepth |
++            SystemRenderResource.SmaaStencil |
++            SystemRenderResource.SmaaLookupTextures, SystemRenderResource.SmaaWeights,
++            new(SystemRenderResource.SmaaWeights, SystemRenderAttachmentFormat.Bgra8,
++                SystemRenderLoadOperation.Clear, SystemRenderStoreOperation.Store),
++            new(SystemRenderResource.SmaaDepth, SystemRenderAttachmentFormat.Depth24Stencil8,
++                SystemRenderLoadOperation.Load, SystemRenderStoreOperation.Store),
++            new(SystemRenderResource.SmaaStencil, SystemRenderAttachmentFormat.Depth24Stencil8,
++                SystemRenderLoadOperation.Load, SystemRenderStoreOperation.Store)),
++        new(SystemRenderSubpass.SmaaNeighborhoodBlend, "SMAA neighborhood blend",
++            SystemRenderTargetRole.Presentation,
++            SystemRenderResource.SceneColor | SystemRenderResource.SmaaWeights |
++            SystemRenderResource.PresentationColor,
++            SystemRenderResource.PresentationColor,
++            new(SystemRenderResource.PresentationColor, SystemRenderAttachmentFormat.CallerDefined,
++                SystemRenderLoadOperation.Load, SystemRenderStoreOperation.Store), null, null),
++        new(SystemRenderSubpass.MsaaColorResolve, "MSAA color resolve",
++            SystemRenderTargetRole.Presentation,
++            SystemRenderResource.SceneColor | SystemRenderResource.PresentationColor,
++            SystemRenderResource.PresentationColor,
++            new(SystemRenderResource.PresentationColor, SystemRenderAttachmentFormat.CallerDefined,
++                SystemRenderLoadOperation.Load, SystemRenderStoreOperation.ResolveColor), null, null,
++            SourceColor: new(SystemRenderResource.SceneColor, SystemRenderAttachmentFormat.OpenGlMsaaColor,
++                SystemRenderLoadOperation.Load, SystemRenderStoreOperation.None,
++                Samples: SystemRenderSampleCount.ModeSelected))
++    ];
++
++    static SystemRenderPasses()
++    {
++        foreach (var descriptor in Descriptors)
++            ValidateAttachments(descriptor.Name, descriptor.Reads, descriptor.Writes,
++                descriptor.Color, descriptor.Depth, descriptor.Stencil);
++        foreach (var descriptor in Subpasses)
++            ValidateAttachments(descriptor.Name, descriptor.Reads, descriptor.Writes,
++                descriptor.Color, descriptor.Depth, descriptor.Stencil,
++                descriptor.SourceColor, descriptor.SourceDepth);
++
++        ValidateSequence("SystemRenderer", Descriptors,
++            SystemRenderResource.PresentationColor);
++        ValidateSequence("SMAA", [Subpasses[0], Subpasses[1], Subpasses[2]],
++            SystemRenderResource.SceneColor | SystemRenderResource.PresentationColor |
++            SystemRenderResource.SmaaLookupTextures);
++        ValidateSequence("MSAA", [Subpasses[3]],
++            SystemRenderResource.SceneColor | SystemRenderResource.PresentationColor);
++    }
++
++    private static void ValidateSequence(
++        string sequenceName,
++        SystemRenderPassDescriptor[] passes,
++        SystemRenderResource externalResources)
++    {
++        var available = externalResources;
++        foreach (var descriptor in passes)
++        {
++            var missing = descriptor.Reads & ~available;
++            if (missing != SystemRenderResource.None)
++                throw new InvalidOperationException(
++                    $"Render sequence '{sequenceName}' reads uninitialized resources " +
++                    $"{missing} in pass '{descriptor.Name}'.");
++            available |= descriptor.Writes;
++        }
++    }
++
++    private static void ValidateSequence(
++        string sequenceName,
++        SystemRenderSubpassDescriptor[] passes,
++        SystemRenderResource externalResources)
++    {
++        var available = externalResources;
++        foreach (var descriptor in passes)
++        {
++            var missing = descriptor.Reads & ~available;
++            if (missing != SystemRenderResource.None)
++                throw new InvalidOperationException(
++                    $"Render sequence '{sequenceName}' reads uninitialized resources " +
++                    $"{missing} in subpass '{descriptor.Name}'.");
++            available |= descriptor.Writes;
++        }
++    }
++
++    private static void ValidateAttachments(
++        string name,
++        SystemRenderResource reads,
++        SystemRenderResource writes,
++        SystemRenderAttachmentContract? color,
++        SystemRenderAttachmentContract? depth,
++        SystemRenderAttachmentContract? stencil,
++        SystemRenderAttachmentContract? sourceColor = null,
++        SystemRenderAttachmentContract? sourceDepth = null)
++    {
++        ValidateAttachment(name, "color", color, reads, writes, isSource: false);
++        ValidateAttachment(name, "depth", depth, reads, writes, isSource: false);
++        ValidateAttachment(name, "stencil", stencil, reads, writes, isSource: false);
++        ValidateAttachment(name, "source color", sourceColor, reads, writes, isSource: true);
++        ValidateAttachment(name, "source depth", sourceDepth, reads, writes, isSource: true);
++    }
++
++    private static void ValidateAttachment(
++        string name,
++        string attachmentName,
++        SystemRenderAttachmentContract? attachment,
++        SystemRenderResource reads,
++        SystemRenderResource writes,
++        bool isSource)
++    {
++        if (attachment is not { } contract)
++            return;
++
++        if (contract.Load == SystemRenderLoadOperation.Load &&
++            (reads & contract.Resource) != contract.Resource)
++            throw new InvalidOperationException(
++                $"Render pass '{name}' loads {attachmentName} without declaring its resource as read.");
++
++        if (!isSource &&
++            (contract.Load is SystemRenderLoadOperation.Clear or SystemRenderLoadOperation.DontCare) &&
++            (contract.Store is SystemRenderStoreOperation.Store or SystemRenderStoreOperation.ResolveColor) &&
++            (writes & contract.Resource) != contract.Resource)
++            throw new InvalidOperationException(
++                $"Render pass '{name}' stores {attachmentName} without declaring its resource as written.");
++    }
++
++    public static int Count => Descriptors.Length;
++    public static int SubpassCount => Subpasses.Length;
++
++    public static SystemRenderPassDescriptor Get(SystemRenderPass pass)
++    {
++        var index = (int)pass;
++        if ((uint)index >= (uint)Descriptors.Length)
++            throw new ArgumentOutOfRangeException(nameof(pass));
++        return Descriptors[index];
++    }
++
++    public static SystemRenderPassDescriptor Get(int index)
++    {
++        if ((uint)index >= (uint)Descriptors.Length)
++            throw new ArgumentOutOfRangeException(nameof(index));
++        return Descriptors[index];
++    }
++
++    public static SystemRenderSubpassDescriptor GetSubpass(SystemRenderSubpass pass)
++    {
++        var index = (int)pass;
++        if ((uint)index >= (uint)Subpasses.Length)
++            throw new ArgumentOutOfRangeException(nameof(pass));
++        return Subpasses[index];
++    }
++
++    public static SystemRenderSubpassDescriptor GetSubpass(int index)
++    {
++        if ((uint)index >= (uint)Subpasses.Length)
++            throw new ArgumentOutOfRangeException(nameof(index));
++        return Subpasses[index];
++    }
++}
+--- a/src/LibreLancer/Interface/DebugView.cs
++++ b/src/LibreLancer/Interface/DebugView.cs
+@@ -249,15 +249,7 @@
+             csv.Append("frame,renderer,width,height,update_draw_ms,frame_interval_ms,fps");
+             for (var pass = 0; pass < GpuPassProfile.Count; pass++)
+             {
+-                var columnName = pass switch
+-                {
+-                    0 => "depth",
+-                    1 => "opaque",
+-                    2 => "stars_nebula",
+-                    3 => "transparent",
+-                    4 => "aa_resolve",
+-                    _ => $"pass_{pass}"
+-                };
++                var columnName = GpuPassProfile.GetColumnName(pass);
+                 csv.Append(",gpu_").Append(columnName).Append("_ms,gpu_")
+                     .Append(columnName).Append("_age_frames");
+             }
+--- a/src/LibreLancer/Render/GpuPassProfile.cs
++++ b/src/LibreLancer/Render/GpuPassProfile.cs
+@@ -1,4 +1,5 @@
+ using System;
++using LibreLancer.Graphics;
+ 
+ namespace LibreLancer.Render;
+ 
+@@ -7,19 +8,110 @@
+ /// <summary>Latest asynchronous GPU pass timings for the current render context.</summary>
+ public static class GpuPassProfile
+ {
+-    private static readonly string[] Names = ["Depth", "Opaque", "Stars / nebula", "Transparent", "AA resolve"];
+-    private static readonly GpuPassSample?[] Samples = new GpuPassSample?[Names.Length];
+-    private static readonly long[] SampleFrames = new long[Names.Length];
++    private static readonly SystemRenderPass[] TimedPasses =
++    [
++        SystemRenderPass.FrameClear,
++        SystemRenderPass.DepthPrepass,
++        SystemRenderPass.Opaque,
++        SystemRenderPass.StarsAndNebula,
++        SystemRenderPass.Transparent
++    ];
++    private static readonly GpuPassSample?[] Samples =
++        new GpuPassSample?[SystemRenderPasses.Count + SystemRenderPasses.SubpassCount];
++    private static readonly long[] SampleFrames = new long[Samples.Length];
+ 
+-    public static int Count => Names.Length;
+-    public static string GetName(int index) => Names[index];
++    public static int Count => Samples.Length;
++    internal static int QueryCount => TimedPasses.Length + SystemRenderPasses.SubpassCount;
++
++    public static string GetName(int index) => index < SystemRenderPasses.Count
++        ? SystemRenderPasses.Get(index).Name
++        : SystemRenderPasses.GetSubpass(index - SystemRenderPasses.Count).Name;
++
++    public static string GetColumnName(int index)
++    {
++        var name = GetName(index);
++        var column = new System.Text.StringBuilder(name.Length);
++        var previousUnderscore = false;
++        foreach (var ch in name)
++        {
++            if (char.IsLetterOrDigit(ch))
++            {
++                column.Append(char.ToLowerInvariant(ch));
++                previousUnderscore = false;
++            }
++            else if (!previousUnderscore && column.Length > 0)
++            {
++                column.Append('_');
++                previousUnderscore = true;
++            }
++        }
++        return column.ToString().TrimEnd('_');
++    }
++
+     public static GpuPassSample? GetSample(int index) => Samples[index];
++    public static GpuPassSample? GetSample(SystemRenderPass pass) => Samples[(int)pass];
++    public static GpuPassSample? GetSample(SystemRenderSubpass pass) =>
++        Samples[SystemRenderPasses.Count + (int)pass];
++
++    internal static int GetQueryIndex(SystemRenderPass pass)
++    {
++        for (var i = 0; i < TimedPasses.Length; i++)
++            if (TimedPasses[i] == pass)
++                return i;
++        return -1;
++    }
++
++    internal static int GetQueryIndex(SystemRenderSubpass pass) => TimedPasses.Length + (int)pass;
++
++    internal static int GetProfileIndex(int queryIndex) => queryIndex < TimedPasses.Length
++        ? (int)TimedPasses[queryIndex]
++        : SystemRenderPasses.Count + queryIndex - TimedPasses.Length;
+ 
+     internal static void SetSample(int index, double milliseconds, long sampleFrame, long currentFrame)
+     {
+         SampleFrames[index] = sampleFrame;
+-        Samples[index] = new GpuPassSample(Names[index], milliseconds,
++        Samples[index] = new GpuPassSample(GetName(index), milliseconds,
+             Math.Max(0, currentFrame - sampleFrame));
++        if (index >= SystemRenderPasses.Count)
++            UpdateAntialiasAggregate(currentFrame);
++    }
++
++    private static void UpdateAntialiasAggregate(long currentFrame)
++    {
++        var aggregateIndex = (int)SystemRenderPass.AntialiasResolve;
++        var smaaIndex = SystemRenderPasses.Count;
++        var msaaIndex = smaaIndex + (int)SystemRenderSubpass.MsaaColorResolve;
++        var msaaSample = Samples[msaaIndex];
++        var smaaFrame = SampleFrames[smaaIndex];
++
++        if (msaaSample is { } msaa && SampleFrames[msaaIndex] >= smaaFrame)
++        {
++            SampleFrames[aggregateIndex] = SampleFrames[msaaIndex];
++            Samples[aggregateIndex] = msaa with
++            {
++                Name = SystemRenderPasses.Get(SystemRenderPass.AntialiasResolve).Name,
++                AgeFrames = Math.Max(0, currentFrame - SampleFrames[msaaIndex])
++            };
++            return;
++        }
++
++        var smaaBlendIndex = smaaIndex + (int)SystemRenderSubpass.SmaaBlendWeights;
++        var smaaNeighborhoodIndex = smaaIndex + (int)SystemRenderSubpass.SmaaNeighborhoodBlend;
++        if (Samples[smaaIndex] is not { } edges ||
++            Samples[smaaBlendIndex] is not { } weights ||
++            Samples[smaaNeighborhoodIndex] is not { } neighborhood ||
++            SampleFrames[smaaIndex] != SampleFrames[smaaBlendIndex] ||
++            SampleFrames[smaaIndex] != SampleFrames[smaaNeighborhoodIndex])
++            return;
++
++        var frame = SampleFrames[smaaIndex];
++        if (frame < SampleFrames[msaaIndex])
++            return;
++        SampleFrames[aggregateIndex] = frame;
++        Samples[aggregateIndex] = new GpuPassSample(
++            SystemRenderPasses.Get(SystemRenderPass.AntialiasResolve).Name,
++            edges.Milliseconds + weights.Milliseconds + neighborhood.Milliseconds,
++            Math.Max(0, currentFrame - frame));
+     }
+ 
+     internal static void UpdateAges(long currentFrame)
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -437,6 +437,7 @@
+                         _mheight = renderHeight;
+                         msaa?.Dispose();
+                         msaa = new AntialiasTarget(rstate, renderWidth, renderHeight, Settings.SelectedAA);
++                        msaa.GpuSubpassMarker = MarkGpuSubpass;
+                     }
+ 
+                     rstate.PushViewport(new Rectangle(0, 0, renderWidth, renderHeight));
+@@ -444,6 +445,11 @@
+                     aaScissorPushed = rstate.PushScissor(new Rectangle(0, 0, renderWidth, renderHeight), false);
+                     rstate.RenderTarget = msaa;
+                 }
++
++                // All scene phases must keep writing into the same scene target.
++                // With AA this is the offscreen AntialiasTarget; otherwise it is
++                // the caller's current target (which may be the screen).
++                RenderTarget? sceneTarget = rstate.RenderTarget;
+ 
+                 RenderMaterial.VertexLighting = !(AllowPerPixelLighting && Settings.PerPixelLighting);
+                 rstate.PreferredFilterLevel = Settings.SelectedFiltering;
+@@ -494,20 +500,30 @@
+                 QuadBuffer.EndUpload();
+                 Commands.BonesBuffer.EndStreaming(Commands.BonesMax);
+ 
+-                if (transitioned)
+-                {
+-                    // Fully in fog. Skip Starsphere
+-                    rstate.ClearColor = nr!.Nebula.FogColor;
+-                    rstate.ClearAll();
+-                }
+-                else
+-                {
+-                    rstate.ClearColor =
+-                        BackgroundOverride ??
+-                        starSystem?.BackgroundColor ??
+-                        NullColor;
+-                    rstate.ClearAll();
+-                }
++                // OpenGL clears respect the active write masks. The renderer
++                // owns these attachments for the frame and restores caller
++                // state in the outer finally block.
++                rstate.ColorWrite = true;
++                rstate.DepthWrite = true;
++                BeginGpuPass(SystemRenderPass.FrameClear, sceneTarget);
++                try
++                {
++                    if (transitioned)
++                    {
++                        // Fully in fog. Skip Starsphere
++                        rstate.ClearColor = nr!.Nebula.FogColor;
++                        rstate.ClearAll();
++                    }
++                    else
++                    {
++                        rstate.ClearColor =
++                            BackgroundOverride ??
++                            starSystem?.BackgroundColor ??
++                            NullColor;
++                        rstate.ClearAll();
++                    }
++                }
++                finally { EndGpuPass(SystemRenderPass.FrameClear, sceneTarget); }
+ 
+                 DebugRenderer.StartFrame(rstate);
+                 Commands.StartFrame(rstate);
+@@ -522,54 +538,59 @@
+                 // Simple depth pre-pass
+                 rstate.ColorWrite = false;
+                 rstate.DepthFunction = DepthFunction.Less;
+-                BeginGpuPass(0);
++                BeginGpuPass(SystemRenderPass.DepthPrepass, sceneTarget);
+                 try
+                 {
+                     foreach (var obj in objects) obj.DepthPrepass(camera, rstate);
+                 }
+-                finally { EndGpuPass(0); }
++                finally { EndGpuPass(SystemRenderPass.DepthPrepass, sceneTarget); }
+                 rstate.DepthFunction = DepthFunction.LessEqual;
+                 rstate.ColorWrite = true;
+                 // Actual Drawing
+ 
+-                Beams.Begin(Commands, resman, camera);
+-
+-                foreach (var obj in objects)
+-                {
+-                    obj.Draw(camera, Commands, SystemLighting, nr!);
+-                }
+-
+-                Beams.End();
+-                for (var i = 0; i < AsteroidFields!.Count; i++)
+-                    AsteroidFields[i].Draw(resman, SystemLighting, Commands, nr!);
+-
+-                if (DrawNebulae)
+-                {
+-                    if (nr == null)
+-                    {
+-                        foreach (var nebula in Nebulae)
++                BeginGpuPass(SystemRenderPass.Opaque, sceneTarget);
++                try
++                {
++                    Beams.Begin(Commands, resman, camera);
++
++                    foreach (var obj in objects)
++                    {
++                        obj.Draw(camera, Commands, SystemLighting, nr!);
++                    }
++
++                    Beams.End();
++                    for (var i = 0; i < AsteroidFields!.Count; i++)
++                        AsteroidFields[i].Draw(resman, SystemLighting, Commands, nr!);
++
++                    if (DrawNebulae)
++                    {
++                        if (nr == null)
+                         {
+-                            nebula.Draw(Commands);
++                            foreach (var nebula in Nebulae)
++                            {
++                                nebula.Draw(Commands);
++                            }
+                         }
+-                    }
+-                    else
+-                    {
+-                        nr.Draw(Commands);
+-                    }
+-                }
+-
+-                billboards.End();
+-                FxPool.EndFrame();
+-                Polyline.EndFrame();
+-                // Opaque Pass
++                        else
++                        {
++                            nr.Draw(Commands);
++                        }
++                    }
++
++                    billboards.End();
++                    FxPool.EndFrame();
++                    Polyline.EndFrame();
++                }
++                finally { EndGpuPass(SystemRenderPass.Opaque, sceneTarget); }
++
++                // Finalize transparent ordering and billboard geometry. Opaque
++                // material draws were issued immediately in the block above.
+                 rstate.DepthEnabled = true;
+-                BeginGpuPass(1);
+-                try { Commands.DrawOpaque(rstate); }
+-                finally { EndGpuPass(1); }
++                Commands.DrawOpaque(rstate);
+ 
+                 if ((!transitioned || !DrawNebulae) && DrawStarsphere)
+                 {
+-                    BeginGpuPass(2);
++                    BeginGpuPass(SystemRenderPass.StarsAndNebula, sceneTarget);
+                     try
+                     {
+                     // Starsphere
+@@ -634,15 +655,15 @@
+ 
+                     rstate.DepthRange = new Vector2(0, 1);
+                     }
+-                    finally { EndGpuPass(2); }
++                    finally { EndGpuPass(SystemRenderPass.StarsAndNebula, sceneTarget); }
+                 }
+ 
+                 OpaqueHook?.Invoke();
+                 // Transparent Pass
+                 rstate.DepthWrite = false;
+-                BeginGpuPass(3);
++                BeginGpuPass(SystemRenderPass.Transparent, sceneTarget);
+                 try { Commands.DrawTransparent(rstate); }
+-                finally { EndGpuPass(3); }
++                finally { EndGpuPass(SystemRenderPass.Transparent, sceneTarget); }
+                 rstate.DepthWrite = true;
+                 rstate.DepthEnabled = true;
+                 PhysicsHook?.Invoke();
+@@ -678,15 +699,11 @@
+ 
+                     if (restoreTarget == null)
+                     {
+-                        BeginGpuPass(4);
+-                        try { msaa?.BlitToScreen(new Point(rstate.CurrentViewport.X, rstate.CurrentViewport.Y)); }
+-                        finally { EndGpuPass(4); }
++                        msaa?.BlitToScreen(new Point(rstate.CurrentViewport.X, rstate.CurrentViewport.Y));
+                     }
+                     else
+                     {
+-                        BeginGpuPass(4);
+-                        try { msaa?.BlitToRenderTarget((restoreTarget as RenderTarget2D)!); }
+-                        finally { EndGpuPass(4); }
++                        msaa?.BlitToRenderTarget((restoreTarget as RenderTarget2D)!);
+                     }
+ 
+                     rstate.RenderTarget = restoreTarget;
+@@ -737,7 +754,7 @@
+ 
+             if (gpuPassQueries == null && rstate.SupportsGpuTimerQueries)
+             {
+-                gpuPassQueries = new IGpuTimerQuery?[GpuPassProfile.Count];
++                gpuPassQueries = new IGpuTimerQuery?[GpuPassProfile.QueryCount];
+                 for (var i = 0; i < gpuPassQueries.Length; i++)
+                     gpuPassQueries[i] = rstate.CreateGpuTimerQuery();
+             }
+@@ -748,13 +765,59 @@
+             for (var i = 0; i < gpuPassQueries.Length; i++)
+             {
+                 if (gpuPassQueries[i]!.TryGetResult(out var nanoseconds, out var frameNumber))
+-                    GpuPassProfile.SetSample(i, nanoseconds / 1_000_000.0,
++                    GpuPassProfile.SetSample(GpuPassProfile.GetProfileIndex(i), nanoseconds / 1_000_000.0,
+                         frameNumber, currentFrame);
+             }
+         }
+ 
+-        private void BeginGpuPass(int index) => gpuPassQueries?[index]?.Begin(currentGpuProfileFrame);
+-        private void EndGpuPass(int index) => gpuPassQueries?[index]?.End();
++        private void BeginGpuPass(SystemRenderPass pass)
++        {
++            var index = GpuPassProfile.GetQueryIndex(pass);
++            if (index >= 0)
++                gpuPassQueries?[index]?.Begin(currentGpuProfileFrame);
++        }
++
++        private void BeginGpuPass(SystemRenderPass pass, RenderTarget? sceneTarget)
++        {
++            ValidateScenePassTarget(pass, sceneTarget);
++            BeginGpuPass(pass);
++        }
++
++        private void EndGpuPass(SystemRenderPass pass, RenderTarget? sceneTarget)
++        {
++            try
++            {
++                ValidateScenePassTarget(pass, sceneTarget);
++            }
++            finally
++            {
++                EndGpuPass(pass);
++            }
++        }
++
++        private void ValidateScenePassTarget(SystemRenderPass pass, RenderTarget? sceneTarget)
++        {
++            var descriptor = SystemRenderPasses.Get(pass);
++            if (descriptor.Target == SystemRenderTargetRole.Scene &&
++                !ReferenceEquals(rstate.RenderTarget, sceneTarget))
++                throw new InvalidOperationException(
++                    $"Render pass '{descriptor.Name}' is bound to a different target than the scene.");
++        }
++        private void EndGpuPass(SystemRenderPass pass)
++        {
++            var index = GpuPassProfile.GetQueryIndex(pass);
++            if (index >= 0)
++                gpuPassQueries?[index]?.End();
++        }
++
++        private void MarkGpuSubpass(SystemRenderSubpass pass, bool begin)
++        {
++            var index = GpuPassProfile.GetQueryIndex(pass);
++            if (begin)
++                gpuPassQueries?[index]?.Begin(currentGpuProfileFrame);
++            else
++                gpuPassQueries?[index]?.End();
++        }
+ 
+         private void DisposeGpuPassQueries()
+         {

@@ -1,0 +1,144 @@
+From: Lancer Nexus Client overlay
+Subject: [PATCH] Add sun ambient regression tests and runtime evidence
+
+---
+
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -164,4 +164,5 @@
+ - [ ] Systemweite Umgebungsbeleuchtung an Farbe und Intensität der jeweiligen Sonne koppeln. Unterschiedliche Sonnenfarben (z. B. grün, rot oder weiß) sollen die diffuse Grundbeleuchtung aller passenden Szenenobjekte konsistent beeinflussen; Datenquelle, Legacy-Fallback und Zusammenspiel mit PBR/IBL anhand reproduzierbarer NAP-Szenen prüfen.
+   - [x] Datenpfad-Audit: Systemambient, persistente `LightSource`-Farben und sichtbare `StarGlow`-Sprites sind getrennt; ein einzelner Farbmittelwert scheitert bei Mehrfachsonnen. Anforderungen und Retail-Gegenproben: [Sonnen-Ambient-Audit](evidence/renderer/sun-colored-ambient-audit-20261015.md).
+   - [x] Opt-in Sonnenfarbanteil pro Objekt aus persistenten Systemlichtquellen ergänzt. Der 25%-Beitrag multipliziert das authored Ambient mit dem lokal nach Attenuation gewichteten Lichtfarbmittel; transient effects bleiben ausgeschlossen. `render_sun_ambient` und `--render-sun-ambient=on|off` schalten ihn separat. Siehe [Datenpfad-Audit](evidence/renderer/sun-colored-ambient-audit-20261015.md).
++  - [x] Fünf fokussierte Regressionstests für den ausgeschalteten Legacy-Pfad, rote/grüne/weiße Lichtfarben und lokale Mehrfachlicht-Gewichtung bestanden.
+   - [ ] NAP-A/B für weiße, rote, grüne und mehrfach vorhandene Sonnen aufnehmen; 25%-Blend und distanzgewichtete Farbmischung visuell kalibrieren. Nebelüberschreibung und Legacy-Ausgabe bei ausgeschaltetem Schalter in der Laufzeit prüfen.
+
+diff --git a/docs/evidence/renderer/sun-colored-ambient-audit-20261015.md b/docs/evidence/renderer/sun-colored-ambient-audit-20261015.md
+--- a/docs/evidence/renderer/sun-colored-ambient-audit-20261015.md
++++ b/docs/evidence/renderer/sun-colored-ambient-audit-20261015.md
+@@ -47,6 +47,14 @@
+ ## Beleggrenzen
+ 
+-Der Codepfad und die Retail-INI-Fälle sind statisch geprüft. Für die neue Mischung gibt es noch
+-keine NAP-Laufzeitbilder, GPU-Renderproben oder Retail-Pixelvergleiche. Der Build belegt nur
+-Kompilierbarkeit; visuelle Stärke, Mehrfachsonnenübergänge und ausgeschalteter Legacy-Fallback
+-brauchen noch Laufzeitabnahme.
++Der Codepfad und die Retail-INI-Fälle sind statisch geprüft. Fünf fokussierte Regressionstests
++bestehen: ausgeschaltetes Feature erhält Ambient exakt, rote/grüne/weiße Lichtfarben, lokale
++Attenuationsgewichtung und kein Einfärben durch nicht-systemische/transiente Lichter. Testlauf:
++`dotnet test src/LibreLancer.Tests/LibreLancer.Tests.csproj -c Release --no-restore
++-p:UseSharedCompilation=false --filter FullyQualifiedName~SunAmbient` (5 bestanden, 0 fehlgeschlagen).
++
++Ein NAP-Lauf mit vorbereitetem HI02-Spielstand lud die Simulation, erzeugte aber kein sichtbares
++SDL-Fenster; der Prozess blieb mit wiederholten Simulation-Overload-Meldungen aktiv und wurde
++beendet. Daher liegen weiterhin keine verwertbaren NAP-Laufzeitbilder, GPU-Renderproben oder
++Retail-Pixelvergleiche vor. Der Release-Build belegt Kompilierbarkeit; visuelle Stärke,
++Mehrfachsonnenübergänge und ausgeschalteter Legacy-Fallback brauchen noch eine sichtbare
++Laufzeitabnahme.
+
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -132,2 +132,3 @@
+ | 2129 | Audit sun-colored ambient lighting data paths and acceptance requirements |
+ | 2130 | Add optional per-object ambient tint from persistent system light colors |
++| 2131 | Add sun ambient regression tests and runtime evidence |
+
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -131,2 +131,3 @@
+ client 2129-audit-sun-colored-ambient-lighting.patch
+ client 2130-sun-colored-ambient-lighting.patch
++client 2131-sun-ambient-tests-and-runtime-evidence.patch
+
+diff --git a/src/LibreLancer.Tests/TransientLightTests.cs b/src/LibreLancer.Tests/TransientLightTests.cs
+--- a/src/LibreLancer.Tests/TransientLightTests.cs
++++ b/src/LibreLancer.Tests/TransientLightTests.cs
+@@ -76,6 +76,67 @@
+     }
+ 
+     [Fact]
++    public void SunAmbientOffPreservesAuthoredAmbientExactly()
++    {
++        var lighting = new SystemLighting
++        {
++            Ambient = new Color4(0.2f, 0.3f, 0.4f, 1),
++            SunAmbientEnabled = false
++        };
++        lighting.SunAmbientLights.Add(CreateSunAmbientLight(new Color3f(1, 0, 0)));
++
++        var result = RenderHelpers.ApplyLights(lighting, 0, Vector3.Zero, 0, null,
++            ldynamic: false);
++
++        Assert.Equal(new Color3f(0.2f, 0.3f, 0.4f), result.Ambient);
++    }
++
++    [Theory]
++    [InlineData(1f, 0f, 0f, 0.2f, 0.225f, 0.3f)]
++    [InlineData(0f, 1f, 0f, 0.15f, 0.3f, 0.3f)]
++    [InlineData(1f, 1f, 1f, 0.2f, 0.3f, 0.4f)]
++    public void SunAmbientBlendsLightColorIntoAuthoredAmbient(float sunR, float sunG, float sunB,
++        float expectedR, float expectedG, float expectedB)
++    {
++        var lighting = new SystemLighting
++        {
++            Ambient = new Color4(0.2f, 0.3f, 0.4f, 1),
++            SunAmbientEnabled = true
++        };
++        lighting.SunAmbientLights.Add(CreateSunAmbientLight(new Color3f(sunR, sunG, sunB)));
++
++        var result = RenderHelpers.ApplyLights(lighting, 0, Vector3.Zero, 0, null,
++            ldynamic: false);
++
++        Assert.Equal(expectedR, result.Ambient.R, 5);
++        Assert.Equal(expectedG, result.Ambient.G, 5);
++        Assert.Equal(expectedB, result.Ambient.B, 5);
++    }
++
++    [Fact]
++    public void SunAmbientUsesLocalAttenuationAndIgnoresNonSystemLights()
++    {
++        var lighting = new SystemLighting
++        {
++            Ambient = new Color4(0.2f, 0.3f, 0.4f, 1),
++            SunAmbientEnabled = true
++        };
++        lighting.SunAmbientLights.Add(CreateSunAmbientLight(new Color3f(1, 0, 0),
++            LightKind.Point, Vector3.Zero, Vector3.UnitX, 10));
++        lighting.SunAmbientLights.Add(CreateSunAmbientLight(new Color3f(0, 1, 0),
++            LightKind.Point, new Vector3(20, 0, 0), Vector3.UnitX, 10));
++        // Transient/scene lights stay in the regular list and must not tint system ambient.
++        lighting.Lights.Add(CreateSunAmbientLight(new Color3f(0, 0, 1)));
++
++        var result = RenderHelpers.ApplyLights(lighting, 0, Vector3.Zero, 0, null,
++            ldynamic: false);
++
++        Assert.Equal(0.2f, result.Ambient.R, 5);
++        Assert.Equal(0.225f, result.Ambient.G, 5);
++        Assert.Equal(0.3f, result.Ambient.B, 5);
++    }
++
++    [Fact]
+     public void ObjectLightingSelectsNearestEightMatchingLights()
+     {
+         var lighting = new SystemLighting();
+@@ -148,4 +209,18 @@
+             Color = new Color3f(intensity, intensity, intensity)
+         }
+     };
++
++    private static DynamicLight CreateSunAmbientLight(Color3f color,
++        LightKind kind = LightKind.Directional, Vector3 position = default,
++        Vector3? attenuation = null, float range = 100) => new()
++    {
++        Light = new RenderLight
++        {
++            Kind = kind,
++            Position = position,
++            Range = range,
++            Attenuation = attenuation ?? Vector3.One,
++            Color = color
++        }
++    };
+ }

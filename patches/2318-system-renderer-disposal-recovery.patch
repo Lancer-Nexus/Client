@@ -1,0 +1,163 @@
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -108,6 +108,7 @@
+         private bool aaScissorPushed;
+         private AntialiasTarget? frameAntialiasTarget;
+         private RenderTarget? frameRestoreTarget;
++        private bool disposed;
+         private bool subpassResourcesInitialized;
+         private long nextGpuProfileFrame;
+         private long currentGpuProfileFrame;
+@@ -1511,23 +1512,33 @@
+         {
+             if (gpuPassQueries == null)
+                 return;
+-            foreach (var query in gpuPassQueries) query?.Dispose();
++            var queries = gpuPassQueries;
+             gpuPassQueries = null;
+             GpuPassProfile.Clear();
++            RendererCleanup.DisposeAll(queries);
+         }
+ 
+         public void Dispose()
+         {
+-            DisposeGpuPassQueries();
++            if (disposed)
++                return;
++            disposed = true;
+             RenderMaterial.ShadowLight = null;
+             RenderMaterial.ShadowDepthTexture = null;
+ 
+-            Polyline.Dispose();
+-            FxPool.Dispose();
+-            DebugRenderer.Dispose();
+-            QuadBuffer.Dispose();
+-            Beams.Dispose();
+-            rendererTargetResources.Dispose();
++            RendererCleanup.DisposeAll(
++                new ActionDisposable(DisposeGpuPassQueries),
++                Polyline,
++                FxPool,
++                DebugRenderer,
++                QuadBuffer,
++                Beams,
++                rendererTargetResources);
++        }
++
++        private sealed class ActionDisposable(Action dispose) : IDisposable
++        {
++            public void Dispose() => dispose();
+         }
+     }
+ }
+--- /dev/null
++++ b/src/LibreLancer/Render/RendererCleanup.cs
+@@ -0,0 +1,26 @@
++using System;
++using System.Collections.Generic;
++
++namespace LibreLancer.Render;
++
++internal static class RendererCleanup
++{
++    public static void DisposeAll(params IDisposable?[] resources)
++    {
++        List<Exception>? errors = null;
++        foreach (var resource in resources)
++        {
++            try
++            {
++                resource?.Dispose();
++            }
++            catch (Exception ex)
++            {
++                (errors ??= new()).Add(ex);
++            }
++        }
++
++        if (errors != null)
++            throw new AggregateException("One or more renderer resources failed to dispose", errors);
++    }
++}
+--- /dev/null
++++ b/src/LibreLancer.Tests/RendererCleanupTests.cs
+@@ -0,0 +1,34 @@
++using System;
++using System.Collections.Generic;
++using LibreLancer.Render;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class RendererCleanupTests
++{
++    [Fact]
++    public void DisposeAllContinuesAfterFailureAndReportsIt()
++    {
++        var disposed = new List<string>();
++
++        var error = Assert.Throws<AggregateException>(() => RendererCleanup.DisposeAll(
++            new TestResource("first", disposed),
++            new TestResource("failing", disposed, fail: true),
++            null,
++            new TestResource("last", disposed)));
++
++        Assert.Contains("renderer dispose failure", error.ToString());
++        Assert.Equal(new[] { "first", "failing", "last" }, disposed);
++    }
++
++    private sealed class TestResource(string name, List<string> disposed, bool fail = false) : IDisposable
++    {
++        public void Dispose()
++        {
++            disposed.Add(name);
++            if (fail)
++                throw new InvalidOperationException("renderer dispose failure");
++        }
++    }
++}
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -18,6 +18,7 @@
+ | Antialiasing | SMAA-Pässe und MSAA-Auflösung; HDR/LDR-Kombinationen sowie Resize und Minimize/Restore wurden auf OpenGL/Mesa geprüft. | Andere Backends/Treiber, wiederholte Lifecycle-Zyklen und Fehler-Injektion stehen aus. |
+ | GPU-Readback | Asynchrones OpenGL-Textur-Readback verwendet PBO und Fence. Fehler beim Setup räumen PBO/FBO/Fence auf; Mapping- und Unmap-Fehler beenden den Task mit Fehler und geben den PBO frei. | Der Quellpfad baut. GL-Fehler-Injektion und ein Laufzeit-Readback auf unterstützten und Sync-losen Treibern sind noch nicht abgenommen. Siehe `docs/evidence/renderer/gl-texture-async-readback-lifecycle-20261018/`. |
+ | Postprocess-Lifecycle | Postprocess-Pässe werden in umgekehrter Ausführungsreihenfolge entsorgt; bei einem Fehler läuft die Freigabe aller übrigen Pässe weiter. Der Plan ist idempotent entsorgbar und meldet Fehler gebündelt. | Regressionstests decken Reihenfolge, Fehlerfortsetzung und wiederholtes Dispose ab. Fehler im eigentlichen Backend-Ressourcenfreigabepfad und Kontextverlust sind weiter offen. |
++| Systemrenderer-Lifecycle | `SystemRenderer.Dispose()` versucht die Freigabe aller Frame-/Effekt-/Target-Ressourcen und GPU-Timerabfragen auch dann, wenn einzelne Freigaben fehlschlagen; Fehler werden gebündelt. Wiederholtes Dispose ist wirkungslos. | Fehlerfortsetzung der allgemeinen Bereinigungsroutine ist unit-getestet. Native GL-Fehlerinjektion und Kontextverlust bleiben offen. Siehe `docs/evidence/renderer/system-renderer-cleanup-20261018/`. |
+ | Dynamische Lichter und Schatten | Persistente und kurzlebige Lichter werden priorisiert; ein ausgewähltes Richtungslicht läuft durch Shadow-Map-Pass und 3×3-PCF. Alpha-Test-Texturen werden auch in PBR-Depth-/Shadow-Pässen anhand eines Material-Uniforms ausgeschnitten; blendtransparente Materialien werfen keine Schatten. Lichtprojektion ist im Licht-XY-Raum verankert und texelgesnappt; Mesh-Cullingradien berücksichtigen `RenderScale`. | Hi02 belegt Pass, Lichtauswahl und Live-Schaltung auf einer OpenGL-GPU. Kamera-Fit-/Stabilitäts- und RenderScale-Radiustests bestehen. Bias-Kalibrierung, Offscreen-Caster-Abdeckung und Bildqualität über weitere Materialien/Szenen brauchen kontrollierte Vergleiche. Siehe `docs/evidence/renderer/shadow-map-hi02-live-toggle-20261017/`, `docs/evidence/renderer/shadow-camera-stability-20261018.md` und `docs/evidence/renderer/scaled-model-culling-20261018.md`. |
+ | Diagnose | CPU-Framezeitprofile, asynchrone OpenGL-GPU-Passzeiten, Bloom-/Shadow-Passzeiten, Ziel-/Speicherschätzungen und CSV-Ausgabe. Environment-Cubemaps mit mehreren Catalog-Aliasen werden im geschätzten GPU-Texturspeicher nur einmal gezählt und bei Bereinigung auch nur einmal freigegeben. | Langzeitprofile und plattformübergreifende Vergleichsbaselines fehlen. Einzelne asynchrone Samples sind keine FPS-Baseline. |
+ 
+--- /dev/null
++++ b/docs/evidence/renderer/system-renderer-cleanup-20261018/README.md
+@@ -0,0 +1,15 @@
++# SystemRenderer cleanup continuation (2026-10-18)
++
++`SystemRenderer.Dispose()` previously stopped at the first exception while
++releasing timer queries, line/effect renderers, buffers or render targets. That
++could leave later frame resources undisposed and make a repeated dispose retry
++partially disposed objects.
++
++The renderer now marks itself disposed once, clears the static shadow bindings,
++and attempts every owned cleanup action. GPU timer query arrays are detached
++before disposal and each query is attempted. Failures are reported together as
++an `AggregateException` after the remaining resources have been processed.
++
++A focused unit test verifies that the shared cleanup routine continues after a
++resource throws and reports the failure. Native GL failure injection and
++context-loss testing are still required to prove driver-resource recovery.
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 316 Client bundles and two native bundles. Each
++The active series contains 317 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+--- a/patches/series
++++ b/patches/series
+@@ -317,3 +317,4 @@
+ client 2315-scaled-model-culling-bounds.patch
+ client 2316-gl-async-texture-readback-lifecycle.patch
+ client 2317-postprocess-disposal-failure-recovery.patch
++client 2318-system-renderer-disposal-recovery.patch

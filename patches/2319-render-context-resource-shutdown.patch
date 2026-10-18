@@ -1,0 +1,334 @@
+--- a/src/LibreLancer.Base/Graphics/RenderContext.cs
++++ b/src/LibreLancer.Base/Graphics/RenderContext.cs
+@@ -19,12 +19,14 @@
+ }
+ 
+ //OpenGL Render States
+-public class RenderContext
++public class RenderContext : IDisposable
+ {
+     private readonly int shaderThread = Environment.CurrentManagedThreadId;
+     private readonly HashSet<Shader> ownedShaders = new();
+     private bool shaderScopeClosed;
+     private readonly GpuFrameRetirement gpuRetirement;
++    private readonly RenderResourceScope ownedResources = new();
++    private bool disposed;
+     private const int RenderColorSpaceUniformBlock = 6;
+     private const ulong RenderColorSpaceTagBase = 0x100;
+     public int PendingGpuReleaseCount => gpuRetirement.PendingCount;
+@@ -52,13 +54,56 @@
+     {
+         CheckShaderThread();
+         if (shaderScopeClosed) return;
+-        try { gpuRetirement.Close(); }
+-        finally {
+-            if (gpuRetirement.IsClosed) {
+-                shaderScopeClosed = true;
+-                foreach (var shader in new List<Shader>(ownedShaders)) shader.Dispose();
++        List<Exception>? errors = null;
++        try
++        {
++            gpuRetirement.Close();
++        }
++        catch (Exception ex)
++        {
++            (errors ??= new()).Add(ex);
++        }
++
++        if (gpuRetirement.IsClosed)
++        {
++            shaderScopeClosed = true;
++            foreach (var shader in new List<Shader>(ownedShaders))
++            {
++                try { shader.Dispose(); }
++                catch (Exception ex) { (errors ??= new()).Add(ex); }
+             }
+         }
++
++        if (errors != null)
++            throw new AggregateException("RenderContext shader shutdown failed", errors);
++    }
++
++    public void Dispose()
++    {
++        CheckShaderThread();
++        if (disposed)
++            return;
++
++        List<Exception>? errors = null;
++        try { DisposeShaders(); }
++        catch (Exception ex) { (errors ??= new()).Add(ex); }
++
++        // Do not release resources still referenced by in-flight GPU work.
++        if (!gpuRetirement.IsClosed)
++        {
++            if (errors != null)
++                throw new AggregateException("RenderContext GPU work did not retire; owned resources remain pending", errors);
++            throw new InvalidOperationException("RenderContext GPU work did not retire; owned resources remain pending");
++        }
++
++        disposed = true;
++        try { ownedResources.Dispose(); }
++        catch (Exception ex) { (errors ??= new()).Add(ex); }
++        if (ReferenceEquals(Instance, this))
++            Instance = null!;
++
++        if (errors != null)
++            throw new AggregateException("RenderContext resource shutdown failed", errors);
+     }
+ 
+     public long FrameNumber => frameNumber;
+@@ -276,7 +321,7 @@
+         Instance = this;
+         PreferredFilterLevel = TextureFiltering.Trilinear;
+         impl.Init(ref requested);
+-        Renderer2D = new Renderer2D(this);
++        Renderer2D = ownedResources.Own(new Renderer2D(this));
+         Textures = new(this);
+         Samplers = new(this);
+         SetIdentityCamera();
+@@ -290,22 +335,30 @@
+         SsaoShader = ShaderBundle.FromResource<RenderContext>(this, "ScreenSpaceAmbientOcclusion.bin").Get(0);
+         using (var stream = typeof(RenderContext).Assembly.GetManifestResourceStream("LibreLancer.Shaders.AreaTexDX10.dds")!)
+         {
+-            SMAAAreaTex = (Texture2D)ImageLib.DDS.FromStream(this, stream);
++            SMAAAreaTex = ownedResources.Own((Texture2D)ImageLib.DDS.FromStream(this, stream));
+         }
+         using (var stream = typeof(RenderContext).Assembly.GetManifestResourceStream("LibreLancer.Shaders.SearchTex.dds")!)
+         {
+-            SMAASearchTex = (Texture2D)ImageLib.DDS.FromStream(this, stream);
++            SMAASearchTex = ownedResources.Own((Texture2D)ImageLib.DDS.FromStream(this, stream));
+         }
+ 
+-        FullScreenTriangle = new VertexBuffer(this, typeof(VertexPositionTexture), 3);
++        FullScreenTriangle = ownedResources.Own(new VertexBuffer(this, typeof(VertexPositionTexture), 3));
+         FullScreenTriangle.SetData(new VertexPositionTexture[]
+         {
+             new(new(-1f, -1f, 0f), new(0f, 0f)),
+             new(new(-1f, 3f, 0f), new(0f, 2f)),
+             new(new(3f, -1f, 0f), new(2f, 0f))
+         });
+-        } catch {
+-            DisposeShaders();
++        } catch (Exception initializationError) {
++            try { Dispose(); }
++            catch (Exception cleanupError) {
++                if (ReferenceEquals(Instance, this))
++                    Instance = null!;
++                throw new AggregateException("RenderContext initialization and cleanup failed",
++                    initializationError, cleanupError);
++            }
++            if (ReferenceEquals(Instance, this))
++                Instance = null!;
+             throw;
+         }
+     }
+--- a/src/LibreLancer.Base/Graphics/Renderer2D.cs
++++ b/src/LibreLancer.Base/Graphics/Renderer2D.cs
+@@ -3,6 +3,7 @@
+ // LICENSE, which is part of this source code package
+ 
+ using System;
++using System.Collections.Generic;
+ using System.Numerics;
+ using BepuUtilities.Memory;
+ using LibreLancer.Graphics.Text;
+@@ -63,6 +64,7 @@
+     internal Texture2D Dot;
+     private Vertex2D* vertices;
+     private BufferPool pool;
++    private bool disposed;
+ 
+     private VertexBuffer?[] vbos = new VertexBuffer[8];
+     private ElementBuffer?[] ebos = new ElementBuffer[8];
+@@ -178,12 +180,37 @@
+ 
+     public void Dispose()
+     {
+-        for (int i = 0; i < vbos.Length; i++)
+-        {
+-            vbos[i]?.Dispose();
+-            ebos[i]?.Dispose();
++        if (disposed)
++            return;
++        disposed = true;
++
++        List<Exception>? errors = null;
++        try { RichText.Dispose(); }
++        catch (Exception ex) { (errors ??= new()).Add(ex); }
++
++        for (int i = vbos.Length - 1; i >= 0; i--)
++        {
++            var vertexBuffer = vbos[i];
++            var elementBuffer = ebos[i];
++            vbos[i] = null;
++            ebos[i] = null;
+             vertexCounts[i] = 0;
+-        }
+-        pool.AssertEmpty();
++            indexCounts[i] = 0;
++            used[i] = false;
++            try { vertexBuffer?.Dispose(); }
++            catch (Exception ex) { (errors ??= new()).Add(ex); }
++            try { elementBuffer?.Dispose(); }
++            catch (Exception ex) { (errors ??= new()).Add(ex); }
++        }
++
++        try { Dot.Dispose(); }
++        catch (Exception ex) { (errors ??= new()).Add(ex); }
++        try { pool.AssertEmpty(); }
++        catch (Exception ex) { (errors ??= new()).Add(ex); }
++        try { ((IDisposable)pool).Dispose(); }
++        catch (Exception ex) { (errors ??= new()).Add(ex); }
++
++        if (errors != null)
++            throw new AggregateException("Renderer2D resource shutdown failed", errors);
+     }
+ }
+--- a/src/LibreLancer.Base/Graphics/Text/RichTextEngine.cs
++++ b/src/LibreLancer.Base/Graphics/Text/RichTextEngine.cs
+@@ -53,12 +53,18 @@
+ 
+     public void Dispose()
+     {
+-        blurg.Dispose();
++        List<Exception>? errors = null;
++        try { blurg.Dispose(); }
++        catch (Exception ex) { (errors ??= new()).Add(ex); }
+ 
+-        for (int i = 0; i < nextTex; i++)
++        for (int i = nextTex - 1; i >= 0; i--)
+         {
+-            textures[i].Dispose();
++            try { textures[i].Dispose(); }
++            catch (Exception ex) { (errors ??= new()).Add(ex); }
+         }
++
++        if (errors != null)
++            throw new AggregateException("Rich text resource shutdown failed", errors);
+     }
+ 
+     private void DrawResult(DrawList2D dlist, BlurgResult r, int x, int y)
+--- a/src/LibreLancer.Base/Platforms/SDL2Game.cs
++++ b/src/LibreLancer.Base/Platforms/SDL2Game.cs
+@@ -635,7 +635,7 @@
+             }
+         }
+         try { loop.OnCleanup(); }
+-        finally { RenderContext.DisposeShaders(); }
++        finally { RenderContext.Dispose(); }
+         Platform.Shutdown();
+         NFD.NFD_Quit();
+         SDL2.SDL_Quit();
+--- a/src/LibreLancer.Base/Platforms/SDL3Game.cs
++++ b/src/LibreLancer.Base/Platforms/SDL3Game.cs
+@@ -655,7 +655,7 @@
+         events = null;
+         FileDialog.Sdl3Handle = IntPtr.Zero;
+         try { loop.OnCleanup(); }
+-        finally { RenderContext.DisposeShaders(); }
++        finally { RenderContext.Dispose(); }
+         Platform.Shutdown();
+         SDL3.SDL_Quit();
+     }
+--- a/src/LibreLancer.Base/Graphics/VertexBuffer.cs
++++ b/src/LibreLancer.Base/Graphics/VertexBuffer.cs
+@@ -16,6 +16,7 @@
+     private IVertexBuffer impl;
+ 
+     public int VertexCount => impl.VertexCount;
++    public bool IsDisposed { get; private set; }
+     public IVertexType VertexType => impl.VertexType;
+     public bool HasElements => Elements != null;
+     public ElementBuffer? Elements { get; private set; }
+@@ -77,6 +78,9 @@
+ 
+     public void Dispose()
+     {
++        if (IsDisposed)
++            return;
++        IsDisposed = true;
+         TotalBuffers--;
+         impl.Dispose();
+     }
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -19,6 +19,7 @@
+ | GPU-Readback | Asynchrones OpenGL-Textur-Readback verwendet PBO und Fence. Fehler beim Setup räumen PBO/FBO/Fence auf; Mapping- und Unmap-Fehler beenden den Task mit Fehler und geben den PBO frei. | Der Quellpfad baut. GL-Fehler-Injektion und ein Laufzeit-Readback auf unterstützten und Sync-losen Treibern sind noch nicht abgenommen. Siehe `docs/evidence/renderer/gl-texture-async-readback-lifecycle-20261018/`. |
+ | Postprocess-Lifecycle | Postprocess-Pässe werden in umgekehrter Ausführungsreihenfolge entsorgt; bei einem Fehler läuft die Freigabe aller übrigen Pässe weiter. Der Plan ist idempotent entsorgbar und meldet Fehler gebündelt. | Regressionstests decken Reihenfolge, Fehlerfortsetzung und wiederholtes Dispose ab. Fehler im eigentlichen Backend-Ressourcenfreigabepfad und Kontextverlust sind weiter offen. |
+ | Systemrenderer-Lifecycle | `SystemRenderer.Dispose()` versucht die Freigabe aller Frame-/Effekt-/Target-Ressourcen und GPU-Timerabfragen auch dann, wenn einzelne Freigaben fehlschlagen; Fehler werden gebündelt. Wiederholtes Dispose ist wirkungslos. | Fehlerfortsetzung der allgemeinen Bereinigungsroutine ist unit-getestet. Native GL-Fehlerinjektion und Kontextverlust bleiben offen. Siehe `docs/evidence/renderer/system-renderer-cleanup-20261018/`. |
++| RenderContext-Lifecycle | SDL2/SDL3 geben den RenderContext vor dem nativen Kontextabbau frei. Nach Abschluss der GPU-Fences werden Shader, SMAA-Texturen, Fullscreen- und Renderer2D-Puffer, Font-Texturen sowie der unmanaged 2D-Pool auch bei Einzel-Fehlern bereinigt. | Headless-Regression prüft Fence-Drain, Wiederholbarkeit und bekannte Kontext-Ressourcen. GL-native Fehlerpfade und Kontextverlust bleiben offen. Siehe `docs/evidence/renderer/render-context-shutdown-20261018/`. |
+ | Dynamische Lichter und Schatten | Persistente und kurzlebige Lichter werden priorisiert; ein ausgewähltes Richtungslicht läuft durch Shadow-Map-Pass und 3×3-PCF. Alpha-Test-Texturen werden auch in PBR-Depth-/Shadow-Pässen anhand eines Material-Uniforms ausgeschnitten; blendtransparente Materialien werfen keine Schatten. Lichtprojektion ist im Licht-XY-Raum verankert und texelgesnappt; Mesh-Cullingradien berücksichtigen `RenderScale`. | Hi02 belegt Pass, Lichtauswahl und Live-Schaltung auf einer OpenGL-GPU. Kamera-Fit-/Stabilitäts- und RenderScale-Radiustests bestehen. Bias-Kalibrierung, Offscreen-Caster-Abdeckung und Bildqualität über weitere Materialien/Szenen brauchen kontrollierte Vergleiche. Siehe `docs/evidence/renderer/shadow-map-hi02-live-toggle-20261017/`, `docs/evidence/renderer/shadow-camera-stability-20261018.md` und `docs/evidence/renderer/scaled-model-culling-20261018.md`. |
+ | Diagnose | CPU-Framezeitprofile, asynchrone OpenGL-GPU-Passzeiten, Bloom-/Shadow-Passzeiten, Ziel-/Speicherschätzungen und CSV-Ausgabe. Environment-Cubemaps mit mehreren Catalog-Aliasen werden im geschätzten GPU-Texturspeicher nur einmal gezählt und bei Bereinigung auch nur einmal freigegeben. | Langzeitprofile und plattformübergreifende Vergleichsbaselines fehlen. Einzelne asynchrone Samples sind keine FPS-Baseline. |
+ 
+--- /dev/null
++++ b/src/LibreLancer.Tests/RenderContextLifecycleTests.cs
+@@ -0,0 +1,33 @@
++using System;
++using LibreLancer.Graphics;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class RenderContextLifecycleTests
++{
++    private sealed class HeadlessGame() : Game(64, 64, false, GameConfiguration.HeadlessTest()) { }
++
++    [Fact]
++    public void DisposeDrainsGpuWorkAndReleasesContextOwnedResourcesOnce()
++    {
++        var context = new HeadlessGame().RenderContext;
++        var areaTexture = context.SMAAAreaTex;
++        var searchTexture = context.SMAASearchTex;
++        var textTexture = context.Renderer2D.Dot;
++        var fullscreenBuffer = context.FullScreenTriangle;
++        var retired = false;
++        context.RetireAfterFrame(() => retired = true);
++
++        context.Dispose();
++        context.Dispose();
++
++        Assert.True(retired);
++        Assert.True(areaTexture.IsDisposed);
++        Assert.True(searchTexture.IsDisposed);
++        Assert.True(textTexture.IsDisposed);
++        Assert.True(fullscreenBuffer.IsDisposed);
++        Assert.Equal(0, context.OwnedShaderCount);
++        Assert.Throws<ObjectDisposedException>(() => new Shader(context, ReadOnlySpan<byte>.Empty));
++    }
++}
+--- /dev/null
++++ b/docs/evidence/renderer/render-context-shutdown-20261018/README.md
+@@ -0,0 +1,15 @@
++# RenderContext shutdown ownership (2026-10-18)
++
++SDL2 and SDL3 now dispose their RenderContext in the cleanup `finally`, before
++shutting down the native platform context. RenderContext first drains GPU
++retirement fences, then attempts to dispose its registered shader set and
++owned startup resources. Owned resources include the Renderer2D, SMAA lookup
++textures, and fullscreen triangle buffer. Renderer2D also disposes its dynamic
++vertex/index buffers, rich-text/font textures, dot texture, and unmanaged
++BufferPool. Cleanup continues across individual disposal errors and reports
++collected failures after attempting the rest. Repeated disposal is safe.
++
++A headless regression checks the GPU-retirement callback, disposed SMAA and
++text textures, fullscreen buffer state, shader registry closure, and repeated
++Dispose. It does not emulate native OpenGL driver failures or context loss; both
++remain required runtime checks.
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 317 Client bundles and two native bundles. Each
++The active series contains 318 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+--- a/patches/series
++++ b/patches/series
+@@ -318,3 +318,4 @@
+ client 2316-gl-async-texture-readback-lifecycle.patch
+ client 2317-postprocess-disposal-failure-recovery.patch
+ client 2318-system-renderer-disposal-recovery.patch
++client 2319-render-context-resource-shutdown.patch

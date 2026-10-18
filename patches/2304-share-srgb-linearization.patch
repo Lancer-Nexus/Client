@@ -1,0 +1,129 @@
+diff --git a/src/LibreLancer/Shaders/includes/OutputColor.hlsl b/src/LibreLancer/Shaders/includes/OutputColor.hlsl
+--- a/src/LibreLancer/Shaders/includes/OutputColor.hlsl
++++ b/src/LibreLancer/Shaders/includes/OutputColor.hlsl
+@@ -11,8 +11,13 @@
+     float3 value = max(srgb, 0.0);
+     float3 low = value / 12.92;
+     float3 high = pow((value + 0.055) / 1.055, 2.4);
+     return lerp(low, high, step(0.04045, value));
++}
++
++float4 SRGBToLinearOutput(float4 srgb)
++{
++    return float4(SRGBToLinearOutput(srgb.rgb), srgb.a);
+ }
+ 
+ float4 ToSceneOutput(float4 displayColor)
+ {
+diff --git a/src/LibreLancer/Shaders/PBR.frag.hlsl b/src/LibreLancer/Shaders/PBR.frag.hlsl
+--- a/src/LibreLancer/Shaders/PBR.frag.hlsl
++++ b/src/LibreLancer/Shaders/PBR.frag.hlsl
+@@ -170,15 +170,8 @@
+     float f = (pbrInputs.NdotH * roughnessSq - pbrInputs.NdotH) * pbrInputs.NdotH + 1.0;
+     return roughnessSq / (M_PI * f * f);
+ }
+ 
+-float4 SRGBtoLinear(float4 srgbIn)
+-{
+-    float3 bLess = step((float3)0.04045,srgbIn.xyz);
+-    float3 linOut = lerp( srgbIn.xyz/(float3)12.92, pow((srgbIn.xyz+(float3)0.055)/(float3)1.055,(float3)2.4), bLess );
+-    return float4(linOut, srgbIn.a);
+-}
+-
+ #ifdef ENVMAP
+ // Analytic approximation of the split-sum specular BRDF integral (Epic Games).
+ float2 IntegrateEnvironmentBrdfApprox(float NdotV, float roughness)
+ {
+@@ -215,12 +208,12 @@
+     float metallic = saturate(getMetallic(input));
+     float perceptualRoughness = clamp(getRoughness(input), c_MinRoughness, 1.0);
+     float alphaRoughness = perceptualRoughness * perceptualRoughness;
+ 
+-    float4 baseTexture = SRGBtoLinear(DtTexture.Sample(DtSampler, GetTexCoord(0, input)));
++    float4 baseTexture = SRGBToLinearOutput(DtTexture.Sample(DtSampler, GetTexCoord(0, input)));
+     if (PBRPadding.x > 0.5 && baseTexture.a < 0.5)
+         discard;
+-    float4 baseColor = baseTexture * SRGBtoLinear(Dc);
++    float4 baseColor = baseTexture * SRGBToLinearOutput(Dc);
+ 
+     float3 f0 = 0.04;
+     float3 diffuseColor = baseColor.rgb * ((float3)1.0 - f0);
+     diffuseColor *= 1.0 - metallic;
+@@ -308,10 +301,10 @@
+ 
+         // Calculation of analytical lighting contribution
+         float3 diffuseContrib = (1.0 - F) * diffuseLambert(pbrInputs);
+         float3 specContrib = F * G * D / (4.0 * NdotL * NdotV);
+-        float3 lightDiffuse = SRGBtoLinear(float4(Lights[i].Diffuse, 1.0)).rgb;
+-        float3 lightAmbient = SRGBtoLinear(float4(Lights[i].Ambient, 1.0)).rgb;
++        float3 lightDiffuse = SRGBToLinearOutput(float4(Lights[i].Diffuse, 1.0)).rgb;
++        float3 lightAmbient = SRGBToLinearOutput(float4(Lights[i].Ambient, 1.0)).rgb;
+         color += NdotL * lightDiffuse * attenuation * shadowVisibility * specContrib;
+         color += NdotL * lightDiffuse * attenuation * shadowVisibility * diffuseContrib;
+         color += diffuseColor * lightAmbient * attenuation;
+     }
+@@ -319,9 +312,9 @@
+     // Environment cubes are world-aligned; do not rotate their lookup with the camera.
+     float3 reflection = reflect(-v, n);
+     reflection.z = -reflection.z;
+     float envMip = EnvPrefiltered > 0.5 ? perceptualRoughness * EnvMipCount : 0.0;
+-    float3 envColor = SRGBtoLinear(EnvTexture.SampleLevel(EnvSampler, reflection, envMip)).rgb;
++    float3 envColor = SRGBToLinearOutput(EnvTexture.SampleLevel(EnvSampler, reflection, envMip)).rgb;
+     float NdotV = saturate(abs(dot(n, v)));
+     float3 envFresnel = specularColor + (1.0 - specularColor) * pow(1.0 - NdotV, 5.0);
+     float2 envBrdf = IntegrateEnvironmentBrdfApprox(NdotV, perceptualRoughness);
+     color += envColor * (specularColor * envBrdf.x + envBrdf.y) * EnvMapStrength;
+@@ -329,20 +322,20 @@
+     // Older catalogs retain the low-frequency final-mip fallback.
+     if (EnvDiffuseIblEnabled > 0.5)
+     {
+         float3 diffuseEnvironment = EnvDiffuseEnabled > 0.5
+-            ? SRGBtoLinear(EnvDiffuseTexture.SampleLevel(EnvSampler, n, 0.0)).rgb
+-            : SRGBtoLinear(EnvTexture.SampleLevel(EnvSampler, n, EnvMipCount)).rgb;
++            ? SRGBToLinearOutput(EnvDiffuseTexture.SampleLevel(EnvSampler, n, 0.0)).rgb
++            : SRGBToLinearOutput(EnvTexture.SampleLevel(EnvSampler, n, EnvMipCount)).rgb;
+         color += diffuseColor * diffuseEnvironment * (1.0 - envFresnel) * EnvMapStrength;
+     }
+ #endif
+     // PBR already evaluates its specular BRDF per pixel, so evaluate diffuse
+     // and ambient light here as well instead of using legacy vertex-light sums.
+-    color += diffuseColor * SRGBtoLinear(float4(AmbientColor.xyz, 1.0)).rgb;
++    color += diffuseColor * SRGBToLinearOutput(float4(AmbientColor.xyz, 1.0)).rgb;
+ 
+     #ifdef ET_ENABLED
+-    float3 emissiveColor = SRGBtoLinear(float4(Ec.rgb, 1.0)).rgb;
+-    float3 emissiveTexture = SRGBtoLinear(float4(
++    float3 emissiveColor = SRGBToLinearOutput(float4(Ec.rgb, 1.0)).rgb;
++    float3 emissiveTexture = SRGBToLinearOutput(float4(
+         EtTexture.Sample(EtSampler, GetTexCoord(1, input)).rgb, 1.0)).rgb;
+     color += emissiveColor * emissiveTexture;
+     #endif
+ 
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -258,3 +258,4 @@
+ | 2301 | Add FP7 intro renderer feature-matrix evidence |
+ | 2302 | Add independent legacy environment-map toggle |
+ | 2303 | Add PBR alpha testing to depth and shadow passes |
++| 2304 | Share the sRGB-to-linear conversion between PBR and common color-space shaders |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -303,3 +303,4 @@
+ client 2301-fp7-renderer-feature-matrix-evidence.patch
+ client 2302-legacy-environment-map-toggle.patch
+ client 2303-pbr-alpha-test-depth-shadow.patch
++client 2304-share-srgb-linearization.patch
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -13,7 +13,7 @@
+ | Metallic/Roughness | Ergänzende Karten sind in Materialauflösung und PBR-Shader eingebunden; DFM besitzt einen skinned PBR-Pfad. | Kartenwirkung ist asset- und materialabhängig. Vollständige Asset-Abdeckung und systematische Spielabnahme fehlen. |
+ | Cubemaps / Reflexion | PBR bindet GGX-vorgefilterte Specular-Cubes und cosine-konvolvierte diffuse Irradiance; die drei erzeugten Umwelt-Cubes und Metadaten liegen in `Data/NAP/Surface/` und `Data/SDK/fx/SurfaceMaps.ini`. | Laufzeitproben bestätigen Cube-Auswahl und Mip-Sampling. Retail-Orientierung, Materialkalibrierung und breite Spielabnahme bleiben offen. Siehe `docs/evidence/renderer/pbr-world-reflection-20261017/` und `docs/evidence/renderer/pbr-environment-20261014/`. |
+ | Legacy-Environment-Maps | Bestehende Freelancer-Cubemap-Reflexionen lassen sich unabhängig vom PBR-IBL per Einstellung oder `--render-legacy-environment-maps=on|off` umschalten. Der Standard bleibt `on`, damit ältere Materialien ihr bisheriges Verhalten behalten. | Beide Startwerte laden bis ins Intro. Der gleiche Kamera-A/B-Bildvergleich fehlt noch; externe Bildschirmaufnahmen waren in der letzten Sitzung schwarz. |
+-| HDR und Tonemapping | Linearisiertes Scene-Target, ACES-Tonemapping, linearisierte PBR-Albedo-/Licht-/Emissionswerte und exakte sRGB-Ausgabe im PBR-LDR-Pfad. | Der Farbvertrag für Legacy-Vertexfarben, Transparenz, Fog und zusammengesetzte Effekte ist noch nicht für alle Pfade visuell abgenommen. Ein HDR/LDR-Vergleich ist unter `docs/evidence/renderer/postprocess-four-mode-ab-20261017/` dokumentiert. |
++| HDR und Tonemapping | Linearisiertes Scene-Target, ACES-Tonemapping, linearisierte PBR-Albedo-/Licht-/Emissionswerte und exakte sRGB-Ausgabe im PBR-LDR-Pfad. PBR nutzt denselben piecewise sRGB-zu-linear-Helper wie die übrigen Farbpfade. | Der Farbvertrag für Legacy-Vertexfarben, Transparenz, Fog und zusammengesetzte Effekte ist noch nicht für alle Pfade visuell abgenommen. Ein HDR/LDR-Vergleich ist unter `docs/evidence/renderer/postprocess-four-mode-ab-20261017/` dokumentiert. |
+ | Bloom | HDR-Extraktion plus Basis-, mittlere und breite Blur-Stufe; Schwelle, Radius, Auflösung und Kernel sind konfigurierbar. | Der Code führt alle drei Stufen aus. Die vorhandene Bloom-Pyramidenaufnahme nennt ein Laufzeitpaket/Manifest vom 18.10. und gilt am Dokumentstand 17.10. nicht als verifizierter NAP-Lauf. Laufzeitabnahme, Halo-Kalibrierung und GPU-Kosten bleiben offen. |
+ | Antialiasing | SMAA-Pässe und MSAA-Auflösung; HDR/LDR-Kombinationen sowie Resize und Minimize/Restore wurden auf OpenGL/Mesa geprüft. | Andere Backends/Treiber, wiederholte Lifecycle-Zyklen und Fehler-Injektion stehen aus. |
+ | Dynamische Lichter und Schatten | Persistente und kurzlebige Lichter werden priorisiert; ein ausgewähltes Richtungslicht läuft durch Shadow-Map-Pass und 3×3-PCF. Alpha-Test-Texturen werden auch in PBR-Depth-/Shadow-Pässen anhand eines Material-Uniforms ausgeschnitten; dafür entstehen keine zusätzlichen Shader-Varianten. Blendtransparente Materialien werfen keine Schatten. Quelle und Ein/Aus-Schaltung sind konfigurierbar. | Hi02 belegt Pass, Lichtauswahl und Live-Schaltung auf einer OpenGL-GPU. Bias, Caster-Abdeckung und Bildqualität über weitere Materialien/Szenen brauchen kontrollierte Vergleiche. Siehe `docs/evidence/renderer/shadow-map-hi02-live-toggle-20261017/`. |

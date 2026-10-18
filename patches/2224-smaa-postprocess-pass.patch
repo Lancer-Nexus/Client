@@ -1,0 +1,563 @@
+--- a/src/LibreLancer.Base/Graphics/PostProcessPipeline.cs
++++ b/src/LibreLancer.Base/Graphics/PostProcessPipeline.cs
+@@ -1,4 +1,5 @@
+-using System;
++﻿using System;
++using System.Collections.Generic;
+ 
+ namespace LibreLancer.Graphics;
+ 
+@@ -8,6 +9,7 @@
+     public RenderContext Graphics;
+     public Texture2D Source;
+     public RenderTarget? Target;
++    public RenderTarget2D? ToneMapIntermediateTarget;
+     public int Width;
+     public int Height;
+     public Point Offset;
+@@ -22,20 +24,20 @@
+     public Action<SystemRenderSubpass, bool>? GpuSubpassMarker;
+ }
+ 
+-/// <summary>A resource-owning stage in the HDR post-process sequence.</summary>
++/// <summary>A stage in the executable post-process chain.</summary>
+ internal interface IPostProcessPass : IDisposable
+ {
+     long EstimatedMemoryBytes { get; }
+     void Execute(ref PostProcessContext context);
+ }
+ 
+-/// <summary>Runs post-process stages in dependency order after AA resolve.</summary>
++/// <summary>Runs enabled scene post-processing and final antialiasing stages in dependency order.</summary>
+ internal sealed class PostProcessPipeline : IDisposable
+ {
+     private readonly IPostProcessPass[] passes;
+-    private readonly BloomPass bloomPass;
++    private readonly BloomPass? bloomPass;
+ 
+-    public long BloomMemoryBytes => bloomPass.EstimatedMemoryBytes;
++    public long BloomMemoryBytes => bloomPass?.EstimatedMemoryBytes ?? 0;
+ 
+     public long EstimatedMemoryBytes
+     {
+@@ -48,10 +50,18 @@
+         }
+     }
+ 
+-    public PostProcessPipeline(RenderContext graphics)
++    public PostProcessPipeline(RenderContext graphics, bool hdrOutput, IPostProcessPass? antialiasPass)
+     {
+-        bloomPass = new BloomPass(graphics);
+-        passes = [bloomPass, new ToneMapPostProcessPass()];
++        var stages = new List<IPostProcessPass>();
++        if (hdrOutput)
++        {
++            bloomPass = new BloomPass(graphics);
++            stages.Add(bloomPass);
++            stages.Add(new ToneMapPostProcessPass());
++        }
++        if (antialiasPass != null)
++            stages.Add(antialiasPass);
++        passes = stages.ToArray();
+     }
+ 
+     public void Execute(ref PostProcessContext context)
+@@ -76,10 +86,14 @@
+         context.GpuSubpassMarker?.Invoke(SystemRenderSubpass.ToneMap, true);
+         try
+         {
+-            TonemapPass.Draw(context.Graphics, context.Source, context.Target,
+-                context.Width, context.Height, context.Offset, context.BloomTexture,
++            var target = context.ToneMapIntermediateTarget ?? context.Target;
++            var offset = context.ToneMapIntermediateTarget != null ? Point.Zero : context.Offset;
++            TonemapPass.Draw(context.Graphics, context.Source, target,
++                context.Width, context.Height, offset, context.BloomTexture,
+                 context.BloomTexture != null ? context.BloomStrength : 0f,
+                 context.HdrExposure);
++            if (context.ToneMapIntermediateTarget != null)
++                context.Source = context.ToneMapIntermediateTarget.Texture;
+         }
+         finally
+         {
+--- a/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
++++ b/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
+@@ -63,8 +63,6 @@
+         Height = height;
+         Mode = mode;
+         HdrOutputEnabled = hdrOutput;
+-        if (hdrOutput)
+-            postProcess = new PostProcessPipeline(renderContext);
+         try
+         {
+             if (mode == AntialiasMode.None && hdrOutput)
+@@ -100,6 +98,14 @@
+                 Target = smaa.Target;
+             }
+             ValidateAttachmentContracts();
++            var hasSmaa = mode is >= AntialiasMode.SMAALow and <= AntialiasMode.SMAAUltra;
++            if (hdrOutput || hasSmaa)
++            {
++                var smaaPass = hasSmaa
++                    ? new SmaaPostProcessPass(renderContext, mode, width, height, smaaEdges!, smaaBlend!)
++                    : null;
++                postProcess = new PostProcessPipeline(renderContext, hdrOutput, smaaPass);
++            }
+         }
+         catch
+         {
+@@ -163,166 +169,6 @@
+             throw new InvalidOperationException("SMAA targets do not satisfy their attachment contracts.");
+     }
+ 
+-    void SMAABlit(RenderTarget? tgt, Point offset)
+-    {
+-        if (smaa == null ||
+-            smaaEdges == null ||
+-            smaaBlend == null)
+-            throw new InvalidOperationException();
+-        // Save state
+-        var t0 = renderContext.Textures[0];
+-        var t1 = renderContext.Textures[1];
+-        var t2 = renderContext.Textures[2];
+-        var s0 = renderContext.Samplers[0];
+-        var s1 = renderContext.Samplers[1];
+-        var sTgt = renderContext.RenderTarget;
+-        var shdr = renderContext.Shader;
+-        var srcBlend = renderContext.BlendMode;
+-        var stencil = renderContext.Stencil;
+-        var stencilEnabled = renderContext.StencilEnabled;
+-        bool depth = renderContext.DepthEnabled;
+-        bool depthWrite = renderContext.DepthWrite;
+-        bool colorWrite = renderContext.ColorWrite;
+-        var clearColor = renderContext.ClearColor;
+-        bool cull = renderContext.Cull;
+-        bool viewportPushed = false;
+-        bool scissorPushed = false;
+-        bool offsetViewportPushed = false;
+-        bool offsetScissorPushed = false;
+-        try
+-        {
+-            Texture2D sceneColor = smaa.Texture;
+-            if (HdrOutputEnabled)
+-            {
+-                ToneMap(sceneColor, ldrToneMapped, Width, Height, Point.Zero);
+-                sceneColor = ldrToneMapped!.Texture;
+-            }
+-            renderContext.PushViewport(0, 0, Width, Height);
+-            viewportPushed = true;
+-            scissorPushed = renderContext.PushScissor(new(0, 0, Width, Height), false);
+-            // Fetch shaders and set RT size
+-            uint level = (uint)(Mode - 1);
+-            var rtMetrics = new Vector4(1.0f / Width, 1.0f / Height, Width, Height);
+-            var edgeDetection = renderContext.SMAAEdgeDetection.Get(level);
+-            edgeDetection.SetUniformBlock(3, ref rtMetrics);
+-            var blendingWeightCalculation = renderContext.SMAABlendingWeightCalculation.Get(level);
+-            blendingWeightCalculation.SetUniformBlock(3, ref rtMetrics);
+-            var neighborhoodBlending = renderContext.SMAANeighborhoodBlending.Get(level);
+-            neighborhoodBlending.SetUniformBlock(3, ref rtMetrics);
+-            // SMAA global samplers
+-            renderContext.Cull = false;
+-            renderContext.Samplers[0] = new(TextureFiltering.Linear, WrapMode.ClampToEdge, WrapMode.ClampToEdge);
+-            renderContext.Samplers[1] = new (TextureFiltering.Nearest, WrapMode.ClampToEdge, WrapMode.ClampToEdge);
+-            // Edge detection pass
+-            BeginGpuSubpass(SystemRenderSubpass.SmaaEdgeDetection);
+-            try
+-            {
+-                BindSubpassTarget(SystemRenderSubpass.SmaaEdgeDetection, smaaEdges);
+-                renderContext.Textures[0] = sceneColor;
+-                renderContext.BlendMode = BlendMode.Opaque;
+-                renderContext.DepthEnabled = false;
+-                renderContext.Shader = edgeDetection;
+-                renderContext.StencilEnabled = true;
+-                renderContext.Stencil = new(StencilFunction.Always, StencilOperation.Replace, StencilOperation.Replace,
+-                    StencilOperation.Replace, 1, 0xFFFFFFFF);
+-                renderContext.DepthWrite = true;
+-                renderContext.ClearDepth(); // clear depth and stencil
+-                renderContext.FullScreenTriangle.Draw(PrimitiveTypes.TriangleList, 1);
+-            }
+-            finally { EndGpuSubpass(SystemRenderSubpass.SmaaEdgeDetection); }
+-            // Blending weight pass
+-            BeginGpuSubpass(SystemRenderSubpass.SmaaBlendWeights);
+-            try
+-            {
+-                BindSubpassTarget(SystemRenderSubpass.SmaaBlendWeights, smaaBlend);
+-                // The stencil test limits writes to edge pixels. Clear the complete
+-                // weight target first so untouched pixels cannot retain old-frame data.
+-                renderContext.ColorWrite = true;
+-                renderContext.ClearColor = Color4.TransparentBlack;
+-                renderContext.ClearColorOnly();
+-                renderContext.Textures[0] = smaaEdges.Texture;
+-                renderContext.Textures[1] = renderContext.SMAAAreaTex;
+-                renderContext.Textures[2] = renderContext.SMAASearchTex;
+-                renderContext.Stencil = new(StencilFunction.Equal, StencilOperation.Keep, StencilOperation.Keep,
+-                    StencilOperation.Keep, 1, 0xFFFFFFFF);
+-                renderContext.Shader = blendingWeightCalculation;
+-                renderContext.FullScreenTriangle.Draw(PrimitiveTypes.TriangleList, 1);
+-            }
+-            finally { EndGpuSubpass(SystemRenderSubpass.SmaaBlendWeights); }
+-            //Neighborhood blending pass
+-            BeginGpuSubpass(SystemRenderSubpass.SmaaNeighborhoodBlend);
+-            try
+-            {
+-                renderContext.StencilEnabled = false;
+-                BindSubpassTarget(SystemRenderSubpass.SmaaNeighborhoodBlend, tgt);
+-                renderContext.Textures[0] = sceneColor;
+-                renderContext.Textures[1] = smaaBlend.Texture;
+-                renderContext.Shader = neighborhoodBlending;
+-                if (offset != Point.Zero)
+-                {
+-                    renderContext.PushViewport(offset.X, offset.Y, Width, Height);
+-                    offsetViewportPushed = true;
+-                    offsetScissorPushed = renderContext.PushScissor(new(offset.X, offset.Y, Width, Height), false);
+-                }
+-                renderContext.FullScreenTriangle.Draw(PrimitiveTypes.TriangleList, 1);
+-                if (offset != Point.Zero)
+-                {
+-                    offsetScissorPushed = false;
+-                    renderContext.PopScissor();
+-                    offsetViewportPushed = false;
+-                    renderContext.PopViewport();
+-                }
+-            }
+-            finally { EndGpuSubpass(SystemRenderSubpass.SmaaNeighborhoodBlend); }
+-        }
+-        finally
+-        {
+-            if (offsetScissorPushed) renderContext.PopScissor();
+-            if (offsetViewportPushed) renderContext.PopViewport();
+-            renderContext.Textures[0] = t0;
+-            renderContext.Textures[1] = t1;
+-            renderContext.Textures[2] = t2;
+-            renderContext.Samplers[0] = s0;
+-            renderContext.Samplers[1] = s1;
+-            renderContext.BlendMode = srcBlend;
+-            renderContext.RenderTarget = sTgt;
+-            renderContext.Shader = shdr;
+-            renderContext.DepthEnabled = depth;
+-            renderContext.DepthWrite = depthWrite;
+-            renderContext.ColorWrite = colorWrite;
+-            renderContext.ClearColor = clearColor;
+-            renderContext.Cull = cull;
+-            renderContext.Stencil = stencil;
+-            renderContext.StencilEnabled = stencilEnabled;
+-            if (scissorPushed) renderContext.PopScissor();
+-            if (viewportPushed) renderContext.PopViewport();
+-        }
+-    }
+-
+-    private void BindSubpassTarget(SystemRenderSubpass pass, RenderTarget? target)
+-    {
+-        var descriptor = SystemRenderPasses.GetSubpass(pass);
+-        var expectedTarget = descriptor.Target switch
+-        {
+-            SystemRenderTargetRole.SmaaEdges => smaaEdges,
+-            SystemRenderTargetRole.SmaaBlendWeights => smaaBlend,
+-            SystemRenderTargetRole.Presentation => target,
+-            _ => null
+-        };
+-        if (!ReferenceEquals(target, expectedTarget))
+-            throw new InvalidOperationException(
+-                $"SMAA subpass '{descriptor.Name}' was bound to an unexpected target.");
+-        if (descriptor.Target is SystemRenderTargetRole.SmaaEdges or
+-            SystemRenderTargetRole.SmaaBlendWeights && target is not RenderTarget2D)
+-            throw new InvalidOperationException(
+-                $"SMAA subpass '{descriptor.Name}' requires a 2D render target.");
+-        if (descriptor.Stencil.HasValue &&
+-            (target is not RenderTarget2D target2D || target2D.DepthBuffer?.HasStencil != true))
+-            throw new InvalidOperationException(
+-                $"SMAA subpass '{descriptor.Name}' requires its declared depth/stencil attachment.");
+-        renderContext.RenderTarget = target;
+-    }
+-
+     private void BeginGpuSubpass(SystemRenderSubpass pass) => GpuSubpassMarker?.Invoke(pass, true);
+     private void EndGpuSubpass(SystemRenderSubpass pass) => GpuSubpassMarker?.Invoke(pass, false);
+ 
+@@ -330,7 +176,7 @@
+     {
+         if (Mode == AntialiasMode.None && hdrScene != null)
+         {
+-            ToneMap(hdrScene.Texture, null, Width, Height, offset);
++            RunPostProcess(hdrScene.Texture, null, Width, Height, offset);
+             return;
+         }
+         if (msaa != null)
+@@ -345,11 +191,11 @@
+             }
+             finally { EndGpuSubpass(SystemRenderSubpass.MsaaColorResolve); }
+             if (HdrOutputEnabled)
+-                ToneMap(hdrResolve!.Texture, null, Width, Height, offset);
++                RunPostProcess(hdrResolve!.Texture, null, Width, Height, offset);
+         }
+         else
+         {
+-            SMAABlit(null, offset);
++            RunPostProcess(smaa!.Texture, null, Width, Height, offset);
+         }
+     }
+ 
+@@ -357,7 +203,7 @@
+     {
+         if (Mode == AntialiasMode.None && hdrScene != null)
+         {
+-            ToneMap(hdrScene.Texture, rTarget, Width, Height, Point.Zero);
++            RunPostProcess(hdrScene.Texture, rTarget, Width, Height, Point.Zero);
+             return;
+         }
+         if (msaa != null)
+@@ -372,23 +218,25 @@
+             }
+             finally { EndGpuSubpass(SystemRenderSubpass.MsaaColorResolve); }
+             if (HdrOutputEnabled)
+-                ToneMap(hdrResolve!.Texture, rTarget, Width, Height, Point.Zero);
++                RunPostProcess(hdrResolve!.Texture, rTarget, Width, Height, Point.Zero);
+         }
+         else
+         {
+-            SMAABlit(rTarget, Point.Zero);
+-        }
+-    }
+-
+-    private void ToneMap(Texture2D source, RenderTarget? target, int width, int height, Point offset)
++            RunPostProcess(smaa!.Texture, rTarget, Width, Height, Point.Zero);
++        }
++    }
++
++    private void RunPostProcess(Texture2D source, RenderTarget? target, int width, int height, Point offset)
+     {
+         if (postProcess == null)
+-            throw new InvalidOperationException("HDR post-processing was not initialized.");
++            throw new InvalidOperationException("Post-processing was not initialized for this target.");
+         var context = new PostProcessContext
+         {
+             Graphics = renderContext,
+             Source = source,
+             Target = target,
++            ToneMapIntermediateTarget = HdrOutputEnabled &&
++                Mode is >= AntialiasMode.SMAALow and <= AntialiasMode.SMAAUltra ? ldrToneMapped : null,
+             Width = width,
+             Height = height,
+             Offset = offset,
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 222 Client bundles and two native bundles. Each
++The active series contains 223 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -131,6 +131,7 @@
+ | 2221 | Record exploratory HDR sun-ambient runtime images and limitations |
+ | 2222 | Preserve material UV animations in batched asteroid fields |
+ | 2223 | Wrap material animation time in constant time and guard invalid durations |
++| 2224 | Run SMAA inside the common HDR/LDR post-process pass chain |
+ | 2116 | Estimate active SMAA and MSAA render-target memory |
+ | 2117 | Record the M01A dark station and ship lighting report |
+ | 2118 | Apply THN ambient and dynamic lights to shared gameplay lighting, then remove them on cleanup |
+--- a/patches/series
++++ b/patches/series
+@@ -223,3 +223,4 @@
+ client 2221-record-hdr-sun-ambient-runtime-attempt.patch
+ client 2222-asteroid-material-animation.patch
+ client 2223-material-animation-constant-time-wrap.patch
++client 2224-smaa-postprocess-pass.patch
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -131,7 +131,8 @@
+ ### 3. Blur und Post-Processing
+ 
+ - [ ] Allgemeine Post-Processing-Pass-Schnittstelle ergänzen; SMAA und bestehende Render-Targets dabei als Referenz für Ressourcenlebensdauer und Skalierung verwenden.
+-  - [x] HDR-Bloom und Tonemapping laufen jetzt über eine ausführbare `IPostProcessPass`-Schnittstelle. Die Pipeline führt Bloom vor Tonemapping aus, übergibt Ziel, Viewport, Einstellungen und GPU-Marker pro Frame und aggregiert den Pass-Speicherbedarf. AA/SMAA und die übrigen Render-Pässe bleiben außerhalb dieser HDR-Pipeline; Backend-unabhängige Targets, ein allgemeines Render-Graph-Lifecycle-Modell und weitere Post-Effects bleiben offen.
++  - [x] Bloom, Tonemapping und SMAA laufen über eine ausführbare `IPostProcessPass`-Kette in Abhängigkeitsreihenfolge. HDR führt Bloom vor Tonemapping aus; bei HDR-SMAA geht das tonemapte Zwischenbild an den SMAA-Pass. LDR-SMAA nutzt denselben finalen Passpfad. Targets bleiben backendabhängig in `AntialiasTarget`; ein allgemeines Render-Graph-Lifecycle-Modell und weitere Post-Effects bleiben offen.
++  - [ ] NAP-only-Laufzeitvergleich für LDR/HDR mit SMAA und ohne AA bei identischer Szene aufnehmen; Bildqualität, GPU-Zeiten und Target-Resize/Minimize-Verhalten abnehmen.
+ - [ ] Separable Gaussian Blur als erster kontrollierter Effekt: variable Kernelbreite, Auflösungs-Skalierung und keine Farb-/Alpha-Halos.
+   - [x] Den horizontalen/vertikalen separablen Gauß-Blur als wiederverwendbaren `SeparableGaussianBlurPass` aus Bloom herausgelöst. Die Zielauflösung ist von 1/8 bis 1/1 einstellbar (`render_bloom_resolution_scale`, CLI und Effekte-Regler); die bilinear gepaarten Gaussian-Taps sind von 1 bis 4 Paaren einstellbar (`render_bloom_kernel_pairs`, CLI und Effekte-Regler; Standard 2 erhält den bisherigen Kernel). Bloom-Extraktion bleibt bei Viertelauflösung. Visuelle Farb-/Alpha-Halo-Abnahme und GPU-Kostenmessung bleiben offen.
+ - [ ] Verwendungsfälle getrennt spezifizieren: weicher UI-/Vorschau-Hintergrund, selektiver Tiefenunschärfe-Effekt und kamerabasierte Bewegungsunschärfe sind unterschiedliche Effekte.
+--- /dev/null
++++ b/src/LibreLancer.Base/Graphics/SmaaPostProcessPass.cs
+@@ -0,0 +1,184 @@
++using System;
++using System.Numerics;
++
++namespace LibreLancer.Graphics;
++
++/// <summary>Runs SMAA edge detection, weights, and neighborhood blending as the final post-process pass.</summary>
++internal sealed class SmaaPostProcessPass : IPostProcessPass
++{
++    private readonly RenderContext renderContext;
++    private readonly AntialiasMode mode;
++    private readonly int width;
++    private readonly int height;
++    private readonly RenderTarget2D smaaEdges;
++    private readonly RenderTarget2D smaaBlend;
++
++    public long EstimatedMemoryBytes => 0;
++
++    public SmaaPostProcessPass(RenderContext renderContext, AntialiasMode mode, int width, int height,
++        RenderTarget2D smaaEdges, RenderTarget2D smaaBlend)
++    {
++        this.renderContext = renderContext;
++        this.mode = mode;
++        this.width = width;
++        this.height = height;
++        this.smaaEdges = smaaEdges;
++        this.smaaBlend = smaaBlend;
++    }
++
++    public void Execute(ref PostProcessContext context)
++    {
++        var tgt = context.Target;
++        var offset = context.Offset;
++        var sceneColor = context.Source;
++        var renderContext = context.Graphics;
++        // Save state
++        var t0 = renderContext.Textures[0];
++        var t1 = renderContext.Textures[1];
++        var t2 = renderContext.Textures[2];
++        var s0 = renderContext.Samplers[0];
++        var s1 = renderContext.Samplers[1];
++        var sTgt = renderContext.RenderTarget;
++        var shdr = renderContext.Shader;
++        var srcBlend = renderContext.BlendMode;
++        var stencil = renderContext.Stencil;
++        var stencilEnabled = renderContext.StencilEnabled;
++        bool depth = renderContext.DepthEnabled;
++        bool depthWrite = renderContext.DepthWrite;
++        bool colorWrite = renderContext.ColorWrite;
++        var clearColor = renderContext.ClearColor;
++        bool cull = renderContext.Cull;
++        bool viewportPushed = false;
++        bool scissorPushed = false;
++        bool offsetViewportPushed = false;
++        bool offsetScissorPushed = false;
++        try
++        {
++            renderContext.PushViewport(0, 0, width, height);
++            viewportPushed = true;
++            scissorPushed = renderContext.PushScissor(new(0, 0, width, height), false);
++            // Fetch shaders and set RT size
++            uint level = (uint)(mode - 1);
++            var rtMetrics = new Vector4(1.0f / width, 1.0f / height, width, height);
++            var edgeDetection = renderContext.SMAAEdgeDetection.Get(level);
++            edgeDetection.SetUniformBlock(3, ref rtMetrics);
++            var blendingWeightCalculation = renderContext.SMAABlendingWeightCalculation.Get(level);
++            blendingWeightCalculation.SetUniformBlock(3, ref rtMetrics);
++            var neighborhoodBlending = renderContext.SMAANeighborhoodBlending.Get(level);
++            neighborhoodBlending.SetUniformBlock(3, ref rtMetrics);
++            // SMAA global samplers
++            renderContext.Cull = false;
++            renderContext.Samplers[0] = new(TextureFiltering.Linear, WrapMode.ClampToEdge, WrapMode.ClampToEdge);
++            renderContext.Samplers[1] = new (TextureFiltering.Nearest, WrapMode.ClampToEdge, WrapMode.ClampToEdge);
++            // Edge detection pass
++            context.GpuSubpassMarker?.Invoke(SystemRenderSubpass.SmaaEdgeDetection, true);
++            try
++            {
++                BindSubpassTarget(SystemRenderSubpass.SmaaEdgeDetection, smaaEdges);
++                renderContext.Textures[0] = sceneColor;
++                renderContext.BlendMode = BlendMode.Opaque;
++                renderContext.DepthEnabled = false;
++                renderContext.Shader = edgeDetection;
++                renderContext.StencilEnabled = true;
++                renderContext.Stencil = new(StencilFunction.Always, StencilOperation.Replace, StencilOperation.Replace,
++                    StencilOperation.Replace, 1, 0xFFFFFFFF);
++                renderContext.DepthWrite = true;
++                renderContext.ClearDepth(); // clear depth and stencil
++                renderContext.FullScreenTriangle.Draw(PrimitiveTypes.TriangleList, 1);
++            }
++            finally { context.GpuSubpassMarker?.Invoke(SystemRenderSubpass.SmaaEdgeDetection, false); }
++            // Blending weight pass
++            context.GpuSubpassMarker?.Invoke(SystemRenderSubpass.SmaaBlendWeights, true);
++            try
++            {
++                BindSubpassTarget(SystemRenderSubpass.SmaaBlendWeights, smaaBlend);
++                // The stencil test limits writes to edge pixels. Clear the complete
++                // weight target first so untouched pixels cannot retain old-frame data.
++                renderContext.ColorWrite = true;
++                renderContext.ClearColor = Color4.TransparentBlack;
++                renderContext.ClearColorOnly();
++                renderContext.Textures[0] = smaaEdges.Texture;
++                renderContext.Textures[1] = renderContext.SMAAAreaTex;
++                renderContext.Textures[2] = renderContext.SMAASearchTex;
++                renderContext.Stencil = new(StencilFunction.Equal, StencilOperation.Keep, StencilOperation.Keep,
++                    StencilOperation.Keep, 1, 0xFFFFFFFF);
++                renderContext.Shader = blendingWeightCalculation;
++                renderContext.FullScreenTriangle.Draw(PrimitiveTypes.TriangleList, 1);
++            }
++            finally { context.GpuSubpassMarker?.Invoke(SystemRenderSubpass.SmaaBlendWeights, false); }
++            //Neighborhood blending pass
++            context.GpuSubpassMarker?.Invoke(SystemRenderSubpass.SmaaNeighborhoodBlend, true);
++            try
++            {
++                renderContext.StencilEnabled = false;
++                BindSubpassTarget(SystemRenderSubpass.SmaaNeighborhoodBlend, tgt);
++                renderContext.Textures[0] = sceneColor;
++                renderContext.Textures[1] = smaaBlend.Texture;
++                renderContext.Shader = neighborhoodBlending;
++                if (offset != Point.Zero)
++                {
++                    renderContext.PushViewport(offset.X, offset.Y, width, height);
++                    offsetViewportPushed = true;
++                    offsetScissorPushed = renderContext.PushScissor(new(offset.X, offset.Y, width, height), false);
++                }
++                renderContext.FullScreenTriangle.Draw(PrimitiveTypes.TriangleList, 1);
++                if (offset != Point.Zero)
++                {
++                    offsetScissorPushed = false;
++                    renderContext.PopScissor();
++                    offsetViewportPushed = false;
++                    renderContext.PopViewport();
++                }
++            }
++            finally { context.GpuSubpassMarker?.Invoke(SystemRenderSubpass.SmaaNeighborhoodBlend, false); }
++        }
++        finally
++        {
++            if (offsetScissorPushed) renderContext.PopScissor();
++            if (offsetViewportPushed) renderContext.PopViewport();
++            renderContext.Textures[0] = t0;
++            renderContext.Textures[1] = t1;
++            renderContext.Textures[2] = t2;
++            renderContext.Samplers[0] = s0;
++            renderContext.Samplers[1] = s1;
++            renderContext.BlendMode = srcBlend;
++            renderContext.RenderTarget = sTgt;
++            renderContext.Shader = shdr;
++            renderContext.DepthEnabled = depth;
++            renderContext.DepthWrite = depthWrite;
++            renderContext.ColorWrite = colorWrite;
++            renderContext.ClearColor = clearColor;
++            renderContext.Cull = cull;
++            renderContext.Stencil = stencil;
++            renderContext.StencilEnabled = stencilEnabled;
++            if (scissorPushed) renderContext.PopScissor();
++            if (viewportPushed) renderContext.PopViewport();
++        }
++    }
++
++    private void BindSubpassTarget(SystemRenderSubpass pass, RenderTarget? target)
++    {
++        var descriptor = SystemRenderPasses.GetSubpass(pass);
++        var expectedTarget = descriptor.Target switch
++        {
++            SystemRenderTargetRole.SmaaEdges => smaaEdges,
++            SystemRenderTargetRole.SmaaBlendWeights => smaaBlend,
++            SystemRenderTargetRole.Presentation => target,
++            _ => null
++        };
++        if (!ReferenceEquals(target, expectedTarget))
++            throw new InvalidOperationException(
++                $"SMAA subpass '{descriptor.Name}' was bound to an unexpected target.");
++        if (descriptor.Target is SystemRenderTargetRole.SmaaEdges or
++            SystemRenderTargetRole.SmaaBlendWeights && target is not RenderTarget2D)
++            throw new InvalidOperationException(
++                $"SMAA subpass '{descriptor.Name}' requires a 2D render target.");
++        if (descriptor.Stencil.HasValue &&
++            (target is not RenderTarget2D target2D || target2D.DepthBuffer?.HasStencil != true))
++            throw new InvalidOperationException(
++                $"SMAA subpass '{descriptor.Name}' requires its declared depth/stencil attachment.");
++        renderContext.RenderTarget = target;
++    }
++
++    public void Dispose() { }
++}

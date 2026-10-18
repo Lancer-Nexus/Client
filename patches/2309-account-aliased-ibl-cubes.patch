@@ -1,0 +1,209 @@
+--- a/src/LibreLancer/Resources/GameResourceManager.cs
++++ b/src/LibreLancer/Resources/GameResourceManager.cs
+@@ -22,7 +22,8 @@
+ public class GameResourceManager : ResourceManager, IDisposable
+ {
+     public IGLWindow GLWindow;
+-    public long EstimatedTextureMemory { get; private set; }
++    private readonly TextureMemoryLedger textureMemory = new();
++    public long EstimatedTextureMemory => textureMemory.EstimatedBytes;
+ 
+     private Dictionary<uint, VMeshResource?> meshes = new();
+     private Dictionary<uint, VMeshData?> meshDatas = new();
+@@ -246,7 +247,7 @@
+         var dat = ImageLib.Generic.TextureFromStream(GLWindow.RenderContext, stream);
+         textures.Add(name, dat);
+         texturefiles.Add(name, filename);
+-        EstimatedTextureMemory += dat.EstimatedTextureMemory;
++        textureMemory.AddReference(dat);
+     }
+ 
+     public void ClearTextures()
+@@ -256,17 +257,18 @@
+         loadedResFiles = [];
+         var keys = new string[textures.Count];
+         textures.Keys.CopyTo(keys, 0);
++        var disposed = new HashSet<Texture>(ReferenceEqualityComparer.Instance);
+ 
+         foreach (var k in keys)
+         {
+-            if (textures[k] != null)
++            if (textures[k] is { } texture && disposed.Add(texture))
+             {
+-                textures[k]!.Dispose();
+-                textures[k] = null;
++                texture.Dispose();
+             }
++            textures[k] = null;
+         }
+ 
+-        EstimatedTextureMemory = 0;
++        textureMemory.Clear();
+     }
+ 
+     public void ClearMeshes()
+@@ -437,12 +439,11 @@
+         }
+ 
+         List<string> removeTex = [];
+-
+         foreach (var tex in textures.Where(tex => texturefiles[tex.Key] == id))
+         {
+             texturefiles.Remove(tex.Key);
+-            EstimatedTextureMemory -= tex.Value?.EstimatedTextureMemory ?? 0;
+-            tex.Value?.Dispose();
++            if (tex.Value != null && textureMemory.RemoveReference(tex.Value))
++                tex.Value.Dispose();
+             removeTex.Add(tex.Key);
+         }
+ 
+@@ -569,6 +570,7 @@
+                     {
+                         textures[alias] = cubeTexture;
+                         texturefiles.TryAdd(alias, filename);
++                        textureMemory.AddReference(cubeTexture);
+                     }
+                 }
+             }
+@@ -579,9 +581,9 @@
+ 
+                 if (v.Texture != null)
+                 {
+-                    EstimatedTextureMemory += v.Texture.EstimatedTextureMemory;
+                     textures[tex.Key] = v.Texture;
+                     texturefiles.TryAdd(tex.Key, filename);
++                    textureMemory.AddReference(v.Texture);
+                 }
+             }
+         }
+--- /dev/null
++++ b/src/LibreLancer/Resources/TextureMemoryLedger.cs
+@@ -0,0 +1,46 @@
++using System.Collections.Generic;
++using LibreLancer.Graphics;
++
++namespace LibreLancer.Resources;
++
++internal sealed class TextureMemoryLedger
++{
++    private readonly Dictionary<Texture, int> references = new(ReferenceEqualityComparer.Instance);
++
++    public long EstimatedBytes { get; private set; }
++
++    public void AddReference(Texture texture)
++    {
++        if (references.TryGetValue(texture, out var count))
++        {
++            references[texture] = checked(count + 1);
++            return;
++        }
++
++        references.Add(texture, 1);
++        EstimatedBytes = checked(EstimatedBytes + texture.EstimatedTextureMemory);
++    }
++
++    /// <summary>Removes one dictionary alias and returns true when it was the final alias.</summary>
++    public bool RemoveReference(Texture texture)
++    {
++        if (!references.TryGetValue(texture, out var count))
++            throw new KeyNotFoundException("Texture has no memory-ledger reference");
++
++        if (count > 1)
++        {
++            references[texture] = count - 1;
++            return false;
++        }
++
++        references.Remove(texture);
++        EstimatedBytes -= texture.EstimatedTextureMemory;
++        return true;
++    }
++
++    public void Clear()
++    {
++        references.Clear();
++        EstimatedBytes = 0;
++    }
++}
+--- /dev/null
++++ b/src/LibreLancer.Tests/TextureMemoryLedgerTests.cs
+@@ -0,0 +1,45 @@
++using LibreLancer.Graphics;
++using LibreLancer.Resources;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class TextureMemoryLedgerTests
++{
++    private sealed class HeadlessGame() : Game(64, 64, false, GameConfiguration.HeadlessTest()) { }
++
++    [Fact]
++    public void AliasesCountTextureBytesOnceUntilLastAliasIsRemoved()
++    {
++        var context = new HeadlessGame().RenderContext;
++        using var texture = new TextureCube(context, 16, mipMap: true, format: SurfaceFormat.Bgra8);
++        var ledger = new TextureMemoryLedger();
++
++        ledger.AddReference(texture);
++        var oneAliasBytes = texture.EstimatedTextureMemory;
++        Assert.Equal(oneAliasBytes, ledger.EstimatedBytes);
++
++        ledger.AddReference(texture);
++        Assert.Equal(oneAliasBytes, ledger.EstimatedBytes);
++        Assert.False(ledger.RemoveReference(texture));
++        Assert.Equal(oneAliasBytes, ledger.EstimatedBytes);
++
++        Assert.True(ledger.RemoveReference(texture));
++        Assert.Equal(0, ledger.EstimatedBytes);
++    }
++
++    [Fact]
++    public void DistinctTexturesAreSummedIndependently()
++    {
++        var context = new HeadlessGame().RenderContext;
++        using var first = new TextureCube(context, 16, mipMap: false, format: SurfaceFormat.Bgra8);
++        using var second = new TextureCube(context, 32, mipMap: false, format: SurfaceFormat.Bgra8);
++        var ledger = new TextureMemoryLedger();
++
++        ledger.AddReference(first);
++        ledger.AddReference(second);
++
++        Assert.Equal((long)first.EstimatedTextureMemory + second.EstimatedTextureMemory,
++            ledger.EstimatedBytes);
++    }
++}
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -17,7 +17,7 @@
+ | Bloom | HDR-Extraktion plus Basis-, mittlere und breite Blur-Stufe; Schwelle, Radius, Auflösung und Kernel sind konfigurierbar. | Der Code führt alle drei Stufen aus. Die vorhandene Bloom-Pyramidenaufnahme nennt ein Laufzeitpaket/Manifest vom 18.10. und gilt am Dokumentstand 17.10. nicht als verifizierter NAP-Lauf. Laufzeitabnahme, Halo-Kalibrierung und GPU-Kosten bleiben offen. |
+ | Antialiasing | SMAA-Pässe und MSAA-Auflösung; HDR/LDR-Kombinationen sowie Resize und Minimize/Restore wurden auf OpenGL/Mesa geprüft. | Andere Backends/Treiber, wiederholte Lifecycle-Zyklen und Fehler-Injektion stehen aus. |
+ | Dynamische Lichter und Schatten | Persistente und kurzlebige Lichter werden priorisiert; ein ausgewähltes Richtungslicht läuft durch Shadow-Map-Pass und 3×3-PCF. Alpha-Test-Texturen werden auch in PBR-Depth-/Shadow-Pässen anhand eines Material-Uniforms ausgeschnitten; dafür entstehen keine zusätzlichen Shader-Varianten. Blendtransparente Materialien werfen keine Schatten. Quelle und Ein/Aus-Schaltung sind konfigurierbar. | Hi02 belegt Pass, Lichtauswahl und Live-Schaltung auf einer OpenGL-GPU. Bias, Caster-Abdeckung und Bildqualität über weitere Materialien/Szenen brauchen kontrollierte Vergleiche. Siehe `docs/evidence/renderer/shadow-map-hi02-live-toggle-20261017/`. |
+-| Diagnose | CPU-Framezeitprofile, asynchrone OpenGL-GPU-Passzeiten, Bloom-/Shadow-Passzeiten, Ziel-/Speicherschätzungen und CSV-Ausgabe. | Langzeitprofile und plattformübergreifende Vergleichsbaselines fehlen. Einzelne asynchrone Samples sind keine FPS-Baseline. |
++| Diagnose | CPU-Framezeitprofile, asynchrone OpenGL-GPU-Passzeiten, Bloom-/Shadow-Passzeiten, Ziel-/Speicherschätzungen und CSV-Ausgabe. Environment-Cubemaps mit mehreren Catalog-Aliasen werden im geschätzten GPU-Texturspeicher nur einmal gezählt und bei Bereinigung auch nur einmal freigegeben. | Langzeitprofile und plattformübergreifende Vergleichsbaselines fehlen. Einzelne asynchrone Samples sind keine FPS-Baseline. |
+ 
+ ## Neueste Ingame-Beobachtung
+ 
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 307 Client bundles and two native bundles. Each
++The active series contains 308 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -263,3 +263,5 @@
+ | 2306 | Add HDR DX10 RGBA16F cubemap loading and linear shader sampling |
+ | 2307 | Clarify cubemap preview residency and switch ModelViewer into Lit mode |
+ | 2308 | Add headless HDR RGBA16F DDS cubemap regression tests |
++
++| 2309 | Track aliased environment cubemaps once in GPU texture memory diagnostics |
+--- a/patches/series
++++ b/patches/series
+@@ -308,3 +308,4 @@
+ client 2306-hdr-ibl-cubemap-support.patch
+ client 2307-lanceredit-cubemap-lit-preview.patch
+ client 2308-hdr-dds-cubemap-tests.patch
++client 2309-account-aliased-ibl-cubes.patch

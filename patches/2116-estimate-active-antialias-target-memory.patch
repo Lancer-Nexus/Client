@@ -1,0 +1,157 @@
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -49,7 +49,7 @@
+   - [x] OpenGL prüft die Vollständigkeit normaler, multisample- und resolve Framebuffer beim Anlegen. Bei unvollständigen Zielen werden die erzeugten GL-Objekte freigegeben und der Statushexwert in der Exception ausgegeben; Laufzeitprüfung auf mehreren Treibern bleibt offen.
+ - [ ] GPU-Zeit und Speicherverbrauch pro Pass messbar machen; Effekte müssen einzeln abschaltbar und nach Hardwareprofil skalierbar sein.
+   - [x] Bereitschaftsaudit abgeschlossen: Timer-Query-API und Query-Aufruf fehlen in OpenGL-/RenderContext-Abstraktion; die lokale Mesa-Laufzeit meldet `GL_ARB_timer_query`. Passgrenzen und eine nicht blockierende Abfragefolge sind dokumentiert. Speicherwerte sind noch nicht als Messung verfügbar. Siehe [GPU-Timer-Query-Audit](evidence/renderer/gpu-timer-query-readiness-audit-20261015.md).
+-  - [x] OpenGL-Timer-Queries für Depth, Opaque, Sterne/Nebel, Transparenz und AA-Resolve eingebaut. Vier Query-Slots pro Pass werden ohne blockierendes Ergebnis-Polling wiederverwendet; das Debug-Overlay zeigt Messwert und Sample-Alter. CSV-Zeilen erfassen den zuletzt verfügbaren GPU-Messwert samt fortlaufend aktualisiertem Alter; nicht verfügbare Samples bleiben leer. Das Alter zählt Aufrufe von `SystemRenderer.Draw()` und hängt nicht von `RenderContext.FrameNumber`/`ClearAll()` ab; ein Regressionstest prüft das Weiterzählen. Die Abfrage läuft nur bei geöffnetem Debug-Overlay. Null und OpenGL ohne Timer-Query melden keine Unterstützung. Der Debug-Overlay-Speicherblock zeigt jetzt geschätzte geladene Texturbytes sowie separat erfasste Surface-Map- und Tangentenbytes. Diese Werte decken nicht den gesamten GPU-Speicher ab und sind keiner Render-Pass-Attribution zugeordnet; Hardwarelauf, Vergleich der GPU-Zeit gegen Treiberprofiling sowie Render-Target-, Buffer- und Treiberallokationen bleiben offen.
++  - [x] OpenGL-Timer-Queries für Depth, Opaque, Sterne/Nebel, Transparenz und AA-Resolve eingebaut. Vier Query-Slots pro Pass werden ohne blockierendes Ergebnis-Polling wiederverwendet; das Debug-Overlay zeigt Messwert und Sample-Alter. CSV-Zeilen erfassen den zuletzt verfügbaren GPU-Messwert samt fortlaufend aktualisiertem Alter; nicht verfügbare Samples bleiben leer. Das Alter zählt Aufrufe von `SystemRenderer.Draw()` und hängt nicht von `RenderContext.FrameNumber`/`ClearAll()` ab; ein Regressionstest prüft das Weiterzählen. Die Abfrage läuft nur bei geöffnetem Debug-Overlay. Null und OpenGL ohne Timer-Query melden keine Unterstützung. Das Debug-Overlay zeigt geschätzte geladene Texturbytes, Surface-Map- und Tangentenbytes; das Spiel-Debugfenster zusätzlich die geschätzten Bytes des aktiven System-AA-Ziels. Diese Werte sind unvollständig und keiner Render-Pass-Attribution zugeordnet; Editor-/Offscreen-Targets, beliebige Buffer und Treiberallokationen bleiben offen.
+ - [ ] Referenzszenen und feste Screenshots für Raum, Basis, Sternensystem, Nebel, Partikel und LancerEdit-Vorschau festlegen.
+ 
+ ### 2. Bumpmapping / Normalmaps vervollständigen
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 114 Client bundles and two native bundles. Each
++The active series contains 115 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -117,3 +117,4 @@
+ | 2113 | Advance asynchronous GPU sample age on every rendered system frame |
+ | 2114 | Track cubemap estimates and expose known GPU memory counters in the Debug overlay |
+ | 2115 | Validate OpenGL framebuffer completeness and release failed allocations |
++| 2116 | Estimate active SMAA and MSAA render-target memory |
+--- a/patches/series
++++ b/patches/series
+@@ -115,3 +115,4 @@
+ client 2113-advance-gpu-profile-sample-age.patch
+ client 2114-renderer-gpu-memory-estimates.patch
+ client 2115-validate-opengl-framebuffers.patch
++client 2116-estimate-active-antialias-target-memory.patch
+--- a/src/LibreLancer.Base/Graphics/Backends/IMultisampleTarget.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/IMultisampleTarget.cs
+@@ -5,6 +5,7 @@
+ {
+     int Width { get; }
+     int Height { get; }
++    long EstimatedMemoryBytes { get; }
+     void BlitToScreen(Point offset);
+     void BlitToRenderTarget(IRenderTarget2D rTarget);
+ }
+--- a/src/LibreLancer.Base/Graphics/Backends/Null/NullMultisampleTarget.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/Null/NullMultisampleTarget.cs
+@@ -3,10 +3,13 @@
+ 
+ internal class NullMultisampleTarget : IMultisampleTarget
+ {
+-    public NullMultisampleTarget(int width, int height)
++    private readonly int samples;
++
++    public NullMultisampleTarget(int width, int height, int samples)
+     {
+         Width = width;
+         Height = height;
++        this.samples = samples;
+     }
+ 
+     public void Dispose()
+@@ -15,6 +18,7 @@
+ 
+     public int Width { get; }
+     public int Height { get; }
++    public long EstimatedMemoryBytes => (long)Width * Height * samples * 8;
+     public void BlitToScreen(Point offset)
+     {
+     }
+--- a/src/LibreLancer.Base/Graphics/Backends/Null/NullRenderContext.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/Null/NullRenderContext.cs
+@@ -108,7 +108,7 @@
+         new NullRenderTarget2D(texture.Width, texture.Height);
+ 
+     public IMultisampleTarget CreateMultisampleTarget(int width, int height, int samples) =>
+-        new NullMultisampleTarget(width, height);
++        new NullMultisampleTarget(width, height, samples);
+ 
+     public IStorageBuffer CreateStorageBuffer(int size, int stride) =>
+         new NullStorageBuffer(size, stride);
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLMultisampleTarget.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLMultisampleTarget.cs
+@@ -13,6 +13,9 @@
+     private uint depthID;
+     public int Width { get; private set; }
+     public int Height { get; private set; }
++    public long EstimatedMemoryBytes => checked((long)Width * Height * samples * 8 +
++        (resolveTexID != 0 ? (long)Width * Height * 4 : 0));
++    private readonly int samples;
+ 
+     private GLRenderContext context;
+ 
+@@ -26,6 +29,7 @@
+         this.context = context;
+         Width = width;
+         Height = height;
++        this.samples = samples;
+         try
+         {
+             texID = GL.GenTexture();
+--- a/src/LibreLancer.Base/Graphics/DepthBuffer.cs
++++ b/src/LibreLancer.Base/Graphics/DepthBuffer.cs
+@@ -10,8 +10,10 @@
+ public class DepthBuffer : IDisposable
+ {
+     internal IDepthBuffer Backing;
++    public long EstimatedMemoryBytes { get; }
+     public DepthBuffer(RenderContext context, int width, int height, bool stencil = false)
+     {
++        EstimatedMemoryBytes = (long)width * height * 4;
+         Backing = context.Backend.CreateDepthBuffer(width, height, stencil);
+     }
+     public void Dispose()
+--- a/src/LibreLancer.Base/Graphics/RenderTarget2D.cs
++++ b/src/LibreLancer.Base/Graphics/RenderTarget2D.cs
+@@ -12,6 +12,7 @@
+     public Texture2D Texture { get; private set; }
+     public int Width => Texture.Width;
+     public int Height => Texture.Height;
++    public long EstimatedMemoryBytes => Texture.EstimatedTextureMemory + (DepthBuffer?.EstimatedMemoryBytes ?? 0);
+ 
+     internal readonly IRenderTarget2D Backing;
+     private bool disposeDepth;
+--- a/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
++++ b/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
+@@ -13,6 +13,12 @@
+     public int Width { get; private set; }
+     public int Height { get; private set; }
+     public AntialiasMode Mode { get; private set; }
++    public long EstimatedMemoryBytes => msaa?.EstimatedMemoryBytes ??
++        (long)(smaa?.Texture.EstimatedTextureMemory ?? 0) +
++        (smaaEdges?.Texture.EstimatedTextureMemory ?? 0) +
++        (smaaBlend?.Texture.EstimatedTextureMemory ?? 0) +
++        (smaa?.DepthBuffer?.EstimatedMemoryBytes ?? 0) +
++        (depthStencil?.EstimatedMemoryBytes ?? 0);
+ 
+     private IMultisampleTarget? msaa;
+     private RenderTarget2D? smaa;
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -278,6 +278,7 @@
+         }
+ 
+         private AntialiasTarget? msaa;
++        public long EstimatedAAMemoryBytes => msaa?.EstimatedMemoryBytes ?? 0;
+         private int _mwidth = -1, _mheight = -1;
+         public CommandBuffer Commands;
+         private int _twidth = -1, _theight = -1;
+--- a/src/LibreLancer/GameStates/SpaceGameplay.Debug.cs
++++ b/src/LibreLancer/GameStates/SpaceGameplay.Debug.cs
+@@ -55,6 +55,7 @@
+                 $"Render Resolution: {Game.RenderContext.CurrentViewport.Width}x{Game.RenderContext.CurrentViewport.Height}");
+             ImGui.Text($"Frame lights accepted: {sysrender.SystemLighting.FrameTransientLightCount}/{sysrender.SystemLighting.MaxFrameLights} (persistent: {sysrender.SystemLighting.Lights.Count})");
+             ImGui.Text($"Active effect lights: {sysrender.ActiveTransientEffectLightCount}/{sysrender.Settings.TransientEffectLightBudget}");
++            ImGui.Text($"Active scene AA target estimate: {sysrender.EstimatedAAMemoryBytes / (1024.0 * 1024.0):F1} MiB");
+             ImGui.Text($"Player Position: {player.Transform.Position}");
+             ImGui.Text($"PredictionErrorPos: {player.PhysicsComponent!.PredictionErrorPos}");
+             ImGui.Text($"PredictionErrorQuat: {player.PhysicsComponent!.PredictionErrorQuat} ({MathHelper.QuatError(

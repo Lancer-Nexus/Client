@@ -1,0 +1,155 @@
+diff --git a/src/LibreLancer/Render/RenderHelpers.cs b/src/LibreLancer/Render/RenderHelpers.cs
+--- a/src/LibreLancer/Render/RenderHelpers.cs
++++ b/src/LibreLancer/Render/RenderHelpers.cs
+@@ -269,6 +269,42 @@
+             return float.IsFinite(priority) ? priority : 0;
+         }
+ 
++        internal static float CalculateFrameLightPriority(RenderLight light, Vector3 cameraPosition)
++        {
++            if (light.Kind == LightKind.Directional)
++                return CalculateLightPriority(light, cameraPosition, 0);
++
++            var range = light.Range;
++            if (!float.IsFinite(range) || range <= 0)
++                return 0;
++
++            var distanceSquared = Vector3.DistanceSquared(light.Position, cameraPosition);
++            if (!float.IsFinite(distanceSquared))
++                return 0;
++
++            if (distanceSquared <= range * range)
++                return CalculateLightPriority(light, cameraPosition, 0);
++
++            // Frame selection must retain a light if the camera is outside its
++            // radius: visible objects near the emitter may still be illuminated.
++            // Per-object lighting applies the actual radius and attenuation later.
++            var color = light.Color;
++            var ambient = light.Ambient;
++            var intensity = Math.Max(0, color.R) * 0.2126f +
++                            Math.Max(0, color.G) * 0.7152f +
++                            Math.Max(0, color.B) * 0.0722f +
++                            Math.Max(0, ambient.R) * 0.2126f +
++                            Math.Max(0, ambient.G) * 0.7152f +
++                            Math.Max(0, ambient.B) * 0.0722f;
++            if (!float.IsFinite(intensity) || intensity <= 0)
++                return 0;
++
++            var distance = MathF.Sqrt(distanceSquared);
++            var projectedRange = range / (distance + range);
++            var priority = intensity * projectedRange * projectedRange;
++            return float.IsFinite(priority) ? priority : 0;
++        }
++
+ 		// Returns whether or not a spotlight can be culled
+         private static bool SpotlightTest(ref RenderLight light, Vector3 objPos, float objRadius)
+ 		{
+diff --git a/src/LibreLancer/Render/SystemLighting.cs b/src/LibreLancer/Render/SystemLighting.cs
+--- a/src/LibreLancer/Render/SystemLighting.cs
++++ b/src/LibreLancer/Render/SystemLighting.cs
+@@ -64,7 +64,9 @@
+             frameStarted = true;
+         }
+ 
+-        public bool AddFrameLight(DynamicLight light)
++        public bool AddFrameLight(DynamicLight light) => AddFrameLight(light, false);
++
++        public bool AddFrameLight(DynamicLight light, bool mayIlluminateVisibleObjectsOutsideCameraRange)
+         {
+             if (!DynamicLightsEnabled || !light.Active)
+                 return false;
+@@ -75,7 +77,9 @@
+             if (!frameStarted)
+                 BeginFrame(frameCameraPosition);
+ 
+-            var priority = GetFrameLightPriority(light);
++            var priority = mayIlluminateVisibleObjectsOutsideCameraRange
++                ? RenderHelpers.CalculateFrameLightPriority(light.Light, frameCameraPosition)
++                : GetFrameLightPriority(light);
+             if (priority <= 0)
+                 return false;
+ 
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -356,11 +356,7 @@
+         private float GetTransientEffectLightPriority(TransientEffectLight effectLight)
+         {
+             var light = CreateTransientEffectRenderLight(effectLight);
+-            var distanceSquared = Vector3.DistanceSquared(camera.Position, light.Position);
+-            if (!float.IsFinite(distanceSquared) || distanceSquared > light.Range * light.Range)
+-                return 0;
+-
+-            return RenderHelpers.CalculateLightPriority(light, camera.Position, 0);
++            return RenderHelpers.CalculateFrameLightPriority(light, camera.Position);
+         }
+ 
+         private int GetTransientEffectLightBudget() =>
+@@ -547,11 +543,11 @@
+                         FrameEffectLightCandidates++;
+                         LastEffectLightDistance = Vector3.Distance(camera.Position, renderLight.Position);
+                         LastEffectLightRange = renderLight.Range;
+-                        LastEffectLightPriority = RenderHelpers.CalculateLightPriority(
+-                            renderLight, camera.Position, 0);
++                        LastEffectLightPriority = RenderHelpers.CalculateFrameLightPriority(
++                            renderLight, camera.Position);
+                         if (LastEffectLightPriority <= 0)
+                             FrameEffectLightsRejectedByPriority++;
+-                        else if (SystemLighting.AddFrameLight(effectLight.Light))
++                        else if (SystemLighting.AddFrameLight(effectLight.Light, true))
+                             FrameEffectLightsAccepted++;
+                         else
+                             FrameEffectLightsRejectedByBudget++;
+diff --git a/src/LibreLancer/Render/ParticleEffectRenderer.cs b/src/LibreLancer/Render/ParticleEffectRenderer.cs
+--- a/src/LibreLancer/Render/ParticleEffectRenderer.cs
++++ b/src/LibreLancer/Render/ParticleEffectRenderer.cs
+@@ -129,7 +129,7 @@
+             effectLight.Active = true;
+             effectLight.Light = CreateEffectLight(effectLightAnimation, effectLightAge,
+                 effectLightTimeScale, effectLightRadius, pos);
+-            system.SystemLighting.AddFrameLight(effectLight);
++            system.SystemLighting.AddFrameLight(effectLight, true);
+         }
+ 
+         internal static RenderLight CreateEffectLight(LightAnim animation, float age,
+diff --git a/src/LibreLancer/World/Equipments/AbstractWeapon.cs b/src/LibreLancer/World/Equipments/AbstractWeapon.cs
+--- a/src/LibreLancer/World/Equipments/AbstractWeapon.cs
++++ b/src/LibreLancer/World/Equipments/AbstractWeapon.cs
+@@ -115,7 +115,7 @@
+                 Color = color,
+                 Range = muzzleLightRadius
+             };
+-            sys.SystemLighting.AddFrameLight(light);
++            sys.SystemLighting.AddFrameLight(light, true);
+         }
+     }
+ 
+diff --git a/src/LibreLancer/Render/LightEquipRenderer.cs b/src/LibreLancer/Render/LightEquipRenderer.cs
+--- a/src/LibreLancer/Render/LightEquipRenderer.cs
++++ b/src/LibreLancer/Render/LightEquipRenderer.cs
+@@ -251,7 +251,7 @@
+                     Color = colorGlow,
+                     Range = emitRange
+                 };
+-                sys.SystemLighting.AddFrameLight(emittedLight);
++                sys.SystemLighting.AddFrameLight(emittedLight, true);
+             }
+ 
+             visible &= !emitterOccluded;
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -190,3 +190,5 @@
+ | 2181 | Add sampleable depth-only render targets |
+ 
+ | 2226 | Diagnose transient effect-light frame candidates and rejection priorities |
++
++| 2227 | Keep visible object lights when their emitter is beyond the camera light radius |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -226,3 +226,4 @@
+ client 2224-smaa-postprocess-pass.patch
+ client 2225-postprocess-four-mode-runtime-evidence.patch
+ client 2226-effect-light-frame-diagnostics.patch
++client 2227-visible-object-frame-light-priority.patch

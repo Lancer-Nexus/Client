@@ -1,0 +1,113 @@
+diff --git a/src/LibreLancer/Shaders/includes/NormalMap.hlsl b/src/LibreLancer/Shaders/includes/NormalMap.hlsl
+--- a/src/LibreLancer/Shaders/includes/NormalMap.hlsl
++++ b/src/LibreLancer/Shaders/includes/NormalMap.hlsl
+@@ -12,14 +12,17 @@
+     return NormalMapNormalize(float3(xy * clamp(strength, 0.0, 16.0), z), float3(0.0, 0.0, 1.0));
+ }
+ 
+-float3x3 MakeNormalMapBasis(float3 normal, float3 tangent, float handedness)
++float3x3 MakeNormalMapBasis(float3 normal, float3 tangent, float handedness, float2 uvScale)
+ {
+     float3 n = NormalMapNormalize(normal, float3(0.0, 0.0, 1.0));
+     float3 axis = abs(n.z) < 0.999 ? float3(0.0, 0.0, 1.0) : float3(0.0, 1.0, 0.0);
+     float3 fallback = normalize(cross(axis, n));
+     float3 t = NormalMapNormalize(tangent - n * dot(n, tangent), fallback);
+     float3 b = cross(n, t) * (handedness < 0.0 ? -1.0 : 1.0);
+-    return float3x3(t, b, n);
++    // MaterialAnim scales the sampled UVs. Scale the tangent axes by the same
++    // signed factors so animated tiling also changes normal-map slope and
++    // mirrored UV animation keeps its handedness.
++    return float3x3(t * uvScale.x, b * uvScale.y, n);
+ }
+ 
+ float3 TransformNormalMap(float3 tangentNormal, float3x3 basis)
+diff --git a/src/LibreLancer/Shaders/Basic_FVF.vert.hlsl b/src/LibreLancer/Shaders/Basic_FVF.vert.hlsl
+--- a/src/LibreLancer/Shaders/Basic_FVF.vert.hlsl
++++ b/src/LibreLancer/Shaders/Basic_FVF.vert.hlsl
+@@ -63,7 +63,7 @@
+ #ifdef NORMALMAP
+     float4 t = float4(input.tangent0, input.tangent1);
+     float3 tangentW = mul(float4(t.xyz, 0.0), World).xyz;
+-    output.tbn = MakeNormalMapBasis(n, tangentW, t.w * NormalMatrix[3][3]);
++    output.tbn = MakeNormalMapBasis(n, tangentW, t.w * NormalMatrix[3][3], MaterialAnim.zw);
+ #else
+     output.normal = n;
+ #endif
+diff --git a/src/LibreLancer/Shaders/Basic_Skinned.vert.hlsl b/src/LibreLancer/Shaders/Basic_Skinned.vert.hlsl
+--- a/src/LibreLancer/Shaders/Basic_Skinned.vert.hlsl
++++ b/src/LibreLancer/Shaders/Basic_Skinned.vert.hlsl
+@@ -73,7 +73,7 @@
+     float4 tangent = float4(input.tangent0, input.tangent1);
+     float3 tangentSkinned = mul(float4(tangent.xyz, 0.0), boneTransform).xyz;
+     float3 tangentWorld = mul(float4(tangentSkinned, 0.0), World).xyz;
+-    output.tbn = MakeNormalMapBasis(n, tangentWorld, tangent.w * NormalMatrix[3][3]);
++    output.tbn = MakeNormalMapBasis(n, tangentWorld, tangent.w * NormalMatrix[3][3], MaterialAnim.zw);
+ #else
+     output.normal = n;
+ #endif
+diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -329,6 +329,12 @@
+ - [x] `MaterialAnim` transformiert UV0 und UV1 in `Basic_FVF` und
+   `Basic_Skinned`; damit animieren auch `SecondUV`-Sampler ihre gewählte
+   Koordinate.
++- [x] Der Normalmap-Tangentenrahmen übernimmt die signierte U-/V-Skalierung
++  aus `MaterialAnim` in FVF- und Skinned-Shadern. Animierte Kachelung verändert
++  damit auch die Normalensteigung; negative Skalierungen spiegeln die jeweilige
++  Tangentenachse. Offset und UV-Kanalwahl bleiben unverändert. Echte UV1-
++  VMesh-/DFM-GPU-Draws mit nichtidentischer Animation und ihre Bildabnahme sind
++  weiterhin offen.
+ - [x] Echte LI_ELITE-Roughness- und Metallic-BC4-Karten einzeln und zusammen
+   im Retail-VMesh/PBR-Pfad gegen dieselben skalaren Materialfaktoren prüfen.
+   ATI1 wird als lineares RGTC1 geladen; beide Shader lesen den R-Kanal ohne
+@@ -337,7 +343,8 @@
+   Normalmap und Tangentenbasis auswählen. Fehlt `pbr_uv`, wird rückwärts-
+   kompatibel `uv` verwendet; MAT-`Rt`/`Mt` behalten ihre eigenen Flags.
+ - [ ] Den UV1-Pfad mit nichtidentischer `MaterialAnim` in echten VMesh-/DFM-
+-  GPU-Draws abnehmen.
++  GPU-Draws visuell abnehmen; die Shader berücksichtigen die signierte
++  Animationsskalierung des Tangentenrahmens jetzt in FVF und Skinning.
+ - [ ] Tangenten mit konsistenter Händigkeit aus Position, Normale, Index und
+   gewählten UVs erzeugen. Gespiegelte UVs, Naht-/Hartkantensplits und
+   degenerierte Dreiecke abdecken. Zusätzliche Vertices dürfen 16-Bit-Indizes
+diff --git a/docs/surface-maps.md b/docs/surface-maps.md
+--- a/docs/surface-maps.md
++++ b/docs/surface-maps.md
+@@ -43,8 +43,10 @@
+ die sichtbare Wirkung von Normal-, Roughness- und Metallic-Maps sind inzwischen
+ implementiert und teilweise mit Retail-Daten geprüft. `uv` steuert die ergänzende
+ Normalmap; optionales `pbr_uv` wählt unabhängig davon die Roughness-/Metallic-
+-Maps. Offen bleiben insbesondere GPU-Draws mit UV1 und abweichender
+-`MaterialAnim`, DFM-/LOD-Abnahme, breite Materialqualität und Performance.
++Maps. Der FVF- und Skinned-Normalmap-Tangentenrahmen folgt nun auch der
++signierten UV-Skalierung aus `MaterialAnim`. Offen bleiben insbesondere
++visuelle GPU-Draws mit UV1 und abweichender `MaterialAnim`, DFM-/LOD-Abnahme,
++breite Materialqualität und Performance.
+ 
+ Nachweise: 17 Parser-/VFS-Tests sowie ein Client-Lauf mit der vollen Liste aus
+ NAP (34 Bibliotheken, 2.807 Normalmap-Zuordnungen, 3 Cubes, keine Diagnosen).
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 277 Client bundles and two native bundles. Each
++The active series contains 278 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -240,3 +240,4 @@
+ | 2276 | Replace SystemRenderer targets transactionally on resize and option changes |
+ | 2277 | Remove local closure helpers from per-frame render graph compilation |
+ | 2278 | Reuse simple SystemRenderer frame callbacks |
++| 2279 | Apply MaterialAnim UV scale to normal-map tangent frames |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -278,3 +278,4 @@
+ client 2276-transactional-render-target-replacement.patch
+ client 2277-render-graph-compile-allocation-reduction.patch
+ client 2278-reuse-simple-system-renderer-callbacks.patch
++client 2279-normalmap-material-animation-tangent-scale.patch

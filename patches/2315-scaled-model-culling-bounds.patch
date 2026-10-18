@@ -1,0 +1,151 @@
+--- a/src/LibreLancer/Render/ModelRenderer.cs
++++ b/src/LibreLancer/Render/ModelRenderer.cs
+@@ -13,6 +13,11 @@
+ {
+     public class ModelRenderer : ObjectRenderer
+     {
++        internal static float ScalePartRadius(float radius, float renderScale) =>
++            radius * MathF.Abs(renderScale);
++
++        private float GetPartRadius(RigidModelPart part) => ScalePartRadius(part.GetRadius(), RenderScale);
++
+         public Matrix4x4 World { get; private set; }
+         public RigidModel? Model { get; private set; }
+         public Color4? ColorOverride;
+@@ -155,7 +160,7 @@
+ 
+                 if (lvl != -1)
+                 {
+-                    var bsphere = new BoundingSphere(center, part.Mesh.Radius);
++                    var bsphere = new BoundingSphere(center, GetPartRadius(part));
+ 
+                     if (camera.FrustumCheck(bsphere))
+                     {
+@@ -185,9 +190,10 @@
+                 if (level == -1)
+                     continue;
+ 
+-                var lighting = RenderHelpers.ApplyLights(lights, LightGroup, center, part.GetRadius(), nr,
++                var partRadius = GetPartRadius(part);
++                var lighting = RenderHelpers.ApplyLights(lights, LightGroup, center, partRadius, nr,
+                     LitAmbient, LitDynamic, NoFog);
+-                var radius = part.GetRadius() + lighting.FogRange.Y;
++                var radius = partRadius + lighting.FogRange.Y;
+                 var canFogCullPart = lighting.FogMode == FogModes.Linear &&
+                                      (nr == null || nr.FogTransitionOpacity() >= 1f || Nebula == nr);
+                 if (canFogCullPart && Vector3.DistanceSquared(camera.Position, center) > radius * radius)
+@@ -214,7 +220,7 @@
+                 var world = part.LocalTransform.Matrix() * _worldSph;
+                 var center = Vector3.Transform(part.Mesh.Center, world);
+                 var level = GetLevel(part, center, viewCamera.Position);
+-                if (level == -1 || !shadowCamera.FrustumCheck(new BoundingSphere(center, part.Mesh.Radius)))
++                if (level == -1 || !shadowCamera.FrustumCheck(new BoundingSphere(center, GetPartRadius(part))))
+                     continue;
+ 
+                 var lighting = Lighting.Empty;
+@@ -285,7 +291,7 @@
+ 
+                     if (lvl != -1)
+                     {
+-                        var bsphere = new BoundingSphere(center, part.Mesh.Radius);
++                        var bsphere = new BoundingSphere(center, GetPartRadius(part));
+ 
+                         if (camera.FrustumCheck(bsphere))
+                         {
+@@ -327,11 +333,12 @@
+                         continue;
+                     }
+ 
+-                    var lighting = RenderHelpers.ApplyLights(lights, LightGroup, center, part.GetRadius(), nr,
++                    var partRadius = GetPartRadius(part);
++                    var lighting = RenderHelpers.ApplyLights(lights, LightGroup, center, partRadius, nr,
+                         LitAmbient, LitDynamic, NoFog);
+                     var canFogCullPart = lighting.FogMode == FogModes.Linear &&
+                                          (nr == null || nr.FogTransitionOpacity() >= 1f || Nebula == nr);
+-                    var r = part.GetRadius() + lighting.FogRange.Y;
++                    var r = partRadius + lighting.FogRange.Y;
+ 
+                     if (!canFogCullPart ||
+                         Vector3.DistanceSquared(camera.Position, center) <= (r * r))
+--- a/src/LibreLancer.Tests/ModelRendererLodTests.cs
++++ b/src/LibreLancer.Tests/ModelRendererLodTests.cs
+@@ -5,6 +5,15 @@
+ 
+ public sealed class ModelRendererLodTests
+ {
++    [Theory]
++    [InlineData(5f, 18f, 90f)]
++    [InlineData(5f, -2f, 10f)]
++    [InlineData(5f, 0f, 0f)]
++    public void BoundsUseAbsoluteRenderScale(float radius, float renderScale, float expected)
++    {
++        Assert.Equal(expected, ModelRenderer.ScalePartRadius(radius, renderScale));
++    }
++
+     [Fact]
+     public void UsesMeshSwitchDistancesWhenTheyDifferFromArchetypeRanges()
+     {
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -16,7 +16,7 @@
+ | HDR und Tonemapping | Linearisiertes Scene-Target, ACES-Tonemapping, linearisierte PBR-Albedo-/Licht-/Emissionswerte und exakte sRGB-Ausgabe im PBR-LDR-Pfad. System- und Nebel-Clearfarben werden ebenfalls vor dem HDR-Clear linearisiert; LDR bleibt unverändert. | Der sRGB-Vertrag für Retail-INI-Farben ist durch Konvertierungstests, aber noch nicht durch kalibrierte Retail-Bildvergleiche abgenommen. Legacy-Vertexfarben, Transparenz, Fog und zusammengesetzte Effekte benötigen weiterhin eine visuelle Gesamtprüfung. HDR/LDR-Vergleich: `docs/evidence/renderer/postprocess-four-mode-ab-20261017/`; Clear-Farbvertrag: `docs/evidence/renderer/hdr-clear-color-contract-20261018.md`. |
+ | Bloom | HDR-Extraktion mittelt jetzt ein vollständiges 4×4-Quellfenster in Viertelauflösung; aufrundende Zielmaße behalten Randpixel bei ungeraden Fenstergrößen. Basis-, mittlere und breite Blur-Stufen sowie Schwelle, Radius, Auflösung und Kernel sind konfigurierbar. | Die Extraktion beseitigt das bisherige Unterabtasten der zentralen vier Texel. Der Code führt alle drei Stufen aus. Die vorhandene Bloom-Pyramidenaufnahme nennt ein Laufzeitpaket/Manifest vom 18.10. und gilt am Dokumentstand 17.10. nicht als verifizierter NAP-Lauf. Laufzeitabnahme, Halo-Kalibrierung und GPU-Kosten bleiben offen. |
+ | Antialiasing | SMAA-Pässe und MSAA-Auflösung; HDR/LDR-Kombinationen sowie Resize und Minimize/Restore wurden auf OpenGL/Mesa geprüft. | Andere Backends/Treiber, wiederholte Lifecycle-Zyklen und Fehler-Injektion stehen aus. |
+-| Dynamische Lichter und Schatten | Persistente und kurzlebige Lichter werden priorisiert; ein ausgewähltes Richtungslicht läuft durch Shadow-Map-Pass und 3×3-PCF. Alpha-Test-Texturen werden auch in PBR-Depth-/Shadow-Pässen anhand eines Material-Uniforms ausgeschnitten; blendtransparente Materialien werfen keine Schatten. Lichtprojektion ist jetzt im Licht-XY-Raum verankert und texelgesnappt, damit Sub-Texel-Kamerabewegung die Shadow-Map nicht kontinuierlich verschiebt. | Hi02 belegt Pass, Lichtauswahl und Live-Schaltung auf einer OpenGL-GPU. Kamera-Fit-/Stabilitätstests bestehen. Bias-Kalibrierung, Offscreen-Caster-Abdeckung und Bildqualität über weitere Materialien/Szenen brauchen kontrollierte Vergleiche. Siehe `docs/evidence/renderer/shadow-map-hi02-live-toggle-20261017/` und `docs/evidence/renderer/shadow-camera-stability-20261018.md`. |
++| Dynamische Lichter und Schatten | Persistente und kurzlebige Lichter werden priorisiert; ein ausgewähltes Richtungslicht läuft durch Shadow-Map-Pass und 3×3-PCF. Alpha-Test-Texturen werden auch in PBR-Depth-/Shadow-Pässen anhand eines Material-Uniforms ausgeschnitten; blendtransparente Materialien werfen keine Schatten. Lichtprojektion ist im Licht-XY-Raum verankert und texelgesnappt; Mesh-Cullingradien berücksichtigen `RenderScale`. | Hi02 belegt Pass, Lichtauswahl und Live-Schaltung auf einer OpenGL-GPU. Kamera-Fit-/Stabilitäts- und RenderScale-Radiustests bestehen. Bias-Kalibrierung, Offscreen-Caster-Abdeckung und Bildqualität über weitere Materialien/Szenen brauchen kontrollierte Vergleiche. Siehe `docs/evidence/renderer/shadow-map-hi02-live-toggle-20261017/`, `docs/evidence/renderer/shadow-camera-stability-20261018.md` und `docs/evidence/renderer/scaled-model-culling-20261018.md`. |
+ | Diagnose | CPU-Framezeitprofile, asynchrone OpenGL-GPU-Passzeiten, Bloom-/Shadow-Passzeiten, Ziel-/Speicherschätzungen und CSV-Ausgabe. Environment-Cubemaps mit mehreren Catalog-Aliasen werden im geschätzten GPU-Texturspeicher nur einmal gezählt und bei Bereinigung auch nur einmal freigegeben. | Langzeitprofile und plattformübergreifende Vergleichsbaselines fehlen. Einzelne asynchrone Samples sind keine FPS-Baseline. |
+ 
+ ## Neueste Ingame-Beobachtung
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -612,7 +612,7 @@
+ - [ ] Gerichtete Schatten zuerst mit Kaskaden/PCF, anschließend zusätzliche
+   Lichttypen.
+   - [x] Sampleable Depth-only-Renderziele über `RenderTarget2D(..., SurfaceFormat.Depth)` ergänzt. OpenGL bindet die Textur als Depth-Attachment ohne Color-Read-/Write-Buffer; der Null-Backend-Pfad behält Rendermaß und no-op-Verhalten. GL/GLES-Readback und Depth-to-Depth-Blit nutzen den Depth-Puffer; Color-to-Depth-Blits werden abgewiesen. Der Release-Build und ein OpenGL-4.6/Mesa-NAP-Smoke-Lauf bestehen: FBO-Erzeugung, Depth-Clear und float-Readback liefern min/max 1..1. GLES, Shader-Sampling und PCF sind nicht geprüft; siehe [Depth-only-Smoke](evidence/renderer/depth-only-target-smoke-20261017/README.md).
+-  - [x] Shadow-Caster-Draws, Lichtmatrizen und Receiver-Shading in Basic/PBR integrieren; `DirectionalShadowCamera` fittet den distanzbegrenzten Sichtfrustum-Slice und verankert den Lichtblickpunkt im Welt-XY-Raum, damit das texelgesnappte Projektionszentrum Shadow-Shimmering bei Sub-Texel-Kamerabewegung vermeidet. Kamera-Fit und Sub-Texel-Stabilität bestehen automatisierte Tests.
++  - [x] Shadow-Caster-Draws, Lichtmatrizen und Receiver-Shading in Basic/PBR integrieren; `DirectionalShadowCamera` fittet den distanzbegrenzten Sichtfrustum-Slice und verankert den Lichtblickpunkt im Welt-XY-Raum, damit das texelgesnappte Projektionszentrum Shadow-Shimmering bei Sub-Texel-Kamerabewegung vermeidet. Kamera-Fit und Sub-Texel-Stabilität bestehen automatisierte Tests. `ModelRenderer.RenderScale` wird in Main-, Depth- und Shadow-Cullingradien berücksichtigt, damit hochskalierte sichtbare Geometrie nicht vorzeitig aus diesen Pässen entfernt wird; siehe [RenderScale-Culling](evidence/renderer/scaled-model-culling-20261018.md).
+   - [ ] PCF-/Bias-Kalibrierung, Offscreen-Caster-Abdeckung und Receiver-Bildqualität in festen Retail-Szenen visuell abnehmen. Die Tests beweisen keine Szenenbildqualität.
+ - [ ] Kurzlebige Effektlichter vervollständigen und messen: Mündungslichter aus `Gun.light_anim` sowie Explosionslichter aus `lgt_effect`/`lgt_radius` und `lgt_time_scale` sind vorhanden. Per-Objekt-Auswahl und Frame-Pool priorisieren nach geschätztem attenuiertem Lichtbeitrag; der Frame-Pool verwirft Quellen außerhalb ihrer Reichweite und ohne positiven Beitrag. Die maximale Zahl zugelassener transienter Frame-Lichter ist mit `dynamic_light_budget` auf 0, 8, 16, 24 oder 32 begrenzbar. Die maximale Zahl aktiver Effektlicht-Ereignisse ist mit `transient_effect_light_budget` auf 0, 32, 64 oder 128 einstellbar; beim Absenken werden die schwächsten aktiven Kandidaten entfernt. `lgt_range_scale` wird bis zum transienten Lichtobjekt durchgereicht, bleibt aber bis zur Semantikklärung ohne Laufzeitwirkung. Offen sind explizite Lichtdaten und hardpointgebundene Lebenszyklen für persistentes Feuer, allgemeine Sichtbarkeits-/Occlusion-Priorisierung und reproduzierbare NAP-Szenenmessungen. Siehe [Feuerinventar](evidence/effect-fire-light-input-inventory-20261014.json).
+   - [x] Negative oder nichtendliche Frame-Deltas werden in `SystemRenderer.Update` auf null normalisiert, bevor Nebel, Partikeleffekte und transiente Lichter aktualisiert werden.
+--- /dev/null
++++ b/docs/evidence/renderer/scaled-model-culling-20261018.md
+@@ -0,0 +1,16 @@
++# RenderScale-aware model culling (2026-10-18)
++
++`ModelRenderer.Update` applies `RenderScale` to the model's world matrix. Before
++this fix, `OutOfView`, visible-part preparation, shadow-depth culling and fog
++radius calculations still used the unscaled mesh radius. A large scaled model
++could therefore be culled while part of its rendered geometry intersected the
++view or shadow frustum; fog-distance culling also used the smaller radius.
++
++All model-part bounds now multiply the authored radius by the absolute render
++scale before those tests. This matches the world transform for the supported
++uniform scale and keeps negative scale magnitudes valid. `ModelRendererLodTests`
++checks scale 18, negative scale and zero scale.
++
++The tests verify the radius calculation and code-path integration, not a
++runtime screenshot. A scene with a scaled mission waypoint and its shadow still
++needs visual confirmation.
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 313 Client bundles and two native bundles. Each
++The active series contains 314 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -275,3 +275,5 @@
+ | 2313 | Honor legacy vertex tint and material opacity in PBR output |
+ 
+ | 2314 | Stabilize directional shadow projection under sub-texel camera motion |
++
++| 2315 | Use scaled mesh bounds for model visibility and shadow culling |
+--- a/patches/series
++++ b/patches/series
+@@ -314,3 +314,4 @@
+ client 2312-linearize-hdr-frame-clear-colors.patch
+ client 2313-pbr-vertex-tint-and-opacity.patch
+ client 2314-stabilize-directional-shadow-camera.patch
++client 2315-scaled-model-culling-bounds.patch

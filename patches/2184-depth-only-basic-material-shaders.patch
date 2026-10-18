@@ -1,0 +1,303 @@
+--- a/src/LibreLancer/Render/RenderMaterial.cs
++++ b/src/LibreLancer/Render/RenderMaterial.cs
+@@ -33,6 +33,7 @@
+         public WorldMatrixHandle World = new();
+         public ResourceManager? Library;
+         public bool Fade = false;
++        public bool DepthOnlyPass;
+         public float FadeNear = 0;
+         public float FadeFar = 0;
+         public float OpacityMultiplier = 1;
+--- a/src/LibreLancer/Render/CommandBuffer.cs
++++ b/src/LibreLancer/Render/CommandBuffer.cs
+@@ -25,6 +25,7 @@
+         public StorageBuffer BonesBuffer;
+         public int BonesMax;
+         public int BonesOffset;
++        public bool DepthOnlyPass;
+         public WorldMatrixBuffer WorldBuffer;
+         public ICamera? Camera;
+         public CommandBuffer(RenderContext context)
+@@ -99,6 +100,8 @@
+                 material.MaterialAnim = anim;
+                 material.World = world;
+                 material.EnvMap = envMap;
++                var previousDepthOnlyPass = material.DepthOnlyPass;
++                material.DepthOnlyPass = DepthOnlyPass;
+                 var previousCull = rstate.Cull;
+                 var previousCullFace = rstate.CullFace;
+                 if (previousCull && !material.DoubleSided && world.IsMirrored)
+@@ -112,6 +115,7 @@
+                     try {
+                         material.AfterDraw(rstate);
+                     } finally {
++                        material.DepthOnlyPass = previousDepthOnlyPass;
+                         rstate.Cull = previousCull;
+                         rstate.CullFace = previousCullFace;
+                     }
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -578,9 +578,14 @@
+                     BeginGpuPass(SystemRenderPass.DepthPrepass, sceneTarget);
+                     try
+                     {
++                        Commands.DepthOnlyPass = true;
+                         foreach (var obj in objects) obj.DepthPrepass(camera, Commands, SystemLighting, nr!);
+                     }
+-                    finally { EndGpuPass(SystemRenderPass.DepthPrepass, sceneTarget); }
++                    finally
++                    {
++                        Commands.DepthOnlyPass = false;
++                        EndGpuPass(SystemRenderPass.DepthPrepass, sceneTarget);
++                    }
+                     rstate.DepthFunction = DepthFunction.LessEqual;
+                     rstate.ColorWrite = true;
+                 }
+--- a/src/LibreLancer/Render/Materials/BasicMaterial.cs
++++ b/src/LibreLancer/Render/Materials/BasicMaterial.cs
+@@ -113,7 +113,8 @@
+             ET_ENABLED = (1 << 3),
+             VERTEX_TEXTURE2 = (1 << 4),
+             VERTEX_LIGHTING = (1 << 5),
+-            ENVMAP = (1 << 6)
++            ENVMAP = (1 << 6),
++            DEPTH_ONLY = (1 << 7)
+         }
+ 
+         private Shader GetPBRShader(IVertexType vertexType, bool useEnvMapping)
+@@ -132,6 +133,8 @@
+                 caps |= PBRFeatures.METALMAP;
+             if (EtEnabled)
+                 caps |= PBRFeatures.ET_ENABLED;
++            if (DepthOnlyPass)
++                caps |= PBRFeatures.DEPTH_ONLY;
+             if (VertexLighting)
+                 caps |= PBRFeatures.VERTEX_LIGHTING;
+             if (useEnvMapping)
+@@ -166,6 +169,7 @@
+             VERTEX_DIFFUSE = (1 << 5),
+             VERTEX_TEXTURE2 = (1 << 6),
+             ENVMAP = (1 << 7),
++            DEPTH_ONLY = (1 << 8),
+         }
+ 
+         private Shader GetRegularShader(IVertexType vertexType, bool useEnvMapping)
+@@ -181,6 +185,8 @@
+                 caps |= ShaderFeatures.FADE_ENABLED;
+             if (useEnvMapping)
+                 caps |= ShaderFeatures.ENVMAP;
++            if (DepthOnlyPass)
++                caps |= ShaderFeatures.DEPTH_ONLY;
+             // Shitty way of dealing with alpha_mask
+             // FL has a lot of DXT1 textures that aren't part of alpha_mask
+             // so this brings overall performance down.
+@@ -281,8 +287,11 @@
+ 
+         public override void Use(RenderContext rstate, IVertexType vertextype, ref Lighting lights, int userData)
+         {
+-            TryAcquireSurfaceNormal(vertextype, rstate);
+-            TryAcquireSurfacePbrMaps(vertextype, lights.Enabled);
++            if (!DepthOnlyPass)
++            {
++                TryAcquireSurfaceNormal(vertextype, rstate);
++                TryAcquireSurfacePbrMaps(vertextype, lights.Enabled);
++            }
+             var pbr = (!string.IsNullOrWhiteSpace(RtSampler) ||
+                        !string.IsNullOrWhiteSpace(MtSampler) || Metallic != null || Roughness != null ||
+                        (Library?.SurfacePbrMapsEnabled == true &&
+@@ -297,12 +306,12 @@
+             TextureCube? pbrEnvironment = null;
+             var envMapStrength = 1.0f;
+             string? envmaptex = Glass ? "envmapglass" : EnvMap;
+-            if (!pbr)
++            if (!DepthOnlyPass && !pbr)
+             {
+                 legacyEnvironment = Library?.ResolveEnvironmentCube(envmaptex, out envMapStrength);
+                 envMapping = legacyEnvironment != null;
+             }
+-            else if (Library?.PbrEnvironmentMapsEnabled == true)
++            else if (!DepthOnlyPass && Library?.PbrEnvironmentMapsEnabled == true)
+             {
+                 pbrEnvironment = Library.ResolveEnvironmentCube(envmaptex, out envMapStrength);
+                 pbrEnvMapping = pbrEnvironment != null;
+@@ -324,7 +333,7 @@
+             }
+ 
+             // Blending
+-            rstate.BlendMode = BlendModeOverride ??
++            rstate.BlendMode = DepthOnlyPass ? BlendMode.Opaque : BlendModeOverride ??
+                 (AlphaEnabled || Fade || OcEnabled || dxt1 || AlphaTest ||
+                  (userData & ForceAlpha) == ForceAlpha || OpacityMultiplier < 1.0f
+                     ? BlendMode.Normal
+@@ -351,26 +360,26 @@
+             }
+ 
+             // EtSampler
+-            if (EtEnabled)
++            if (!DepthOnlyPass && EtEnabled)
+             {
+                 BindTexture(rstate, 1, EtSampler, 1, EtFlags, ResourceManager.NullTextureName);
+             }
+-            else if (BtEnabled)
++            else if (!DepthOnlyPass && BtEnabled)
+             {
+                 BindTexture(rstate, 4, BtSampler, 4, BtFlags, ResourceManager.NullTextureName);
+             }
+ 
+-            if (!string.IsNullOrEmpty(NmSampler))
++            if (!DepthOnlyPass && !string.IsNullOrEmpty(NmSampler))
+             {
+                 BindTexture(rstate, 2, NmSampler, 2, NmFlags, ResourceManager.NullTextureName);
+             }
+ 
+-            if (envMapping && legacyEnvironment != null)
++            if (!DepthOnlyPass && envMapping && legacyEnvironment != null)
+             {
+                 rstate.Textures[3] = legacyEnvironment;
+                 rstate.Samplers[3] = new(rstate.PreferredFilterLevel, WrapMode.Repeat, WrapMode.Repeat);
+             }
+-            else if (pbrEnvMapping && pbrEnvironment != null)
++            else if (!DepthOnlyPass && pbrEnvMapping && pbrEnvironment != null)
+             {
+                 rstate.Textures[5] = pbrEnvironment;
+                 rstate.Samplers[5] = new(rstate.PreferredFilterLevel, WrapMode.Repeat, WrapMode.Repeat);
+@@ -435,7 +444,8 @@
+             }
+ 
+             // Set lights
+-            SetLights(shader, ref lights, rstate.FrameNumber);
++            if (!DepthOnlyPass)
++                SetLights(shader, ref lights, rstate.FrameNumber);
+             rstate.Shader = shader;
+             if (rstate.RenderDocMaterialMarkersEnabled && !debugMarkerActive)
+             {
+--- a/src/LibreLancer/RigidModel.cs
++++ b/src/LibreLancer/RigidModel.cs
+@@ -166,7 +166,7 @@
+                     DetailMapMaterial detail => detail.SurfaceBinding,
+                     _ => null
+                 };
+-                if (res.SurfaceNormalMapsEnabled && res.SurfaceGeneratedTangentsEnabled &&
++                if (!opaqueOnly && res.SurfaceNormalMapsEnabled && res.SurfaceGeneratedTangentsEnabled &&
+                     surfaceBinding?.Normal != null &&
+                     l.Resource.SourceData is { } sourceData && VMeshTangentBuilder.Supports(sourceData.VertexFormat) &&
+                     dc.MeshIndex >= 0 && dc.MeshIndex < sourceData.Meshes.Length)
+--- a/src/LibreLancer/Shaders/Basic_FVF.txt
++++ b/src/LibreLancer/Shaders/Basic_FVF.txt
+@@ -8,3 +8,4 @@
+ feature VERTEX_DIFFUSE 6
+ feature VERTEX_TEXTURE2 7
+ feature ENVMAP 8
++feature DEPTH_ONLY 9
+--- a/src/LibreLancer/Shaders/Basic_Skinned.txt
++++ b/src/LibreLancer/Shaders/Basic_Skinned.txt
+@@ -6,3 +6,4 @@
+ feature FADE_ENABLED 4
+ feature NORMALMAP 5
+ feature ENVMAP 8
++feature DEPTH_ONLY 9
+--- a/src/LibreLancer/Shaders/Basic_PositionColor.txt
++++ b/src/LibreLancer/Shaders/Basic_PositionColor.txt
+@@ -1,5 +1,6 @@
+ vertex Basic_PositionColor.vert.hlsl
+ fragment Basic.frag.hlsl
++feature DEPTH_ONLY 9
+ feature VERTEX_LIGHTING 1
+ feature ALPHATEST_ENABLED 2
+ feature TEX2_ENABLED 3
+--- a/src/LibreLancer/Shaders/Basic_PositionTexture.txt
++++ b/src/LibreLancer/Shaders/Basic_PositionTexture.txt
+@@ -1,5 +1,6 @@
+ vertex Basic_PositionTexture.vert.hlsl
+ fragment Basic.frag.hlsl
++feature DEPTH_ONLY 9
+ feature VERTEX_LIGHTING 1
+ feature ALPHATEST_ENABLED 2
+ feature TEX2_ENABLED 3
+--- a/src/LibreLancer/Shaders/PBR.txt
++++ b/src/LibreLancer/Shaders/PBR.txt
+@@ -7,3 +7,4 @@
+ feature VERTEX_TEXTURE2 5
+ feature VERTEX_LIGHTING 6
+ feature ENVMAP 7
++feature DEPTH_ONLY 8
+--- a/src/LibreLancer/Shaders/PBR_Skinned.txt
++++ b/src/LibreLancer/Shaders/PBR_Skinned.txt
+@@ -7,3 +7,4 @@
+ feature VERTEX_TEXTURE2 5
+ feature VERTEX_LIGHTING 6
+ feature ENVMAP 7
++feature DEPTH_ONLY 8
+--- a/src/LibreLancer/Shaders/Basic.frag.hlsl
++++ b/src/LibreLancer/Shaders/Basic.frag.hlsl
+@@ -78,6 +78,17 @@
+ }
+ #endif
+ 
++#ifdef DEPTH_ONLY
++float4 main(Input input) : SV_Target0
++{
++#ifdef ALPHATEST_ENABLED
++    float alpha = DtTexture.Sample(DtSampler, GetTexCoord(0, input)).a;
++    if (alpha < 0.5)
++        discard;
++#endif
++    return 0;
++}
++#else
+ float4 main(Input input) : SV_Target0
+ {
+     float4 dtSampled = DtTexture.Sample(DtSampler, GetTexCoord(0, input));
+@@ -139,3 +150,4 @@
+     return ToLinearSceneOutput(acolor);
+ #endif
+ }
++#endif
+--- a/src/LibreLancer/Shaders/PBR.frag.hlsl
++++ b/src/LibreLancer/Shaders/PBR.frag.hlsl
+@@ -179,6 +179,12 @@
+     return x * x * params.x + x * params.y + params.z;
+ }
+ 
++#ifdef DEPTH_ONLY
++float4 main(Input input) : SV_Target0
++{
++    return 0;
++}
++#else
+ float4 main(Input input) : SV_Target0
+ {
+     float3 n = getNormal(input);
+@@ -302,3 +308,4 @@
+ 
+     return ToDisplayOutput(float4(color, baseColor.a));
+ }
++#endif
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -239,7 +239,7 @@
+   - `--render-sun-ambient=on|off` → `render_sun_ambient` (opt-in 25% diffuse tint from locally weighted persistent system-light colors; off by default).
+   - `--render-hdr=on|off` → `render_hdr` (opt-in float scene target and ACES tone mapping; falls back to LDR when the GPU target is unavailable).
+   - `--render-bloom=on|off` → `render_bloom` (opt-in bloom pass; requires `render_hdr`).
+-  - `--render-depth-prepass=on|off` → `render_depth_prepass` (opt-in opaque model depth pass; off by default because it currently reuses full material shaders).
++  - `--render-depth-prepass=on|off` → `render_depth_prepass` (opt-in opaque model depth pass; Basic/PBR materials use depth-only fragment variants; off by default pending runtime performance measurements).
+   - `--render-bloom-threshold=0..8` → `render_bloom_threshold` (finite invariant-culture float; default 1).
+   - `--render-bloom-strength=0..2` → `render_bloom_strength` (finite invariant-culture float; default 0.18).
+   - `--render-projectile-beams=on|off` → `render_projectile_beams` (only hides `vis_beam`; simulation and projectile particle effects remain active).
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -205,7 +205,7 @@
+ - [ ] Screen-Space Ambient Occlusion als optionale Ergänzung bewerten; Geometrie- und Nebelartefakte gegen Vanilla-Szenen abgleichen.
+ - [ ] Echtzeit-Schatten (zunächst gerichtete Lichter, Kaskaden und PCF) anhand vorhandener Freelancer-Lichtdaten und der GPU-Kosten bewerten.
+   - [x] Sampleable Depth-only-Renderziele im OpenGL-Backend und no-op-Ziele im Null-Backend bereitgestellt; Release-Build sowie OpenGL-4.6/Mesa-NAP-Smoke für FBO, Clear und Depth-Readback bestanden. GLES, Shader-Sampling und PCF bleiben offen; siehe [Depth-only-Smoke](evidence/renderer/depth-only-target-smoke-20261017/README.md).
+-  - [x] Opake, sichtbare Model-Meshes schreiben optional im Main-Camera-Depth-Prepass mit LOD, World-Matrix und Material-Alpha-Test; transparente Teile bleiben ausgeschlossen. `render_depth_prepass` und `--render-depth-prepass=on|off` steuern den Pass, der standardmäßig aus ist: Er nutzt vorerst die bestehenden Vollmaterial-Shader bei deaktiviertem Color-Write, hat keinen dedizierten Depth-Shader und wirft keine Schatten. Release-Build und Overlay-Rekonstruktion bestanden.
++  - [x] Opake, sichtbare Model-Meshes schreiben optional im Main-Camera-Depth-Prepass mit LOD und World-Matrix; transparente Teile bleiben ausgeschlossen. `render_depth_prepass` und `--render-depth-prepass=on|off` steuern den Pass, der standardmäßig aus ist. Basic/PBR-Materialien verwenden Depth-only-Fragmentvarianten; Alpha-Test wird im Basic-Pfad beibehalten, Normal-/Emissive-/Beleuchtungsarbeit entfällt. Nicht unterstützte Materialtypen nutzen ihren vorhandenen Shader-Fallback. Der Pass wirft keine Schatten; Laufzeit- und FPS-Abnahme stehen aus.
+   - [ ] GL/GLES-FBO-Laufzeit prüfen, danach Caster-Draws, Lichtmatrizen, PCF und Receiver-Shading in den beleuchteten Materialpfaden implementieren.
+ - [ ] Screen-Space-Reflections als optionale Ergänzung prüfen; fehlende Bildinformation an Bildschirmrändern und bei verdeckten Objekten muss über den bestehenden PBR-Fallback abgefangen werden.
+ - [ ] Volumetrischen Nebel und volumetrische Lichtstrahlen als eigenständige, skalierbare Qualitätstufe evaluieren; vorhandene Freelancer-Nebelparameter und Transparenzreihenfolge als Referenz verwenden.
+--- a/patches/series
++++ b/patches/series
+@@ -184,2 +184,3 @@
+ client 2182-draw-opaque-models-in-depth-prepass.patch
+ client 2183-toggle-opaque-depth-prepass.patch
++client 2184-depth-only-basic-material-shaders.patch

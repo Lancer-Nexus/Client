@@ -1,0 +1,159 @@
+--- a/src/LibreLancer/Render/SystemLighting.cs
++++ b/src/LibreLancer/Render/SystemLighting.cs
+@@ -5,6 +5,7 @@
+ using System;
+ using System.Collections.Generic;
+ using System.Numerics;
++using LibreLancer.Data.GameData;
+ 
+ namespace LibreLancer.Render
+ {
+@@ -16,6 +17,7 @@
+ 		public Color4 Ambient = Color4.Black;
+ 		public List<DynamicLight> Lights = [];
+ 		private readonly List<DynamicLight> frameLights = new(64);
++        private readonly List<float> frameLightPriorities = new(64);
+ 		private bool frameStarted;
+ 		public List<DynamicLight> FrameLights => frameStarted ? frameLights : Lights;
+ 		public bool DynamicLightsEnabled = true;
+@@ -28,13 +30,31 @@
+         private int transientStart;
+         private Vector3 frameCameraPosition;
+ 
++        private float GetFrameLightPriority(DynamicLight source)
++        {
++            var light = source.Light;
++            if (light.Kind != LightKind.Directional)
++            {
++                var range = light.Range;
++                var distanceSquared = Vector3.DistanceSquared(frameCameraPosition, light.Position);
++                if (!float.IsFinite(range) || range <= 0 || distanceSquared > range * range)
++                    return 0;
++            }
++
++            return RenderHelpers.CalculateLightPriority(light, frameCameraPosition, 0);
++        }
++
+         public void BeginFrame(Vector3 cameraPosition)
+         {
+             frameCameraPosition = cameraPosition;
+             frameLights.Clear();
++            frameLightPriorities.Clear();
+             var persistentCount = Math.Min(Lights.Count, BitArray128.Capacity);
+             for (var i = 0; i < persistentCount; i++)
++            {
+                 frameLights.Add(Lights[i]);
++                frameLightPriorities.Add(0);
++            }
+             transientStart = frameLights.Count;
+             frameStarted = true;
+         }
+@@ -54,28 +74,28 @@
+             if (transientCount < MaxFrameLights)
+             {
+                 frameLights.Add(light);
++                frameLightPriorities.Add(GetFrameLightPriority(light));
+                 return true;
+             }
+ 
+-            var lightPosition = light.Light.Position;
+-            var distance = Vector3.DistanceSquared(frameCameraPosition, lightPosition);
+-            var farthestIndex = transientStart;
+-            var farthestDistance = Vector3.DistanceSquared(frameCameraPosition,
+-                frameLights[farthestIndex].Light.Position);
++            var priority = GetFrameLightPriority(light);
++            var lowestIndex = transientStart;
++            var lowestPriority = frameLightPriorities[lowestIndex];
+             for (var i = transientStart + 1; i < frameLights.Count; i++)
+             {
+-                var candidateDistance = Vector3.DistanceSquared(frameCameraPosition, frameLights[i].Light.Position);
+-                if (candidateDistance > farthestDistance)
++                var candidatePriority = frameLightPriorities[i];
++                if (candidatePriority < lowestPriority)
+                 {
+-                    farthestIndex = i;
+-                    farthestDistance = candidateDistance;
++                    lowestIndex = i;
++                    lowestPriority = candidatePriority;
+                 }
+             }
+ 
+-            if (distance >= farthestDistance)
++            if (priority <= lowestPriority)
+                 return false;
+ 
+-            frameLights[farthestIndex] = light;
++            frameLights[lowestIndex] = light;
++            frameLightPriorities[lowestIndex] = priority;
+             return true;
+         }
+ 	}
+--- a/src/LibreLancer.Tests/TransientLightTests.cs
++++ b/src/LibreLancer.Tests/TransientLightTests.cs
+@@ -31,6 +31,38 @@
+         Assert.Equal(SystemLighting.MaxFrameLights, lighting.FrameLights.Count);
+         Assert.Contains(lighting.FrameLights, x => x.Light.Position.X == 0.5f);
+         Assert.DoesNotContain(lighting.FrameLights, x => x.Light.Position.X == SystemLighting.MaxFrameLights);
++    }
++
++    [Fact]
++    public void FrameLightBudgetKeepsHigherAttenuatedContributionInsteadOfOnlyNearestLights()
++    {
++        var lighting = new SystemLighting();
++        lighting.BeginFrame(Vector3.Zero);
++
++        for (var i = 1; i <= SystemLighting.MaxFrameLights; i++)
++            Assert.True(lighting.AddFrameLight(CreateLight(i, attenuation: Vector3.One, range: 100)));
++
++        Assert.True(lighting.AddFrameLight(CreateLight(9, intensity: 2, attenuation: Vector3.One, range: 100)));
++
++        Assert.Equal(SystemLighting.MaxFrameLights, lighting.FrameLights.Count);
++        Assert.Contains(lighting.FrameLights, x => x.Light.Position.X == 9 && x.Light.Color.R == 2);
++        Assert.DoesNotContain(lighting.FrameLights, x => x.Light.Position.X == SystemLighting.MaxFrameLights);
++    }
++
++    [Fact]
++    public void FrameLightBudgetRejectsHighIntensityCurveLightOutsideRange()
++    {
++        var lighting = new SystemLighting();
++        lighting.BeginFrame(Vector3.Zero);
++
++        for (var i = 1; i <= SystemLighting.MaxFrameLights; i++)
++            Assert.True(lighting.AddFrameLight(CreateLight(i, kind: LightKind.PointAttenCurve,
++                attenuation: new Vector3(0, -1, 1), range: 100)));
++
++        var outsideRange = CreateLight(101, intensity: 1000, kind: LightKind.PointAttenCurve,
++            attenuation: new Vector3(0, -1, 1), range: 100);
++        Assert.False(lighting.AddFrameLight(outsideRange));
++        Assert.DoesNotContain(lighting.FrameLights, x => x.Light.Position.X == 101);
+     }
+ 
+     [Fact]
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -135,7 +135,7 @@
+ - [ ] Screen-Space-Reflections als optionale Ergänzung prüfen; fehlende Bildinformation an Bildschirmrändern und bei verdeckten Objekten muss über den bestehenden PBR-Fallback abgefangen werden.
+ - [ ] Volumetrischen Nebel und volumetrische Lichtstrahlen als eigenständige, skalierbare Qualitätstufe evaluieren; vorhandene Freelancer-Nebelparameter und Transparenzreihenfolge als Referenz verwenden.
+ - [ ] Forward+/Clustered Lighting gegen die aktuelle Beleuchtungsarchitektur und typische Freelancer-Szenen mit vielen Lichtern benchmarken, bevor ein Renderer-Umbau geplant wird.
+-- [ ] Kurzlebige dynamische Lichter für Effekte, Waffenfeuer/Mündungsblitze, Feuer und Explosionen vervollständigen. Vorhanden sind `Gun.light_anim`-Mündungslichter sowie datengetriebene Explosionslichter aus `lgt_effect`/`lgt_radius` einschließlich `lgt_time_scale`; der Effektpool begrenzt aktive Ereignisse auf 128 und der Frame-Pool lokale Lichtquellen auf 32. Die per-Objekt-Auswahl priorisiert nun nach geschätzter Lichtwirkung; der Frame-Pool priorisiert weiterhin nach Kameradistanz. Offen bleiben `lgt_range_scale`, explizite Lichtdaten und hardpointgebundene Lichtlebenszyklen für persistentes Feuer, allgemeine Sichtbarkeits-/Occlusion-Priorisierung, konfigurierbares Qualitätsbudget und visuelle Messungen in typischen NAP-Szenen ([Feuerinventar](evidence/effect-fire-light-input-inventory-20261014.json)).
++- [ ] Kurzlebige dynamische Lichter für Effekte, Waffenfeuer/Mündungsblitze, Feuer und Explosionen vervollständigen. Vorhanden sind `Gun.light_anim`-Mündungslichter sowie datengetriebene Explosionslichter aus `lgt_effect`/`lgt_radius` einschließlich `lgt_time_scale`; der Effektpool begrenzt aktive Ereignisse auf 128 und der Frame-Pool lokale Lichtquellen auf 32. Die per-Objekt-Auswahl und der Frame-Pool priorisieren nun nach geschätzter attenuierter Lichtwirkung; der Frame-Pool verwirft lokale Quellen außerhalb ihrer Reichweite und cached die Scores für den aktuellen Frame. `lgt_range_scale` wird geparst und nach `ResolvedFx` übernommen, aber `GameWorld.SpawnTempFx` reicht es nicht an den Renderer weiter. Beide SDK-Dateien `EffectsExplosion.ini` und `EffectsExplosionNew.ini` enthalten jeweils 25 passende Effekte, bei denen `lgt_range_scale` gleich `lgt_radius` ist; die eigenständige Semantik bleibt damit ungeklärt. Ebenfalls offen sind explizite Lichtdaten und hardpointgebundene Lichtlebenszyklen für persistentes Feuer, Sichtbarkeits-/Occlusion-Priorisierung, konfigurierbares Qualitätsbudget und visuelle Messungen in typischen NAP-Szenen ([Feuerinventar](evidence/effect-fire-light-input-inventory-20261014.json)).
+ 
+ ### 5. Effektüberarbeitung nach Renderer und dynamischer Beleuchtung
+ 
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -38,6 +38,7 @@
+ | 2062 | StarArch lens glow rendering and independent startup/config toggle |
+ | 2063 | Ignore cubemaps in 2D material texture slots to prevent renderer crashes |
+ | 2064 | Fade sun lens glow as the sun enters or leaves the camera frustum |
++| 2065 | Prioritize frame lights by attenuated contribution near the camera |
+ | 2011 (`lancerdecode`) | Native Vorbis EOF/reset handling |
+ | 2012 (`blurgtext`) | System FreeType without OT-SVG hooks |
+ 
+--- a/patches/series
++++ b/patches/series
+@@ -64,3 +64,4 @@
+ client 2062-sun-lens-glow-runtime.patch
+ client 2063-safe-2d-texture-binding.patch
+ client 2064-sun-lens-glow-fades.patch
++client 2065-frame-light-contribution-priority.patch

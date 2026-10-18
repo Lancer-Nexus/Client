@@ -1,0 +1,162 @@
+--- a/src/LibreLancer/Render/Cameras/DirectionalShadowCamera.cs
++++ b/src/LibreLancer/Render/Cameras/DirectionalShadowCamera.cs
+@@ -73,11 +73,15 @@
+         var radius = 0f;
+         foreach (var corner in corners)
+             radius = Math.Max(radius, Vector3.Distance(center, corner));
+-        var eye = center - direction * (radius + depthPadding + 1);
++        // Keep the light view's XY origin fixed in world space. Following the
++        // camera center here would cancel projection-center texel snapping and
++        // make the shadow map slide continuously as the camera moves.
++        var centerAlongLight = Vector3.Dot(center, direction);
++        var eye = direction * (centerAlongLight - radius - depthPadding - 1);
+         var up = Math.Abs(Vector3.Dot(direction, Vector3.UnitY)) > 0.98f
+             ? Vector3.UnitZ
+             : Vector3.UnitY;
+-        var nextView = Matrix4x4.CreateLookAt(eye, center, up);
++        var nextView = Matrix4x4.CreateLookAt(eye, eye + direction, up);
+ 
+         var min = new Vector3(float.PositiveInfinity);
+         var max = new Vector3(float.NegativeInfinity);
+--- /dev/null
++++ b/src/LibreLancer.Tests/DirectionalShadowCameraTests.cs
+@@ -0,0 +1,69 @@
++using System;
++using System.Numerics;
++using LibreLancer.Render.Cameras;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class DirectionalShadowCameraTests
++{
++    [Fact]
++    public void SubTexelCameraMotionDoesNotSlideShadowProjection()
++    {
++        var source = new LookAtCamera();
++        source.Update(1280, 720, Vector3.Zero, new Vector3(0, 0, -1));
++        var shadow = new DirectionalShadowCamera();
++        var lightDirection = Vector3.Normalize(new Vector3(0.4f, -0.7f, 0.2f));
++
++        Assert.True(shadow.Fit(source, lightDirection, 1000, 1024, 0, 100));
++        var initial = Vector4.Transform(new Vector4(17, 4, -25, 1), shadow.ViewProjection);
++
++        var cameraMotion = new Vector3(0.05f, 0, 0);
++        source.Update(1280, 720, cameraMotion, cameraMotion + new Vector3(0, 0, -1));
++        Assert.True(shadow.Fit(source, lightDirection, 1000, 1024, 0, 100));
++        var moved = Vector4.Transform(new Vector4(17, 4, -25, 1), shadow.ViewProjection);
++
++        Assert.Equal(initial.X, moved.X, 6);
++        Assert.Equal(initial.Y, moved.Y, 6);
++    }
++
++    [Fact]
++    public void FittedCameraContainsDistanceLimitedSourceFrustumCorners()
++    {
++        var source = new LookAtCamera();
++        source.Update(1280, 720, new Vector3(120, -30, 50), new Vector3(120, -30, 49));
++        var shadow = new DirectionalShadowCamera();
++        var lightDirection = Vector3.Normalize(new Vector3(-0.6f, -0.3f, 0.8f));
++        const float maxDistance = 1500f;
++
++        Assert.True(shadow.Fit(source, lightDirection, maxDistance, 1024, 10, 100));
++        Assert.True(Matrix4x4.Invert(source.ViewProjection, out var inverseViewProjection));
++
++        for (var y = -1; y <= 1; y += 2)
++        for (var x = -1; x <= 1; x += 2)
++        {
++            Assert.True(TryUnproject(new Vector3(x, y, 0), inverseViewProjection, out var near));
++            Assert.True(TryUnproject(new Vector3(x, y, 1), inverseViewProjection, out var far));
++            var ray = Vector3.Normalize(far - source.Position);
++            var nearDistance = Math.Max(0, Vector3.Dot(near - source.Position, ray));
++            var farDistance = Math.Min(maxDistance, Vector3.Distance(far, source.Position));
++            var start = source.Position + ray * nearDistance;
++            var end = source.Position + ray * farDistance;
++
++            Assert.True(shadow.FrustumCheck(new BoundingSphere(start, 0.1f)));
++            Assert.True(shadow.FrustumCheck(new BoundingSphere(end, 0.1f)));
++        }
++    }
++
++    private static bool TryUnproject(Vector3 clip, Matrix4x4 inverse, out Vector3 world)
++    {
++        var result = Vector4.Transform(new Vector4(clip, 1), inverse);
++        if (Math.Abs(result.W) < 1e-7f)
++        {
++            world = default;
++            return false;
++        }
++        world = new Vector3(result.X, result.Y, result.Z) / result.W;
++        return true;
++    }
++}
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -16,7 +16,7 @@
+ | HDR und Tonemapping | Linearisiertes Scene-Target, ACES-Tonemapping, linearisierte PBR-Albedo-/Licht-/Emissionswerte und exakte sRGB-Ausgabe im PBR-LDR-Pfad. System- und Nebel-Clearfarben werden ebenfalls vor dem HDR-Clear linearisiert; LDR bleibt unverändert. | Der sRGB-Vertrag für Retail-INI-Farben ist durch Konvertierungstests, aber noch nicht durch kalibrierte Retail-Bildvergleiche abgenommen. Legacy-Vertexfarben, Transparenz, Fog und zusammengesetzte Effekte benötigen weiterhin eine visuelle Gesamtprüfung. HDR/LDR-Vergleich: `docs/evidence/renderer/postprocess-four-mode-ab-20261017/`; Clear-Farbvertrag: `docs/evidence/renderer/hdr-clear-color-contract-20261018.md`. |
+ | Bloom | HDR-Extraktion mittelt jetzt ein vollständiges 4×4-Quellfenster in Viertelauflösung; aufrundende Zielmaße behalten Randpixel bei ungeraden Fenstergrößen. Basis-, mittlere und breite Blur-Stufen sowie Schwelle, Radius, Auflösung und Kernel sind konfigurierbar. | Die Extraktion beseitigt das bisherige Unterabtasten der zentralen vier Texel. Der Code führt alle drei Stufen aus. Die vorhandene Bloom-Pyramidenaufnahme nennt ein Laufzeitpaket/Manifest vom 18.10. und gilt am Dokumentstand 17.10. nicht als verifizierter NAP-Lauf. Laufzeitabnahme, Halo-Kalibrierung und GPU-Kosten bleiben offen. |
+ | Antialiasing | SMAA-Pässe und MSAA-Auflösung; HDR/LDR-Kombinationen sowie Resize und Minimize/Restore wurden auf OpenGL/Mesa geprüft. | Andere Backends/Treiber, wiederholte Lifecycle-Zyklen und Fehler-Injektion stehen aus. |
+-| Dynamische Lichter und Schatten | Persistente und kurzlebige Lichter werden priorisiert; ein ausgewähltes Richtungslicht läuft durch Shadow-Map-Pass und 3×3-PCF. Alpha-Test-Texturen werden auch in PBR-Depth-/Shadow-Pässen anhand eines Material-Uniforms ausgeschnitten; dafür entstehen keine zusätzlichen Shader-Varianten. Blendtransparente Materialien werfen keine Schatten. Quelle und Ein/Aus-Schaltung sind konfigurierbar. | Hi02 belegt Pass, Lichtauswahl und Live-Schaltung auf einer OpenGL-GPU. Bias, Caster-Abdeckung und Bildqualität über weitere Materialien/Szenen brauchen kontrollierte Vergleiche. Siehe `docs/evidence/renderer/shadow-map-hi02-live-toggle-20261017/`. |
++| Dynamische Lichter und Schatten | Persistente und kurzlebige Lichter werden priorisiert; ein ausgewähltes Richtungslicht läuft durch Shadow-Map-Pass und 3×3-PCF. Alpha-Test-Texturen werden auch in PBR-Depth-/Shadow-Pässen anhand eines Material-Uniforms ausgeschnitten; blendtransparente Materialien werfen keine Schatten. Lichtprojektion ist jetzt im Licht-XY-Raum verankert und texelgesnappt, damit Sub-Texel-Kamerabewegung die Shadow-Map nicht kontinuierlich verschiebt. | Hi02 belegt Pass, Lichtauswahl und Live-Schaltung auf einer OpenGL-GPU. Kamera-Fit-/Stabilitätstests bestehen. Bias-Kalibrierung, Offscreen-Caster-Abdeckung und Bildqualität über weitere Materialien/Szenen brauchen kontrollierte Vergleiche. Siehe `docs/evidence/renderer/shadow-map-hi02-live-toggle-20261017/` und `docs/evidence/renderer/shadow-camera-stability-20261018.md`. |
+ | Diagnose | CPU-Framezeitprofile, asynchrone OpenGL-GPU-Passzeiten, Bloom-/Shadow-Passzeiten, Ziel-/Speicherschätzungen und CSV-Ausgabe. Environment-Cubemaps mit mehreren Catalog-Aliasen werden im geschätzten GPU-Texturspeicher nur einmal gezählt und bei Bereinigung auch nur einmal freigegeben. | Langzeitprofile und plattformübergreifende Vergleichsbaselines fehlen. Einzelne asynchrone Samples sind keine FPS-Baseline. |
+ 
+ ## Neueste Ingame-Beobachtung
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -612,7 +612,8 @@
+ - [ ] Gerichtete Schatten zuerst mit Kaskaden/PCF, anschließend zusätzliche
+   Lichttypen.
+   - [x] Sampleable Depth-only-Renderziele über `RenderTarget2D(..., SurfaceFormat.Depth)` ergänzt. OpenGL bindet die Textur als Depth-Attachment ohne Color-Read-/Write-Buffer; der Null-Backend-Pfad behält Rendermaß und no-op-Verhalten. GL/GLES-Readback und Depth-to-Depth-Blit nutzen den Depth-Puffer; Color-to-Depth-Blits werden abgewiesen. Der Release-Build und ein OpenGL-4.6/Mesa-NAP-Smoke-Lauf bestehen: FBO-Erzeugung, Depth-Clear und float-Readback liefern min/max 1..1. GLES, Shader-Sampling und PCF sind nicht geprüft; siehe [Depth-only-Smoke](evidence/renderer/depth-only-target-smoke-20261017/README.md).
+-  - [ ] Shadow-Caster-Draws, Lichtmatrizen, PCF-Vergleich und Receiver-Shading in den beleuchteten Materialpfaden ergänzen und mit Szenenbildern abnehmen.
++  - [x] Shadow-Caster-Draws, Lichtmatrizen und Receiver-Shading in Basic/PBR integrieren; `DirectionalShadowCamera` fittet den distanzbegrenzten Sichtfrustum-Slice und verankert den Lichtblickpunkt im Welt-XY-Raum, damit das texelgesnappte Projektionszentrum Shadow-Shimmering bei Sub-Texel-Kamerabewegung vermeidet. Kamera-Fit und Sub-Texel-Stabilität bestehen automatisierte Tests.
++  - [ ] PCF-/Bias-Kalibrierung, Offscreen-Caster-Abdeckung und Receiver-Bildqualität in festen Retail-Szenen visuell abnehmen. Die Tests beweisen keine Szenenbildqualität.
+ - [ ] Kurzlebige Effektlichter vervollständigen und messen: Mündungslichter aus `Gun.light_anim` sowie Explosionslichter aus `lgt_effect`/`lgt_radius` und `lgt_time_scale` sind vorhanden. Per-Objekt-Auswahl und Frame-Pool priorisieren nach geschätztem attenuiertem Lichtbeitrag; der Frame-Pool verwirft Quellen außerhalb ihrer Reichweite und ohne positiven Beitrag. Die maximale Zahl zugelassener transienter Frame-Lichter ist mit `dynamic_light_budget` auf 0, 8, 16, 24 oder 32 begrenzbar. Die maximale Zahl aktiver Effektlicht-Ereignisse ist mit `transient_effect_light_budget` auf 0, 32, 64 oder 128 einstellbar; beim Absenken werden die schwächsten aktiven Kandidaten entfernt. `lgt_range_scale` wird bis zum transienten Lichtobjekt durchgereicht, bleibt aber bis zur Semantikklärung ohne Laufzeitwirkung. Offen sind explizite Lichtdaten und hardpointgebundene Lebenszyklen für persistentes Feuer, allgemeine Sichtbarkeits-/Occlusion-Priorisierung und reproduzierbare NAP-Szenenmessungen. Siehe [Feuerinventar](evidence/effect-fire-light-input-inventory-20261014.json).
+   - [x] Negative oder nichtendliche Frame-Deltas werden in `SystemRenderer.Update` auf null normalisiert, bevor Nebel, Partikeleffekte und transiente Lichter aktualisiert werden.
+ - [ ] Danach Laser-, Projektil- und Explosionseffekte überarbeiten: Beam- und Trefferdarstellung, Trails, Partikel, Farbverläufe sowie Größen-/Zeitverhalten aufeinander abstimmen und mit dynamischer Beleuchtung integrieren. Originaleffekte und einzeln abschaltbare Qualitätsoptionen erhalten; NAP-Referenzszenen mit Vergleichsbildern und CPU-/GPU-Zeit abnehmen.
+--- /dev/null
++++ b/docs/evidence/renderer/shadow-camera-stability-20261018.md
+@@ -0,0 +1,21 @@
++# Directional shadow camera stability (2026-10-18)
++
++The shadow camera previously translated its light view to the center of the
++visible camera frustum on every frame, then snapped the frustum bounds in that
++moving light-space coordinate system. Because the view translation followed
++the same center that was being snapped, sub-texel camera motion still moved the
++shadow map in world space.
++
++The view now keeps its light-plane XY origin fixed in world space while its
++depth origin follows the fitted camera slice along the light direction. The
++orthographic XY center is then snapped in a stable coordinate system. This
++preserves positive depth range fitting while preventing continuous shadow
++projection movement for sub-texel camera translations.
++
++`DirectionalShadowCameraTests` verifies the projected XY position of a fixed
++world point across a sub-texel camera move and verifies that the fitted shadow
++frustum contains the visible camera frustum's near points and its distance-
++limited far points.
++
++This is camera-math evidence. It does not verify PCF bias quality, offscreen
++casters that can cast into the view, or image quality in a retail game scene.
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 312 Client bundles and two native bundles. Each
++The active series contains 313 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -273,3 +273,5 @@
+ | 2312 | Linearize system and nebula frame-clear colors for HDR targets |
+ 
+ | 2313 | Honor legacy vertex tint and material opacity in PBR output |
++
++| 2314 | Stabilize directional shadow projection under sub-texel camera motion |
+--- a/patches/series
++++ b/patches/series
+@@ -313,3 +313,4 @@
+ client 2311-bloom-extraction-downsample-footprint.patch
+ client 2312-linearize-hdr-frame-clear-colors.patch
+ client 2313-pbr-vertex-tint-and-opacity.patch
++client 2314-stabilize-directional-shadow-camera.patch

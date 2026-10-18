@@ -1,0 +1,892 @@
+diff --git a/src/LibreLancer.Base/Graphics/SystemRenderPass.cs b/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
+--- a/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
++++ b/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
+@@ -1,4 +1,5 @@
+ using System;
++using System.Collections.Generic;
+ 
+ namespace LibreLancer.Graphics;
+ 
+@@ -79,8 +80,8 @@
+     SystemRenderSampleCount Samples = SystemRenderSampleCount.Single);
+ 
+ /// <summary>
+-/// Metadata for the current forward renderer path. This is not an executing
+-/// render graph; target bindings remain owned by the existing renderer.
++/// Metadata for the current forward renderer path. The pass graph schedules
++/// callbacks from these contracts; target bindings remain owned by the renderer.
+ /// </summary>
+ public readonly record struct SystemRenderPassDescriptor(
+     SystemRenderPass Pass,
+@@ -202,6 +203,229 @@
+                 $"Pass '{descriptor.Name}' is not part of the SystemRenderer frame sequence.");
+         return descriptor.ExecutionOrder;
+     }
++}
++
++/// <summary>Schedules the executable SystemRenderer pass callbacks by resource and explicit dependencies.</summary>
++public sealed class SystemRenderPassGraph
++{
++    private sealed class Node
++    {
++        public string Name { get; }
++        public SystemRenderPass? Pass { get; }
++        public SystemRenderResource RequiredReads { get; }
++        public Action Execute { get; }
++        public string[] After { get; }
++        public int Priority { get; }
++
++        public Node(string name, SystemRenderPass? pass, SystemRenderResource requiredReads,
++            Action execute, string[] after, int priority)
++        {
++            Name = name;
++            Pass = pass;
++            RequiredReads = requiredReads;
++            Execute = execute;
++            After = after;
++            Priority = priority;
++        }
++    }
++
++    private const int ResourceBitCount = 32;
++    private const int InitialNodeCapacity = 16;
++    private readonly List<Node> nodes = new(InitialNodeCapacity);
++    private bool[,] edges = new bool[InitialNodeCapacity, InitialNodeCapacity];
++    private int[] indegree = new int[InitialNodeCapacity];
++    private readonly List<int>[] readers = new List<int>[ResourceBitCount];
++    private readonly List<int>[] writers = new List<int>[ResourceBitCount];
++    private bool[] executed = new bool[InitialNodeCapacity];
++
++    public SystemRenderPassGraph()
++    {
++        for (var i = 0; i < readers.Length; i++)
++        {
++            readers[i] = new List<int>(InitialNodeCapacity);
++            writers[i] = new List<int>(InitialNodeCapacity);
++        }
++    }
++
++    public int Count => nodes.Count;
++
++    public void Reset() => nodes.Clear();
++
++    public void AddPass(SystemRenderPass pass, Action execute,
++        SystemRenderResource requiredReads = SystemRenderResource.None, params string[] after)
++    {
++        var descriptor = SystemRenderPasses.Get(pass);
++        Add(new Node(descriptor.Name, pass, requiredReads, execute, after,
++            checked(descriptor.ExecutionOrder * 2)));
++    }
++
++    public void AddAction(string name, Action execute, int priority, params string[] after) =>
++        Add(new Node(name, null, SystemRenderResource.None, execute, after, priority));
++
++    private void Add(Node node)
++    {
++        if (node.Execute == null)
++            throw new ArgumentNullException(nameof(node.Execute));
++        foreach (var existing in nodes)
++            if (string.Equals(existing.Name, node.Name, StringComparison.Ordinal))
++                throw new InvalidOperationException($"Render graph node '{node.Name}' was added more than once.");
++        nodes.Add(node);
++    }
++
++    public void Execute(SystemRenderResource externalResources = SystemRenderResource.None)
++    {
++        var count = nodes.Count;
++        EnsureCapacity(count);
++        Array.Clear(edges);
++        Array.Clear(indegree);
++        Array.Clear(executed);
++        for (var i = 0; i < ResourceBitCount; i++)
++        {
++            readers[i].Clear();
++            writers[i].Clear();
++        }
++
++        void AddEdge(int from, int to)
++        {
++            if (from == to || edges[from, to])
++                return;
++            edges[from, to] = true;
++            indegree[to]++;
++        }
++
++        for (var i = 0; i < count; i++)
++        {
++            foreach (var dependency in nodes[i].After)
++            {
++                var found = -1;
++                for (var j = 0; j < count; j++)
++                    if (string.Equals(nodes[j].Name, dependency, StringComparison.Ordinal))
++                    {
++                        found = j;
++                        break;
++                    }
++                if (found < 0)
++                    throw new InvalidOperationException(
++                        $"Render graph node '{nodes[i].Name}' depends on missing node '{dependency}'.");
++                AddEdge(found, i);
++            }
++        }
++
++        for (var i = 0; i < count; i++)
++        {
++            var node = nodes[i];
++            var reads = node.RequiredReads;
++            var optionalReads = SystemRenderResource.None;
++            var writes = SystemRenderResource.None;
++            if (node.Pass is { } pass)
++            {
++                var descriptor = SystemRenderPasses.Get(pass);
++                reads |= descriptor.Reads;
++                optionalReads = descriptor.OptionalReads;
++                writes = descriptor.Writes;
++            }
++
++            for (var bit = 0; bit < ResourceBitCount; bit++)
++            {
++                var resource = (SystemRenderResource)(1u << bit);
++                if ((reads & resource) != 0)
++                    readers[bit].Add(i);
++                if ((writes & resource) != 0)
++                    writers[bit].Add(i);
++            }
++        }
++
++        for (var bit = 0; bit < ResourceBitCount; bit++)
++        {
++            var resource = (SystemRenderResource)(1u << bit);
++            var resourceReaders = readers[bit];
++            var resourceWriters = writers[bit];
++
++            for (var writerIndex = 1; writerIndex < resourceWriters.Count; writerIndex++)
++                AddEdge(resourceWriters[writerIndex - 1], resourceWriters[writerIndex]);
++
++            foreach (var reader in resourceReaders)
++            {
++                var previousWriter = -1;
++                var nextWriter = -1;
++                foreach (var writer in resourceWriters)
++                {
++                    if (writer < reader)
++                        previousWriter = writer;
++                    else if (writer > reader)
++                    {
++                        nextWriter = writer;
++                        break;
++                    }
++                }
++
++                if (previousWriter >= 0)
++                {
++                    AddEdge(previousWriter, reader);
++                    if (nextWriter >= 0)
++                        AddEdge(reader, nextWriter);
++                    continue;
++                }
++
++                if ((externalResources & resource) != 0)
++                {
++                    if (nextWriter >= 0)
++                        AddEdge(reader, nextWriter);
++                    continue;
++                }
++                if (nextWriter >= 0)
++                {
++                    AddEdge(nextWriter, reader);
++                    continue;
++                }
++
++                var node = nodes[reader];
++                var optionalReads = node.Pass is { } pass
++                    ? SystemRenderPasses.Get(pass).OptionalReads
++                    : SystemRenderResource.None;
++                if ((node.RequiredReads & resource) == 0 && (optionalReads & resource) != 0)
++                    continue;
++                throw new InvalidOperationException(
++                    $"Render graph node '{node.Name}' reads resource '{resource}' without a producer.");
++            }
++        }
++
++        for (var step = 0; step < count; step++)
++        {
++            var next = -1;
++            for (var i = 0; i < count; i++)
++            {
++                if (executed[i] || indegree[i] != 0)
++                    continue;
++                if (next < 0 || nodes[i].Priority < nodes[next].Priority ||
++                    (nodes[i].Priority == nodes[next].Priority && i < next))
++                    next = i;
++            }
++            if (next < 0)
++                throw new InvalidOperationException("Render graph contains a dependency cycle.");
++            nodes[next].Execute();
++            executed[next] = true;
++            for (var i = 0; i < count; i++)
++                if (edges[next, i]) indegree[i]--;
++        }
++    }
++
++    private void EnsureCapacity(int required)
++    {
++        if (required <= indegree.Length)
++            return;
++
++        var capacity = Math.Max(required, checked(indegree.Length * 2));
++        edges = new bool[capacity, capacity];
++        Array.Resize(ref indegree, capacity);
++        Array.Resize(ref executed, capacity);
++        foreach (var resourceReaders in readers)
++            resourceReaders.Capacity = Math.Max(resourceReaders.Capacity, capacity);
++        foreach (var resourceWriters in writers)
++            resourceWriters.Capacity = Math.Max(resourceWriters.Capacity, capacity);
++    }
++
++    public static string Name(SystemRenderPass pass) => SystemRenderPasses.Get(pass).Name;
+ }
+ 
+ public enum SystemRenderSubpass
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -71,6 +71,7 @@
+         private ResourceManager resman;
+         private IGpuTimerQuery?[]? gpuPassQueries;
+         private readonly SystemRenderPassExecution activeFramePasses = new();
++        private readonly SystemRenderPassGraph framePassGraph = new();
+         private readonly SystemRenderSubpassExecution activeFrameSubpasses = new();
+         private bool subpassResourcesInitialized;
+         private long nextGpuProfileFrame;
+@@ -587,6 +588,7 @@
+                 // the caller's current target (which may be the screen).
+                 RenderTarget? sceneTarget = rstate.RenderTarget;
+                 activeFramePasses.Reset();
++                framePassGraph.Reset();
+                 subpassResourcesInitialized = false;
+                 if (Settings.RenderSoftParticles && Settings.RenderParticleEffects &&
+                     (msaa?.SsaoDepthTarget != null || softParticleDepthTarget != null))
+@@ -661,279 +663,300 @@
+                 QuadBuffer.EndUpload();
+                 Commands.BonesBuffer.EndStreaming(Commands.BonesMax);
+ 
+-                // OpenGL clears respect the active write masks. The renderer
+-                // owns these attachments for the frame and restores caller
+-                // state in the outer finally block.
+-                rstate.ColorWrite = true;
+-                rstate.DepthWrite = true;
+-                ExecuteGpuPass(SystemRenderPass.FrameClear, sceneTarget, () =>
+-                {
+-                    if (transitioned)
+-                    {
+-                        // Fully in fog. Skip Starsphere
+-                        rstate.ClearColor = nr!.Nebula.FogColor;
+-                        rstate.ClearAll();
+-                    }
+-                    else
+-                    {
+-                        rstate.ClearColor =
+-                            BackgroundOverride ??
+-                            starSystem?.BackgroundColor ??
+-                            NullColor;
+-                        rstate.ClearAll();
+-                    }
+-                });
+-
+-                DebugRenderer.StartFrame(rstate);
+-                Commands.StartFrame(rstate);
+-                FxPool.StartFrame(camera);
+-                Polyline.StartFrame();
+-                rstate.DepthEnabled = true;
+-                // Optimisation for dictionary lookups
+-                LightEquipRenderer.FrameStart();
+-                // Clear depth buffer for game objects
+-                billboards.Begin(camera, Commands);
+-                SystemLighting.NumberOfTilesX = -1;
+                 var sampleableSceneDepth = ssaoActive ? msaa?.SsaoDepthTarget : null;
+                 sampleableSceneDepth ??= softParticlesActive ? softParticleDepthTarget : null;
+-                if (sampleableSceneDepth is { } sceneDepthTarget)
+-                {
+-                    var savedTarget = rstate.RenderTarget;
+-                    var savedColorWrite = rstate.ColorWrite;
+-                    var savedDepthEnabled = rstate.DepthEnabled;
+-                    var savedDepthWrite = rstate.DepthWrite;
+-                    var savedDepthFunction = rstate.DepthFunction;
+-                    var ssaoViewportPushed = false;
+-                    var ssaoScissorPushed = false;
+-                    try
+-                    {
+-                        rstate.PushViewport(new Rectangle(0, 0, renderWidth, renderHeight));
+-                        ssaoViewportPushed = true;
+-                        ssaoScissorPushed = rstate.PushScissor(new Rectangle(0, 0, renderWidth, renderHeight), false);
+-                        rstate.RenderTarget = sceneDepthTarget;
+-                        rstate.SetCamera(camera);
+-                        Commands.Camera = camera;
+-                        rstate.DepthEnabled = true;
+-                        rstate.DepthWrite = true;
+-                        rstate.DepthFunction = DepthFunction.Less;
+-                        rstate.ColorWrite = false;
+-                        rstate.ClearDepth();
+-                        var depthPass = ssaoActive
+-                            ? SystemRenderPass.SsaoDepthPrepass
+-                            : SystemRenderPass.ParticleDepthPrepass;
+-                        ValidateSampleableDepthTarget(depthPass, sceneDepthTarget);
+-                        ExecuteGpuPass(depthPass, sceneDepthTarget, () =>
++                var frameSetup = "Frame setup";
++                var opaqueHook = "Opaque hook";
++                var shadowMapReady = false;
++
++                framePassGraph.AddPass(SystemRenderPass.FrameClear, () =>
++                {
++                    // OpenGL clears respect active write masks. The renderer owns
++                    // these attachments for the frame and restores caller state later.
++                    rstate.ColorWrite = true;
++                    rstate.DepthWrite = true;
++                    ExecuteGpuPass(SystemRenderPass.FrameClear, sceneTarget, () =>
++                    {
++                        if (transitioned)
+                         {
+-                            Commands.DepthOnlyPass = true;
+-                            try
+-                            {
+-                                foreach (var obj in objects) obj.DepthPrepass(camera, Commands, SystemLighting, nr!);
+-                            }
+-                            finally { Commands.DepthOnlyPass = false; }
+-                        });
+-                    }
+-                    finally
+-                    {
+-                        Commands.DepthOnlyPass = false;
+-                        rstate.ColorWrite = savedColorWrite;
+-                        rstate.DepthEnabled = savedDepthEnabled;
+-                        rstate.DepthWrite = savedDepthWrite;
+-                        rstate.DepthFunction = savedDepthFunction;
+-                        rstate.SetCamera(camera);
+-                        Commands.Camera = camera;
+-                        if (ssaoScissorPushed) rstate.PopScissor();
+-                        if (ssaoViewportPushed) rstate.PopViewport();
+-                        rstate.RenderTarget = savedTarget;
+-                    }
+-                }
+-                if (Settings.RenderDepthPrepass)
+-                {
+-                    rstate.ColorWrite = false;
+-                    rstate.DepthFunction = DepthFunction.Less;
+-                    ExecuteGpuPass(SystemRenderPass.DepthPrepass, sceneTarget, () =>
+-                    {
+-                        Commands.DepthOnlyPass = true;
+-                        try
+-                        {
+-                            foreach (var obj in objects) obj.DepthPrepass(camera, Commands, SystemLighting, nr!);
+-                        }
+-                        finally { Commands.DepthOnlyPass = false; }
+-                    });
+-                    rstate.DepthFunction = DepthFunction.LessEqual;
+-                    rstate.ColorWrite = true;
+-                }
+-                else
+-                {
+-                    rstate.DepthFunction = DepthFunction.Less;
+-                    rstate.ColorWrite = true;
+-                }
+-                var shadowMapReady = DrawShadowMap();
+-                RenderMaterial.VertexLighting = !(AllowPerPixelLighting && Settings.PerPixelLighting) && !shadowMapReady;
+-                // Actual Drawing
+-
+-                ExecuteGpuPass(SystemRenderPass.Opaque, sceneTarget, () =>
+-                {
+-                    Beams.Begin(Commands, resman, camera);
+-
+-                    foreach (var obj in objects)
+-                    {
+-                        obj.Draw(camera, Commands, SystemLighting, nr!);
+-                    }
+-
+-                    Beams.End();
+-                    for (var i = 0; i < AsteroidFields!.Count; i++)
+-                        AsteroidFields[i].Draw(resman, SystemLighting, Commands, nr!);
+-
+-                    if (DrawNebulae)
+-                    {
+-                        if (nr == null)
+-                        {
+-                            foreach (var nebula in Nebulae)
+-                            {
+-                                nebula.Draw(Commands);
+-                            }
++                            rstate.ClearColor = nr!.Nebula.FogColor;
++                            rstate.ClearAll();
+                         }
+                         else
+                         {
+-                            nr.Draw(Commands);
++                            rstate.ClearColor = BackgroundOverride ?? starSystem?.BackgroundColor ?? NullColor;
++                            rstate.ClearAll();
+                         }
+-                    }
+-
+-                    billboards.End();
+-                    FxPool.EndFrame();
+-                    Polyline.EndFrame();
++                    });
++                });
++
++                framePassGraph.AddAction(frameSetup, () =>
++                {
++                    DebugRenderer.StartFrame(rstate);
++                    Commands.StartFrame(rstate);
++                    FxPool.StartFrame(camera);
++                    Polyline.StartFrame();
+                     rstate.DepthEnabled = true;
+-                    Commands.DrawOpaque(rstate);
+-                });
+-
+-                if ((!transitioned || !DrawNebulae) && DrawStarsphere)
+-                {
+-                    ExecuteGpuPass(SystemRenderPass.StarsAndNebula, sceneTarget, () =>
+-                    {
+-                    // Starsphere
+-                    rstate.DepthRange = new Vector2(1, 1);
+-
+-                    if (camera is ThnCamera thn && !ZOverride)
+-                    {
+-                        thnDefaultZActive = true;
+-                        thn.DefaultZ();
+-                        rstate.SetCamera(thn);
+-                    }
+-
+-                    for (var i = 0; i < StarSphereModels.Length; i++)
+-                    {
+-                        Matrix4x4 ssworld = Matrix4x4.CreateTranslation(camera.Position);
+-
+-                        if (StarSphereWorlds != null)
++                    LightEquipRenderer.FrameStart();
++                    billboards.Begin(camera, Commands);
++                    SystemLighting.NumberOfTilesX = -1;
++                }, priority: 1, SystemRenderPassGraph.Name(SystemRenderPass.FrameClear));
++
++                if (sampleableSceneDepth is { } sceneDepthTarget)
++                {
++                    var depthPass = ssaoActive
++                        ? SystemRenderPass.SsaoDepthPrepass
++                        : SystemRenderPass.ParticleDepthPrepass;
++                    framePassGraph.AddPass(depthPass, () =>
++                    {
++                        var savedTarget = rstate.RenderTarget;
++                        var savedColorWrite = rstate.ColorWrite;
++                        var savedDepthEnabled = rstate.DepthEnabled;
++                        var savedDepthWrite = rstate.DepthWrite;
++                        var savedDepthFunction = rstate.DepthFunction;
++                        var ssaoViewportPushed = false;
++                        var ssaoScissorPushed = false;
++                        try
+                         {
+-                            ssworld = StarSphereWorlds[i] * ssworld;
++                            rstate.PushViewport(new Rectangle(0, 0, renderWidth, renderHeight));
++                            ssaoViewportPushed = true;
++                            ssaoScissorPushed = rstate.PushScissor(
++                                new Rectangle(0, 0, renderWidth, renderHeight), false);
++                            rstate.RenderTarget = sceneDepthTarget;
++                            rstate.SetCamera(camera);
++                            Commands.Camera = camera;
++                            rstate.DepthEnabled = true;
++                            rstate.DepthWrite = true;
++                            rstate.DepthFunction = DepthFunction.Less;
++                            rstate.ColorWrite = false;
++                            rstate.ClearDepth();
++                            ValidateSampleableDepthTarget(depthPass, sceneDepthTarget);
++                            ExecuteGpuPass(depthPass, sceneDepthTarget, () =>
++                            {
++                                Commands.DepthOnlyPass = true;
++                                try
++                                {
++                                    foreach (var obj in objects)
++                                        obj.DepthPrepass(camera, Commands, SystemLighting, nr!);
++                                }
++                                finally { Commands.DepthOnlyPass = false; }
++                            });
+                         }
+-
+-                        var lighting = Lighting.Empty;
+-
+-                        if (StarSphereLightings != null)
++                        finally
+                         {
+-                            lighting = StarSphereLightings[i];
++                            Commands.DepthOnlyPass = false;
++                            rstate.ColorWrite = savedColorWrite;
++                            rstate.DepthEnabled = savedDepthEnabled;
++                            rstate.DepthWrite = savedDepthWrite;
++                            rstate.DepthFunction = savedDepthFunction;
++                            rstate.SetCamera(camera);
++                            Commands.Camera = camera;
++                            if (ssaoScissorPushed) rstate.PopScissor();
++                            if (ssaoViewportPushed) rstate.PopViewport();
++                            rstate.RenderTarget = savedTarget;
+                         }
+-
+-                        // We frustum cull to save on fill rate for low end devices (pi)
+-                        var mdl = StarSphereModels[i];
+-
+-                        foreach (var part in mdl.AllParts)
++                    }, SystemRenderResource.None, frameSetup);
++                }
++
++                if (Settings.RenderDepthPrepass)
++                {
++                    framePassGraph.AddPass(SystemRenderPass.DepthPrepass, () =>
++                    {
++                        rstate.ColorWrite = false;
++                        rstate.DepthFunction = DepthFunction.Less;
++                        try
+                         {
+-                            if (!part.Active || part.Mesh == null)
++                            ExecuteGpuPass(SystemRenderPass.DepthPrepass, sceneTarget, () =>
+                             {
+-                                continue;
++                                Commands.DepthOnlyPass = true;
++                                try
++                                {
++                                    foreach (var obj in objects)
++                                        obj.DepthPrepass(camera, Commands, SystemLighting, nr!);
++                                }
++                                finally { Commands.DepthOnlyPass = false; }
++                            });
++                        }
++                        finally
++                        {
++                            rstate.DepthFunction = DepthFunction.LessEqual;
++                            rstate.ColorWrite = true;
++                        }
++                    }, SystemRenderResource.None, frameSetup);
++                }
++                else
++                {
++                    framePassGraph.AddAction("Depth state", () =>
++                    {
++                        rstate.DepthFunction = DepthFunction.Less;
++                        rstate.ColorWrite = true;
++                    }, priority: 3, frameSetup);
++                }
++
++                if (Settings.RenderShadows)
++                {
++                    framePassGraph.AddPass(SystemRenderPass.ShadowMap,
++                        () => shadowMapReady = DrawShadowMap(), SystemRenderResource.None, frameSetup);
++                }
++                else
++                {
++                    framePassGraph.AddAction(SystemRenderPassGraph.Name(SystemRenderPass.ShadowMap),
++                        () => shadowMapReady = DrawShadowMap(), priority: 6, frameSetup);
++                }
++
++                framePassGraph.AddPass(SystemRenderPass.Opaque, () =>
++                {
++                    RenderMaterial.VertexLighting =
++                        !(AllowPerPixelLighting && Settings.PerPixelLighting) && !shadowMapReady;
++                    ExecuteGpuPass(SystemRenderPass.Opaque, sceneTarget, () =>
++                    {
++                        Beams.Begin(Commands, resman, camera);
++                        foreach (var obj in objects)
++                            obj.Draw(camera, Commands, SystemLighting, nr!);
++                        Beams.End();
++                        for (var i = 0; i < AsteroidFields!.Count; i++)
++                            AsteroidFields[i].Draw(resman, SystemLighting, Commands, nr!);
++                        if (DrawNebulae)
++                        {
++                            if (nr == null)
++                            {
++                                foreach (var nebula in Nebulae)
++                                    nebula.Draw(Commands);
+                             }
+-
+-                            var p = part;
+-                            var w = p.LocalTransform.Matrix() * ssworld;
+-                            var bsphere = new BoundingSphere(Vector3.Transform(p.Mesh!.Center, w), p.Mesh.Radius);
+-
+-                            if (camera.FrustumCheck(bsphere))
++                            else nr.Draw(Commands);
++                        }
++                        billboards.End();
++                        FxPool.EndFrame();
++                        Polyline.EndFrame();
++                        rstate.DepthEnabled = true;
++                        Commands.DrawOpaque(rstate);
++                    });
++                }, SystemRenderResource.None, frameSetup);
++
++                var drawStars = (!transitioned || !DrawNebulae) && DrawStarsphere;
++                if (drawStars)
++                {
++                    framePassGraph.AddPass(SystemRenderPass.StarsAndNebula, () =>
++                    {
++                        ExecuteGpuPass(SystemRenderPass.StarsAndNebula, sceneTarget, () =>
++                        {
++                            rstate.DepthRange = new Vector2(1, 1);
++                            if (camera is ThnCamera thn && !ZOverride)
+                             {
+-                                p.Mesh.DrawImmediate(0, resman, rstate, w, ref lighting, mdl.MaterialAnims,
+-                                    BasicMaterial.ForceAlpha);
++                                thnDefaultZActive = true;
++                                thn.DefaultZ();
++                                rstate.SetCamera(thn);
+                             }
+-                        }
+-                    }
+-
+-                    if (camera is ThnCamera thn2 && !ZOverride)
+-                    {
+-                        thn2.CameraZ();
+-                        thnDefaultZActive = false;
+-                        rstate.SetCamera(thn2);
+-                    }
+-
+-                    if (nr != null && DrawNebulae)
+-                    {
+-                        nr.RenderFogTransition(rstate);
+-                    }
+-
+-                    rstate.DepthRange = new Vector2(0, 1);
+-                    });
+-                }
+-
+-                OpaqueHook?.Invoke();
+-                // Transparent Pass
+-                rstate.DepthWrite = false;
+-                RenderMaterial.ParticleSceneDepthTexture = softParticlesActive ? sampleableSceneDepth?.Texture : null;
+-                RenderMaterial.ParticleSoftness = Settings.SoftParticleDistance;
+-                try
+-                {
+-                    ExecuteGpuPass(SystemRenderPass.Transparent, sceneTarget, () => Commands.DrawTransparent(rstate));
+-                }
+-                finally
+-                {
+-                    RenderMaterial.ParticleSceneDepthTexture = null;
+-                    RenderMaterial.ParticleSoftness = 0f;
+-                }
++                            for (var i = 0; i < StarSphereModels.Length; i++)
++                            {
++                                Matrix4x4 ssworld = Matrix4x4.CreateTranslation(camera.Position);
++                                if (StarSphereWorlds != null)
++                                    ssworld = StarSphereWorlds[i] * ssworld;
++                                var lighting = StarSphereLightings != null
++                                    ? StarSphereLightings[i]
++                                    : Lighting.Empty;
++                                var mdl = StarSphereModels[i];
++                                foreach (var part in mdl.AllParts)
++                                {
++                                    if (!part.Active || part.Mesh == null)
++                                        continue;
++                                    var p = part;
++                                    var w = p.LocalTransform.Matrix() * ssworld;
++                                    var bsphere = new BoundingSphere(
++                                        Vector3.Transform(p.Mesh!.Center, w), p.Mesh.Radius);
++                                    if (camera.FrustumCheck(bsphere))
++                                        p.Mesh.DrawImmediate(0, resman, rstate, w, ref lighting,
++                                            mdl.MaterialAnims, BasicMaterial.ForceAlpha);
++                                }
++                            }
++                            if (camera is ThnCamera thn2 && !ZOverride)
++                            {
++                                thn2.CameraZ();
++                                thnDefaultZActive = false;
++                                rstate.SetCamera(thn2);
++                            }
++                            if (nr != null && DrawNebulae)
++                                nr.RenderFogTransition(rstate);
++                            rstate.DepthRange = new Vector2(0, 1);
++                        });
++                    }, SystemRenderResource.None, frameSetup);
++                }
++
++                framePassGraph.AddAction(opaqueHook, () => OpaqueHook?.Invoke(), priority: 11,
++                    SystemRenderPassGraph.Name(drawStars ? SystemRenderPass.StarsAndNebula : SystemRenderPass.Opaque));
++                var softParticleReads = Settings.RenderSoftParticles && Settings.RenderParticleEffects &&
++                                        sampleableSceneDepth != null
++                    ? SystemRenderResource.SampleableSceneDepth
++                    : SystemRenderResource.None;
++                framePassGraph.AddPass(SystemRenderPass.Transparent, () =>
++                {
++                    rstate.DepthWrite = false;
++                    RenderMaterial.ParticleSceneDepthTexture = softParticlesActive ? sampleableSceneDepth?.Texture : null;
++                    RenderMaterial.ParticleSoftness = Settings.SoftParticleDistance;
++                    try
++                    {
++                        ExecuteGpuPass(SystemRenderPass.Transparent, sceneTarget,
++                            () => Commands.DrawTransparent(rstate));
++                    }
++                    finally
++                    {
++                        RenderMaterial.ParticleSceneDepthTexture = null;
++                        RenderMaterial.ParticleSoftness = 0f;
++                    }
++                }, softParticleReads, opaqueHook);
++
++                var physicsHook = "Physics hook";
++                var debugOverlay = "Debug overlay";
++                framePassGraph.AddAction(physicsHook, () =>
++                {
++                    rstate.DepthWrite = true;
++                    rstate.DepthEnabled = true;
++                    PhysicsHook?.Invoke();
++                }, priority: 13, SystemRenderPassGraph.Name(SystemRenderPass.Transparent));
++
++                framePassGraph.AddAction(debugOverlay, () =>
++                {
++                    foreach (var point in debugPoints)
++                    {
++                        var lX = point + new Vector3(5, 0, 0);
++                        var lmX = point + new Vector3(-5, 0, 0);
++                        var lY = point + new Vector3(0, -5, 0);
++                        var lmY = point + new Vector3(0, 5, 0);
++                        var lZ = point + new Vector3(0, 0, 5);
++                        var lmZ = point + new Vector3(0, 0, -5);
++                        DebugRenderer.DrawLine(lX, lmX, Color4.Red);
++                        DebugRenderer.DrawLine(lY, lmY, Color4.Red);
++                        DebugRenderer.DrawLine(lZ, lmZ, Color4.Red);
++                    }
++
++                    foreach (var line in debugLines)
++                        DebugRenderer.DrawLine(line.Start, line.End, line.Color);
++
++                    debugPoints = [];
++                    debugLines = [];
++                    DebugRenderer.Render();
++                }, priority: 14, physicsHook);
++
++                if (msaa is { } antialiasTarget)
++                {
++                    framePassGraph.AddAction("AA resolve", () =>
++                    {
++                        aaViewportPushed = false;
++                        rstate.PopViewport();
++                        aaScissorPushed = false;
++                        rstate.PopScissor();
++
++                        if (restoreTarget == null)
++                            antialiasTarget.BlitToScreen(new Point(rstate.CurrentViewport.X, rstate.CurrentViewport.Y));
++                        else
++                            antialiasTarget.BlitToRenderTarget((restoreTarget as RenderTarget2D)!);
++
++                        rstate.RenderTarget = restoreTarget;
++                    }, priority: 15, debugOverlay);
++                }
++
++                framePassGraph.Execute();
+                 activeFramePasses.CompleteFrame();
+-                rstate.DepthWrite = true;
+-                rstate.DepthEnabled = true;
+-                PhysicsHook?.Invoke();
+-
+-                foreach (var point in debugPoints)
+-                {
+-                    var lX = point + new Vector3(5, 0, 0);
+-                    var lmX = point + new Vector3(-5, 0, 0);
+-                    var lY = point + new Vector3(0, -5, 0);
+-                    var lmY = point + new Vector3(0, 5, 0);
+-                    var lZ = point + new Vector3(0, 0, 5);
+-                    var lmZ = point + new Vector3(0, 0, -5);
+-                    DebugRenderer.DrawLine(lX, lmX, Color4.Red);
+-                    DebugRenderer.DrawLine(lY, lmY, Color4.Red);
+-                    DebugRenderer.DrawLine(lZ, lmZ, Color4.Red);
+-                }
+-
+-                foreach (var line in debugLines)
+-                {
+-                    DebugRenderer.DrawLine(line.Start, line.End, line.Color);
+-                }
+-
+-                debugPoints = [];
+-                debugLines = [];
+-                DebugRenderer.Render();
+-
+-                if (msaa != null)
+-                {
+-                    aaViewportPushed = false;
+-                    rstate.PopViewport();
+-                    aaScissorPushed = false;
+-                    rstate.PopScissor();
+-
+-                    if (restoreTarget == null)
+-                    {
+-                        msaa?.BlitToScreen(new Point(rstate.CurrentViewport.X, rstate.CurrentViewport.Y));
+-                    }
+-                    else
+-                    {
+-                        msaa?.BlitToRenderTarget((restoreTarget as RenderTarget2D)!);
+-                    }
+-
+-                    rstate.RenderTarget = restoreTarget;
+-                }
+-
+                 if (subpassResourcesInitialized)
+                     activeFrameSubpasses.CompleteFrame();
+                 rstate.DepthEnabled = true;
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -58,7 +58,7 @@
+     GPU-Bindungen geprüft. Caller-Outputformat, Treiber-internal-format-Abfrage und API-Laufzeitprüfung
+     der Load-/Store-Angaben bleiben offen. Siehe
+     [Target-Attachment-Audit](evidence/renderer/render-target-attachment-contract-20261016.md).
+-  - [x] Bestehende Forward-Aufrufreihenfolge, Opaque-/Transparent-Kommandos, Sterne, Nebel und AA-Resolve im Quellcode erfasst. Der Depth-Prepass-Metadatavertrag ist als optional markiert und liest/schreibt nur SceneDepth; er beansprucht keinen Szenenfarb-Read oder Color-Attachment. Die Metadaten sind noch kein ausführbarer Render Graph. Siehe [Pass-Reihenfolge-Audit](evidence/renderer/forward-pass-order-audit-20261015.md).
++  - [x] Bestehende Forward-Aufrufreihenfolge, Opaque-/Transparent-Kommandos, Sterne, Nebel und AA-Resolve im Quellcode erfasst. Der Depth-Prepass-Metadatavertrag ist als optional markiert und liest/schreibt nur SceneDepth; er beansprucht keinen Szenenfarb-Read oder Color-Attachment. Der damals manuelle Hauptpass-Ablauf wurde inzwischen durch den darunter dokumentierten Callback-Scheduler ergänzt. Siehe [Pass-Reihenfolge-Audit](evidence/renderer/forward-pass-order-audit-20261015.md).
+   - [x] Samplebare Tiefentextur als eigenen Graph-Ressourcentyp vom aktiven Szenen-Tiefenattachment getrennt. SSAO und Soft Particles deklarieren und validieren den DepthTexture-Passausgang beim realen Target-Binding; SSAO deklariert dieselbe Ressource als Quelle. Der restliche Main-Pass-Ablauf ist weiterhin manuell gesteuert.
+   - [x] Laufzeitvalidierung an die tatsächlichen Hauptpass-Aufrufe gebunden: pro Frame werden Reihenfolge, doppelte/fehlende Begin-End-Paare und Pflichtressourcen geprüft; optionale Szene-Tiefe und Schatten bleiben ausdrücklich optional. Der wiederverwendete Validator speichert ausgeführte Pässe als Bitmaske. Render-Befehle und Targetwechsel werden weiterhin manuell ausgeführt, also noch kein ausführbarer Render Graph.
+   - [x] Laufzeitvalidierung für Postprocess-Subpasses ergänzt: SMAA, SSAO, Bloom und Tonemapping prüfen an ihren tatsächlichen Begin-/End-Aufrufen die Ressourcenabhängigkeiten. Verfügbare Hauptpass-Ressourcen und externe Lookup-/Ausgabeziele bilden den Frame-Anfang; optionale Bloom-Eingaben bleiben für Tonemapping optional. Der Frameabschluss stellt zusätzlich sicher, dass kein Subpass offen blieb. Das prüft Read-before-write und Passpaarung, steuert aber weiterhin keine Befehle oder Targetwechsel. Build- und Laufzeitabnahme stehen aus.
+@@ -67,6 +67,7 @@
+   - [x] Statische Passvertrag-Prüfung verlangt pro Attachment genau eine Ressource und gleicht Store/Resolve-Verhalten mit den deklarierten Writes ab; Resolve ist nur für Color erlaubt. Source-Attachments bleiben Read-Verträge. Die Metadaten steuern weiterhin nicht selbst die API-Aufrufe.
+   - [x] Die statische Passfolgenprüfung wertet optionale Reads wie die Laufzeitprüfung aus und verlangt sie nicht als zwingende Eingaben; so sind sequenzielle Prüfläufe auch ohne optionalen Schatten- oder Tiefenpuffer gültig.
+   - [x] Die Hauptpass-Ausführungsreihenfolge steht jetzt in den typisierten Passdeskriptoren und wird von der Laufzeitprüfung daraus gelesen; ein separater Pass-zu-Order-Switch ist entfernt. Der Draw-Aufruf führt die Passkörper noch manuell aus.
++  - [x] `SystemRenderPassGraph` topologisch sortiert und führt Hauptpässe, Physics-Hook, Debug-Overlay und optionalen AA-/HDR-Resolve anhand deklarierter Read-/Write-Ressourcen und expliziter Abhängigkeiten aus. Ressourcenproduzenten dürfen unabhängig von ihrer Registrierungsreihenfolge stehen; Read-after-write, Write-after-read und Write-after-write werden eingeordnet. Pflicht-Reads ohne Producer, fehlende explizite Vorgänger und Zyklen werden vor Ausführung der Callbacks abgewiesen. Targetwechsel und Attachments bleiben in den Passcallbacks verwaltet; Laufzeit-/Bildabnahme und Messung der verbleibenden Frame-Allokationen stehen offen.
+   - [x] Der Hauptpass-Tracker veröffentlicht nach erfolgreichem Draw nur deklarierte Writes, deren optionale Attachments am konkreten Target vorhanden sind. Fehlende oder unbekannte optionale Anhänge werden nicht als verfügbare Frame-Ressourcen ausgegeben; Targetwechsel und Passplanung bleiben manuell.
+   - [x] Gebundene Backend-Renderziele stellen Farb-/Tiefen-/Stencil-Präsenz und ein bekanntes Farbformat bereit. `SystemRenderer` weist Ziele zurück, denen laut Passvertrag zwingende Anhänge fehlen; GL-MSAA meldet das Farbformat nur für bekannte sized-Formate. Swapchainformat und Desktop-GLs unsized-MSAA-Storage bleiben unbekannt.
+   - [x] `AntialiasTarget` prüft beim Erzeugen die tatsächlichen aktiven Farb-/Tiefenattachments und für SMAA auch Stencil an Kanten- und Gewichtsziel; bekannte Zielformate müssen dem gewählten LDR-/HDR-Pfad entsprechen. Unbekanntes Desktop-MSAA-Format bleibt zulässig und wird nicht geraten.
+diff --git a/docs/evidence/renderer/forward-pass-order-audit-20261015.md b/docs/evidence/renderer/forward-pass-order-audit-20261015.md
+--- a/docs/evidence/renderer/forward-pass-order-audit-20261015.md
++++ b/docs/evidence/renderer/forward-pass-order-audit-20261015.md
+@@ -42,8 +42,17 @@
+ Die Zeitmessung umfasst GPU-Arbeit innerhalb dieses Blocks, nicht CPU-Update-
+ oder Vorbereitungszeit. Die typisierten IDs steuern die Query-Slots; die
+ Deskriptoren halten zusätzlich abstrakte Farb-/Tiefenressourcen fest. Stars/Nebel
+-und Resolve sind bedingt. Die Angaben sind ein Startvertrag für den bestehenden
+-Forward-Pfad und werden nicht automatisch ausgeführt oder validiert.
++und Resolve sind bedingt. Der Hauptpfad wird inzwischen über
++`SystemRenderPassGraph` von Frame-Clear bis zum optionalen AA-/HDR-Resolve
++geplant und ausgeführt. Dazwischen liegen Opaque-/Transparent-Pässe,
++`PhysicsHook` und Debug-Overlay als abhängige Aktionen. Der Graph leitet Abhängigkeiten
++aus Ressourcen-Reads/Writes ab, auch wenn ein Producer später registriert ist;
++Read-after-write, Write-after-read und Write-after-write werden geordnet.
++Pflicht-Reads, explizite Vorgänger und Zyklen werden vor Ausführung der
++Callbacks geprüft. Die Callbacks verwalten
++weiterhin RenderTarget-Wechsel, Attachments und RenderContext-Zustand; der Graph
++bindet oder erzeugt keine GPU-Ziele. Eine Laufzeit-/Bildabnahme und Messung der
++Scheduler-Allokationen fehlen weiterhin.
+ 
+ ## Was für einen vollständigen Render-Graph-Vertrag noch fehlt
+ 
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 265 Client bundles and two native bundles. Each
++The active series contains 271 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -233,3 +233,4 @@
+ | 2269 | Validate attachment store operations against pass resource declarations |
+ | 2270 | Align static pass validation with optional resource reads |
+ | 2271 | Declare system pass execution order in the pass descriptors |
++| 2272 | Schedule and execute main SystemRenderer passes as a reusable dependency graph |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -271,3 +271,4 @@
+ client 2269-validate-attachment-store-contracts.patch
+ client 2270-align-static-optional-read-validation.patch
+ client 2271-declare-system-pass-order.patch
++client 2272-execute-main-pass-graph.patch

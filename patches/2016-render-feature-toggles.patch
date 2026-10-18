@@ -1,0 +1,201 @@
+diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -678,6 +678,8 @@
+ `--render-generated-tangents=on|off`,
+ `--render-surface-profile=original|minimal|standard|full`,
+ `--render-per-pixel-lighting=on|off`,
++`--render-dynamic-lighting=on|off`, `--render-nebulae=off|on` und
++`--render-starsphere=off|on`,
+ `--render-antialias=none|smaa-low|smaa-medium|smaa-high|smaa-ultra|msaa-2x|msaa-4x|msaa-8x`
+ und `--render-anisotropy=0|2|4|8|16`. Nicht unterstützte AA- und
+ Anisotropiewerte werden nach der Backend-Erkennung automatisch deaktiviert.
+@@ -687,6 +689,14 @@
+ Beispiele:
+ 
+ ```sh
+-lancer client.ini --render-normal-maps=on --render-antialias=smaa-high
+-lancer client.ini --render-generated-tangents=off --render-anisotropy=0
++lancer client.ini --render-normal-maps=on --render-dynamic-lighting=off
++lancer client.ini --render-nebulae=off --render-starsphere=on --render-antialias=smaa-high
+ ```
++
++
++Der Material-Probe-Lauf im FP7-Intro fand 73 aufgelöste Surface-Bindings und
++35 tatsächlich gezeichnete Normalmaps. Sichtbar gebundene Beispiele sind
++`g_fighter01` und `g_fighter03`; die Shaderpfade erhalten Map-Referenz,
++UV-Kanal und Stärke. Die Testinstrumentierung wurde nach dem Lauf entfernt.
++Offen bleiben ein fixes Ingame-A/B mit einer gezielt ausgewählten sichtbaren
++Retail-Textur sowie die CPU-/GPU-Zeitmessung.
+diff --git a/src/LibreLancer/GameSettings.cs b/src/LibreLancer/GameSettings.cs
+index 97cb0b8..5341023 100644
+--- a/src/LibreLancer/GameSettings.cs
++++ b/src/LibreLancer/GameSettings.cs
+@@ -43,6 +43,12 @@ namespace LibreLancer
+         public bool Debug = false;
+         [Entry("per_pixel_lighting")]
+         public bool PerPixelLighting = true;
++        [Entry("dynamic_lighting")]
++        public bool DynamicLighting = true;
++        [Entry("render_nebulae")]
++        public bool RenderNebulae = true;
++        [Entry("render_starsphere")]
++        public bool RenderStarsphere = true;
+ 
+         [WattleScriptHidden]
+         public SurfaceMapProfile SurfaceProfile = SurfaceMapProfile.Original;
+@@ -74,6 +80,9 @@ namespace LibreLancer
+ 
+         float IRendererSettings.LodMultiplier => LodMultiplier;
+         bool IRendererSettings.PerPixelLighting => PerPixelLighting;
++        bool IRendererSettings.DynamicLighting => DynamicLighting;
++        bool IRendererSettings.RenderNebulae => RenderNebulae;
++        bool IRendererSettings.RenderStarsphere => RenderStarsphere;
+ 
+         int IRendererSettings.SelectedAnisotropy => Anisotropy;
+         TextureFiltering IRendererSettings.SelectedFiltering =>
+@@ -106,6 +115,9 @@ namespace LibreLancer
+             writer.WriteLine($"lod_multiplier = {Fmt(LodMultiplier)}");
+             writer.WriteLine($"debug = {(Debug ? "true" : "false")}");
+             writer.WriteLine($"per_pixel_lighting = {(PerPixelLighting ? "true" : "false")}");
++            writer.WriteLine($"dynamic_lighting = {(DynamicLighting ? "true" : "false")}");
++            writer.WriteLine($"render_nebulae = {(RenderNebulae ? "true" : "false")}");
++            writer.WriteLine($"render_starsphere = {(RenderStarsphere ? "true" : "false")}");
+         }
+ 
+         [WattleScriptHidden]
+@@ -131,7 +143,10 @@ namespace LibreLancer
+                 SurfaceProfile = SurfaceProfile,
+                 SurfaceNormalMapsEnabled = SurfaceNormalMapsEnabled,
+                 SurfaceGeneratedTangentsEnabled = SurfaceGeneratedTangentsEnabled,
+-                PerPixelLighting = PerPixelLighting
++                PerPixelLighting = PerPixelLighting,
++                DynamicLighting = DynamicLighting,
++                RenderNebulae = RenderNebulae,
++                RenderStarsphere = RenderStarsphere
+             };
+ 
+             return gs;
+@@ -156,6 +171,9 @@ namespace LibreLancer
+             SurfaceNormalMapsEnabled = other.SurfaceNormalMapsEnabled;
+             SurfaceGeneratedTangentsEnabled = other.SurfaceGeneratedTangentsEnabled;
+             PerPixelLighting = other.PerPixelLighting;
++            DynamicLighting = other.DynamicLighting;
++            RenderNebulae = other.RenderNebulae;
++            RenderStarsphere = other.RenderStarsphere;
+         }
+ 
+         public void Validate()
+diff --git a/src/LibreLancer/Render/IRendererSettings.cs b/src/LibreLancer/Render/IRendererSettings.cs
+index 5feda67..960cd13 100644
+--- a/src/LibreLancer/Render/IRendererSettings.cs
++++ b/src/LibreLancer/Render/IRendererSettings.cs
+@@ -9,4 +9,7 @@ public interface IRendererSettings
+     int SelectedAnisotropy { get; }
+     float LodMultiplier { get; }
+     bool PerPixelLighting { get; }
++    bool DynamicLighting => true;
++    bool RenderNebulae => true;
++    bool RenderStarsphere => true;
+ }
+diff --git a/src/LibreLancer/Render/RenderHelpers.cs b/src/LibreLancer/Render/RenderHelpers.cs
+index a04e2d2..68d8472 100644
+--- a/src/LibreLancer/Render/RenderHelpers.cs
++++ b/src/LibreLancer/Render/RenderHelpers.cs
+@@ -28,7 +28,7 @@ namespace LibreLancer.Render
+                 return Lighting.Empty;
+             }
+ 
+-            ldynamic = true;
++			ldynamic = ldynamic && src.DynamicLightsEnabled;
+             var lights = Lighting.Create();
+             lights.Ambient = lambient ? new Color3f(src.Ambient.R, src.Ambient.G, src.Ambient.B) : Color3f.Black;
+             lights.NumberOfTilesX = src.NumberOfTilesX;
+@@ -108,7 +108,7 @@ namespace LibreLancer.Render
+                 lights.FogRange = fogrange;
+             }
+ 
+-            if (lightning == null || src.NumberOfTilesX != -1)
++			if (!ldynamic || lightning == null || src.NumberOfTilesX != -1)
+             {
+                 return lights;
+             }
+diff --git a/src/LibreLancer/Render/SystemLighting.cs b/src/LibreLancer/Render/SystemLighting.cs
+index 8e7649b..e42ba6d 100644
+--- a/src/LibreLancer/Render/SystemLighting.cs
++++ b/src/LibreLancer/Render/SystemLighting.cs
+@@ -13,6 +13,7 @@ namespace LibreLancer.Render
+         public int ID = Environment.TickCount;
+ 		public Color4 Ambient = Color4.Black;
+ 		public List<DynamicLight> Lights = [];
++		public bool DynamicLightsEnabled = true;
+ 		public FogModes FogMode = FogModes.None;
+ 		public float FogDensity = 0f;
+ 		public Color4 FogColor = Color4.Black;
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+index decc9d8..997ec18 100644
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -87,6 +87,9 @@ namespace LibreLancer.Render
+         {
+             this.game = game;
+             Settings = game.GetService<IRendererSettings>()!;
++            DrawNebulae = Settings.RenderNebulae;
++            DrawStarsphere = Settings.RenderStarsphere;
++            SystemLighting.DynamicLightsEnabled = Settings.DynamicLighting;
+             billboards = game.GetService<Billboards>()!;
+             Commands = game.GetService<CommandBuffer>()!;
+             this.camera = camera;
+diff --git a/src/lancer/Program.cs b/src/lancer/Program.cs
+index 6bdf95a..1fde68d 100644
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -24,6 +24,9 @@ internal static class MainClass
+             Console.WriteLine("         --render-generated-tangents=on|off");
+             Console.WriteLine("         --render-surface-profile=original|minimal|standard|full");
+             Console.WriteLine("         --render-per-pixel-lighting=on|off");
++            Console.WriteLine("         --render-dynamic-lighting=on|off");
++            Console.WriteLine("         --render-nebulae=on|off");
++            Console.WriteLine("         --render-starsphere=on|off");
+             Console.WriteLine("         --render-antialias=none|smaa-low|smaa-medium|smaa-high|smaa-ultra|msaa-2x|msaa-4x|msaa-8x");
+             Console.WriteLine("         --render-anisotropy=0|2|4|8|16");
+ #if DEBUG
+@@ -165,6 +168,9 @@ internal static class MainClass
+         private bool? generatedTangents;
+         private SurfaceMapProfile? surfaceProfile;
+         private bool? perPixelLighting;
++        private bool? dynamicLighting;
++        private bool? nebulae;
++        private bool? starsphere;
+         private AntialiasMode? antialias;
+         private int? anisotropy;
+ 
+@@ -205,6 +211,18 @@ internal static class MainClass
+                     if (!ParseToggle(out var lighting)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
+                     perPixelLighting = lighting;
+                     return true;
++                case "--render-dynamic-lighting":
++                    if (!ParseToggle(out var dynamicLights)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
++                    dynamicLighting = dynamicLights;
++                    return true;
++                case "--render-nebulae":
++                    if (!ParseToggle(out var drawNebulae)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
++                    nebulae = drawNebulae;
++                    return true;
++                case "--render-starsphere":
++                    if (!ParseToggle(out var drawStarsphere)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
++                    starsphere = drawStarsphere;
++                    return true;
+                 case "--render-surface-profile":
+                     if (Enum.TryParse(value, true, out SurfaceMapProfile profile) && Enum.IsDefined(profile))
+                     {
+@@ -242,6 +260,9 @@ internal static class MainClass
+             if (generatedTangents.HasValue) settings.SurfaceGeneratedTangentsEnabled = generatedTangents.Value;
+             if (surfaceProfile.HasValue) settings.SurfaceProfile = surfaceProfile.Value;
+             if (perPixelLighting.HasValue) settings.PerPixelLighting = perPixelLighting.Value;
++            if (dynamicLighting.HasValue) settings.DynamicLighting = dynamicLighting.Value;
++            if (nebulae.HasValue) settings.RenderNebulae = nebulae.Value;
++            if (starsphere.HasValue) settings.RenderStarsphere = starsphere.Value;
+             if (antialias.HasValue) settings.Antialias = (int)antialias.Value;
+             if (anisotropy.HasValue) settings.Anisotropy = anisotropy.Value;
+         }

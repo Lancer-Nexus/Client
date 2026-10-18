@@ -1,0 +1,299 @@
+From: Lancer Nexus Client overlay
+Subject: [PATCH] Add optional sun-colored ambient lighting
+
+---
+
+diff --git a/src/LibreLancer/Render/SystemLighting.cs b/src/LibreLancer/Render/SystemLighting.cs
+--- a/src/LibreLancer/Render/SystemLighting.cs
++++ b/src/LibreLancer/Render/SystemLighting.cs
+@@ -16,6 +16,8 @@
+         public int ID = Environment.TickCount;
+ 		public Color4 Ambient = Color4.Black;
+ 		public List<DynamicLight> Lights = [];
++		public List<DynamicLight> SunAmbientLights = [];
++		public bool SunAmbientEnabled;
+ 		private readonly List<DynamicLight> frameLights = new(64);
+         private readonly List<float> frameLightPriorities = new(64);
+ 		private bool frameStarted;
+diff --git a/src/LibreLancer/Render/RenderHelpers.cs b/src/LibreLancer/Render/RenderHelpers.cs
+--- a/src/LibreLancer/Render/RenderHelpers.cs
++++ b/src/LibreLancer/Render/RenderHelpers.cs
+@@ -31,6 +31,8 @@
+ 			ldynamic = ldynamic && src.DynamicLightsEnabled;
+             var lights = Lighting.Create();
+             lights.Ambient = lambient ? new Color3f(src.Ambient.R, src.Ambient.G, src.Ambient.B) : Color3f.Black;
++            if (lambient && src.SunAmbientEnabled)
++                lights.Ambient = ApplySunAmbient(src, lightGroup, c, r, lights.Ambient);
+             lights.NumberOfTilesX = src.NumberOfTilesX;
+ 			if (nofog)
+ 			{
+@@ -146,6 +148,70 @@
+             return lights;
+ 		}
+ 
++        private static Color3f ApplySunAmbient(SystemLighting source, int lightGroup,
++            Vector3 center, float radius, Color3f ambient)
++        {
++            const float sunTintBlend = 0.25f;
++            var colorSum = Color3f.Black;
++            var weightSum = 0f;
++            foreach (var dynamicLight in source.SunAmbientLights)
++            {
++                if (!dynamicLight.Active || dynamicLight.LightGroup != lightGroup)
++                    continue;
++
++                var light = dynamicLight.Light;
++                var weight = GetSunAmbientWeight(light, center, radius);
++                if (weight <= 0 || !float.IsFinite(light.Color.R) || !float.IsFinite(light.Color.G) ||
++                    !float.IsFinite(light.Color.B))
++                    continue;
++
++                colorSum += new Color3f(Math.Max(0, light.Color.R), Math.Max(0, light.Color.G),
++                    Math.Max(0, light.Color.B)) * weight;
++                weightSum += weight;
++            }
++
++            if (weightSum <= 0 || !float.IsFinite(weightSum))
++                return ambient;
++
++            var sunColor = colorSum * (1f / weightSum);
++            if (sunColor.R <= 0 && sunColor.G <= 0 && sunColor.B <= 0)
++                return ambient;
++
++            // Blend a bounded sun-colored contribution into the authored ambient.
++            var sunTintedAmbient = ambient * sunColor;
++            return ambient * (1f - sunTintBlend) + sunTintedAmbient * sunTintBlend;
++        }
++
++        private static float GetSunAmbientWeight(RenderLight light, Vector3 center, float radius)
++        {
++            if (light.Kind == LightKind.Directional)
++                return 1f;
++
++            if (!float.IsFinite(light.Range) || light.Range <= 0)
++                return 0;
++            var distance = Math.Max(0, Vector3.Distance(light.Position, center) - Math.Max(0, radius));
++            if (!float.IsFinite(distance) || distance > light.Range)
++                return 0;
++
++            float denominator;
++            if (light.Kind == LightKind.PointAttenCurve)
++            {
++                var normalizedDistance = distance / Math.Max(light.Range, 1);
++                denominator = light.Attenuation.X * normalizedDistance * normalizedDistance +
++                              light.Attenuation.Y * normalizedDistance + light.Attenuation.Z;
++            }
++            else
++            {
++                denominator = light.Attenuation.X + light.Attenuation.Y * distance +
++                              light.Attenuation.Z * distance * distance;
++            }
++
++            if (!float.IsFinite(denominator) || denominator <= 0)
++                return 0;
++            var weight = 1f / denominator;
++            return float.IsFinite(weight) ? weight : 0;
++        }
++
+         internal static float CalculateLightPriority(RenderLight light, Vector3 objectCenter, float objectRadius)
+         {
+             var color = light.Color;
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -166,13 +166,15 @@
+ 
+             foreach (var lt in system.LightSources)
+             {
+-                SystemLighting.Lights.Add(new DynamicLight()
++                var light = new DynamicLight()
+                 {
+                     Light = lt.Light,
+                     BaseColor = lt.Light.Color,
+                     ColorCurve = lt.ColorCurve,
+                     ColorCurvePeriod = lt.ColorCurvePeriod
+-                });
++                };
++                SystemLighting.Lights.Add(light);
++                SystemLighting.SunAmbientLights.Add(light);
+             }
+         }
+ 
+@@ -448,6 +450,7 @@
+                 rstate.AnisotropyLevel = Settings.SelectedAnisotropy;
+                 DrawNebulae = Settings.RenderNebulae;
+                 DrawStarsphere = Settings.RenderStarsphere;
++                SystemLighting.SunAmbientEnabled = Settings.RenderSunAmbient;
+                 var nr = CheckNebulae(); // are we in a nebula?
+                 SystemLighting.DynamicLightsEnabled = Settings.DynamicLighting;
+                 SystemLighting.MaxFrameLights = Settings.DynamicLightBudget;
+diff --git a/src/LibreLancer/Render/IRendererSettings.cs b/src/LibreLancer/Render/IRendererSettings.cs
+--- a/src/LibreLancer/Render/IRendererSettings.cs
++++ b/src/LibreLancer/Render/IRendererSettings.cs
+@@ -15,6 +15,7 @@
+     bool RenderNebulae => true;
+     bool RenderStarsphere => true;
+     bool RenderSunLensGlow => true;
++    bool RenderSunAmbient => false;
+     bool RenderProjectileBeams => true;
+     bool RenderParticleEffects => true;
+     bool RenderTransientEffectLights => true;
+diff --git a/src/LibreLancer/GameSettings.cs b/src/LibreLancer/GameSettings.cs
+--- a/src/LibreLancer/GameSettings.cs
++++ b/src/LibreLancer/GameSettings.cs
+@@ -55,6 +55,8 @@
+         public bool RenderStarsphere = true;
+         [Entry("render_sun_lens_glow")]
+         public bool RenderSunLensGlow = true;
++        [Entry("render_sun_ambient")]
++        public bool RenderSunAmbient = false;
+         [Entry("render_projectile_beams")]
+         public bool RenderProjectileBeams = true;
+         [Entry("render_particle_effects")]
+@@ -108,6 +110,7 @@
+         bool IRendererSettings.RenderNebulae => RenderNebulae;
+         bool IRendererSettings.RenderStarsphere => RenderStarsphere;
+         bool IRendererSettings.RenderSunLensGlow => RenderSunLensGlow;
++        bool IRendererSettings.RenderSunAmbient => RenderSunAmbient;
+         bool IRendererSettings.RenderProjectileBeams => RenderProjectileBeams;
+         bool IRendererSettings.RenderParticleEffects => RenderParticleEffects;
+         bool IRendererSettings.RenderTransientEffectLights => RenderTransientEffectLights;
+@@ -152,6 +155,7 @@
+             writer.WriteLine($"render_nebulae = {(RenderNebulae ? "true" : "false")}");
+             writer.WriteLine($"render_starsphere = {(RenderStarsphere ? "true" : "false")}");
+             writer.WriteLine($"render_sun_lens_glow = {RenderSunLensGlow.ToString().ToLowerInvariant()}");
++            writer.WriteLine($"render_sun_ambient = {RenderSunAmbient.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_projectile_beams = {RenderProjectileBeams.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_particle_effects = {RenderParticleEffects.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_jump_gate_effects = {RenderJumpGateEffects.ToString().ToLowerInvariant()}");
+@@ -191,6 +195,7 @@
+                 RenderNebulae = RenderNebulae,
+                 RenderStarsphere = RenderStarsphere,
+                 RenderSunLensGlow = RenderSunLensGlow,
++                RenderSunAmbient = RenderSunAmbient,
+                 RenderProjectileBeams = RenderProjectileBeams,
+                 RenderParticleEffects = RenderParticleEffects,
+                 RenderJumpGateEffects = RenderJumpGateEffects,
+@@ -228,6 +233,7 @@
+             RenderNebulae = other.RenderNebulae;
+             RenderStarsphere = other.RenderStarsphere;
+             RenderSunLensGlow = other.RenderSunLensGlow;
++            RenderSunAmbient = other.RenderSunAmbient;
+             RenderProjectileBeams = other.RenderProjectileBeams;
+             RenderParticleEffects = other.RenderParticleEffects;
+             RenderJumpGateEffects = other.RenderJumpGateEffects;
+diff --git a/src/lancer/Program.cs b/src/lancer/Program.cs
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -32,6 +32,7 @@
+             Console.WriteLine("         --render-nebulae=on|off");
+             Console.WriteLine("         --render-starsphere=on|off");
+             Console.WriteLine("         --render-sun-lens-glow=on|off");
++            Console.WriteLine("         --render-sun-ambient=on|off");
+             Console.WriteLine("         --render-projectile-beams=on|off");
+             Console.WriteLine("         --render-particle-effects=on|off");
+             Console.WriteLine("         --render-transient-effect-lights=on|off");
+@@ -185,6 +186,7 @@
+         private bool? nebulae;
+         private bool? starsphere;
+         private bool? sunLensGlow;
++        private bool? sunAmbient;
+         private bool? projectileBeams;
+         private bool? particleEffects;
+         private bool? jumpGateEffects;
+@@ -242,6 +244,10 @@
+                     if (!ParseToggle(out var dynamicLights)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
+                     dynamicLighting = dynamicLights;
+                     return true;
++                case "--render-sun-ambient":
++                    if (!ParseToggle(out var sunAmbientEnabled)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
++                    sunAmbient = sunAmbientEnabled;
++                    return true;
+                 case "--render-dynamic-light-budget":
+                     if (int.TryParse(value, out var lightBudget) && lightBudget is 0 or 8 or 16 or 24 or 32)
+                     {
+@@ -335,6 +341,7 @@
+             if (nebulae.HasValue) settings.RenderNebulae = nebulae.Value;
+             if (starsphere.HasValue) settings.RenderStarsphere = starsphere.Value;
+             if (sunLensGlow.HasValue) settings.RenderSunLensGlow = sunLensGlow.Value;
++            if (sunAmbient.HasValue) settings.RenderSunAmbient = sunAmbient.Value;
+             if (projectileBeams.HasValue) settings.RenderProjectileBeams = projectileBeams.Value;
+             if (particleEffects.HasValue) settings.RenderParticleEffects = particleEffects.Value;
+             if (jumpGateEffects.HasValue) settings.RenderJumpGateEffects = jumpGateEffects.Value;
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -163,7 +163,8 @@
+ - [ ] Image-Based Lighting und konsistente Umgebungsreflexionen für den PBR-Pfad prüfen.
+ - [ ] Systemweite Umgebungsbeleuchtung an Farbe und Intensität der jeweiligen Sonne koppeln. Unterschiedliche Sonnenfarben (z. B. grün, rot oder weiß) sollen die diffuse Grundbeleuchtung aller passenden Szenenobjekte konsistent beeinflussen; Datenquelle, Legacy-Fallback und Zusammenspiel mit PBR/IBL anhand reproduzierbarer NAP-Szenen prüfen.
+   - [x] Datenpfad-Audit: Systemambient, persistente `LightSource`-Farben und sichtbare `StarGlow`-Sprites sind getrennt; ein einzelner Farbmittelwert scheitert bei Mehrfachsonnen. Anforderungen und Retail-Gegenproben: [Sonnen-Ambient-Audit](evidence/renderer/sun-colored-ambient-audit-20261015.md).
+-  - [ ] Per Objekt aus persistenten Systemlichtquellen einen farbigen diffusen Sonnenbeitrag bestimmen. `[Ambient]`-Helligkeit, Nebel-/Feld-Ambient und die unveränderte Legacy-Ausgabe bei ausgeschaltetem Schalter erhalten; Blendregel und Intensität vorab anhand weißer, roter, grüner und mehrfacher Sonnen festlegen.
++  - [x] Opt-in Sonnenfarbanteil pro Objekt aus persistenten Systemlichtquellen ergänzt. Der 25%-Beitrag multipliziert das authored Ambient mit dem lokal nach Attenuation gewichteten Lichtfarbmittel; transient effects bleiben ausgeschlossen. `render_sun_ambient` und `--render-sun-ambient=on|off` schalten ihn separat. Siehe [Datenpfad-Audit](evidence/renderer/sun-colored-ambient-audit-20261015.md).
++  - [ ] NAP-A/B für weiße, rote, grüne und mehrfach vorhandene Sonnen aufnehmen; 25%-Blend und distanzgewichtete Farbmischung visuell kalibrieren. Nebelüberschreibung und Legacy-Ausgabe bei ausgeschaltetem Schalter in der Laufzeit prüfen.
+ - [ ] Screen-Space Ambient Occlusion als optionale Ergänzung bewerten; Geometrie- und Nebelartefakte gegen Vanilla-Szenen abgleichen.
+ - [ ] Echtzeit-Schatten (zunächst gerichtete Lichter, Kaskaden und PCF) anhand vorhandener Freelancer-Lichtdaten und der GPU-Kosten bewerten.
+ - [ ] Screen-Space-Reflections als optionale Ergänzung prüfen; fehlende Bildinformation an Bildschirmrändern und bei verdeckten Objekten muss über den bestehenden PBR-Fallback abgefangen werden.
+diff --git a/docs/evidence/renderer/sun-colored-ambient-audit-20261015.md b/docs/evidence/renderer/sun-colored-ambient-audit-20261015.md
+--- a/docs/evidence/renderer/sun-colored-ambient-audit-20261015.md
++++ b/docs/evidence/renderer/sun-colored-ambient-audit-20261015.md
+@@ -14,8 +14,10 @@
+    `SunRenderer` für die sichtbaren Sprites benutzt. Sie speisen `SystemLighting.Ambient` nicht.
+ 
+ Damit kann eine farbige Sonne sichtbar und als direktes Licht farbig sein, während der diffuse
+-Grundanteil unabhängig davon in der System-INI festgelegt bleibt. Der geplante Effekt ist im
+-Renderer nicht implementiert.
++Grundanteil unabhängig davon in der System-INI festgelegt bleibt. Ein opt-in Pfad ist inzwischen
++implementiert: Er mischt 25% des vorhandenen Ambientwerts, multipliziert mit dem lokal
++attentuierten gewichteten Mittel der persistenten Systemlichtfarben, in das Ambient ein. Die
++Option ist standardmäßig aus. Nebula-Ambient wird anschließend wie bisher überschrieben.
+ 
+ ## Gegenproben in der lokalen Retail-Datenreferenz
+ 
+@@ -44,7 +46,8 @@
+ - Nur persistente Systemlichter dürfen den diffusen Sonnenanteil speisen. Kurzlebige Waffen-,
+   Explosions- und Effektlichter dürfen die komplette Szene nicht global einfärben.
+ - Den vorhandenen `[Ambient]`-Wert als authored Helligkeits-/Stimmungsbasis erhalten; der
+-  Sonnenfarbanteil braucht eine explizite Intensität/Blendregel und einen separaten Renderer-Schalter.
++  Sonnenfarbanteil ist auf 25% begrenzt und besitzt einen separaten Renderer-Schalter. Der Wert ist
++  ein vorläufiger Startpunkt und noch nicht visuell kalibriert.
+ - Nebel-Ambient und Feld-Ambient haben eigene Datenpfade. Ihre bisherigen Overrides dürfen nicht
+   versehentlich durch die neue Systemfarbe ersetzt werden.
+ - Legacy-Verhalten muss bei ausgeschaltetem Feature bitgleich bleiben. Weiße Sonne dient als
+@@ -54,6 +57,7 @@
+ 
+ ## Beleggrenzen
+ 
+-Dies ist ein statischer Code- und Retail-INI-Abgleich. Es wurden keine neuen NAP-Laufzeitbilder,
+-GPU-Renderproben oder Retail-Pixelvergleiche für Ambientlicht erstellt. Die Helligkeits-/Blendregel
+-ist bewusst noch nicht festgelegt und muss vor Implementierung samt Legacy-Referenz bestimmt werden.
++Der Codepfad und die Retail-INI-Fälle sind statisch geprüft. Für die neue Mischung gibt es noch
++keine NAP-Laufzeitbilder, GPU-Renderproben oder Retail-Pixelvergleiche. Der Build belegt nur
++Kompilierbarkeit; visuelle Stärke, Mehrfachsonnenübergänge und ausgeschalteter Legacy-Fallback
++brauchen noch Laufzeitabnahme.
+diff --git a/AGENTS.md b/AGENTS.md
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -236,6 +236,7 @@
+   - `--render-nebulae=on|off` → `render_nebulae`.
+   - `--render-starsphere=on|off` → `render_starsphere`.
+   - `--render-sun-lens-glow=on|off` → `render_sun_lens_glow`.
++  - `--render-sun-ambient=on|off` → `render_sun_ambient` (opt-in 25% diffuse tint from locally weighted persistent system-light colors; off by default).
+   - `--render-projectile-beams=on|off` → `render_projectile_beams` (only hides `vis_beam`; simulation and projectile particle effects remain active).
+   - `--render-particle-effects=on|off` → `render_particle_effects` (suppresses particle geometry while effect timing and simulation continue).
+   - `--render-jump-gate-effects=on|off` → `render_jump_gate_effects` (controls the configured jump-tunnel effect renderer).
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -129,3 +129,4 @@
+ client 2127-verify-m01a-cubemap-fix-runtime.patch
+ client 2128-server-slow-update-stage-timing.patch
+ client 2129-audit-sun-colored-ambient-lighting.patch
++client 2130-sun-colored-ambient-lighting.patch
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -131,3 +131,4 @@
+ | 2127 | Verify M01A cubemap fix in a fresh NAP-only Release run and update renderer evidence |
+ | 2128 | Add timing breakdowns to slow server update diagnostics |
+ | 2129 | Audit sun-colored ambient lighting data paths and acceptance requirements |
++| 2130 | Add optional per-object ambient tint from persistent system light colors |

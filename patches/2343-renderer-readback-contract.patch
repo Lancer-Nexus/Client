@@ -1,0 +1,237 @@
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -573,7 +573,7 @@
+     `VertexElementType` und `WrapMode` sind nun ebenfalls backendneutral und
+     werden explizit in GL-Werte übersetzt; einschließlich der Sampler-Cache-
+     Initialisierung bestehen insgesamt dreizehn Regressionstests.
+-    Screenshot-/Readback- und Fensterverträge bleiben offen.
++    Screenshot-/Readback ist jetzt backendneutral: SDL2/SDL3 lesen den Backbuffer über `RenderContext.ReadBackbuffer`; OpenGL sichert und restauriert das Read-Framebuffer-Binding, Null liefert einen definierten leeren Frame. Der SDL-Fenster-/Swapchain-Vertrag bleibt offen.
+ - [ ] SDL3-Mindestversion und native Bereitstellung pro Plattform festlegen;
+   SDL2/GLES/Null-Pfade erhalten. Geräte-/Formatfähigkeiten beim Start prüfen
+   und eine nicht verfügbare Auswahl verständlich auf einen gültigen Backend
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -227,3 +227,17 @@
+ liegen unter [`SSAO intermediate viewport HDR regression`](evidence/renderer/ssao-intermediate-viewport-hdr-20261018/README.md).
+ Der Nachweis gilt für OpenGL/Mesa llvmpipe und ersetzt keine Abnahme auf weiteren
+ Treibern oder GPUs.
++
++
++## Backend-Grenzen
++
++Der Screenshotpfad ist von SDL2/SDL3 nach `RenderContext.ReadBackbuffer`
++verlagert. Das Render-Backend besitzt damit Format und Zugriff des Backbuffers;
++die Plattformebene ruft keine OpenGL-Read-Funktionen mehr auf. OpenGL liest
++BGRA8 aus dem Default-Framebuffer. Read-Framebuffer, Default-Framebuffer-Lesequelle,
++Pixel-Pack-Puffer und Pack-Alignment werden nach dem Zugriff wiederhergestellt;
++dadurch bleibt der CPU-Zielpuffer unabhängig vom vorherigen GPU-Readbackzustand dicht gepackt. Das Null-Backend liefert für Headless-Aufrufe einen
++definierten leeren Pixelbereich. Der Vertrag ist eine Grundlage für weitere
++Backends, aber noch kein Vulkan-/SDL_GPU-Nachweis. Screenshot-Readback ist
++synchron und sollte bei häufigen Aufnahmen später über einen asynchronen
++Readback-Pfad ergänzt werden.
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -288,3 +288,5 @@
+ | 2340 | Apply depth comparison changes and make depth functions backend-neutral |
+ | 2341 | Move texture wrap and vertex element enums out of OpenGL constant space |
+ | 2342 | Record backend-neutral enum and depth-state NAP runtime smoke |
++
++| 2343 | Move SDL screenshot readback behind the render backend interface |
+--- a/patches/series
++++ b/patches/series
+@@ -342,3 +342,4 @@
+ client 2340-backend-neutral-depth-function.patch
+ client 2341-neutralize-wrap-and-vertex-enums.patch
+ client 2342-record-neutral-enums-nap-smoke.patch
++client 2343-renderer-readback-contract.patch
+--- a/src/LibreLancer.Base/Graphics/Backends/IRenderContext.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/IRenderContext.cs
+@@ -57,6 +57,7 @@
+ 
+     void MakeCurrent(IntPtr sdlWindow);
+     void SwapWindow(IntPtr sdlWindow, bool vsync, bool fullscreen);
++    void ReadBackbuffer(Span<Bgra8> pixels, int width, int height);
+ 
+     Point GetDrawableSize(IntPtr sdlWindow);
+ 
+--- a/src/LibreLancer.Base/Graphics/Backends/Null/NullRenderContext.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/Null/NullRenderContext.cs
+@@ -152,6 +152,14 @@
+ 
+     }
+ 
++    public void ReadBackbuffer(Span<Bgra8> pixels, int width, int height)
++    {
++        var required = checked(width * height);
++        if (width <= 0 || height <= 0 || pixels.Length < required)
++            throw new ArgumentException("Invalid backbuffer readback dimensions or destination length");
++        pixels[..required].Clear();
++    }
++
+     public Point GetDrawableSize(IntPtr sdlWindow)
+     {
+         if (SDL3.Supported)
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Constants.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Constants.cs
+@@ -126,6 +126,7 @@
+     public const int GL_COPY_READ_BUFFER = 0x8F36;
+     public const int GL_COPY_WRITE_BUFFER = 0x8F37;
+     public const int GL_PIXEL_PACK_BUFFER = 0x88EB;
++    public const int GL_PIXEL_PACK_BUFFER_BINDING = 0x88ED;
+ 
+     public const int GL_STREAM_DRAW = 0x88E0;
+     public const int GL_DYNAMIC_DRAW = 0x88E8;
+@@ -158,6 +159,8 @@
+     public const int GL_FRAMEBUFFER = 0x8D40;
+     public const int GL_NONE = 0;
+     public const int GL_READ_FRAMEBUFFER = 0x8CA8;
++    public const int GL_READ_FRAMEBUFFER_BINDING = 0x8CAA;
++    public const int GL_READ_BUFFER = 0x0C02;
+     public const int GL_DRAW_FRAMEBUFFER = 0x8CA9;
+     public const int GL_RENDERBUFFER = 0x8D41;
+     public const int GL_DEPTH_COMPONENT16 = 0x81A5;
+@@ -178,6 +181,7 @@
+     public const int GL_BACK = 0x0405;
+ 
+     public const int GL_UNPACK_ALIGNMENT = 0x0CF5;
++    public const int GL_PACK_ALIGNMENT = 0x0D05;
+     public const int GL_ONE_MINUS_SRC_COLOR = 0x0301;
+     public const int GL_ONE_MINUS_DST_COLOR = 0x0307;
+     public const int GL_DST_COLOR = 0x0306;
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderContext.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderContext.cs
+@@ -722,6 +722,39 @@
+         currentFrame = new();
+     }
+ 
++    public unsafe void ReadBackbuffer(Span<Bgra8> pixels, int width, int height)
++    {
++        var required = checked(width * height);
++        if (width <= 0 || height <= 0 || pixels.Length < required)
++            throw new ArgumentException("Invalid backbuffer readback dimensions or destination length");
++
++        GL.GetIntegerv(GL.GL_READ_FRAMEBUFFER_BINDING, out var previousReadFramebuffer);
++        GL.GetIntegerv(GL.GL_PIXEL_PACK_BUFFER_BINDING, out var previousPackBuffer);
++        GL.GetIntegerv(GL.GL_PACK_ALIGNMENT, out var previousPackAlignment);
++        var previousDefaultReadBuffer = GL.GL_BACK;
++        try
++        {
++            // ReadPixels treats the pointer as an offset when a pack buffer is bound.
++            GL.BindBuffer(GL.GL_PIXEL_PACK_BUFFER, 0);
++            GL.PixelStorei(GL.GL_PACK_ALIGNMENT, 1);
++            GL.BindFramebuffer(GL.GL_READ_FRAMEBUFFER, 0);
++            GL.GetIntegerv(GL.GL_READ_BUFFER, out previousDefaultReadBuffer);
++            GL.ReadBuffer(GL.GL_BACK);
++            fixed (Bgra8* ptr = pixels)
++                GL.ReadPixels(0, 0, width, height, GL.GL_BGRA, GL.GL_UNSIGNED_BYTE, (IntPtr)ptr);
++        }
++        finally
++        {
++            GL.PixelStorei(GL.GL_PACK_ALIGNMENT, previousPackAlignment);
++            GL.BindBuffer(GL.GL_PIXEL_PACK_BUFFER, (uint)previousPackBuffer);
++            // Read buffer selection is framebuffer state. Restore the default target's
++            // selection before restoring the previously bound read framebuffer.
++            GL.BindFramebuffer(GL.GL_READ_FRAMEBUFFER, 0);
++            GL.ReadBuffer(previousDefaultReadBuffer);
++            GL.BindFramebuffer(GL.GL_READ_FRAMEBUFFER, (uint)previousReadFramebuffer);
++        }
++    }
++
+     public Point GetDrawableSize(IntPtr sdlWindow)
+     {
+         if (SDL3.Supported)
+--- a/src/LibreLancer.Base/Graphics/RenderContext.cs
++++ b/src/LibreLancer.Base/Graphics/RenderContext.cs
+@@ -301,6 +301,19 @@
+ 
+     public void SetIdentityCamera() => Backend.SetIdentityCamera();
+     public void SetCamera(ICamera camera) => Backend.SetCamera(camera);
++
++    public void ReadBackbuffer(Span<Bgra8> pixels, int width, int height)
++    {
++        ObjectDisposedException.ThrowIf(disposed, this);
++        if (Environment.CurrentManagedThreadId != shaderThread)
++            throw new InvalidOperationException("Backbuffer readback requires the render thread");
++        if (width <= 0 || height <= 0)
++            throw new ArgumentOutOfRangeException(nameof(width), "Backbuffer dimensions must be positive");
++        var required = checked(width * height);
++        if (pixels.Length < required)
++            throw new ArgumentException($"Backbuffer requires {required} pixels, but the buffer has {pixels.Length}", nameof(pixels));
++        impl.ReadBackbuffer(pixels[..required], width, height);
++    }
+ 
+     public Renderer2D Renderer2D { get; }
+ 
+--- a/src/LibreLancer.Base/Platforms/SDL2Game.cs
++++ b/src/LibreLancer.Base/Platforms/SDL2Game.cs
+@@ -209,14 +209,10 @@
+         _screenshot = true;
+     }
+ 
+-    private unsafe void TakeScreenshot()
+-    {
+-        GL.ReadBuffer(GL.GL_BACK);
++    private void TakeScreenshot()
++    {
+         var colorData = new Bgra8[width * height];
+-        fixed (Bgra8* ptr = colorData)
+-        {
+-            GL.ReadPixels(0, 0, width, height, GL.GL_BGRA, GL.GL_UNSIGNED_BYTE, (IntPtr)ptr);
+-        }
++        RenderContext.ReadBackbuffer(colorData, width, height);
+ 
+         for (int i = 0; i < colorData.Length; i++)
+         {
+--- a/src/LibreLancer.Base/Platforms/SDL3Game.cs
++++ b/src/LibreLancer.Base/Platforms/SDL3Game.cs
+@@ -252,12 +252,10 @@
+         _screenshot = true;
+     }
+ 
+-    private unsafe void TakeScreenshot()
+-    {
+-        GL.ReadBuffer(GL.GL_BACK);
++    private void TakeScreenshot()
++    {
+         var colordata = new Bgra8[Width * height];
+-        fixed (Bgra8* ptr = colordata)
+-            GL.ReadPixels(0, 0, Width, height, GL.GL_BGRA, GL.GL_UNSIGNED_BYTE, (IntPtr)ptr);
++        RenderContext.ReadBackbuffer(colordata, Width, height);
+         for (int i = 0; i < colordata.Length; i++)
+         {
+             colordata[i].A = 0xFF;
+--- /dev/null
++++ b/src/LibreLancer.Tests/BackbufferReadbackTests.cs
+@@ -0,0 +1,32 @@
++using System;
++using LibreLancer.Graphics.Backends.Null;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class BackbufferReadbackTests
++{
++    [Fact]
++    public void NullBackend_ClearsOnlyRequestedPixelRegion()
++    {
++        var backend = new NullRenderContext();
++        var pixels = new[] { new Bgra8(1, 2, 3, 4), new Bgra8(5, 6, 7, 8) };
++
++        backend.ReadBackbuffer(pixels, 1, 1);
++
++        Assert.Equal(default, pixels[0]);
++        Assert.Equal(new Bgra8(5, 6, 7, 8), pixels[1]);
++    }
++
++    [Theory]
++    [InlineData(0, 1, 1)]
++    [InlineData(1, 0, 1)]
++    [InlineData(2, 1, 1)]
++    public void NullBackend_RejectsInvalidReadbackRequest(int width, int height, int bufferLength)
++    {
++        var backend = new NullRenderContext();
++        var pixels = new Bgra8[bufferLength];
++
++        Assert.Throws<ArgumentException>(() => backend.ReadBackbuffer(pixels, width, height));
++    }
++}

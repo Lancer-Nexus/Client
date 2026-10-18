@@ -1,0 +1,328 @@
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -666,8 +666,7 @@
+                 // state in the outer finally block.
+                 rstate.ColorWrite = true;
+                 rstate.DepthWrite = true;
+-                BeginGpuPass(SystemRenderPass.FrameClear, sceneTarget);
+-                try
++                ExecuteGpuPass(SystemRenderPass.FrameClear, sceneTarget, () =>
+                 {
+                     if (transitioned)
+                     {
+@@ -683,8 +682,7 @@
+                             NullColor;
+                         rstate.ClearAll();
+                     }
+-                }
+-                finally { EndGpuPass(SystemRenderPass.FrameClear, sceneTarget); }
++                });
+ 
+                 DebugRenderer.StartFrame(rstate);
+                 Commands.StartFrame(rstate);
+@@ -724,17 +722,15 @@
+                             ? SystemRenderPass.SsaoDepthPrepass
+                             : SystemRenderPass.ParticleDepthPrepass;
+                         ValidateSampleableDepthTarget(depthPass, sceneDepthTarget);
+-                        BeginGpuPass(depthPass, sceneDepthTarget);
+-                        try
++                        ExecuteGpuPass(depthPass, sceneDepthTarget, () =>
+                         {
+                             Commands.DepthOnlyPass = true;
+-                            foreach (var obj in objects) obj.DepthPrepass(camera, Commands, SystemLighting, nr!);
+-                        }
+-                        finally
+-                        {
+-                            Commands.DepthOnlyPass = false;
+-                            EndGpuPass(depthPass, sceneDepthTarget);
+-                        }
++                            try
++                            {
++                                foreach (var obj in objects) obj.DepthPrepass(camera, Commands, SystemLighting, nr!);
++                            }
++                            finally { Commands.DepthOnlyPass = false; }
++                        });
+                     }
+                     finally
+                     {
+@@ -754,17 +750,15 @@
+                 {
+                     rstate.ColorWrite = false;
+                     rstate.DepthFunction = DepthFunction.Less;
+-                    BeginGpuPass(SystemRenderPass.DepthPrepass, sceneTarget);
+-                    try
++                    ExecuteGpuPass(SystemRenderPass.DepthPrepass, sceneTarget, () =>
+                     {
+                         Commands.DepthOnlyPass = true;
+-                        foreach (var obj in objects) obj.DepthPrepass(camera, Commands, SystemLighting, nr!);
+-                    }
+-                    finally
+-                    {
+-                        Commands.DepthOnlyPass = false;
+-                        EndGpuPass(SystemRenderPass.DepthPrepass, sceneTarget);
+-                    }
++                        try
++                        {
++                            foreach (var obj in objects) obj.DepthPrepass(camera, Commands, SystemLighting, nr!);
++                        }
++                        finally { Commands.DepthOnlyPass = false; }
++                    });
+                     rstate.DepthFunction = DepthFunction.LessEqual;
+                     rstate.ColorWrite = true;
+                 }
+@@ -777,8 +771,7 @@
+                 RenderMaterial.VertexLighting = !(AllowPerPixelLighting && Settings.PerPixelLighting) && !shadowMapReady;
+                 // Actual Drawing
+ 
+-                BeginGpuPass(SystemRenderPass.Opaque, sceneTarget);
+-                try
++                ExecuteGpuPass(SystemRenderPass.Opaque, sceneTarget, () =>
+                 {
+                     Beams.Begin(Commands, resman, camera);
+ 
+@@ -809,18 +802,13 @@
+                     billboards.End();
+                     FxPool.EndFrame();
+                     Polyline.EndFrame();
+-                }
+-                finally { EndGpuPass(SystemRenderPass.Opaque, sceneTarget); }
+-
+-                // Finalize transparent ordering and billboard geometry. Opaque
+-                // material draws were issued immediately in the block above.
+-                rstate.DepthEnabled = true;
+-                Commands.DrawOpaque(rstate);
++                    rstate.DepthEnabled = true;
++                    Commands.DrawOpaque(rstate);
++                });
+ 
+                 if ((!transitioned || !DrawNebulae) && DrawStarsphere)
+                 {
+-                    BeginGpuPass(SystemRenderPass.StarsAndNebula, sceneTarget);
+-                    try
++                    ExecuteGpuPass(SystemRenderPass.StarsAndNebula, sceneTarget, () =>
+                     {
+                     // Starsphere
+                     rstate.DepthRange = new Vector2(1, 1);
+@@ -883,8 +871,7 @@
+                     }
+ 
+                     rstate.DepthRange = new Vector2(0, 1);
+-                    }
+-                    finally { EndGpuPass(SystemRenderPass.StarsAndNebula, sceneTarget); }
++                    });
+                 }
+ 
+                 OpaqueHook?.Invoke();
+@@ -892,11 +879,12 @@
+                 rstate.DepthWrite = false;
+                 RenderMaterial.ParticleSceneDepthTexture = softParticlesActive ? sampleableSceneDepth?.Texture : null;
+                 RenderMaterial.ParticleSoftness = Settings.SoftParticleDistance;
+-                BeginGpuPass(SystemRenderPass.Transparent, sceneTarget);
+-                try { Commands.DrawTransparent(rstate); }
++                try
++                {
++                    ExecuteGpuPass(SystemRenderPass.Transparent, sceneTarget, () => Commands.DrawTransparent(rstate));
++                }
+                 finally
+                 {
+-                    EndGpuPass(SystemRenderPass.Transparent, sceneTarget);
+                     RenderMaterial.ParticleSceneDepthTexture = null;
+                     RenderMaterial.ParticleSoftness = 0f;
+                 }
+@@ -1017,35 +1005,76 @@
+         private void BeginGpuPass(SystemRenderPass pass)
+         {
+             activeFramePasses.Begin(pass);
+-            rstate.PushRenderDocMaterialMarker(SystemRenderPasses.Get(pass).Name);
++            var markerPushed = false;
+             try
+             {
++                rstate.PushRenderDocMaterialMarker(SystemRenderPasses.Get(pass).Name);
++                markerPushed = true;
+                 var index = GpuPassProfile.GetQueryIndex(pass);
+                 if (index >= 0)
+                     gpuPassQueries?[index]?.Begin(currentGpuProfileFrame);
+             }
+             catch
+             {
+-                rstate.PopRenderDocMaterialMarker();
++                try
++                {
++                    if (markerPushed)
++                        rstate.PopRenderDocMaterialMarker();
++                }
++                finally
++                {
++                    activeFramePasses.Abort(pass);
++                }
+                 throw;
+             }
+         }
+ 
+-        private void BeginGpuPass(SystemRenderPass pass, RenderTarget? sceneTarget)
++        private void EndGpuPass(SystemRenderPass pass, RenderTarget? sceneTarget)
++        {
++            try
++            {
++                ValidateScenePassTarget(pass, sceneTarget);
++            }
++            finally
++            {
++                EndGpuPass(pass);
++            }
++        }
++
++        private void ExecuteGpuPass(SystemRenderPass pass, RenderTarget? sceneTarget, Action draw)
+         {
+             ValidateScenePassTarget(pass, sceneTarget);
+-            BeginGpuPass(pass);
+-        }
+-
+-        private void EndGpuPass(SystemRenderPass pass, RenderTarget? sceneTarget)
+-        {
++            var started = false;
++            var completed = false;
+             try
+             {
+-                ValidateScenePassTarget(pass, sceneTarget);
++                BeginGpuPass(pass);
++                started = true;
++                draw();
++                completed = true;
+             }
+             finally
+             {
+-                EndGpuPass(pass);
++                try
++                {
++                    if (started)
++                        EndGpuPass(pass, sceneTarget);
++                }
++                catch
++                {
++                    completed = false;
++                    throw;
++                }
++                finally
++                {
++                    if (started)
++                    {
++                        if (completed)
++                            activeFramePasses.End(pass);
++                        else
++                            activeFramePasses.Abort(pass);
++                    }
++                }
+             }
+         }
+ 
+@@ -1170,7 +1199,6 @@
+             var previousColorWrite = rstate.ColorWrite;
+             var viewportPushed = false;
+             var scissorPushed = false;
+-            var passStarted = false;
+             try
+             {
+                 rstate.RenderTarget = shadowTarget;
+@@ -1184,23 +1212,18 @@
+                 rstate.DepthRange = new Vector2(0, 1);
+                 rstate.ColorWrite = false;
+                 rstate.ClearDepth();
+-                ValidateScenePassTarget(SystemRenderPass.ShadowMap, null);
+                 rstate.SetCamera(shadowCamera);
+                 Commands.Camera = shadowCamera;
+                 Commands.DepthOnlyPass = true;
+-                BeginGpuPass(SystemRenderPass.ShadowMap);
+-                passStarted = true;
+-                foreach (var model in shadowCasters)
+-                    model.ShadowDepthPrepass(shadowCamera, camera, Commands);
++                ExecuteGpuPass(SystemRenderPass.ShadowMap, null, () =>
++                {
++                    foreach (var model in shadowCasters)
++                        model.ShadowDepthPrepass(shadowCamera, camera, Commands);
++                });
+             }
+             finally
+             {
+                 try
+-                {
+-                    if (passStarted)
+-                        EndGpuPass(SystemRenderPass.ShadowMap);
+-                }
+-                finally
+                 {
+                     Commands.DepthOnlyPass = false;
+                     rstate.RenderTarget = previousTarget;
+@@ -1214,6 +1237,7 @@
+                     rstate.SetCamera(camera);
+                     Commands.Camera = camera;
+                 }
++                finally { Commands.DepthOnlyPass = false; }
+             }
+ 
+             RenderMaterial.ShadowLight = selectedLight;
+@@ -1236,14 +1260,7 @@
+             }
+             finally
+             {
+-                try
+-                {
+-                    rstate.PopRenderDocMaterialMarker();
+-                }
+-                finally
+-                {
+-                    activeFramePasses.End(pass);
+-                }
++                rstate.PopRenderDocMaterialMarker();
+             }
+         }
+ 
+--- a/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
++++ b/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
+@@ -165,6 +165,14 @@
+                 $"Render pass '{SystemRenderPasses.Get(pass).Name}' ended without a matching begin.");
+         available |= SystemRenderPasses.Get(pass).Writes;
+         completedMask |= 1u << (int)pass;
++        activePass = null;
++    }
++
++    public void Abort(SystemRenderPass pass)
++    {
++        if (activePass != pass)
++            throw new InvalidOperationException(
++                $"Render pass '{SystemRenderPasses.Get(pass).Name}' aborted without a matching begin.");
+         activePass = null;
+     }
+ 
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -62,6 +62,7 @@
+   - [x] Samplebare Tiefentextur als eigenen Graph-Ressourcentyp vom aktiven Szenen-Tiefenattachment getrennt. SSAO und Soft Particles deklarieren und validieren den DepthTexture-Passausgang beim realen Target-Binding; SSAO deklariert dieselbe Ressource als Quelle. Der restliche Main-Pass-Ablauf ist weiterhin manuell gesteuert.
+   - [x] Laufzeitvalidierung an die tatsächlichen Hauptpass-Aufrufe gebunden: pro Frame werden Reihenfolge, doppelte/fehlende Begin-End-Paare und Pflichtressourcen geprüft; optionale Szene-Tiefe und Schatten bleiben ausdrücklich optional. Der wiederverwendete Validator speichert ausgeführte Pässe als Bitmaske. Render-Befehle und Targetwechsel werden weiterhin manuell ausgeführt, also noch kein ausführbarer Render Graph.
+   - [x] Laufzeitvalidierung für Postprocess-Subpasses ergänzt: SMAA, SSAO, Bloom und Tonemapping prüfen an ihren tatsächlichen Begin-/End-Aufrufen die Ressourcenabhängigkeiten. Verfügbare Hauptpass-Ressourcen und externe Lookup-/Ausgabeziele bilden den Frame-Anfang; optionale Bloom-Eingaben bleiben für Tonemapping optional. Der Frameabschluss stellt zusätzlich sicher, dass kein Subpass offen blieb. Das prüft Read-before-write und Passpaarung, steuert aber weiterhin keine Befehle oder Targetwechsel. Build- und Laufzeitabnahme stehen aus.
++  - [x] Die tatsächlichen Hauptpasses laufen nun über `ExecuteGpuPass`: Zielbindung prüfen, Pass beginnen, Draw ausführen, Timer/Marker schließen und den erzeugten Ressourcenstatus erst nach erfolgreichem Draw und Targetabschluss veröffentlichen. Fehlgeschlagene Draws brechen den Pass ab und erzeugen keine verfügbaren Ressourcen. Die Aufrufreihenfolge und Targetwechsel bleiben manuell gesteuert; ein Render-Graph-Scheduler ist damit noch nicht vorhanden.
+   - [x] Gebundene Backend-Renderziele stellen Farb-/Tiefen-/Stencil-Präsenz und ein bekanntes Farbformat bereit. `SystemRenderer` weist Wrapperziele ohne Farbe oder Tiefe zurück; GL-MSAA meldet das Farbformat nur für bekannte sized-Formate. Swapchainformat und Desktop-GLs unsized-MSAA-Storage bleiben unbekannt.
+   - [x] `AntialiasTarget` prüft beim Erzeugen die tatsächlichen aktiven Farb-/Tiefenattachments und für SMAA auch Stencil an Kanten- und Gewichtsziel; bekannte Zielformate müssen dem gewählten LDR-/HDR-Pfad entsprechen. Unbekanntes Desktop-MSAA-Format bleibt zulässig und wird nicht geraten.
+ - [ ] Render-Target-Resize, minimierte Fenster, Scissor-/Viewport-Wechsel und Geräteverlust für zusätzliche Pässe absichern.
+--- a/patches/series
++++ b/patches/series
+@@ -265,3 +265,4 @@
+ client 2263-record-diffuse-ibl-kufighter-runtime-ab.patch
+ client 2264-restore-billboard-state-on-draw-failure.patch
+ client 2265-validate-postprocess-subpass-resources.patch
++client 2266-execute-main-render-passes.patch
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 264 Client bundles and two native bundles. Each
++The active series contains 265 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -227,3 +227,4 @@
+ | 2263 | Record NAP-backed diffuse IBL A/B on Kusari Fighter |
+ | 2264 | Restore billboard render state if a draw fails |
+ | 2265 | Validate post-process subpass resource dependencies at runtime |
++| 2266 | Execute main renderer passes through a failure-aware pass runner |

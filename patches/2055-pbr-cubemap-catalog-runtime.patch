@@ -1,0 +1,740 @@
+diff --git a/src/LibreLancer.Data/Schema/SurfaceMapsIni.cs b/src/LibreLancer.Data/Schema/SurfaceMapsIni.cs
+--- a/src/LibreLancer.Data/Schema/SurfaceMapsIni.cs
++++ b/src/LibreLancer.Data/Schema/SurfaceMapsIni.cs
+@@ -72,6 +72,9 @@
+         binding = new SurfaceNormalMapBinding(map, library);
+         return true;
+     }
++
++    public bool TryResolveCubeMap(string nickname, out SurfaceCubeMap? cubeMap) =>
++        cubeMaps.TryGetValue(nickname, out cubeMap);
+ 
+     internal static bool IsRelativeAssetPath(string value)
+     {
+diff --git a/src/LibreLancer.Tests/NormalMapShaderTests.cs b/src/LibreLancer.Tests/NormalMapShaderTests.cs
+--- a/src/LibreLancer.Tests/NormalMapShaderTests.cs
++++ b/src/LibreLancer.Tests/NormalMapShaderTests.cs
+@@ -37,5 +37,16 @@
+         var type=typeof(BasicMaterial).GetNestedType("PBRParameters",BindingFlags.NonPublic)!;
+         Assert.Equal(64,Marshal.SizeOf(type));
+         Assert.Equal(48,Marshal.OffsetOf(type,"EnvMipCount").ToInt32());
++        Assert.Equal(52,Marshal.OffsetOf(type,"EnvMapStrength").ToInt32());
++    }
++
++    [Theory]
++    [InlineData("BasicParameters")]
++    [InlineData("PBRParameters")]
++    public void EnvironmentMapStrengthUsesTheFinalMaterialRegister(string name)
++    {
++        var type=typeof(BasicMaterial).GetNestedType(name,BindingFlags.NonPublic)!;
++        Assert.Equal(64,Marshal.SizeOf(type));
++        Assert.Equal(52,Marshal.OffsetOf(type,"EnvMapStrength").ToInt32());
+     }
+ }
+diff --git a/src/LibreLancer.Tests/SurfaceMapsIniTests.cs b/src/LibreLancer.Tests/SurfaceMapsIniTests.cs
+--- a/src/LibreLancer.Tests/SurfaceMapsIniTests.cs
++++ b/src/LibreLancer.Tests/SurfaceMapsIniTests.cs
+@@ -48,6 +48,9 @@
+         Assert.Equal(0.8f, binding.Map.Roughness);
+         Assert.Equal(0, binding.Map.Metallic);
+         Assert.Equal(0.35f, maps.CubeMaps["SKY"].Strength);
++        Assert.True(maps.TryResolveCubeMap("sky", out var cubeMap));
++        Assert.Equal("DATA/fx/sky.mat", cubeMap!.File);
++        Assert.Equal("nebula", cubeMap.Kind);
+         Assert.Empty(maps.Diagnostics);
+     }
+ 
+@@ -125,6 +128,7 @@
+     {
+         var maps = Parse("[CubeMap]\nnickname = bad\nfile = fx/sky.mat\nstrength = 1.01\n[Texture]\nname = good\nfile = fx/good.txm\nfuture_hint = supported_later\n[FutureSection]\nkey = ignored\n");
+         Assert.Empty(maps.CubeMaps);
++        Assert.False(maps.TryResolveCubeMap("bad", out _));
+         Assert.Single(maps.Libraries);
+         Assert.Equal(3, maps.Diagnostics.Count);
+     }
+diff --git a/src/LibreLancer/Render/Materials/BasicMaterial.cs b/src/LibreLancer/Render/Materials/BasicMaterial.cs
+--- a/src/LibreLancer/Render/Materials/BasicMaterial.cs
++++ b/src/LibreLancer/Render/Materials/BasicMaterial.cs
+@@ -256,7 +256,8 @@
+             public float Oc;
+             public float Tex2Type;
+             public float NormalStrength;
+-            public Vector3 NormalPadding;
++            public float EnvMapStrength;
++            public Vector2 Padding;
+         }
+ 
+         [StructLayout(LayoutKind.Sequential, Pack = 1)]
+@@ -269,7 +270,8 @@
+             public float Metallic;
+             public float NormalStrength;
+             public float EnvMipCount;
+-            public Vector3 Padding;
++            public float EnvMapStrength;
++            public Vector2 Padding;
+         }
+ 
+ 
+@@ -289,14 +291,15 @@
+             bool envMapping = false;
+             bool pbrEnvMapping = false;
+             TextureCube? pbrEnvironment = null;
++            var envMapStrength = 1.0f;
+             string? envmaptex = Glass ? "envmapglass" : EnvMap;
+             if (!pbr)
+             {
+-                envMapping = (GetTexture(3, envmaptex, false) is TextureCube);
++                envMapping = Library?.ResolveEnvironmentCube(envmaptex, out envMapStrength) != null;
+             }
+             else if (Library?.PbrEnvironmentMapsEnabled == true)
+             {
+-                pbrEnvironment = GetTexture(5, envmaptex, false) as TextureCube;
++                pbrEnvironment = Library.ResolveEnvironmentCube(envmaptex, out envMapStrength);
+                 pbrEnvMapping = pbrEnvironment != null;
+             }
+ 
+@@ -374,7 +377,8 @@
+-                      Metallic = (Library?.SurfacePbrMapsEnabled == true ? SurfaceBinding?.Metallic : null) ?? Metallic ?? 1.0f,
++                      Metallic = (Library?.SurfacePbrMapsEnabled == true ? SurfaceBinding?.Metallic : null) ?? Metallic ?? ((!string.IsNullOrWhiteSpace(MtSampler) || activeSurfaceMetallic != null || (Library?.SurfacePbrMapsEnabled == true && SurfaceBinding?.MetallicMap != null)) ? 1.0f : 0.0f),
+                       Roughness = (Library?.SurfacePbrMapsEnabled == true ? SurfaceBinding?.Roughness : null) ?? Roughness ?? 1.0f,
+                       Oc = Oc * OpacityMultiplier, NormalStrength = activeSurfaceNormal != null ? activeSurfaceNormalStrength : NormalStrength,
+-                      EnvMipCount = pbrEnvironment == null ? 0 : Math.Max(pbrEnvironment.LevelCount - 1, 0) };
++                      EnvMipCount = pbrEnvironment == null ? 0 : Math.Max(pbrEnvironment.LevelCount - 1, 0),
++                      EnvMapStrength = envMapStrength };
+                 shader.SetUniformBlock(3, ref param);
+ 
+                 if (!string.IsNullOrEmpty(MtSampler))
+@@ -416,7 +420,8 @@
+                 var param = new BasicParameters()
+                 {
+                     Dc = dcValue, Ec = Ec, FadeRange = new Vector2(FadeNear, FadeFar), Oc = Oc * OpacityMultiplier,
+-                    Tex2Type = BtEnabled ? 1 : 0, NormalStrength = activeSurfaceNormal != null ? activeSurfaceNormalStrength : NormalStrength
++                    Tex2Type = BtEnabled ? 1 : 0, NormalStrength = activeSurfaceNormal != null ? activeSurfaceNormalStrength : NormalStrength,
++                    EnvMapStrength = envMapStrength
+                 };
+                 shader.SetUniformBlock(3, ref param);
+                 SetTextureCoordinates(shader, DtFlags, EtFlags, normalFlags, BtFlags);
+diff --git a/src/LibreLancer/Resources/ResourceManager.cs b/src/LibreLancer/Resources/ResourceManager.cs
+--- a/src/LibreLancer/Resources/ResourceManager.cs
++++ b/src/LibreLancer/Resources/ResourceManager.cs
+@@ -24,7 +24,17 @@
+ // TODO: Allow for disposing and all that Jazz
+ public abstract class ResourceManager
+ {
+-    public SurfaceMapsIni SurfaceMaps { get; set; } = new();
++    private SurfaceMapsIni surfaceMaps = new();
++    private readonly HashSet<string> unavailableSurfaceCubeMaps = new(StringComparer.OrdinalIgnoreCase);
++    public SurfaceMapsIni SurfaceMaps
++    {
++        get => surfaceMaps;
++        set
++        {
++            surfaceMaps = value ?? new SurfaceMapsIni();
++            unavailableSurfaceCubeMaps.Clear();
++        }
++    }
+     public bool SurfaceNormalMapsEnabled { get; set; }
+     public bool SurfacePbrMapsEnabled { get; set; }
+     public bool PbrEnvironmentMapsEnabled { get; set; }
+@@ -57,6 +67,38 @@
+             FLLog.Warning("Surface", $"Unable to load supplemental textures for {material.Name}: {ex.Message}");
+             return null;
+         }
++    }
++
++    /// <summary>Resolves an archetype environment cube, loading catalog assets on demand.</summary>
++    public TextureCube? ResolveEnvironmentCube(string? nickname, out float strength)
++    {
++        strength = 1.0f;
++        if (string.IsNullOrWhiteSpace(nickname)) return null;
++
++        if (!SurfaceMaps.TryResolveCubeMap(nickname, out var catalogEntry) || catalogEntry == null)
++            return FindTexture(nickname) as TextureCube;
++
++        strength = catalogEntry.Strength;
++        if (FindTexture(nickname) is TextureCube existing)
++            return existing;
++        if (!unavailableSurfaceCubeMaps.Add(nickname))
++            return null;
++
++        try
++        {
++            LoadResourceFile(catalogEntry.File);
++        }
++        catch (Exception error) when (error is IOException or InvalidDataException or NotSupportedException or ArgumentException or FileException)
++        {
++            FLLog.Warning("Surface", $"Unable to load CubeMap {nickname} from {catalogEntry.File}: {error.Message}");
++            return null;
++        }
++
++        if (FindTexture(nickname) is TextureCube loaded)
++            return loaded;
++
++        FLLog.Warning("Surface", $"CubeMap {nickname} from {catalogEntry.File} did not resolve to a TextureCube");
++        return null;
+     }
+ 
+     private Dictionary<string, RuntimeSurFile> surs = new(StringComparer.OrdinalIgnoreCase);
+diff --git a/src/LibreLancer/Shaders/Basic.frag.hlsl b/src/LibreLancer/Shaders/Basic.frag.hlsl
+--- a/src/LibreLancer/Shaders/Basic.frag.hlsl
++++ b/src/LibreLancer/Shaders/Basic.frag.hlsl
+@@ -51,7 +51,8 @@
+     float Oc;
+     float Tex2Type; //>0 for BtSampler
+     float NormalStrength;
+-    float3 NormalPadding;
++    float EnvMapStrength;
++    float2 NormalPadding;
+ };
+ 
+ cbuffer TexCoordSelectors : register(b5, UNIFORM_SPACE)
+@@ -118,7 +119,7 @@
+ #ifdef ENVMAP
+     float4 env = EnvTexture.Sample(EnvSampler, input.viewSpaceReflection);
+     float3 envrgb = 2 * env.rgb * color.rgb;
+-    color = float4(envrgb, color.a);
++    color = float4(lerp(color.rgb, envrgb, EnvMapStrength), color.a);
+ #endif
+     float4 acolor = color * float4(1.0, 1.0, 1.0, Oc);
+ 
+diff --git a/src/LibreLancer/Shaders/PBR.frag.hlsl b/src/LibreLancer/Shaders/PBR.frag.hlsl
+--- a/src/LibreLancer/Shaders/PBR.frag.hlsl
++++ b/src/LibreLancer/Shaders/PBR.frag.hlsl
+@@ -55,7 +55,8 @@
+     float Metallic;
+     float NormalStrength;
+     float EnvMipCount;
+-    float3 PbrPadding;
++    float EnvMapStrength;
++    float2 PbrPadding;
+ };
+ 
+ cbuffer TexCoordSelectors : register(b5, UNIFORM_SPACE)
+@@ -284,7 +285,7 @@
+     float3 envColor = SRGBtoLinear(EnvTexture.SampleLevel(EnvSampler, reflection, envMip)).rgb;
+     float NdotV = saturate(abs(dot(n, v)));
+     float3 envFresnel = specularColor + (1.0 - specularColor) * pow(1.0 - NdotV, 5.0);
+-    color += envColor * envFresnel;
++    color += envColor * envFresnel * EnvMapStrength;
+ #endif
+ #ifdef VERTEX_LIGHTING
+     float3 vertexDiffuse = input.frontFacing ? input.diffuseTermFront : input.diffuseTermBack;
+diff --git a/docs/evidence/renderer/pbr-environment-20261014/production-pbr-mat-cubemaps-20261014.md b/docs/evidence/renderer/pbr-environment-20261014/production-pbr-mat-cubemaps-20261014.md
+--- a/docs/evidence/renderer/pbr-environment-20261014/production-pbr-mat-cubemaps-20261014.md
++++ b/docs/evidence/renderer/pbr-environment-20261014/production-pbr-mat-cubemaps-20261014.md
+@@ -66,3 +66,33 @@
+ der aktiven Umgebung, die Einbindung von `[CubeMap] strength`, visuelle
+ Orientierungs-/Stärkeabnahme auf echten Schiffen und Stationen sowie eine
+ GGX-vorgefilterte IBL-Pipeline. Normale DDS-Mipmaps ersetzen kein GGX-Filtering.
++
++## Surface-Katalog-Resolver und Strength (2026-10-14)
++
++Ein zweiter Lauf verwendet `GameResourceManager` mit `SurfaceMapsIni.Load` auf
++`Surface/fx/SurfaceMaps.ini`. `ResolveEnvironmentCube` erhält jeweils den
++Nickname aus dem `[CubeMap]`-Katalog, lädt die referenzierte MAT bei Bedarf aus
++dem VFS und gibt die konfigurierte Stärke an den PBR-Materialpfad weiter. Alle
++Laufzeitdateien stammen aus `Data/NAP/`; es wurden keine losen Freelancer-Daten
++verwendet.
++
++| Katalog-Nickname | MAT | Mips | gelesene Stärke | Mittelpixel RGB mit Produktions-PBR |
++|---|---|---:|---:|---|
++| `envcube_space` | `Surface/fx/envcube_space.mat` | 9 | 0,35 | (8, 9, 13) |
++| `envcube_sun` | `Surface/fx/envcube_sun.mat` | 9 | 0,5 | (12, 13, 15) |
++| `envcube_nebula` | `Surface/fx/envcube_nebula.mat` | 9 | 0,4 | (15, 12, 16) |
++
++![Produktions-PBR mit Stärke aus dem Surface-Cubemap-Katalog](production-pbr-catalog-strength-20261014.png)
++
++Zum Vergleich ergab der vorherige kontrollierte Draw mit Stärke 1 für dieselben
++Texturen (13, 14, 22), (17, 17, 21) und (23, 18, 25). Damit sind die
++Katalogauflösung, das bedarfsgesteuerte Laden der drei MATs und die Weitergabe
++der jeweiligen Stärke bis zum Produktionsshader auf diesem OpenGL-Gerät
++bestätigt. `envmapbasic` wurde in diesem Lauf separat direkt geladen und dient
++als Legacy-/Fallback-Cube; es ist kein Eintrag der drei Surface-Werte.
++
++Das ändert die Bewertung des Null-Differenz-ModelViewer-A/B nicht: Eine
++kontrollierte Geometrie beweist weiterhin keine sichtbare, korrekt orientierte
++Reflexion auf Retail-Schiffen oder im Spiel. Dafür müssen Materialzustand,
++Mesh-Richtung und tatsächliche ModelViewer-/Spiel-Draws geprüft werden. Eine
++GGX-vorgefilterte IBL-Pipeline ist ebenfalls nicht Teil dieses Nachweises.
+diff --git a/docs/evidence/renderer/pbr-environment-20261014/pbr-environment-ab-20261014.json b/docs/evidence/renderer/pbr-environment-20261014/pbr-environment-ab-20261014.json
+--- a/docs/evidence/renderer/pbr-environment-20261014/pbr-environment-ab-20261014.json
++++ b/docs/evidence/renderer/pbr-environment-20261014/pbr-environment-ab-20261014.json
+@@ -86,5 +86,24 @@
+     "image": "production-pbr-mat-cubemaps-20261014.png",
+     "image_sha256": "48a1e737e05969f374a78d4527bae39c80fa52368cbea86bd40e16ebe2c14ead",
+     "limits": "Controlled test triangle and camera uniforms. A separate axis-probe shader sampled all six mip-0 directions for the real MATs. These do not prove the LI_ELITE ModelViewer or in-game visual result, environment selection, Retail mesh orientation, or reflection-strength acceptance."
++  },
++  "surface_catalog_resolver_probe": {
++    "date": "2026-10-14",
++    "data_source": "Data/NAP only",
++    "resolver": "GameResourceManager.ResolveEnvironmentCube after SurfaceMapsIni.Load(Surface/fx/SurfaceMaps.ini)",
++    "shader": "Built Client PBR.bin embedded resource, ENVMAP feature 64",
++    "results": [
++      {"nickname":"envcube_space","file":"Surface/fx/envcube_space.mat","mip_levels":9,"strength":0.35,"center_rgb":[8,9,13]},
++      {"nickname":"envcube_sun","file":"Surface/fx/envcube_sun.mat","mip_levels":9,"strength":0.5,"center_rgb":[12,13,15]},
++      {"nickname":"envcube_nebula","file":"Surface/fx/envcube_nebula.mat","mip_levels":9,"strength":0.4,"center_rgb":[15,12,16]}
++    ],
++    "image": "production-pbr-catalog-strength-20261014.png",
++    "image_sha256": "68343140975af7c7ff44d71927fbbf352376b0a4588c1c478017323c61bc5339",
++    "comparison_strength_1_rgb": {
++      "envcube_space": [13,14,22],
++      "envcube_sun": [17,17,21],
++      "envcube_nebula": [23,18,25]
++    },
++    "limits": "Controlled triangle only. Resolver, catalog strength and shader propagation are exercised; visible reflections on Retail meshes and in gameplay remain unverified."
+   }
+ }
+diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -362,19 +362,23 @@
+ PBR-ENVMAP-Variante mit `envmapbasic` und den drei 9-Mip-Cubes aus `Data/NAP`
+ durch den MAT/UTF/DDS-Loader gezeichnet und unterschiedliche Readbacks
+ bestätigt. Das belegt Shader-, Bindungs-, Asset- und Mip-Pfad in einer
+-kontrollierten Testgeometrie. Das LI_ELITE-ModelViewer-A/B zeigt im Modell-ROI
+-weiterhin 0 geänderte Pixel; die sichtbare Retail-Reflexion ist nicht
+-abgenommen. Bilder und Messwerte stehen im
++kontrollierten Testgeometrie. `ResourceManager.ResolveEnvironmentCube` lädt
++Surface-Cubes nun anhand des expliziten `[CubeMap]`-Katalogs, und ein weiterer
++Produktionsdraw bestätigt die Werte `strength` 0,35 / 0,5 / 0,4. Das
++LI_ELITE-ModelViewer-A/B zeigt im Modell-ROI weiterhin 0 geänderte Pixel; die
++sichtbare Retail-Reflexion ist nicht abgenommen. Bilder und Messwerte stehen im
+ [PBR-Cubemap-Probebericht](evidence/renderer/pbr-environment-20261014/cubemap-assets-and-binding-audit.md).
+-CubeMap-Auswahl im Spiel, Stärke, Retail-Orientierung, GGX-IBL und Performance
+-bleiben offen.
++Orientierung und Stärke auf Retail-Meshes, vollständige Spielabnahme, GGX-IBL
++und Performance bleiben offen.
+ 
+ - [x] Den Produktions-PBR-ENVMAP-Shader mit synthetischem Cube an allen sechs
+   Richtungen und mit echten `envmapbasic`, `envcube_space`, `envcube_sun` und
+   `envcube_nebula` MAT/DDS-Assets im OpenGL-Offscreen-Draw prüfen.
+-- [ ] `envcube_space`, `envcube_sun`, `envcube_nebula` anhand des Surface-Katalogs
+-  im Spiel auswählen; Cube-Orientierung auf Retail-Meshes, `[CubeMap] strength`
+-  und sichtbare Reflexionsstärke abnehmen.
++- [x] `envcube_space`, `envcube_sun`, `envcube_nebula` anhand des Surface-Katalogs
++  auflösen, bedarfsgesteuert aus NAP laden und `[CubeMap] strength` an den
++  Produktions-PBR-Shader weitergeben; kontrollierte GPU-Readbacks dokumentieren.
++- [ ] Cube-Orientierung und sichtbare Reflexionsstärke auf Retail-Meshes und im
++  Spiel abnehmen; der bisherige LI_ELITE-ModelViewer-A/B-ROI änderte 0 Pixel.
+ - [ ] Im PBR-Pfad eine kollisionsfreie Bindung vorsehen: vorhandene Dt/Et/Nm/
+   Mt/Rt-Slots 0–4, Specular-Cube/Irradiance/BRDF-LUT auf 5–7 als Entwurf.
+   Ressourcen je Shader reflektieren; tatsächliche Backendgrenzen prüfen.
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -173,7 +173,8 @@
+ 
+ - [ ] **Zuerst die Pipeline (Abschnitte 1, 3, 4):** Render-Passes, HDR-Zwischenpuffer, Tonemapping und Bloom. Größter sichtbarer Gewinn für Sonnen, Triebwerke, Schüsse und Schilde, ohne neues Backend.
+ - [ ] **Forward oder Clustered Forward statt Deferred:** Transparenz und MSAA/SMAA sprechen gegen Deferred. Forward+ gegen die aktuelle Beleuchtung benchmarken.
+-- [ ] **Image-Based Lighting:** Cube Maps (`envcube_*` aus LN-Data) für den PBR-Pfad als Umgebungslicht prüfen.
++- [x] **Cubemap-Grundpfad:** Surface-Katalog-Cubes `envcube_*` bedarfsgesteuert laden und `[CubeMap] strength` im opt-in PBR-Pfad anwenden; kontrollierte Produktionsshader-GPU-Proben sind dokumentiert.
++- [ ] **Image-Based Lighting:** Retail-Orientierung und sichtbare Cubemap-Reflexion im Spiel abnehmen; danach GGX-Reflexionsfilterung, diffuse Irradiance und BRDF-LUT prüfen. Die LI_ELITE-ModelViewer-A/B änderte bislang 0 Modellpixel.
+ - [ ] **Volumetrische Nebel und Soft Particles:** Nebelfelder sind ein Merkmal des Spiels; als eigene Qualitätsstufe mit Fallback.
+ - [ ] **Vulkan-Backend (Spike):** Prüfen, wie weit `IRenderContext` und die HLSL→SPIR-V-Kette tragen. Nutzen: Linux/Steam Deck, Mehrkern-Befehlsaufzeichnung für viele Schiffe, RenderDoc, MoltenVK für macOS. Aufwand und Risiko groß, vorher messen.
+ - [ ] **Direct3D 11 und Metal nur bei konkretem Bedarf:** D3D11 nur, wenn OpenGL unter Windows Probleme macht; Metal besser über MoltenVK.
+diff --git a/docs/surface-maps.md b/docs/surface-maps.md
+--- a/docs/surface-maps.md
++++ b/docs/surface-maps.md
+@@ -3,7 +3,7 @@
+ Die aktuelle Umsetzungsreihenfolge und Abnahme stehen im
+ [Grafik-Umsetzungsplan](graphics-implementation-plan.md).
+ 
+-**Status:** Parser, Profile, VFS- und CPU-/GPU-Residency sowie opt-in Normalmap-Bindungen für authored FVF3/FVF4, generierte VMesh-/DFM-Tangenten und QuadSphere sind umgesetzt. Ergänzende Roughness-/Metallic-Sampler sind über `surface_pbr_maps` angebunden. Ein kontrollierter LI_ELITE-A/B im LancerEdit ModelViewer bestätigt eine sichtbare Änderung. Im In-Game-A/B des vollständigen Profils bleiben nach Erhalt der Room-Vertex-Beleuchtung und korrekter Behandlung von Backface-Normalen die Stadtfassaden sichtbar beleuchtet; der zuvor beobachtete großflächige Schwarzeffekt tritt nicht mehr auf. Der Surface-Map-Lease-Absturz in Cutscenes ist ebenfalls behoben. Der opt-in PBR-Cubemap-Pfad besteht nun kontrollierte OpenGL-Proben mit dem Produktionsshader und den echten `envmapbasic`-/Surface-Cube-MATs aus `Data/NAP`; Mip-Sampling ist für die drei neuen Karten bestätigt. Der echte LI_ELITE-ModelViewer-A/B ändert trotzdem keine Modellpixel. In-Game-Reflexionen, Cube-Auswahl nach Umgebung, `[CubeMap] strength`, IBL-Qualität und Leistung bleiben offen. Vergleichsbilder und Messdaten liegen in der [Renderer-Galerie](renderer-comparison-gallery.md) und im [PBR-Cubemap-Probebericht](evidence/renderer/pbr-environment-20261014/cubemap-assets-and-binding-audit.md). Materialqualität in weiteren Szenen bleibt offen. **Stand:** 2026-10-14.
++**Status:** Parser, Profile, VFS- und CPU-/GPU-Residency sowie opt-in Normalmap-Bindungen für authored FVF3/FVF4, generierte VMesh-/DFM-Tangenten und QuadSphere sind umgesetzt. Ergänzende Roughness-/Metallic-Sampler sind über `surface_pbr_maps` angebunden. Ein kontrollierter LI_ELITE-A/B im LancerEdit ModelViewer bestätigt eine sichtbare Änderung. Im In-Game-A/B des vollständigen Profils bleiben nach Erhalt der Room-Vertex-Beleuchtung und korrekter Behandlung von Backface-Normalen die Stadtfassaden sichtbar beleuchtet; der zuvor beobachtete großflächige Schwarzeffekt tritt nicht mehr auf. Der Surface-Map-Lease-Absturz in Cutscenes ist ebenfalls behoben. Der opt-in PBR-Cubemap-Pfad löst `[CubeMap]`-Katalogeinträge nun anhand des vorhandenen `envmap_material` auf, lädt ihre MATs bei Bedarf und reicht `strength` weiter. Kontrollierte OpenGL-Proben mit Produktionsshader und echten `Data/NAP`-Assets bestätigen die drei Katalogwerte und Mip-Sampling. Der LI_ELITE-ModelViewer-A/B ändert trotzdem keine Modellpixel; sichtbare In-Game-Reflexionen, Retail-Orientierung, IBL-Qualität und Leistung bleiben offen. Vergleichsbilder und Messdaten liegen in der [Renderer-Galerie](renderer-comparison-gallery.md) und im [PBR-Cubemap-Probebericht](evidence/renderer/pbr-environment-20261014/cubemap-assets-and-binding-audit.md). Materialqualität in weiteren Szenen bleibt offen. **Stand:** 2026-10-14.
+ **Datenseite:** Repository `LN-Data` (`tools/make_surface_maps.py`, `SDK/fx/SurfaceMaps.ini`, `TODO-surface-maps.md`).
+ Engine-Änderungen bleiben gemäß `AGENTS.md` patch-only unter `patches/series`.
+ 
+@@ -214,7 +214,8 @@
+ - [ ] `strength` als Material-Parameter (Shader-Konstante) einführen oder ablehnen und die Karte vorskalieren. Roughness und Metallic haben bereits Faktoren (`PBRParameters.Roughness`/`Metallic`).
+ - [x] `Rt_name`/`Mt_name` aus der INI ergänzen und die UV-Menge festlegen: `GetTexCoord(3/4, …)` im Shader, `SetTextureCoordinates(…, MtFlags, RtFlags)`; MAT-Werte haben Vorrang.
+ - [ ] Metallische Flächen ohne Umgebungsreflexion: IBL/`envmap_material` im PBR-Pfad integrieren oder `metallic` in den INIs begrenzen. Der Liberty-A/B zeigt nach dem Room-Lighting-Fix keine schwarzen Fassaden; Cubemap-Reflexionen und Materialtreue sind damit nicht abgenommen.
+-- [ ] Reflexionsstärke für `[CubeMap]` entscheiden (neue Konstante oder nicht unterstützt).
++- [x] `[CubeMap] strength` aus dem expliziten Katalog als opt-in Materialparameter bis zum Basic-/PBR-Shader weiterreichen.
++- [ ] Stärke und Cube-Orientierung auf Retail-Schiffen, Stationen und im Spiel visuell abnehmen.
+ 
+ Rendering:
+ 
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -54,3 +54,4 @@
+ client 2052-retail-beam-parser-audit.patch
+ client 2053-nap-ignore-gitkeep-placeholders.patch
+ client 2054-pbr-production-cubemap-probe-evidence.patch
++client 2055-pbr-cubemap-catalog-runtime.patch
+diff --git a/docs/evidence/renderer/pbr-environment-20261014/production-pbr-catalog-strength-20261014.png b/docs/evidence/renderer/pbr-environment-20261014/production-pbr-catalog-strength-20261014.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..f76e059b984262c91b3318aef67423fd5a235f38
+GIT binary patch
+literal 19050
+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
+
+literal 0
+HcmV?d00001
+

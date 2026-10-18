@@ -1,0 +1,105 @@
+diff --git a/docs/evidence/renderer/hdr-tonemapping-transition-audit-20261016.md b/docs/evidence/renderer/hdr-tonemapping-transition-audit-20261016.md
+new file mode 100644
+index 0000000..0ef3590
+--- /dev/null
++++ b/docs/evidence/renderer/hdr-tonemapping-transition-audit-20261016.md
+@@ -0,0 +1,61 @@
++# HDR-/Tonemapping-Übergangsaudit (2026-10-16)
++
++## Umfang
++
++Quellcodeprüfung des vorhandenen OpenGL-Spielpfads für Scene-Color-Format,
++Multisample-Auflösung und Shader-Ausgabefarben. Es wurden keine Rendererdateien
++geändert und kein visueller HDR-Lauf ausgeführt.
++
++## Befunde
++
++1. `SurfaceFormat.HdrBlendable` und `HalfVector4` werden im OpenGL-Backend als
++   `GL_RGBA16F` angelegt ([EnumConversions.cs](../../../src/LibreLancer.Base/Graphics/Backends/OpenGL/EnumConversions.cs)).
++   Das allgemeine `Texture2D`-Konstrukt verwendet standardmäßig jedoch
++   `SurfaceFormat.Bgra8` ([Texture2D.cs](../../../src/LibreLancer.Base/Graphics/Texture2D.cs)).
++   Das belegt Texturspeicher-Unterstützung, aber noch keine vollständige
++   renderbare HDR-Pipeline oder Gerätefähigkeit.
++
++2. `SystemRenderer.Draw()` rendert ohne AA in das Caller-Ziel. Mit AA zeichnet
++   es direkt in `AntialiasTarget` und kopiert/löst anschließend in das
++   Caller-Ziel auf ([SystemRenderer.cs](../../../src/LibreLancer/Render/SystemRenderer.cs)).
++   Der SMAA-Pfad legt Szene-, Kanten- und Gewichtstexturen standardmäßig als
++   BGRA8 an; der OpenGL-MSAA-Pfad verwendet RGBA8 auf GLES bzw. ein
++   implementation-defined Format auf Desktop-GL. Sein Resolve-Target wird mit
++   einem 8-Bit-Texeltyp angelegt ([AntialiasTarget.cs](../../../src/LibreLancer.Base/Graphics/AntialiasTarget.cs),
++   [GLMultisampleTarget.cs](../../../src/LibreLancer.Base/Graphics/Backends/OpenGL/GLMultisampleTarget.cs)).
++
++3. Die Shader definieren noch keine gemeinsame lineare Szenenausgabe. Der
++   PBR-Fragmentshader kodiert seinen berechneten Farbwert explizit mit
++   `pow(color, 1/2.2)` ([PBR.frag.hlsl](../../../src/LibreLancer/Shaders/PBR.frag.hlsl)).
++   Der Legacy-Pfad liefert dagegen über die bestehenden Beleuchtungsfunktionen
++   direkt sein Ergebnis; eine gemeinsame lineare/sRGB-Grenze für Legacy-
++   Materialien, Effekte, Nebel und Clears ist nicht festgelegt.
++
++4. In den geprüften OpenGL-Backenddateien gibt es keine Aktivierung eines
++   sRGB-Framebuffer-Konversionspfads (`GL_FRAMEBUFFER_SRGB`) und keinen
++   Tonemapping-Pass. Ein Quellcode-Suchtreffer für `HdrBlendable` oder
++   `GL_RGBA16F` ist daher kein Laufzeitnachweis für HDR.
++
++## Konsequenz und Implementierungsreihenfolge
++
++HDR braucht einen durchgängigen Farbvertrag. Ein isolierter `RGBA16F`-Target-
++Tausch würde Legacy- und PBR-Materialien, Alpha-Blending und Antialiasing mit
++unterschiedlichen Farbannahmen mischen.
++
++1. Eingangs- und Ausgangsfarbräume festlegen; Legacy-Texturen, PBR-Texturen,
++   Emission, Fog, transparente Effekte und Clear-Farben explizit an den
++   Szenenfarbraum anbinden.
++2. Ein renderbares Half-Float Scene-Color-Target samt Capability-Prüfung und
++   fallbackfähigem Resize-/Lifecycle-Verhalten einführen. MSAA muss denselben
++   linearen Formatvertrag erhalten; seine Auflösung darf nicht vorzeitig auf
++   8 Bit quantisieren.
++3. Exposure/Tonemapping in einen definierten LDR-Ausgabepass integrieren.
++   SMAA wird auf dem tonemapped Bild ausgeführt; UI und Editor-Overlays werden
++   nach dem Tonemapping komponiert.
++4. Bloom danach als abschaltbare HDR-Downsample-/Blur-/Composite-Kette ergänzen.
++   Der unveränderte Legacy-Pfad bleibt ein Vergleichs- und Rückfallprofil.
++5. Erst nach dieser Reihenfolge dieselbe feste Retail-Szene in Legacy/HDR und
++   None/SMAA/MSAA aufnehmen, visuell prüfen und GPU-/Speichermehrkosten messen.
++
++Dieser Audit schließt P4 nicht ab: Scene-Target, Farbkonversion, Tonemapping,
++Bloom, Capability-Fallback und Laufzeitabnahme sind weiterhin offen.
+diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
+index 1a2af5c..a5f8938 100644
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -458,6 +458,14 @@ offen. Orientierung, Materialqualität, GGX-IBL und Performance bleiben offen.
+ 
+ ### P4 – Pässe und Post-Processing
+ 
++- [x] Übergang zu HDR/Tonemapping im bestehenden GL-Spielpfad geprüft. Der
++  allgemeine OpenGL-Texturpfad kennt `RGBA16F`, der Systemrenderer rendert aber
++  direkt ins Caller-Ziel bzw. in LDR-AA-Ziele; MSAA nutzt derzeit 8-Bit-Farbe.
++  Zudem ist die Farbkonvention nicht einheitlich: Der PBR-Shader kodiert seinen
++  Ausgang selbst mit `pow(1/2.2)`, während der Legacy-Pfad keine gemeinsame
++  lineare Szenenausgabe festlegt. Eine HDR-Umstellung darf deshalb nicht nur das
++  Render-Target austauschen. Der Quellcode-Audit hält Voraussetzungen und die
++  Reihenfolge fest: [HDR-/Tonemapping-Übergangsaudit](evidence/renderer/hdr-tonemapping-transition-audit-20261016.md).
+ - [x] Typisierte IDs und erste abstrakte Lese-/Schreibzugriffe für die sechs
+   gemessenen SystemRenderer-GPU-Phasen angelegt; Frame-Clear wird nun ebenfalls
+   gemessen. Diese Metadaten steuern auch
+diff --git a/patches/README.md b/patches/README.md
+index 8630a44..4251851 100644
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -157,3 +157,5 @@ jump-gate route.
+ | 2154 | Preserve the applied sun ambient value when leaving graphics options |
+ | 2155–2164 | Trace BeamEffect state, owner context, elapsed progress and retail CBeam velocity dispatch |
+ | 2165 | Add typed SystemRenderer passes, time actual opaque draws, audit render-target attachments, and trace Retail CBeam velocity |
++| 2166 | Profile SMAA subpasses and MSAA resolve with asynchronous GPU timers in a NAP-only M01A run |
++| 2167 | Audit the HDR, tonemapping, linear-color and AA transition requirements |
+diff --git a/patches/series b/patches/series
+index ecff5f2..d5edfc0 100644
+--- a/patches/series
++++ b/patches/series
+@@ -166,3 +166,4 @@ client 2163-correct-engbase-provider-evidence.patch
+ client 2164-document-engbase-iengine-slot.patch
+ client 2165-system-render-pass-contract-and-beam-velocity-trace.patch
+ client 2166-gpu-timer-aa-subpass-runtime-profile.patch
++client 2167-hdr-tonemapping-transition-audit.patch

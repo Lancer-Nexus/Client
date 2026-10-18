@@ -1,0 +1,248 @@
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -76,6 +76,9 @@
+         private readonly Action frameSetupCallback;
+         private readonly Action frameClearCallback;
+         private readonly Action frameClearDrawCallback;
++        private readonly Action sampleableDepthPassCallback;
++        private readonly Action depthPrepassCallback;
++        private readonly Action depthOnlyDrawCallback;
+         private readonly Action depthStateCallback;
+         private readonly Action shadowMapCallback;
+         private readonly Action opaqueHookCallback;
+@@ -85,6 +88,12 @@
+         private RenderTarget? frameClearTarget;
+         private NebulaRenderer? frameClearNebula;
+         private bool frameClearTransitioned;
++        private RenderTarget? frameSceneTarget;
++        private RenderTarget2D? frameSampleableDepthTarget;
++        private NebulaRenderer? frameDepthNebula;
++        private SystemRenderPass frameDepthPass;
++        private int frameRenderWidth;
++        private int frameRenderHeight;
+         private bool subpassResourcesInitialized;
+         private long nextGpuProfileFrame;
+         private long currentGpuProfileFrame;
+@@ -130,6 +139,9 @@
+             frameSetupCallback = SetupFramePass;
+             frameClearCallback = ClearFramePass;
+             frameClearDrawCallback = ClearFrameAttachments;
++            sampleableDepthPassCallback = DrawSampleableDepthPass;
++            depthPrepassCallback = DrawDepthPrepass;
++            depthOnlyDrawCallback = DrawDepthOnly;
+             depthStateCallback = SetDepthStatePass;
+             shadowMapCallback = DrawShadowMapPass;
+             opaqueHookCallback = InvokeOpaqueHookPass;
+@@ -710,6 +722,10 @@
+                 frameClearTarget = sceneTarget;
+                 frameClearNebula = nr;
+                 frameClearTransitioned = transitioned;
++                frameSceneTarget = sceneTarget;
++                frameDepthNebula = nr;
++                frameRenderWidth = renderWidth;
++                frameRenderHeight = renderHeight;
+ 
+                 framePassGraph.AddPass(SystemRenderPass.FrameClear, frameClearCallback);
+ 
+@@ -721,82 +737,16 @@
+                     var depthPass = ssaoActive
+                         ? SystemRenderPass.SsaoDepthPrepass
+                         : SystemRenderPass.ParticleDepthPrepass;
+-                    framePassGraph.AddPass(depthPass, () =>
+-                    {
+-                        var savedTarget = rstate.RenderTarget;
+-                        var savedColorWrite = rstate.ColorWrite;
+-                        var savedDepthEnabled = rstate.DepthEnabled;
+-                        var savedDepthWrite = rstate.DepthWrite;
+-                        var savedDepthFunction = rstate.DepthFunction;
+-                        var ssaoViewportPushed = false;
+-                        var ssaoScissorPushed = false;
+-                        try
+-                        {
+-                            rstate.PushViewport(new Rectangle(0, 0, renderWidth, renderHeight));
+-                            ssaoViewportPushed = true;
+-                            ssaoScissorPushed = rstate.PushScissor(
+-                                new Rectangle(0, 0, renderWidth, renderHeight), false);
+-                            rstate.RenderTarget = sceneDepthTarget;
+-                            rstate.SetCamera(camera);
+-                            Commands.Camera = camera;
+-                            rstate.DepthEnabled = true;
+-                            rstate.DepthWrite = true;
+-                            rstate.DepthFunction = DepthFunction.Less;
+-                            rstate.ColorWrite = false;
+-                            rstate.ClearDepth();
+-                            ValidateSampleableDepthTarget(depthPass, sceneDepthTarget);
+-                            ExecuteGpuPass(depthPass, sceneDepthTarget, () =>
+-                            {
+-                                Commands.DepthOnlyPass = true;
+-                                try
+-                                {
+-                                    foreach (var obj in objects)
+-                                        obj.DepthPrepass(camera, Commands, SystemLighting, nr!);
+-                                }
+-                                finally { Commands.DepthOnlyPass = false; }
+-                            });
+-                        }
+-                        finally
+-                        {
+-                            Commands.DepthOnlyPass = false;
+-                            rstate.ColorWrite = savedColorWrite;
+-                            rstate.DepthEnabled = savedDepthEnabled;
+-                            rstate.DepthWrite = savedDepthWrite;
+-                            rstate.DepthFunction = savedDepthFunction;
+-                            rstate.SetCamera(camera);
+-                            Commands.Camera = camera;
+-                            if (ssaoScissorPushed) rstate.PopScissor();
+-                            if (ssaoViewportPushed) rstate.PopViewport();
+-                            rstate.RenderTarget = savedTarget;
+-                        }
+-                    }, SystemRenderResource.None, frameSetup);
++                    frameDepthPass = depthPass;
++                    frameSampleableDepthTarget = sceneDepthTarget;
++                    framePassGraph.AddPass(depthPass, sampleableDepthPassCallback,
++                        SystemRenderResource.None, frameSetup);
+                 }
+ 
+                 if (Settings.RenderDepthPrepass)
+                 {
+-                    framePassGraph.AddPass(SystemRenderPass.DepthPrepass, () =>
+-                    {
+-                        rstate.ColorWrite = false;
+-                        rstate.DepthFunction = DepthFunction.Less;
+-                        try
+-                        {
+-                            ExecuteGpuPass(SystemRenderPass.DepthPrepass, sceneTarget, () =>
+-                            {
+-                                Commands.DepthOnlyPass = true;
+-                                try
+-                                {
+-                                    foreach (var obj in objects)
+-                                        obj.DepthPrepass(camera, Commands, SystemLighting, nr!);
+-                                }
+-                                finally { Commands.DepthOnlyPass = false; }
+-                            });
+-                        }
+-                        finally
+-                        {
+-                            rstate.DepthFunction = DepthFunction.LessEqual;
+-                            rstate.ColorWrite = true;
+-                        }
+-                    }, SystemRenderResource.None, frameSetup);
++                    framePassGraph.AddPass(SystemRenderPass.DepthPrepass, depthPrepassCallback,
++                        SystemRenderResource.None, frameSetup);
+                 }
+                 else
+                 {
+@@ -1189,6 +1139,75 @@
+             rstate.ClearAll();
+         }
+ 
++        private void DrawSampleableDepthPass()
++        {
++            var depthTarget = frameSampleableDepthTarget!;
++            var savedTarget = rstate.RenderTarget;
++            var savedColorWrite = rstate.ColorWrite;
++            var savedDepthEnabled = rstate.DepthEnabled;
++            var savedDepthWrite = rstate.DepthWrite;
++            var savedDepthFunction = rstate.DepthFunction;
++            var viewportPushed = false;
++            var scissorPushed = false;
++            try
++            {
++                rstate.PushViewport(new Rectangle(0, 0, frameRenderWidth, frameRenderHeight));
++                viewportPushed = true;
++                scissorPushed = rstate.PushScissor(
++                    new Rectangle(0, 0, frameRenderWidth, frameRenderHeight), false);
++                rstate.RenderTarget = depthTarget;
++                rstate.SetCamera(camera);
++                Commands.Camera = camera;
++                rstate.DepthEnabled = true;
++                rstate.DepthWrite = true;
++                rstate.DepthFunction = DepthFunction.Less;
++                rstate.ColorWrite = false;
++                rstate.ClearDepth();
++                ValidateSampleableDepthTarget(frameDepthPass, depthTarget);
++                ExecuteGpuPass(frameDepthPass, depthTarget, depthOnlyDrawCallback);
++            }
++            finally
++            {
++                Commands.DepthOnlyPass = false;
++                rstate.ColorWrite = savedColorWrite;
++                rstate.DepthEnabled = savedDepthEnabled;
++                rstate.DepthWrite = savedDepthWrite;
++                rstate.DepthFunction = savedDepthFunction;
++                rstate.SetCamera(camera);
++                Commands.Camera = camera;
++                if (scissorPushed) rstate.PopScissor();
++                if (viewportPushed) rstate.PopViewport();
++                rstate.RenderTarget = savedTarget;
++            }
++        }
++
++        private void DrawDepthPrepass()
++        {
++            rstate.ColorWrite = false;
++            rstate.DepthFunction = DepthFunction.Less;
++            try
++            {
++                ExecuteGpuPass(SystemRenderPass.DepthPrepass, frameSceneTarget, depthOnlyDrawCallback);
++            }
++            finally
++            {
++                rstate.DepthFunction = DepthFunction.LessEqual;
++                rstate.ColorWrite = true;
++                Commands.DepthOnlyPass = false;
++            }
++        }
++
++        private void DrawDepthOnly()
++        {
++            Commands.DepthOnlyPass = true;
++            try
++            {
++                foreach (var obj in objects)
++                    obj.DepthPrepass(camera, Commands, SystemLighting, frameDepthNebula!);
++            }
++            finally { Commands.DepthOnlyPass = false; }
++        }
++
+         private void SetDepthStatePass()
+         {
+             rstate.DepthFunction = DepthFunction.Less;
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -67,7 +67,7 @@
+   - [x] Statische Passvertrag-Prüfung verlangt pro Attachment genau eine Ressource und gleicht Store/Resolve-Verhalten mit den deklarierten Writes ab; Resolve ist nur für Color erlaubt. Source-Attachments bleiben Read-Verträge. Die Metadaten steuern weiterhin nicht selbst die API-Aufrufe.
+   - [x] Die statische Passfolgenprüfung wertet optionale Reads wie die Laufzeitprüfung aus und verlangt sie nicht als zwingende Eingaben; so sind sequenzielle Prüfläufe auch ohne optionalen Schatten- oder Tiefenpuffer gültig.
+   - [x] Die Hauptpass-Ausführungsreihenfolge steht in den typisierten Passdeskriptoren und wird von Laufzeitprüfung sowie Scheduler daraus gelesen; der separate Pass-zu-Order-Switch ist entfernt. Der Graph führt die Passcallbacks aus.
+-  - [x] `SystemRenderPassGraph` topologisch sortiert und führt Hauptpässe, Physics-Hook, Debug-Overlay und optionalen AA-/HDR-Resolve anhand deklarierter Read-/Write-Ressourcen und expliziter Abhängigkeiten aus. Derselbe Scheduler kompiliert und führt den Postprocess-Plan aus. Ressourcenproduzenten dürfen unabhängig von ihrer Registrierungsreihenfolge stehen; Read-after-write, Write-after-read und Write-after-write werden eingeordnet. Pflicht-Reads ohne Producer, fehlende explizite Vorgänger und Zyklen werden vor Ausführung der Callbacks abgewiesen. Knoten und Abhängigkeitspuffer werden zwischen Frames wiederverwendet; bei gleicher exakter Passstruktur und denselben externen Ressourcen wird auch die topologische Ausführungsfolge wiederverwendet. Eine Strukturänderung löst eine erneute Kompilierung aus. Targetwechsel und Attachments bleiben in den Passcallbacks. Die Abhängigkeitsauflösung nutzt keine pro Kompilierung erzeugten lokalen Closure-Helfer mehr. Setup-, Clear-, Depth-State-, Shadow-Status-, Hook- und Debug-Callbacks des `SystemRenderer` verwenden langlebige Delegates; weitere Haupt-Draw-Callbacks werden weiterhin pro Frame neu erstellt und können Closure-Allokationen verursachen. Laufzeit-/Bildabnahme und Frame-Profiling bleiben offen.
++  - [x] `SystemRenderPassGraph` topologisch sortiert und führt Hauptpässe, Physics-Hook, Debug-Overlay und optionalen AA-/HDR-Resolve anhand deklarierter Read-/Write-Ressourcen und expliziter Abhängigkeiten aus. Derselbe Scheduler kompiliert und führt den Postprocess-Plan aus. Ressourcenproduzenten dürfen unabhängig von ihrer Registrierungsreihenfolge stehen; Read-after-write, Write-after-read und Write-after-write werden eingeordnet. Pflicht-Reads ohne Producer, fehlende explizite Vorgänger und Zyklen werden vor Ausführung der Callbacks abgewiesen. Knoten und Abhängigkeitspuffer werden zwischen Frames wiederverwendet; bei gleicher exakter Passstruktur und denselben externen Ressourcen wird auch die topologische Ausführungsfolge wiederverwendet. Eine Strukturänderung löst eine erneute Kompilierung aus. Targetwechsel und Attachments bleiben in den Passcallbacks. Die Abhängigkeitsauflösung nutzt keine pro Kompilierung erzeugten lokalen Closure-Helfer mehr. Setup-, Clear-, sampleable Depth-, Depth-Prepass-, Depth-State-, Shadow-Status-, Hook- und Debug-Callbacks des `SystemRenderer` verwenden langlebige Delegates; Opaque-, Stars-/Nebula-, Transparent- und AA-Resolve-Callbacks werden weiterhin pro Frame neu erstellt und können Closure-Allokationen verursachen. Laufzeit-/Bildabnahme und Frame-Profiling bleiben offen.
+   - [x] Der Hauptpass-Tracker veröffentlicht nach erfolgreichem Draw nur deklarierte Writes, deren optionale Attachments am konkreten Target vorhanden sind. Fehlende oder unbekannte optionale Anhänge werden nicht als verfügbare Frame-Ressourcen ausgegeben. Die Passplanung erfolgt im Graphen; Targetwechsel bleiben in den jeweiligen Callbacks.
+   - [x] Gebundene Backend-Renderziele stellen Farb-/Tiefen-/Stencil-Präsenz und ein bekanntes Farbformat bereit. `SystemRenderer` weist Ziele zurück, denen laut Passvertrag zwingende Anhänge fehlen; GL-MSAA meldet das Farbformat nur für bekannte sized-Formate. Swapchainformat und Desktop-GLs unsized-MSAA-Storage bleiben unbekannt.
+   - [x] `AntialiasTarget` prüft beim Erzeugen die tatsächlichen aktiven Farb-/Tiefenattachments und für SMAA auch Stencil an Kanten- und Gewichtsziel; bekannte Zielformate müssen dem gewählten LDR-/HDR-Pfad entsprechen. Unbekanntes Desktop-MSAA-Format bleibt zulässig und wird nicht geraten.
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 280 Client bundles and two native bundles. Each
++The active series contains 281 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -243,3 +243,4 @@
+ | 2279 | Apply MaterialAnim UV scale to normal-map tangent frames |
+ | 2280 | Cache SystemRenderer pass schedules when topology is unchanged |
+ | 2281 | Reuse frame-clear callbacks across SystemRenderer frames |
++| 2282 | Reuse SystemRenderer depth-prepass callbacks across frames |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -281,3 +281,4 @@
+ client 2279-normalmap-material-animation-tangent-scale.patch
+ client 2280-cache-system-render-pass-schedule.patch
+ client 2281-cache-frame-clear-callbacks.patch
++client 2282-cache-depth-prepass-callbacks.patch

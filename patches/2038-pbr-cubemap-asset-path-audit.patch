@@ -1,0 +1,109 @@
+diff --git a/docs/evidence/renderer/pbr-environment-20261014/cubemap-assets-and-binding-audit.md b/docs/evidence/renderer/pbr-environment-20261014/cubemap-assets-and-binding-audit.md
+new file mode 100644
+--- /dev/null
++++ b/docs/evidence/renderer/pbr-environment-20261014/cubemap-assets-and-binding-audit.md
+@@ -0,0 +1,77 @@
++# PBR-Cubemap: Asset- und Bindungspfad-Audit
++
++Stand: 2026-10-14. Dieses Audit verfolgt den vorhandenen `LI_ELITE`-PBR-Cubemap-
++Pfad bis zu den NAP-Quellen. Es belegt Assetstruktur und Codeauswahl, aber keine
++GPU-Texturbindung oder sichtbare Reflexion.
++
++## Befund
++
++- `BasicMaterial.Use()` wählt bei aktiviertem `PbrEnvironmentMapsEnabled` den
++  Namen `Glass ? "envmapglass" : EnvMap` und löst ihn mit `GetTexture(5, name)`
++  auf. `EnvMap` stammt aus `envmap_material` des Archetyps. Für `LI_ELITE` ist
++  das `envmapbasic`; der PBR-Shader sampelt `TextureCube` an Register `t5`.
++- Dieser Pfad fragt die `[CubeMap]`-Einträge aus der Surface-INI und die Karten
++  `envcube_space`, `envcube_sun`, `envcube_nebula` nicht ab. Die Karten sind im
++  NAP vorhanden und von `SurfaceMaps.ini` referenziert, aber sie werden über den
++  aktuellen Archetyppfad nicht ausgewählt. Eine Auswahl anhand eines Surface-
++  Profils oder einer Weltumgebung ist noch nicht implementiert.
++- Der `CUBE`-DDS aus `Material/fx/envmapbasic.mat` ist 64x64, hat eine Mipstufe
++  (im DDS-Header ist die rohe Mipzahl 0) und sechs Flächen. Die +X-Fläche ist
++  im RGB-Mittelwert (127,127,127), wie auch vier weitere Flächen; +Y enthält
++  den hellen Anteil. Ein direkter +X-Sample sollte daher kein schwarzes
++  Quellpixel liefern. Das frühere schwarze Diagnosebild deutet weiter auf eine
++  offene Shader-/Sampler-/GPU-Bindungs- oder Koordinatenfrage, nicht auf einen
++  schwarzen +X-Assetinhalt.
++- Die neuen `envcube_*`-Karten sind je 256x256 mit neun Mipstufen und sechs
++  Flächen. Der Surface-Assetcheck hat 41 Dateien, 7005 DDS-Texturen und null
++  Struktur-/Referenzfehler gemeldet. Das ist eine Datenintegritätsprüfung,
++  keine visuelle oder Laufzeitabnahme.
++
++## Nachprüfbare Quelldaten
++
++Alle Laufzeitdaten unten stammen aus `Data/NAP/`; die Engine-Stellen stammen aus
++`src/` des Client-Worktrees.
++
++| NAP-Datei | SHA-256 | DDS | RGB-Mittelwert +X |
++|---|---|---|---|
++| `Material/fx/envmapbasic.mat` | `18c30f383fc451dcb5e596668770fcbc517cb88dadf7ea64c685a01c2a2432bc` | 64x64, 1 Mip, 6 Flächen | (127, 127, 127) |
++| `Surface/fx/envcube_space.mat` | `c0b9908383e7e6837bf61d7c9f256636bf16cb455f800e3ebe9a10ebe3eba9db` | 256x256, 9 Mips, 6 Flächen | (9.86, 11.26, 21.95) |
++| `Surface/fx/envcube_sun.mat` | `862be2bc062cf6d636c998b88c6fb9ca36434c7d5ff862544d0a78eba0b2b70f` | 256x256, 9 Mips, 6 Flächen | (18.06, 14.63, 11.48) |
++| `Surface/fx/envcube_nebula.mat` | `c360f2222aea189f6bf0c62d37ff2ba2bd2d82c8bde4a14cb110abd0a30af0eb` | 256x256, 9 Mips, 6 Flächen | (39.43, 21.29, 45.22) |
++
++Die +X-Statistik liest die DDS-Flächenfolge `+X, -X, +Y, -Y, +Z, -Z` und
++interpretiert die gespeicherten 32-Bit-Kanäle als BGRA. Die Flächenfolge,
++DDS-Größen und UTF-Knoten wurden aus den Dateien selbst gelesen.
++
++| Engine-Datei | SHA-256 | Relevanter Pfad |
++|---|---|---|
++| `BasicMaterial.cs` | `bc4438ec45c780c102bfe8acca1773542cc46271ae10895bcb9f1baa62305cdf` | PBR wählt das Archetyp-`EnvMap` und bindet Cube an Slot 5 |
++| `PBR.frag.hlsl` | `b56d7687b5a654c31fe9b9453e424adc3d9fbe006651ada67705f4aaf4deda6d` | `EnvTexture` ist `t5`; PBR berechnet Reflexionsrichtung und Mip |
++
++## Nächster verifizierbarer Schritt
++
++1. In einer RenderDoc-Aufnahme desselben `LI_ELITE`-Draws prüfen, ob Slot 5 eine
++   nicht-schwarze `TextureCube`-Ressource mit sechs Flächen enthält und welcher
++   Samplerzustand aktiv ist.
++2. Einen synthetischen Cube mit sechs klar unterschiedlichen Farben über den
++   Produktionsshader sampeln; dadurch lassen sich Face-Orientierung und
++   Slot-/Samplerbindung auseinanderhalten.
++3. Erst danach die `[CubeMap]`-Metadaten in den Laufzeit-Resolver integrieren,
++   die Umgebungsauswahl festlegen und `strength` mit einem klaren Default
++   anwenden. Die existierenden Oberflächenkarten bleiben dabei opt-in.
++
++Noch offen: RenderDoc-Pipelinezustand, visuelle Ausgabe, Cube-Orientierung,
++Reflexionsstärke und Zuordnung der drei Karten zu Archetypen oder Systemen.
++
++## Statische Slot- und Feature-Prüfung (2026-10-14)
++
++Der weitere Quellabgleich findet keinen offensichtlichen Feature-Bit- oder
++Slotversatz: `BasicMaterial.PBRFeatures.ENVMAP` ist Bit 6; `PBR.txt` ordnet
++`ENVMAP` dem Featureindex 7 zu (einsbasierte Deklaration). `BasicMaterial.Use`
++löst den Archetyp-Cube an Cache-/Texture-Slot 5 auf und bindet ihn bei aktivem
++PBR-Umgebungsmodus an Slot 5. Der Fragmentshader deklariert `EnvTexture` als
++`t5` und `EnvSampler` als `s5`. `TextureSlots` stellt acht Einträge bereit;
++der OpenGL-Pfad wendet Sampler für die vom Shader reflektierten Textureinheiten
++an. Damit ist die Zuordnung im C#- und Shader-Quelltext konsistent. Das beweist
++weder die tatsächliche GPU-Ressource im LI_ELITE-Draw noch den Samplewert und
++ersetzt nicht den RenderDoc- oder synthetischen Farbflächen-Probe.
+diff --git a/docs/renderer-comparison-gallery.md b/docs/renderer-comparison-gallery.md
+--- a/docs/renderer-comparison-gallery.md
++++ b/docs/renderer-comparison-gallery.md
+@@ -44,9 +44,12 @@
+ als `TextureCube` auf. Das Material `elite_256` hat im Surface-Katalog
+ Roughness- und Metallic-Karten. Nur der Schalter für PBR-Umgebungsreflexionen
+ ändert sich. Der Vergleich ergibt im Modell-ROI 0 geänderte Pixel. Diese
+-Ansicht bestätigt den Preview-Bindungspfad, aber keine sichtbare Reflexion;
+-die schwarze Umgebungslichtprobe und die unveränderten Modellpixel lassen die
+-PBR-Cubemap-Wirkung offen.
++Ansicht bestätigt den Preview-Bindungspfad, aber keine sichtbare Reflexion. Der
++Asset-Audit zeigt, dass die +X-Fläche von `envmapbasic` RGB (127,127,127)
++enthält; die schwarze Probe ist daher nicht durch ein schwarzes +X-Quellpixel
++erklärt. Ob Slot 5/Sampler oder Richtungsinterpretation die schwarze Ausgabe
++verursacht, bleibt offen. Der aktuelle PBR-Pfad wählt außerdem noch keine
++`envcube_*`-Karte aus der Surface-INI aus.
+ 
+ | PBR-Cubemap aus | PBR-Cubemap an |
+ |---|---|
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -37,3 +37,4 @@
+ client 2035-surface-pbr-immediate-draw-lease.patch
+ client 2036-pbr-environment-cubemap-reflections.patch
+ client 2037-pbr-evidence-and-renderer-todos.patch
++client 2038-pbr-cubemap-asset-path-audit.patch

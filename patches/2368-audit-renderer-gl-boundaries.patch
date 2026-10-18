@@ -1,0 +1,102 @@
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+index 223b5c9..a52fb70 100644
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -200,9 +200,14 @@ NAP-Paket und Log des bisherigen Laufs liegen in
+    führen ihre Pässe bereits über den Graph-Scheduler aus und validieren
+    Attachment-Verträge. Die Attachment-Formate in den Contracts tragen nun keine
+    GL-Backendnamen mehr; die konkreten Speicherformate werden weiterhin vom
+-   Backend angefordert. Direkte GL-Zustandsaufrufe, Ressourcennutzung, Aliasing
+-   und Fehlerwiederherstellung laufen aber noch nicht durch eine echte
+-   Backend-Ausführungsschicht und bleiben offen.
++   Backend angefordert. Der aktuelle Systemrenderer enthält keine direkten
++   GL-Aufrufe; seine Pass-Callbacks setzen jedoch sofort Zustand und Ressourcen
++   über den konkreten `RenderContext`, dessen Laufzeitfabrik weiterhin das
++   OpenGL-Backend erzeugt. Der Pass-Graph plant und validiert Callbacks, zeichnet
++   aber keine backendneutralen GPU-Kommandos auf und verwaltet kein Aliasing.
++   SDL_GPU besitzt weiterhin nur einen separaten Diagnosepfad. Eine echte
++   Backend-Ausführung, Ressourcen-Lebenszeiten und Fehlerwiederherstellung
++   bleiben offen.
+ 6. **Vulkan/SDL_GPU-Spike und Backend.** Zuerst eine echte Pipeline mit
+    Freelancer-FVF, BC4/BC5, Cubemaps, Skinning, Renderzielen und Präsentation
+    kompilieren und auf einer Vulkan-GPU starten. Erst nach erfolgreichem Spike
+diff --git a/docs/vulkan-backend-untersuchung.md b/docs/vulkan-backend-untersuchung.md
+index 08af272..5306d1a 100644
+--- a/docs/vulkan-backend-untersuchung.md
++++ b/docs/vulkan-backend-untersuchung.md
+@@ -312,20 +312,25 @@ Tangenten werden in `Basic_FVF` als zwei `float2` auf zusätzlichen UV-Slots (`T
+ 
+ ## 7. Abhängigkeiten von OpenGL außerhalb des Backends
+ 
+-Diese Stellen müssen vor oder mit einem neuen Backend entkoppelt werden:
++Quellcodeabgleich am 2026-10-18: Die früher genannten GL-Werte in
++`VertexElementType` und `WrapMode` sowie der direkte Screenshot-Readback aus den
++SDL-Fensterklassen sind inzwischen backendneutralisiert. `SystemRenderer` ruft
++keine GL-Funktionen direkt auf; RenderGraph-Callbacks führen GPU-Operationen
++aber weiterhin sofort über den derzeitigen `RenderContext` aus. Außerhalb des
++OpenGL-Backends verbleiben folgende konkrete Kopplungen:
+ 
+ | Fundstelle | Befund | Entkopplung |
+ |---|---|---|
+-| `Graphics/Vertices/VertexElementType.cs` | Aufzählung mit `GL.GL_FLOAT`, `GL.GL_UNSIGNED_SHORT`, `GL.GL_UNSIGNED_BYTE`, `GL.GL_SHORT` | eigene Werte, Umsetzung im Backend |
+-| `Graphics/WrapMode.cs` | Werte `GL.GL_CLAMP_TO_EDGE`, `GL_CLAMP_TO_BORDER`, `GL_MIRRORED_REPEAT`, `GL_REPEAT` | eigene Werte |
+-| `Platforms/SDL3Game.cs` (≈ Z. 243–260), `SDL2Game.cs` (≈ Z. 205–218) | `Screenshot` ruft `GL.ReadBuffer`, `GL.ReadPixels` direkt | Rückleser im Backend (`IRenderContext`) |
+-| `Graphics/S3TC.cs` | GL-Aufrufe und Software-Entkompression | Teil des GL-Backends, Dekompression als Hilfsfunktion |
+-| `Platforms/SDL3Game.cs`, `SDL2Game.cs`, `HeadlessContext.cs` | Fensterflag `SDL_WINDOW_OPENGL`, GL-Attribute | Fensterflags je Backend (bei SDL_GPU kein GL-Kontext) |
+-| `GLSwap.cs` | `SDL_GL_*`-Aufrufe | gehört in das Backend |
+-| `IRenderContext.MakeCurrent`, `SwapWindow` | Annahme: GL-Kontext des Fensters | in modernen Backends anders (Swapchain) |
+-| `GraphicsFeature.GLES`, `SupportsWireframe` | GL-spezifische Fähigkeitsabfragen | allgemeinere Abfrage |
+-
+-Der restliche Client greift nicht auf GL zu (Stichprobe über das ganze `src/`: nur die genannten Dateien).
++| `Platforms/SDL3Game.cs`, `SDL2Game.cs`, `HeadlessContext.cs` | Fenstererzeugung und Fabrik wählen derzeit `GLRenderContext`; Fenster tragen `SDL_WINDOW_OPENGL` | Backendwahl muss vor Fenstererzeugung erfolgen; SDL_GPU beansprucht ein SDL-Fenster ohne GL-Kontext |
++| `GLSwap.cs` | `SDL_GL_*`-Aufrufe für Swap/V-Sync | Swapchain-Präsentation im jeweiligen Backend |
++| `IRenderContext.MakeCurrent`, `SwapWindow` | Vertrag setzt einen aktuellen Fensterkontext voraus | Frame-/Present-Vertrag auf explizite Backendoperationen umstellen |
++| `Graphics/S3TC.cs` | Dekodierung und Upload teilen eine Datei; der Upload ruft GL direkt auf | Dekompression als API-unabhängige Datenfunktion abtrennen |
++| `GraphicsFeature.GLES`, `SupportsWireframe` | Featureabfragen spiegeln teilweise GL-Eigenschaften wider | Fähigkeitsabfragen als backendunabhängige Renderer-Capabilities modellieren |
++
++Ein `rg`-Abgleich über `src/` findet die übrigen direkten GL-Aufrufe im
++OpenGL-Backend sowie in Build-/Diagnosecode. Die zentralen restlichen Blocker
++sind daher Backendauswahl, Ressourcen-/Kommandoausführung und die GL-spezifische
++Textur-Uploadhilfe, nicht direkte GL-Aufrufe im Systemrenderer.
+ 
+ ---
+ 
+diff --git a/patches/README.md b/patches/README.md
+index 64b64af..7685bbe 100644
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -313,3 +313,4 @@ jump-gate route.
+ | 2365 | Release old full-resolution render targets before resize reallocation |
+ | 2366 | Record NAP-only resize and restore runtime evidence for render-target replacement |
+ | 2367 | Add NAP-only M01A visual A/B evidence for the soft-particle toggle |
++| 2368 | Remove stale OpenGL imports and refresh the backend boundary audit |
+diff --git a/patches/series b/patches/series
+index 7489ad1..dc3e56a 100644
+--- a/patches/series
++++ b/patches/series
+@@ -365,3 +365,4 @@ client 2364-frame-profile-render-options.patch
+ client 2365-release-render-targets-before-reallocation.patch
+ client 2366-render-target-resize-runtime-evidence.patch
+ client 2367-soft-particle-m01a-visual-ab.patch
++client 2368-audit-renderer-gl-boundaries.patch
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+index 5e5fdbc..98416b7 100644
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -10,7 +10,6 @@ using LibreLancer.Data.GameData.World;
+ using LibreLancer.Data.Schema;
+ using LibreLancer.Fx;
+ using LibreLancer.Graphics;
+-using LibreLancer.Graphics.Backends.OpenGL;
+ using LibreLancer.Render.Cameras;
+ using LibreLancer.Render.Materials;
+ using LibreLancer.Resources;
+@@ -1059,7 +1058,7 @@ namespace LibreLancer.Render
+ 
+         private void ClearFramePass()
+         {
+-            // OpenGL clears respect active write masks. The renderer owns these
++            // Clears respect active write masks. The renderer owns these
+             // attachments for the frame and restores caller state later.
+             rstate.ColorWrite = true;
+             rstate.DepthWrite = true;

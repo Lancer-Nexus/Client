@@ -1,0 +1,108 @@
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -1205,44 +1205,56 @@
+ 
+         private void DrawStarsAndNebulaContent()
+         {
+-            rstate.DepthRange = new Vector2(1, 1);
+-            if (camera is ThnCamera thn && !ZOverride)
++            var previousDepthFunction = rstate.DepthFunction;
++            var previousDepthRange = rstate.DepthRange;
++            try
+             {
+-                thnDefaultZActive = true;
+-                thn.DefaultZ();
+-                rstate.SetCamera(thn);
+-            }
+-            for (var i = 0; i < StarSphereModels.Length; i++)
+-            {
+-                Matrix4x4 ssworld = Matrix4x4.CreateTranslation(camera.Position);
+-                if (StarSphereWorlds != null)
+-                    ssworld = StarSphereWorlds[i] * ssworld;
+-                var lighting = StarSphereLightings != null
+-                    ? StarSphereLightings[i]
+-                    : Lighting.Empty;
+-                var mdl = StarSphereModels[i];
+-                foreach (var part in mdl.AllParts)
++                // Sky domes are placed at the far depth. They must pass against the
++                // frame's clear depth whether or not a depth prepass is enabled.
++                rstate.DepthFunction = DepthFunction.LessEqual;
++                rstate.DepthRange = new Vector2(1, 1);
++                if (camera is ThnCamera thn && !ZOverride)
++                {
++                    thnDefaultZActive = true;
++                    thn.DefaultZ();
++                    rstate.SetCamera(thn);
++                }
++                for (var i = 0; i < StarSphereModels.Length; i++)
++                {
++                    Matrix4x4 ssworld = Matrix4x4.CreateTranslation(camera.Position);
++                    if (StarSphereWorlds != null)
++                        ssworld = StarSphereWorlds[i] * ssworld;
++                    var lighting = StarSphereLightings != null
++                        ? StarSphereLightings[i]
++                        : Lighting.Empty;
++                    var mdl = StarSphereModels[i];
++                    foreach (var part in mdl.AllParts)
++                    {
++                        if (!part.Active || part.Mesh == null)
++                            continue;
++                        var p = part;
++                        var w = p.LocalTransform.Matrix() * ssworld;
++                        var bsphere = new BoundingSphere(
++                            Vector3.Transform(p.Mesh!.Center, w), p.Mesh.Radius);
++                        if (camera.FrustumCheck(bsphere))
++                            p.Mesh.DrawImmediate(0, resman, rstate, w, ref lighting,
++                                mdl.MaterialAnims, BasicMaterial.ForceAlpha);
++                    }
++                }
++                if (camera is ThnCamera thn2 && !ZOverride)
+                 {
+-                    if (!part.Active || part.Mesh == null)
+-                        continue;
+-                    var p = part;
+-                    var w = p.LocalTransform.Matrix() * ssworld;
+-                    var bsphere = new BoundingSphere(
+-                        Vector3.Transform(p.Mesh!.Center, w), p.Mesh.Radius);
+-                    if (camera.FrustumCheck(bsphere))
+-                        p.Mesh.DrawImmediate(0, resman, rstate, w, ref lighting,
+-                            mdl.MaterialAnims, BasicMaterial.ForceAlpha);
++                    thn2.CameraZ();
++                    thnDefaultZActive = false;
++                    rstate.SetCamera(thn2);
+                 }
++                if (frameDepthNebula != null && DrawNebulae)
++                    frameDepthNebula.RenderFogTransition(rstate);
+             }
+-            if (camera is ThnCamera thn2 && !ZOverride)
++            finally
+             {
+-                thn2.CameraZ();
+-                thnDefaultZActive = false;
+-                rstate.SetCamera(thn2);
++                rstate.DepthRange = previousDepthRange;
++                rstate.DepthFunction = previousDepthFunction;
+             }
+-            if (frameDepthNebula != null && DrawNebulae)
+-                frameDepthNebula.RenderFogTransition(rstate);
+-            rstate.DepthRange = new Vector2(0, 1);
+         }
+ 
+         private void ResolveAntialiasPass()
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -351,3 +351,4 @@
+ client 2349-hi02-intel-renderer-profile-evidence.patch
+ client 2350-sdl-gpu-depth-target-smoke.patch
+ client 2352-tint-nebula-ambient-with-system-sun.patch
++client 2353-fix-sky-sphere-depth-test.patch
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -299,3 +299,4 @@
+ | 2349 | Record a 300-frame Hi02 GPU profile on Intel HD 4600 |
+ | 2350 | Add SDL_GPU depth and HDR scene-copy smoke coverage |
+ | 2352 | Apply the system sun ambient tint to nebula ambient overrides |
++| 2353 | Render sky spheres against the frame clear depth |
