@@ -351,3 +351,4 @@ jump-gate route.
 | 2393 | Sample real Freelancer MAT diffuse DDS textures in the SDL_GPU PBR VMesh smoke |
 
 | 2394 | Draw complete indexed NAP VMesh material surfaces through the SDL_GPU PBR smoke |
+| 2395 | Load and sample real NAP normal, roughness and metallic maps on a VMesh |
