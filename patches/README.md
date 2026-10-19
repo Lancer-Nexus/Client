@@ -356,3 +356,8 @@ jump-gate route.
 | 2397 | Keep SDL_GPU DFM diagnostic geometry inside Vulkan clip depth and add opt-in framebuffer captures |
 | 2398 | Load SDL_GPU VMesh diagnostic inputs through the active NAP provider |
 | 2399 | Apply the authored CMP hierarchy transform to the selected SDL_GPU VMesh diagnostic draw |
+| 2400 | Select an individual CMP component in the NAP-backed SDL_GPU VMesh smoke |
+| 2401 | Normalize source VMesh FVF streams with normals and UVs for SDL_GPU part draws |
+| 2402 | Report CMP component VMesh formats when an SDL_GPU part draw cannot be selected |
+| 2403 | Allow selected unmapped CMP components in Surface-disabled SDL_GPU runs |
+| 2404 | Record NAP SDL_GPU CMP part transform Surface-map A/B evidence |

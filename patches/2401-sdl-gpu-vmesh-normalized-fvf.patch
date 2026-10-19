@@ -1,0 +1,51 @@
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -281,8 +281,9 @@
+             {
+                 if (!cmp.VMeshLibrary.Meshes.TryGetValue(meshRef.MeshCrc, out var data))
+                     continue;
+-                var expected = D3DFVF.XYZ | D3DFVF.NORMAL | D3DFVF.TEX1;
+-                if (data.VertexFormat.FVF != expected)
++                // The SDL smoke consumes a normalized position/normal/UV0 stream;
++                // source meshes may carry additional UV sets or vertex color.
++                if (!data.VertexFormat.Normal || data.VertexFormat.TexCoords < 1)
+                     continue;
+                 for (var meshIndex = meshRef.StartMesh;
+                      meshIndex < meshRef.StartMesh + meshRef.MeshCount && meshIndex < data.Meshes.Length;
+@@ -314,7 +315,8 @@
+                     var surface = materialCandidate != null && surfaceMaps != null
+                         ? SurfaceMaterialResolver.Resolve(materialCandidate, surfaceMaps)
+                         : null;
+-                    if (surfaceVfs != null && (surface?.Normal == null || surface.NormalUvChannel != 0))
++                    if (surfaceVfs != null && (surface?.Normal == null || surface.NormalUvChannel != 0 ||
++                                               !VMeshTangentBuilder.Supports(data.VertexFormat)))
+                         continue;
+                     selectedModel = model;
+                     selectedPart = cmpPart;
+@@ -332,7 +334,7 @@
+ 
+         if (selectedModel == null || selectedPart == null || selectedRef == null || selectedData == null || selectedMesh == null)
+             throw new InvalidDataException(
+-                $"CMP contains no indexed XYZ|NORMAL|TEX1 VMesh draw with valid indices" +
++                $"CMP contains no indexed VMesh draw with normals, UV0 and valid indices" +
+                 (string.IsNullOrWhiteSpace(partName) ? "" : $" for part '{partName}'") + $": {path}");
+ 
+         // Build the authored CMP hierarchy with the same construct transforms used
+@@ -384,7 +386,7 @@
+             throw new InvalidDataException($"Selected VMesh draw has no projected extent: {path}");
+ 
+         var vertices = new float[checked((selectedData.VertexCount + 3) * 8)];
+-        var outputFvf = selectedData.VertexFormat.FVF;
++        var outputFvf = D3DFVF.XYZ | D3DFVF.NORMAL | D3DFVF.TEX1;
+         var gpuBaseVertex = drawBaseVertex + 3;
+         var coverageTriangle = new float[6];
+         for (var i = 0; i < drawIndexCount; i++)
+@@ -422,7 +424,7 @@
+         {
+             var tangentMesh = VMeshTangentBuilder.Build(selectedData, selectedMeshIndex,
+                 selectedRef.StartVertex, selectedSurface.NormalUvChannel);
+-            outputFvf = tangentMesh.VertexFormat.FVF;
++            outputFvf = D3DFVF.XYZ | D3DFVF.NORMAL | D3DFVF.TEX3;
+             vertices = new float[checked((tangentMesh.VertexCount + 3) * 12)];
+             drawIndices = new ushort[tangentMesh.Indices.Length + 1];
+             for (var i = 0; i < tangentMesh.VertexCount; i++)

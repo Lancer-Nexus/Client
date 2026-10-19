@@ -1,0 +1,73 @@
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -225,13 +225,13 @@
+     }
+ 
+     private static VMeshDraw LoadVmeshDraw(FileSystem vfs, string path, string materialPath,
+-        bool surfaceEnabled)
++        bool surfaceEnabled, string? partName = null)
+     {
+-        return LoadVmeshDraw(path, materialPath, vfs.Open, vfs, surfaceEnabled);
++        return LoadVmeshDraw(path, materialPath, vfs.Open, vfs, surfaceEnabled, partName);
+     }
+ 
+     private static VMeshDraw LoadVmeshDraw(string path, string? materialPath, Func<string, Stream> openStream,
+-        FileSystem? surfaceVfs, bool surfaceEnabled)
++        FileSystem? surfaceVfs, bool surfaceEnabled, string? partName = null)
+     {
+         MatFile? externalMaterials = null;
+         TxmFile? externalTextures = null;
+@@ -273,6 +273,9 @@
+                      .Where(x => x.Model != null)
+                      .OrderBy(x => x.ObjectName, StringComparer.Ordinal))
+         {
++            if (!string.IsNullOrWhiteSpace(partName) &&
++                !string.Equals(cmpPart.ObjectName, partName, StringComparison.OrdinalIgnoreCase))
++                continue;
+             var model = cmpPart.Model!;
+             foreach (var meshRef in model.Levels.OfType<VMeshRef>())
+             {
+@@ -329,7 +332,8 @@
+ 
+         if (selectedModel == null || selectedPart == null || selectedRef == null || selectedData == null || selectedMesh == null)
+             throw new InvalidDataException(
+-                $"CMP contains no indexed XYZ|NORMAL|TEX1 VMesh draw with valid indices: {path}");
++                $"CMP contains no indexed XYZ|NORMAL|TEX1 VMesh draw with valid indices" +
++                (string.IsNullOrWhiteSpace(partName) ? "" : $" for part '{partName}'") + $": {path}");
+ 
+         // Build the authored CMP hierarchy with the same construct transforms used
+         // by the production RigidModel path, then select the matching component.
+@@ -533,16 +537,21 @@
+             }
+             return;
+         }
+-        if (args.Length is >= 4 and <= 5 && args[0] == "--sdl-gpu-vmesh-nap-smoke")
++        if (args.Length is >= 4 and <= 6 && args[0] == "--sdl-gpu-vmesh-nap-smoke")
+         {
+             try
+             {
+-                if (args.Length == 5 && args[4] is not ("on" or "off"))
++                var selectedPart = args.Length >= 5 && args[4] is not ("on" or "off") ? args[4] : null;
++                var surfaceMode = args.Length == 6 ? args[5] :
++                    args.Length == 5 && selectedPart == null ? args[4] : "on";
++                if (args.Length == 6 && selectedPart == null)
++                    throw new ArgumentException("Provide a CMP part name before the Surface map mode.");
++                if (surfaceMode is not ("on" or "off"))
+                     throw new ArgumentException("Surface map mode must be 'on' or 'off'.");
+                 var packageProvider = NexusPackageFileProvider.LoadActive(args[1])
+                     ?? throw new InvalidDataException($"No active NAP manifest was found under {args[1]}.");
+                 var packageVfs = new FileSystem(packageProvider);
+-                var vmesh = LoadVmeshDraw(packageVfs, args[2], args[3], args.Length < 5 || args[4] == "on");
++                var vmesh = LoadVmeshDraw(packageVfs, args[2], args[3], surfaceMode == "on", selectedPart);
+                 Console.WriteLine($"Loaded complete Freelancer VMesh draw from active NAP: {vmesh.Description}.");
+                 Environment.ExitCode = SDL3GpuSmoke.Run(
+                     () => new FVFVertex(vmesh.Format).GetVertexDeclaration(),
+@@ -654,7 +663,7 @@
+             Console.WriteLine("       Standalone test option: --invulnerable=on|off (local embedded server only)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-smoke (SDL3 GPU shader, pipeline, draw, and swapchain test)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-vmesh-smoke <cmp-path> [mat-path [surface-data-root [on|off]]] (draw a VMesh with MAT diffuse and optional NAP Surface maps)");
+-            Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-vmesh-nap-smoke <application-dir> <cmp-virtual-path> <mat-virtual-path> [on|off] (draw a VMesh and Surface maps from the active NAP snapshot)");
++            Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-vmesh-nap-smoke <application-dir> <cmp-virtual-path> <mat-virtual-path> [part-name] [on|off] (draw one CMP part and its Surface maps from the active NAP snapshot)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-dfm-smoke <dfm-path> [surface-data-root [on|off]] (draw an embedded DFM material with production GPU skinning)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-dfm-nap-smoke <application-dir> <dfm-virtual-path> [on|off] (draw an embedded DFM from the verified active NAP snapshot)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-shader-bundle-audit (parse every built-in shader variant and validate SDL_GPU slot maps)");
