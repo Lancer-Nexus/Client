@@ -1,6 +1,6 @@
 # Freelancer Data: offene Client-Arbeiten
 
-Diese Liste überträgt aus dem benachbarten [Data-Repository](../../LN-Data/README.md)
+Diese Liste überträgt aus dem benachbarten [Data-Repository](../../Data/README.md)
 die Aufgaben, die LibreLancer-Client, Engine, Renderer oder Laufzeit betreffen.
 Die Quelldokumente bleiben maßgeblich für Änderungen an SDK-INIs, NAP-Dateien
 und dem Datenimport. Originaldateien werden nicht in diesem Client-Repository
@@ -17,37 +17,145 @@ Die Reihenfolge, Abhängigkeiten und Abnahmekriterien zur Umsetzung stehen im
 
 ### Musik-Playlists in Räumen
 
-Quelle: [LN-Data/TODO-musik.md](../../LN-Data/TODO-musik.md)
+Quelle: [Data/TODO-musik.md](../../Data/TODO-musik.md)
 
-Stand: Patch `2171-room-music-playlists.patch` (Commit `7a3518ce8`) setzt die Parser- und Auswahllogik um.
-
-- [x] `[Room_Sound] music` nimmt mehrere Nicknames und `oneshot` an (`RoomSound.MusicTracks`, `BaseRoom.MusicTracks`); ein einzelner Nickname und `oneshot` verhalten sich wie zuvor.
-- [x] Wechselverhalten: zufällige Auswahl ohne direkte Wiederholung (`RoomMusicPlaylist`), nächster Titel, sobald der aktuelle endet; bei mehreren Titeln spielt jeder einmal, ein einzelner Titel schleift weiter.
-- [x] Parser- und Auswahltests (`RoomMusicPlaylistTests`: mehrere Titel mit `oneshot`, einzelner Titel mit `oneshot`, keine Wiederholung, null/ein Titel).
-- [ ] Wiedergabetest im Client: Raum mit mehreren Titeln (`Br0104Bar.ini` o. ä.), Wechsel am Titelende, Verhalten mit `oneshot` (bei `oneshot` wird einmalig ein Titel gespielt und nicht gewechselt), Raumwechsel.
-- [ ] Audioformat beachten: Die Musik liegt in `LN-Data` seit der Konvertierung als Ogg Vorbis (`.ogg`) vor. Den Streaming-Pfad (`StreamingSource`) mit `.ogg` prüfen, besonders das Ende eines Titels (`Game.Sound.MusicPlaying`) und lückenlosen Wechsel.
-- [ ] Erst nach erfolgreichem Engine-Test die Bar-Raum-INIs im Data-Repository auf Playlists umstellen und anschließend dessen INIs nach NAP synchronisieren (Datenaufgabe, Räume und Titel in `TODO-musik.md`).
+- [x] Den Ablauf vom `[Room_Sound] music`-Parser über `GameItemDb` und
+  `BaseRoom` bis `RoomGameplay`/`SoundManager.PlayMusic` nachvollziehen.
+- [x] Kommagetrennte Nicknames in einer `music`-Zeile unterstützen; einzelne
+  Nicknames und das bestehende `oneshot`-Suffix bleiben kompatibel.
+- [x] Playlist-Regeln festlegen: zufälliger Track beim Raumwechsel, danach
+  Weiterschalten nach Trackende ohne direkte Wiederholung. Ein Einzeltitel
+  bleibt geloopt. Eine Playlist mit `oneshot` spielt genau einen zufällig
+  gewählten Track und endet; es gibt keinen Timerwechsel.
+- [x] Parser- und Auswahltests für mehrere Titel, `oneshot`, Einzeltrack,
+  Leereintrag und Vermeidung direkter Wiederholungen ergänzen.
+- [x] Wiedergabe und Trackwechsel in `Br0104Bar` mit dem lokalen
+  Freelancer-Datenbestand zur Laufzeit geprüft. Der isolierte Debug-Lauf nutzte
+  eine Retail-DATA-Kopie, startete `Br01_04_Base` in der Bar und ersetzte die
+  Raum-Musik durch zwei synthetische Ogg-Tracks. Das Log zeigt zehn Trackwechsel
+  im Wechsel `test_bar_b` / `test_bar_a`, ohne Error-, Fatal- oder
+  Exception-Einträge; OpenAL lief im Null-Treiber, daher kein Hörtest.
+- [x] Danach 131 generische Bar-Raum-INIs im Data-Repository auf die zehn
+  generischen Titel umgestellt und alle 1252 SDK-INIs nach NAP synchronisiert.
+  Nach Erhalt der CRLF-Zeilenenden wurden 131 Ziele aktualisiert, 1121 blieben
+  unverändert; der finale Dry-Run meldete 1252 unveränderte Dateien.
+  Alle 131 Bar-Ziele in `NAP/World` stimmen byteweise mit den SDK-INIs überein.
 
 ### Asteroidenfelder und Asteroidentexturen
 
-Quelle: [Data/TODO-asteroiden.md](../../LN-Data/TODO-asteroiden.md)
+Quelle: [Data/TODO-asteroiden.md](../../Data/TODO-asteroiden.md)
 
 - [ ] Die aus der HD-Edition übernommenen Abstände (`fill_dist`, `start_dist`),
   Dichte und Farben in den betroffenen Systemen im Client darstellen und mit
   dem Originalverhalten vergleichen.
-- [ ] Für die neu verwendeten Abschnitte und Felder (`shape`, `exclusion`,
-  `zone`, `render_parts`, `fade`) prüfen, ob Parser, GameItemDb und Renderer
-  Werte nicht nur einlesen, sondern korrekt verwenden. Fehlende oder
-  unbekannte Werte mit gezielten Parsertests abdecken.
+- [x] Codepfad für Feldwerte, Billboards, Band und Exclusion-Zonen von Schema
+  über `GameItemDb` bis Renderer/Komponente geprüft. `fill_dist`,
+  `empty_cube_frequency`, Farben, Billboard-`start_dist` und
+  `fade_dist_percent` werden verwendet; `Band.render_parts`/`fade` werden
+  gespeichert, aber nicht gerendert. `ExclusionBand`, mehrere Band-/Billboard-
+  Felder sowie die Exclusion-Steuerflags sind derzeit nicht oder nur teilweise
+  angebunden. Details stehen im [Client-Umsetzungsplan](data-client-plan.md#phase-1--parser--und-datenflussprüfung).
+- [x] Retail-Laufzeitbaseline für BR01 Cornwall aufgenommen: ein isolierter
+  Debug-Client mit temporär missionsfreiem Startsave betrat das Zentrum des
+  Asteroidenfelds und zeigte Asteroiden in der Szene. Log, Warnungen und
+  Screenshot liegen unter `/tmp/lancer-br01-asteroid-runtime-20261012/`.
+  Dieser Lauf prüft weder HD-Werte noch das Originalspiel.
+- [x] Client-A/B-Lauf für Cornwall mit Retail-Feld-INI und HD-SDK-Feld-INI
+  durchgeführt. Beide Varianten erreichten `Entering system Br01`; der HD-Lauf
+  lud das Feld nach Bereitstellung der referenzierten SDK-`RockShapes.ini`
+  ebenfalls ohne Error/Fatal/Exception. Die INI-Werte ändern gegenüber Retail
+  `fill_dist` von 1650 auf 3300 und `start_dist` von 1000 auf 2000; die
+  Würfelhäufigkeit (0,5), Feldfarben und Asteroidenwürfel bleiben gleich.
+  Quellcode und Lauf bestätigen den erweiterten Render-Radius und die spätere
+  Billboard-Einblendung im Client. Logs und Vergleichsbilder liegen unter
+  `/tmp/lancer-proton-freelancer-asteroid-20261012/`. Das ist kein Vergleich
+  mit dem Originalrenderer.
+- [ ] Originalspielvergleich bleibt offen. Proton 7.0 und portables Wine 10.20
+  endeten vor der Szene mit „Freelancer did not detect a 3D capable video
+  card“; DXVK scheiterte an `VK_KHR_surface`. Ein Proton-9-Beta-Lauf auf dem
+  Intel-HD4600-Desktop rendert mit einer vollständigen, temporären Retail-Kopie
+  nun das animierte Freelancer-Titelmenü und dessen 3D-Hintergrund. Die Kopie
+  enthält `DATA`, `EXE` und `DLLS` unter
+  `/tmp/lancer-proton-freelancer-asteroid-20261012/FL/`; die Retail-Installation
+  blieb unverändert. `xdotool`/XTest und isolierte uinput-Tastatur-/Mausereignisse
+  wählten „New Game“ nicht aus. Deshalb ist weiterhin keine Retail-Szenenreferenz
+  für den A/B-Lauf vorhanden. Log und Menüaufnahme liegen im selben
+  `/tmp/lancer-proton-freelancer-asteroid-20261012/`-Verzeichnis.
+  Im Wiederholungslauf erschien der Grafikkartenhinweis erneut; Win32
+  `BM_CLICK` auf `IDYES` schloss ihn. Ein anschließender Win32-SendInput- und
+  PostMessage-Klick auf „New Game“ löste keinen Szenenwechsel aus. Die X11-
+  Aufnahme war danach schwarz, während das Spiel weiter Renderwarnungen schrieb;
+  der sichtbare Szenenzustand dieses Wiederholungslaufs ist daher unklar.
+  Auch mit `fullscreen = 0` und `size = 1024,768` in der temporären
+  `freelancer.ini` blieb die Fensteraufnahme nach dem Warnhinweis schwarz. Die
+  Konfiguration wurde danach auf den Retail-Stand zurückgesetzt.
+- [x] HD-Asteroidenreferenzen statisch abgeglichen: alle 210
+  `[Asteroids] file`-Verweise aus SDK-System-INIs zeigen auf Dateien in
+  `SDK/solar/asteroids/`; der Sync-Trockentest legt BR01s System- und
+  Asteroiden-INI unter `NAP/World/` mit passendem Pfad ab. Kein statischer
+  Dateinamenbruch gefunden. Der echte NAP-Bestand ist weiterhin leer, daher
+  bleibt der Paket-/HD-Clientlauf offen.
+- [ ] Ungeklärte HD-Semantik und sichtbare Wirkung der erfassten Lücken in
+  `Br01CornwallRockAsteroidField.ini` mit dem Originalspiel vergleichen;
+  anschließend nur bestätigte Client-Abweichungen gezielt korrigieren.
+- [x] Retail-DATA und SDK für die offenen `AsteroidArch.ini`-Felder
+  abgeglichen: dieselben drei `[AsteroidMine]`-Einträge besitzen
+  `explosion_impulse` (1000, 100, 1000) und dieselben drei
+  `[DynamicAsteroid]`-Einträge besitzen `particle_effect` (`gf_blsmallasteroid`
+  einmal, `gf_dynamiclavaast` zweimal).
+- [x] Clientpfad implementiert: `DynamicAsteroid` parst `particle_effect`,
+  `GameItemDb.InitAsteroids()` löst ihn über `Effects.ini` zu `ResolvedFx` auf,
+  und `CGameSession` hängt den `ParticleEffectRenderer` mit der Effektlichtkurve
+  an das dynamische Asteroidenobjekt. Drei Parser-Regressionen und der Release-
+  Build bestehen; ein frischer NAP-Start erreicht `FP7_system` ohne die früheren
+  `particle_effect`-Parsewarnungen. Ein sichtbarer Asteroidenfeld-Laufzeittest
+  bleibt offen. `explosion_impulse` wird weiterhin nicht übernommen.
+- [x] Retail-Binärpfad für `particle_effect` identifiziert: Ghidra findet in
+  `Freelancer.exe` den Parser `FUN_00408cd0` bei `0x00408cd0`; er liest den
+  Effektwert, bildet eine ID und speichert sie im Objekt. Das belegt das Parsen,
+  aber noch nicht, wann oder ob dieser Effekt abgespielt wird. Für
+  `explosion_impulse` fand die Literalsuche in den installierten EXE/DLLs keinen
+  direkten Treffer; das allein beweist nicht, dass der Schlüssel ignoriert wird.
+- [ ] Minenexplosion und Zerstörung dynamischer Asteroiden im Originalspiel
+  gezielt beobachten und mit dem Client vergleichen. Der `particle_effect`-
+  Eintrag wird jetzt bis zum Renderer ausgeführt; Retail-Parität und sichtbarer
+  Effekt im Asteroidenfeld bleiben offen. Die Bedeutung von `explosion_impulse`
+  ist ungeklärt und wird bis zu einem belegten Verbraucher nicht umgesetzt.
 - [ ] Die Asteroidenformen und Feldgrenzen in repräsentativen Systemen prüfen;
   Fehler bei Laden, Sichtbarkeit, Dichte oder Absturz reproduzierbar festhalten.
-- [ ] Fehlende Referenzen auf `solar/asteroids/roids.txm` im Client-Lauf
-  identifizieren und dokumentieren. Textur ersetzen oder SDK-Verweis ändern
-  bleibt eine Entscheidung und Änderung im Data-Repository.
+- [x] Die sieben `solar/asteroids/roids.txm`-Verweise der SDK-`Shapes.ini` bis
+  zum Clientpfad geprüft. Weder Retail-DATA noch SDK-System-/Asteroiden-INIs
+  referenzieren `solar/asteroids/Shapes.ini`; auch ihre 15 Shape-Namen werden
+  außerhalb der Datei nicht verwendet. Der aktuelle Datenbestand aktiviert
+  diesen Fehler daher nicht. Würde eine Konfiguration diese Shapes verwenden,
+  kann der fehlende Textureintrag im Billboard-Renderer zu einer
+  Nullreferenz führen. Die Retail-Laufzeitbaseline BR01 benutzt
+  `RockShapes.ini` und prüft diesen Sonderfall nicht.
+- [ ] Falls Data eine aktive Konfiguration für `Shapes.ini` ergänzt, den
+  betroffenen Client-Lauf reproduzieren. Textur ersetzen oder SDK-Verweis
+  ändern bleibt eine Entscheidung und Änderung im Data-Repository.
 
 ### Schwarze Löcher, Nebel und Ringsysteme
 
-Quelle: [Data/TODO-blackhole.md](../../LN-Data/TODO-blackhole.md)
+Quelle: [Data/TODO-blackhole.md](../../Data/TODO-blackhole.md)
+
+- [x] Lokale Retail- und SDK-`Bh.ini` read-only verglichen: SDK entfernt
+  `[Sound]`, `[FadeChunks]`, `[CloseChunks]` und ersetzt `lava_wisp` durch
+  `rock_wisp`.
+- [x] SDK-Systemreferenzen sowie Client-Schemas und Renderer nach einem
+  Black-Hole-Pfad geprüft. Kein Systemverweis und kein dedizierter Client-Parser/
+  Renderer gefunden; unterstützte Nebel-Schemas decken mehrere Black-Hole-Felder
+  nicht ab. Details: [Client-Umsetzungsplan](data-client-plan.md#phase-1--parser--und-datenflussprüfung).
+- [x] Nebelpfad von Schema über `GameItemDb.GetNebula()` bis
+  `NebulaRenderer`/`SunRenderer` geprüft. Nicht angebundene SDK-Werte und
+  Mehrfach-`NebulaLight`-Abschnitte sind im
+  [Client-Umsetzungsplan](data-client-plan.md#phase-1--parser--und-datenflussprüfung)
+  festgehalten.
+- [x] Planetare `ring`-Dateireferenzen bis ins Datenmodell verfolgt; ein
+  Renderer-Verbraucher fehlt im aktuellen Quellbaum. `Zone.ShapeKind.Ring`
+  funktioniert separat als Geometrie für Zonenabfragen.
+- [ ] Nebel- und Ringbefunde im Originalspiel visuell vergleichen; insbesondere
+  die Omega-13-`rock_wisp`-Puffs und die planetaren Ringassets prüfen.
 
 - [ ] Das Omega-13-Schwarze-Loch sowie betroffene Ringsysteme im Client laden und
   Darstellung, Sichtbarkeit, Speicherbedarf und Laufzeitstabilität prüfen.
@@ -63,28 +171,66 @@ Quelle: [Data/TODO-blackhole.md](../../LN-Data/TODO-blackhole.md)
 
 ### Solar-, Planeten- und Nebelwerte
 
-Quelle: [Data/TODO-solar.md](../../LN-Data/TODO-solar.md)
+Quelle: [Data/TODO-solar.md](../../Data/TODO-solar.md)
 
+- [x] Solar-Archetypen bis `ResolveDrawable()` und zum Modellladen des
+  Systemobjekts verfolgt. `material_library` und `DA_archetype` verwenden die
+  exakt angegebenen VFS-Pfade; fehlende Dateien werden als Fehler protokolliert
+  und es gibt keinen Flatten-/Alias-Fallback. Das HD-INI passt seine flachen
+  `.mat`-/`.txm`-Pfade an die Paketnamen an. `Data/NAP/Material` enthält lokal
+  nur `.gitkeep`. Der read-only Retail-DATA-Lauf reproduziert 932
+  `SolarArch.ini`-Verweise, weist aber `detailmap_gas.txm` (9 Stellen) und
+  `detailmap_ice.txm` (12 Stellen) als fehlend aus. Das kann der vollständige
+  NAP-Bestand mit HD-Dateien ergänzen; der Paket-/Renderlauf bleibt offen.
+  Details:
+  [Client-Umsetzungsplan](data-client-plan.md#phase-1--parser--und-datenflussprüfung).
+- [x] `solar_radius` bis Navmap und Besuchsradius, `atmosphere_range` bis
+  `GameWorld.InAtmosphere()` verfolgt. `burn_color`/`ambient_color` werden
+  kopiert, aber im Spielquellbaum nicht verwendet.
+- [x] `StarArch.ini` geprüft: Glow, Center und Spines erreichen `SunRenderer`;
+  Lens-Glow-Form, Farbe, Radius und Fade-Zeiten sind nun ebenfalls angebunden.
+  `lens_flare` sowie die Stern-Intensitäts- und Zonen-Fades bleiben Parser-only;
+  der visuelle Originalabgleich ist offen. Details: [Client-Umsetzungsplan](data-client-plan.md#phase-1--parser--und-datenflussprüfung).
+- [x] Schlüssel-zu-Code-Abgleich vervollständigt: 14 von 28 `SolarArch.ini`-
+  Schlüsseln werden in das Solar-Laufzeitmodell übernommen; bei `StarArch.ini`
+  erreichen 6 von 11 Schlüsseln den Renderer. Die geparsten, aber im Solar-/Stern-
+  pfad nicht angebundenen Schlüssel und getrennte Schiffverbraucher sind im
+  [Client-Umsetzungsplan](data-client-plan.md#phase-1--parser--und-datenflussprüfung)
+  dokumentiert.
+- [ ] HD-Planetmaterialien und geänderte Stern-/Solarwerte im repräsentativen
+  Client-Lauf visuell prüfen.
+- [x] Stock-Renderbaseline im separaten Debug-Client-Lauf festgehalten:
+  `FP7_system` aus lokaler Retail-DATA geladen; Screenshot zeigt Schiffe,
+  Station, Sterne und Nebel. Log bestätigt Daten- und UI-Laden sowie den
+  Systemeintritt, mit 108 Warnungen und ohne Error/Fatal/Exception. Beleg:
+  `/tmp/lancer-solar-runtime-20261012/`. Der Lauf verwendet weder HD-/NAP-
+  Inhalte noch Clusterwelten und vergleicht nicht mit dem Originalspiel.
 - [ ] Planetendarstellung mit den flachen Materialpfaden (`solar/planets/*.mat`
   und `detailmap_*.txm`) im Client prüfen; Material- und Texturauflösung im
   Laufzeitlog festhalten.
 - [ ] Die 59 geänderten Nebelkonfigurationen sowie Sterne, Sonnen und
   Asteroiden-/Sonnen-Loadouts in repräsentativen Systemen visuell und auf
   Laufzeitfehler prüfen.
-- [ ] Von der HD-Edition stammende Solar-INI-Felder auf Parser- und
-  Renderer-Verwendung prüfen. Ein erfolgreiches Parsen allein gilt nicht als
-  Laufzeitnachweis.
-- [ ] Die fehlenden `solar/asteroids/roids.txm`-Verweise zusammen mit dem
-  Asteroiden-TODO erfassen, damit Daten- und Clientprüfung dieselbe Ausnahme
-  verwenden.
+- [x] Parserdeklarationen der 28 unterschiedlichen `[Solar]`-Schlüssel aus
+  `SDK/solar/SolarArch.ini` mit `Schema/Archetype.cs` abgeglichen; alle besitzen
+  ein `[Entry]` oder `[EntryHandler]`, kein unbekannter Schlüssel gefunden.
+- [ ] HD-Planetenmaterialien und geänderte Stern-/Solarwerte im repräsentativen
+  Clientlauf visuell prüfen. Der Quellcode-Abgleich belegt keine korrekte
+  Darstellung; der vollständige HD-NAP mit den Texturassets fehlt lokal noch.
+- [x] Fehlende `solar/asteroids/roids.txm`-Verweise zusammen mit dem
+  Asteroiden-TODO erfasst; die sieben Einträge sind derzeit nicht über die
+  Retail- oder SDK-Konfiguration erreichbar.
 
 ### Startup-Videos und moderne Videoformate
 
-Quelle: [Data/TODO-video.md](../../LN-Data/TODO-video.md)
+Quelle: [Data/TODO-video.md](../../Data/TODO-video.md)
 
 - [x] `StartupMovies`-Verwendung geprüft: `FreelancerIni` parst
   `movie_file`; im Client-Quellbaum wurde kein Verbraucher und kein
   Wiedergabeaufruf gefunden. Der Playback-Pfad ist derzeit nicht angebunden.
+- [x] Decoder-Inventar geprüft: in `src` ist kein Video-Decoder oder
+  Video-Wiedergabe-Backend eingebunden. Die HD-Data-Dokumentation führt
+  WMV9/VC-1 mit WMA als vorhandene Movie-Formate auf.
 - [ ] Entscheiden und planen, ob Startup-Movie-Wiedergabe im Client umgesetzt
   werden soll; bei Umsetzung Playback-Pfad und Decoder für Zielplattformen
   ergänzen und testen.
@@ -123,6 +269,145 @@ beschrieben.
   prüfen; fehlende Original-Ressourcen-DLLs dürfen dafür im Clientpaket nicht
   vorausgesetzt werden.
 
+### Ogg-/FLAC-Musik und Sounds
+
+Quelle: [Audio-Pipeline-Audit](asset-packages/audio-pipeline.md)
+
+- [x] Direkte AudioEntry-Wiedergabe geprüft: der native `lancerdecode`-Pfad
+  erkennt Ogg/Vorbis und FLAC per Signatur und dekodiert beide zu PCM.
+- [x] Musik-Loop geprüft: der alte Vorbis-Reset nach EOF startete den Stream
+  nicht erneut. Patch 2172 öffnet den Decoder ab Streamanfang neu; Vorbis-
+  und FLAC-Resetregressionen bestehen 2/2 mit dem 8192-Byte-Musikpuffer.
+- [x] SFX-Loop-Pfad abgegrenzt: Einzelsounds werden zuerst vollständig zu PCM
+  dekodiert; wiederholte Wiedergabe nutzt OpenAL `AL_LOOPING` und hängt nicht
+  von einem Vorbis-Decoderreset ab.
+- [x] NAP-gebundene Vorbis-, FLAC- und Ogg-FLAC-SFX aus dem aktiven Snapshot
+  über `SoundData`/`AudioManager` abgespielt: Loop-Instanzen blieben nach 2,5 s
+  aktiv, One-Shot-Kontrollen endeten nach 1,4 s. Die Client-SFX-Trigger in
+  einer Spielsituation sind damit nicht gesondert abgenommen.
+- [x] Raum-Playlistintegration mit synchronisiertem Debug-Paket nachgewiesen:
+  `MusicPlayer` meldet Streamende, `RoomGameplay` wählt daraufhin A/B
+  abwechselnd; 20-Sekunden-Clientlauf und Dateiöffnungen belegen den Übergang.
+- [x] Nichtstille Client-PCM-Ausgabe im 44,1-kHz-Stereo-PulseAudio-Monitor
+  nachgewiesen (-24 dBFS Spitzenpegel), geroutet auf einen temporären Null-Sink.
+- [ ] Vorbis-Musik und Playlistwechsel im echten Client auf Lautsprecher oder
+  Kopfhörer anhören und Loop-Übergangsqualität beurteilen.
+- [x] Audio-Decoder mit Vorbis, FLAC und Ogg FLAC aus chunked NAP-Einträgen
+  lesen, zurücksetzen und byte-identische PCM-Ausgaben prüfen.
+- [x] Aktiven NAP-Paketbestand im vollständigen Linux-Client ohne loses
+  `DATA` starten. Der Debuglauf lud Spieldaten aus dem aktiven Snapshot und
+  wählte zwei NAP-gebundene Vorbis-Tracks abwechselnd; beide Testtöne sind in
+  der Null-Sink-PCM-Aufnahme im Frequenzspektrum erkennbar. Ein separater
+  Ein-Track-Lauf mit `oneshot=False` hielt den 440-Hz-Vorbis-Track über EOF
+  hinaus aktiv; die akustische Loop-Grenze bleibt zu beurteilen.
+- [x] `lancerdecode` als x86-64 Windows-DLL cross-kompiliert; PE32+ und
+  `KERNEL32.dll`/`msvcrt.dll`-Importe geprüft.
+- [x] Der BuildLL-Lauf `BuildEngine --with-win64` legt die x64-PE32+-DLL
+  bytegleich unter `bin/librelancer-win-x64/lib/x64/` ab.
+- [ ] Windows-Ladeauflösung und Fixture-Decodierung im CI-Runner bestätigen; der Workflow-Schritt ist eingerichtet, ein erfolgreicher Lauf steht noch aus.
+- [x] Ogg FLAC separat mit synthetischem Fixture getestet: Container-/Codec-
+  Erkennung, PCM-Decoding, Reset nach EOF und Musik-/SFX-Loopkontrollen
+  bestehen unter Linux.
+- [x] Synthetische FLAC- und Ogg-FLAC-Musik aus dem aktiven Linux-NAP-Client
+  gestreamt und im Null-Sink-Spektrum bestätigt; beide Formate wechselten in
+  der Deck-Playlist wiederholt.
+- [x] Vollständige `LibreLancer.Tests`-Suite in Release am 2026-10-12 bestanden:
+  677/677 Tests. Das ergänzt den fokussierten Audio-/Playlistlauf (12/12),
+  bestätigt für sich allein aber keine Windows-Laufzeit oder Hörqualität.
+- [ ] Vorbis/FLAC/Ogg FLAC unter Windows mit gestagter DLL auf Seek-/Chunk-
+  grenzen prüfen; Loaderauflösung und Laufzeit-Decodierung sind offen.
+
+### Grafische Erweiterungen: Normalmaps, Cubemaps und Vulkan
+
+- [ ] Den [Grafik-Umsetzungsplan](graphics-implementation-plan.md) in der
+  Reihenfolge P0–P9 abarbeiten. Zuerst den NAP-Bestand vervollständigen und
+  die vorhandenen Surface-Karten mit INI-Auflösung, Tangenten und Material-
+  Parametern im Client nutzbar machen; anschließend IBL, Render-Passes,
+  Post-Processing und das vollständige SDL_GPU/Vulkan-Backend abnehmen.
+- [ ] Die [Data-Aufgaben](../../Data/TODO-surface-maps.md) und das
+  [aktuelle Inventar](evidence/graphics-input-inventory-20261012.json)
+  für die leeren INIs/Bibliotheken und den unvollständigen Container verwenden.
+
+### Figuren-Gesichter und Charaktertexturen
+
+- [ ] Gesichter und sichtbare Hautmaterialien ausgewählter Figuren weniger
+  plastikartig gestalten. Zuerst die passenden NAP-Texturen, UVs, MAT-Zuweisungen
+  und vorhandenen Normalmaps/Rauheitsdaten einem konkreten Charaktermodell
+  zuordnen. Danach optionale, per Image-to-Image-LLM überarbeitete Albedo-Maps
+  sowie dazu passende Normal-/Roughness-Maps erzeugen und im isolierten NAP-Test
+  mit den Originalen vergleichen. UV-Nähte, Beleuchtung, Gesichtsidentität und
+  Dialog-/Raumansichten prüfen; Originalassets unverändert lassen und die
+  Herkunft der generierten Varianten dokumentieren.
+
+### Waffen- und Explosionseffekte
+
+- [ ] Nach Renderer- und Lichtarbeiten Laser-/Waffenstrahlen, Treffer und
+  Explosionen gestalterisch und technisch überarbeiten. Bestehende Effekt-
+  Definitionen, Partikel, Materialien, Timing und dynamische Lichtanbindung
+  inventarisieren; repräsentative Effekte vergleichen und anschließend gezielt
+  modernisieren, ohne Originaleffekte oder Gameplay-Timing unbeabsichtigt zu
+  verändern.
+- [x] Beam- und Explosionseffektpfade inventarisiert; siehe
+  [Effekt-Audit](beam-and-explosion-effects-audit.md). `flash_size` wird zwar
+  vom Retail-Parser in den Beam-Datensatz übernommen und im Retail-Renderer
+  bedingt zur Geometrieberechnung verwendet. LibreLancer wertet das Feld im
+  Beam-Renderer noch nicht aus; Bedingung und Zeitpunkt müssen vor einer
+  kompatiblen Umsetzung noch genauer verfolgt werden.
+
+### Vollständige INI-Parameterabdeckung
+
+- [ ] In einer späteren systematischen Prüfung die von der Client-Laufzeit
+  geladenen INI-Dateien und ihre Parameter vom Parser über Datenmodelle und
+  Zuordnung bis zum C#-Verbrauch verfolgen. Fehlende, ignorierte oder nur
+  teilweise verwendete Werte inventarisieren und mit Beispielen und Tests
+  planen.
+
+### Modding-Erweiterung
+
+- [ ] Nach Abschluss der INI-Abdeckung sinnvolle optionale Parameter für
+  Verhalten oder Zustände identifizieren, die aktuell hardcodiert oder nicht
+  ausgeführt werden. Kandidaten in passenden INIs mit rückwärtskompatiblen
+  Defaults, klarer Zuständigkeit und Tests spezifizieren und nach Priorität
+  umsetzen.
+
+### NPC-Wegefindung (nach Renderer und dynamischen Lichtern)
+
+- [ ] Nach Abschluss der Renderer- und Lichtarbeiten die NPC-Routenplanung
+  und Laufzeitnavigation überarbeiten. Zuerst vorhandene Zielwahl, Wegpunkte,
+  Sprungtore/-löcher, Hindernisvermeidung und Abbruch-/Neuberechnungspfade
+  anhand reproduzierbarer Szenen prüfen. Danach festgestellte Fehler gezielt
+  beheben und Verhalten in Einzel- sowie Gruppennavigation verifizieren.
+
+### Flugphysik und Intro-Bewegungen
+
+- [ ] Die ungewöhnlich hohe Geschwindigkeit der Intro-Sequenz reproduzieren
+  und für repräsentative Schiffe Position, Wegstrecke, Dauer sowie daraus
+  resultierende Geschwindigkeit dokumentieren. Intro-THN-Bewegungen und
+  reguläre Schiffsphysik getrennt betrachten.
+- [x] Den Laufzeitpfad von THN-Bewegung, `ShipPhysicsComponent`, Engine-Schub,
+  linearer Reibung und Maximalgeschwindigkeit nachvollziehen. Feststellen, ob
+  die beobachtete Geschwindigkeit aus Skript-Keyframes, Zeitschritt oder
+  Flugparametern stammt. Für `m01a_fp7_01.thn` ist die Bewegung THN-kinematisch:
+  `StartPathAnimationEvent` steuert `MotionPath` linear über die Ereignisdauer;
+  `ShipPhysicsComponent` wird dabei nicht angewendet. Der isolierte Clientlauf
+  bestätigt den Aufruf von `Act_CallThorn`. Die statische Weg-/Zeitmessung ist
+  dokumentiert; ein visueller Framevergleich bleibt offen.
+- [ ] Die gemessenen Werte mit lokalen Retail-DATA/EXE-Referenzen vergleichen
+  und pro Schiffstyp Beschleunigung, Reisegeschwindigkeit und Höchsttempo
+  ableiten. Keine globale Verlangsamung allein anhand des Intro-Eindrucks
+  vornehmen.
+- [ ] Bestätigte Abweichungen mit gezielten Daten-/Engineänderungen beheben;
+  Änderungen an Enginecode als Client-Patch pflegen. Intro-Tempo und normale
+  Steuerung anschließend separat im Client prüfen, einschließlich Beschleunigen,
+  Abbremsen, Richtungswechsel und Szenenübergang.
+
+Vorprüfung (2026-10-13): Die lokale Retail-Sequenz `m01a_fp7_01.thn` bewegt den
+M01A-Transporter auf einem geraden 1.628,2-m-Pfad in 74 Sekunden, also mit rund
+22 m/s. Das konfigurierte Transport-Engine-Modell ergibt aus `max_force=240000`
+und insgesamt `linear_drag=3001` ein rechnerisches Endtempo von rund 80 m/s.
+Die THN-Bewegung läuft kinematisch über `MotionPath`; ein Laufzeit-/Sichtvergleich
+fehlt. Die statischen Werte bestätigen daher noch kein überhöhtes Spieltempo.
+
 ## Gemeinsame Prüfpunkte und Zuständigkeit
 
 - [ ] Eine Client-Ladeprüfung mit einer lokalen Freelancer-Installation und
@@ -149,104 +434,8 @@ dupliziert:
 
 ## Daten-Quellen
 
-- [Asteroiden](../../LN-Data/TODO-asteroiden.md)
-- [Schwarze Löcher](../../LN-Data/TODO-blackhole.md)
-- [Musik](../../LN-Data/TODO-musik.md)
-- [Solar und Nebel](../../LN-Data/TODO-solar.md)
-- [Video](../../LN-Data/TODO-video.md)
-
-## Ergänzungen aus LN-Data (Stand 2026-10-11)
-
-Datenstand in `LN-Data`: SDK 1.3.1 mit den INIs des HD-Packs (HD-Werte gelten), 7369 Nicht-INI-Dateien im NAP (elf Klassenordner), 343 per KI um Faktor 4 hochskalierte Texturcontainer (605 Texturen), 1700 Audiodateien von WAV nach Ogg Vorbis (1620) und FLAC (80) gewandelt, INIs auf `.ogg`/`.flac` umgestellt. 19 712 Datei-Verweise geprüft, 32 Ziele fehlen (`LN-Data/missing.md`, erzeugt von `tools/check_refs.py`; die Zahlen in README, WISSEN und missing.md stimmen jetzt überein). Struktur geprüft, in keiner Engine gestartet. Die Plugin-Quellen liegen in `LN-Data/reference/freelancer-plugins/`, die Analyse in `LN-Data/TODO-plugins.md`.
-
-### Daten laden (NAP, HD-Pack, hochskalierte Texturen, Audio)
-
-- [ ] `NAP/` mit `nexus-pack pack` zu NAP-V1-Paketen bauen (Vorschlag: Basis, HD-Pack, Hochskalierung, INIs getrennt) und mounten. Override-Deklarationen aus `tools/hd_overrides.txt` (1603) und `tools/upscaled_containers.txt` (343) ableiten.
-- [ ] Client und LLServer mit diesen Daten bis zum ersten UI und in ein System starten (Linux). Das ist der fehlende Spieltest.
-- [ ] 1024- und 2048-Pixel-Texturen (DXT1/DXT5, TGA) laden, besonders Planeten (256 → 2048) und `solar/rings/rings.txm`.
-- [ ] Hochskalierte Container laden: DXT1/3/5, DDS unkomprimiert 24 Bit, TGA 8/16/24/32 mit Mip-Kette (neu geschriebener UTF-Container, `tools/utf_write.py`). Bei Fehlern den Container aus der Sicherung zurückholen und aus `upscaled_containers.txt` nehmen.
-- [ ] Die 10 neuen HD-INIs lesen; die vier Plugin-INIs (`Storyfactions.ini`, `Territory.ini`, `Ranks.ini`, `HudShift.ini`) müssen ohne Plugin wirkungslos bleiben.
-- [ ] **Audio:** Die 1700 Audiodateien sind `.ogg` (Vorbis, 1620) und `.flac` (80); die INIs verweisen darauf (`audio/Sounds.ini`, `Music.ini`, `StorySounds.ini` u. a.). Prüfen, dass Client und LLServer sie über `GameDataManager` und den NAP-Stream dekodieren, auch Streaming-Musik, dass Dialoge und Effekte ohne Alias laden und dass die Schleifen lückenlos laufen. Es gibt keine Loop-Start/Ende-Metadaten (`audio-pipeline.md`). Opus ist ausgeschlossen. Ein `.thn` (`s059x_nrml_jonner_rh_01_bar_01.thn`) verweist auf `.ogg`.
-- [ ] Verhalten bei den 32 fehlenden Zielen: Kollisionsmodelle `*_col.cmp` (5), 17 `spacepop`-INIs, `tlr_a/d/tube_a`, `trading_depot`, `roids.txm`, `hudtarget.txm`, `exit/openingscreen.tga`. Absturz, Warnung oder stiller Fallback?
-
-### Plugin-Funktionen des HD-Packs
-
-Das HD-Pack lädt über `EXE/dacom.ini` rund 20 Client-Plugins für `Freelancer.exe` 1.1. Sie sind **Binärpatches im Prozessspeicher**: Sie überschreiben beim Laden feste Adressen in `Freelancer.exe` oder `common.dll`, hängen eigene Hooks ein und lesen ihre Einstellungen mit dem `INI_Reader` aus `common.dll`. Adressen und Patches sind deshalb nicht übertragbar. Gebraucht wird die **Funktion**, nicht der Code; sie soll in LibreLancer als normales Feature mit der vorhandenen INI umgesetzt werden (Format unverändert).
-
-**Referenzen** (alle im Repository `LN-Data`, Ordner `reference/freelancer-plugins/`; dort `README.md` mit Herkunft, Stand und Lizenz je Plugin; Analyse und Spezifikation in `TODO-plugins.md`):
-
-- `adoxa/<plugin>/`: Quellcode von Jason Hood, Quelle `https://adoxa.altervista.org/freelancer/plugins.html`. Lizenz laut Seite: „freely used by any mod“, keine formale Lizenzdatei.
-- `github/<plugin>/`: Quellcode aus eigenen GitHub-Repos mit jeweils eigener Lizenz (Tabelle „Quellen im Netz“).
-- Die kompilierten DLLs sind nicht enthalten; nichts davon wird gebaut oder geladen.
-
-#### Priorität A: ohne diese Funktionen sind die HD-INIs wirkungslos
-
-| Plugin (Version) | Funktion | Konfiguration | Wirkung ohne Plugin | Quellcode (LN-Data) |
-|---|---|---|---|---|
-| **Story Factions** 1.01 | Legt fest, welche Fraktionen in der Reputationsliste als Story-Fraktionen ausgeblendet werden. Die Liste ist im Original fest einprogrammiert, die INI ersetzt sie vollständig. | `DATA\Storyfactions.ini`, `[StoryFactions]`, ein Fraktions-Nickname pro Zeile (`fc_ln_grp`, `fc_kn_grp`, `fc_rn_grp`, `fc_n_grp`, `fc_or_grp`, `fc_f_grp`, `fc_q_grp`, `fc_ouk_grp`, `fc_uk_grp`). Fehlt die Datei: eingebaute Liste. | keine | `adoxa/storyfactions/` |
-| **Territory** 1.03 | Ändert die Meldung beim Systemeintritt („X System, Y Space.“) und ergänzt Häuser auf der Nav-Map. Im Original sind Territorien und die vier Häuser (Li, Br, Ku, Rh) fest eingebaut. | `DATA\UNIVERSE\Territory.ini`: `[Settings]` (`caps`, `codepage`), `[Houses]` (`format`/`format_id` mit `%s` für System und Haus, `house`/`house_id`, `systems` mit Nickname oder Bereich wie `Li01-5`, `NavMap = X, Y[, Schrift]`), `[Systems]` (`format`, `systems`) | keine | `adoxa/territory/` |
-| **Ranks** 1.00 | Zeigt zum Level einen Rangnamen („Pilot 12“); im Mehrspielermodus je Fraktion. Rangnamen sind Stringressourcen in der DLL. | `DATA\MISSIONS\ranks.ini`: `[SP Ranks]`, `[MP Ranks]` (je Fraktion `group = <nickname>`), `[Rank Settings]` (`just_levels`, `offset`); Schlüssel `next_rank = LEVEL[, ID]`, `set_ranks = INTERVAL, COUNT[, ID]`, `format` (`%%d` Level, `%s` Rang), `first_rank_id` | keine | `adoxa/ranks/` |
-| **HUD Shift** 2.12.1 | Verschiebt HUD-Elemente, damit sie bei Breitbild am Rand bleiben; Werte je Seitenverhältnis (16:9, 15:9, 16:10, 5:4). | `DATA\INTERFACE\HudShift.ini`: `[HUDShift]` (`Horizontal = auto` oder Wert, `Vertical`, `GaugeBars`, `PlayerStatus`, `TargetStatus`), `[Group]` (`nickname`, `location = left/right/top/bottom`, `position`). Die Adressen in `position` sind absolute EXE-Adressen und müssen durch Anker ersetzt werden. | HUD bei Breitbild falsch platziert | `adoxa/hudshift/` |
-
-Umsetzungshinweise: Story Factions ist eine konfigurierbare Ausschlussliste für das Reputationsfenster. Territory braucht datengetriebene Territorien, Nav-Map-Beschriftung aus der INI und Formatstrings mit Platzhaltern (`^` = Zeilenumbruch, höchstens 63 Zeichen). Ranks braucht eine Rang-Tabelle je Fraktion mit lokalisierten Namen. HUD Shift soll die Verschiebung aus dem Seitenverhältnis berechnen und mit Ankern statt Adressen arbeiten.
-
-#### Priorität B und C: Mehrspieler, Bedienung, Komfort
-
-| Plugin (Version) | Funktion | Priorität | Hinweis | Quellcode (LN-Data) |
-|---|---|---|---|---|
-| **MP Rep** 1.03 | Holt im Mehrspielermodus die Reputation vom Server für politische Zonen, Patrouillen und Schiffskauf (ersetzt `GetGroupFeelingsTowards`; benötigt auch einen Server-Patch). | B | Protokollpunkt mit dem Gateway (Reputation, Besitz, Lease). Original wertet clientseitig aus. | `adoxa/mprep/` |
-| **Zone** 1.20 | Meldet Namen benannter Zonen beim Betreten und Verlassen, Farbe nach Gefahr (`property_flags`, Bits 3–5). | B | Parameter `upper`, `low=`, `medium=`, `high=`, `ultra=`; Texte als Ressourcen. | `adoxa/zone/` |
-| **Wheel Scroll** 1.12 | Mausrad in Fenstern (Reputation, Kontakte, Waffen, Chat). | B | kleiner Aufwand | `adoxa/wheelscroll/` |
-| **Turret Zoom** 1.41 | Mausrad steuert die Kamera der Turmansicht, Modifikatoren Shift/Ctrl/Alt. | B | Parameter im HD-Pack: `inverse max=1000 shift=200 ctrl=20 alt=4 s+c=0.4 c+a=0.2 switch=100 interval=500 adjust=0.75` | `adoxa/turretzoom/` |
-| **flplusplus** | Konfigurierbare Sichtweite/LOD, TTF-Schriften, Speicher- und Screenshot-Pfad, FPS-Limit, Fehlerkorrekturen. | B | HD-Daten brauchen größere Sichtweite und eigene Schriften. | `github/flplusplus/` |
-| **FLSharp** | Hook-basierte Korrekturen, Auflösungsliste, Hauptmonitor als Standard. | B | Die Fehlerliste (siehe unten) als Abnahmetests übernehmen. | `github/FLSharp/` |
-| **HUDless** 1.02 | HUD per Taste ausblenden (`MINIMIZE HUD`, `OPEN LOG`); HUD, dann Cursor, dann beides wiederherstellen. | C | | `adoxa/hudless/` |
-| **Hail** 1.01 | Taste für „Hail“ (Eintrag `USER_RADIO` in `keylist.ini`). | C | | `adoxa/hail/` |
-| **Numeric Damage** 1.00 | Zeigt Trefferpunkte (Hülle, Schild) numerisch. | C | | `adoxa/numeric/` |
-| **MultiIntro** | Mehr als drei Intro-Bildschirme, zufällig. | C | **GPL-3.0**: kein Code übernehmen ohne Lizenzprüfung. | `github/MultiIntro-Updated/` |
-| **DelayDisplay** | Waffen-Abklingzeit in der Kontaktliste. | C | **Keine Lizenz** (Dekompilation des Plugins von M0tah). Variante mit Lizenz: `TheStarport/FLUF`, `modules/delay_display` (AGPL-3.0, nicht kopiert). | `github/DelayDisplay/` |
-| **TargetScreen** | Dynamische Zielansicht (Nachbau von Venemons Dynamic Target Screen). | C | MIT | `github/DynamicTargetScreen/` |
-
-**FLSharp-Fehler, die der neue Code nicht wiederholen darf:** Handelsrouten-Lichter bleiben aus; Wegpunkte werden im falschen System gelöscht; Mehrfachlauf-Waffen (Mündungsfeuer, Ton, Munitionszähler); `use_animation` aus `weapon_equip.ini`; Client-Server-Updates (mindestens alle 2 s, 40 ms Minimum, 750 ms in der Handelsroute); Rotationssperre beim Start; Kopieren/Einfügen in Eingabefeldern; Abstürze bei fehlerhaften Spielständen; Infokarten für dynamische Solare.
-
-#### Entfällt oder gehört woanders hin
-
-| Plugin | Grund | Quellcode (LN-Data) |
-|---|---|---|
-| MP3 Codec Fix 1.12 | findet den Fraunhofer-MP3-Codec; im neuen Audiosystem kein Thema | `adoxa/mp3codec/` |
-| Console 1.24 | Entwicklerkonsole für den Einzelspielermodus (mehrere Schiffe besitzen u. a.), im Mehrspielermodus nicht vorgesehen | `adoxa/console/` |
-| JFLP.DLL 1.27 | Sammelpatch für Steuerung und Anzeige; Funktionen einzeln bewerten | `adoxa/jflp/` |
-| Lighting Bug Fix | Beleuchtungsfehler; im HD-Pack deaktiviert, hängt am alten Renderer (MIT) | `github/fl-lighting-bug-fix/` |
-| cyrillic_chat | kyrillischer Chat; im HD-Pack deaktiviert (MIT) | `github/cyrillic_chat/` |
-| VersionText | Quellcode nicht auffindbar (verlinktes Repo liefert 404) | – |
-| FLHook | Serverseitiges Hook-Framework (TheStarport, GPL-3.0), gehört zur Serverarchitektur und wird über `FLHookCompat` getrennt bewertet | `github/FLHook/` |
-
-#### Quellen im Netz
-
-| Plugin | Quelle |
-|---|---|
-| adoxa-Plugins (Jason Hood) | `https://adoxa.altervista.org/freelancer/plugins.html` |
-| flplusplus | `https://github.com/FLHDE/flplusplus` (BSD-3-Clause) |
-| FLSharp | `https://github.com/BC46/FLSharp` (MIT) |
-| MultiIntro | `https://github.com/FLHDE/MultiIntro-Updated` (GPL-3.0) |
-| DelayDisplay | `https://github.com/FLHDE/DelayDisplay` (ohne Lizenz) |
-| TargetScreen | `https://github.com/FLHDE/DynamicTargetScreen` (MIT) |
-| cyrillic_chat | `https://github.com/FLHDE/cyrillic_chat` (MIT) |
-| Lighting Bug Fix | `https://github.com/FLHDE/fl-lighting-bug-fix` (MIT) |
-| FLHook | `https://github.com/TheStarport/FLHook` (GPL-3.0) |
-
-#### Vorgehen
-
-1. Priorität A mit den vier vorhandenen INIs umsetzen, Formate unverändert.
-2. MP Rep als Protokollpunkt mit dem Gateway abstimmen.
-3. FLSharp-Fehlerliste als Abnahmetests übernehmen.
-4. Komfort (Zone, Wheel Scroll, Turret Zoom, flplusplus-Optionen), dann Priorität C nach Bedarf.
-5. Prüfen, ob `Freelancer.ini`/`dacom.ini` in LibreLancer überhaupt Plugin-Einträge braucht oder die Funktionen in der Engine bleiben.
-6. Erwartung testen: Die vier INIs bleiben ohne Plugin wirkungslos.
-
-**Lizenz:** GPL-3.0-Code (MultiIntro, FLHook) nicht ohne Prüfung übernehmen. Für MIT/BSD gilt Namensnennung. DelayDisplay hat keine Lizenz. Die adoxa-Plugins nennen nur „freely used by any mod“.
-
-### Weiterer Spielinhalt
-
-- [ ] **HD-Spiellogik:** Das HD-Pack entfernt viele `faction_weight`-Einträge und ändert Skripte, Gerüchte und Encounter. Entscheidung: HD-Werte gelten. Im Spiel prüfen.
-
+- [Asteroiden](../../Data/TODO-asteroiden.md)
+- [Schwarze Löcher](../../Data/TODO-blackhole.md)
+- [Musik](../../Data/TODO-musik.md)
+- [Solar und Nebel](../../Data/TODO-solar.md)
+- [Video](../../Data/TODO-video.md)

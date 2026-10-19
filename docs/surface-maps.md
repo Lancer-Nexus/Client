@@ -1,8 +1,120 @@
 # Surface Maps: Normal Maps und Cube Maps per INI
 
-**Status:** Beschreibung und Aufgabenliste, noch nichts im Client umgesetzt. **Stand:** 2026-10-12.
+Die aktuelle Umsetzungsreihenfolge und Abnahme stehen im
+[Grafik-Umsetzungsplan](graphics-implementation-plan.md).
+
+**Status:** Parser, Profile, VFS- und CPU-/GPU-Residency sowie opt-in Normalmap-Bindungen für authored FVF3/FVF4, generierte VMesh-/DFM-Tangenten und QuadSphere sind umgesetzt. Ergänzende Roughness-/Metallic-Sampler sind über `surface_pbr_maps` angebunden. Ein kontrollierter LI_ELITE-A/B im LancerEdit ModelViewer bestätigt eine sichtbare Änderung. Im In-Game-A/B des vollständigen Profils bleiben nach Erhalt der Room-Vertex-Beleuchtung und korrekter Behandlung von Backface-Normalen die Stadtfassaden sichtbar beleuchtet; der zuvor beobachtete großflächige Schwarzeffekt tritt nicht mehr auf. Der Surface-Map-Lease-Absturz in Cutscenes ist ebenfalls behoben. Der opt-in PBR-Cubemap-Pfad löst `[CubeMap]`-Katalogeinträge nun anhand des vorhandenen `envmap_material` auf, lädt ihre MATs bei Bedarf und reicht `strength` weiter. Kontrollierte OpenGL-Proben mit Produktionsshader und echten `Data/NAP`-Assets bestätigen die drei Katalogwerte und Mip-Sampling. Der LI_ELITE-ModelViewer-A/B ändert trotzdem keine Modellpixel; sichtbare In-Game-Reflexionen, Retail-Orientierung, IBL-Qualität und Leistung bleiben offen. Vergleichsbilder und Messdaten liegen in der [Renderer-Galerie](renderer-comparison-gallery.md) und im [PBR-Cubemap-Probebericht](evidence/renderer/pbr-environment-20261014/cubemap-assets-and-binding-audit.md). Materialqualität in weiteren Szenen bleibt offen. **Stand:** 2026-10-14.
 **Datenseite:** Repository `LN-Data` (`tools/make_surface_maps.py`, `SDK/fx/SurfaceMaps.ini`, `TODO-surface-maps.md`).
 Engine-Änderungen bleiben gemäß `AGENTS.md` patch-only unter `patches/series`.
+Der LancerEdit-ModelViewer kann einen Cubemap-Katalogeintrag nur für die
+Vorschau überschreiben; die Auswahl schreibt nichts in die Archetyp-INIs.
+
+## Aktuell implementierte Metadaten-Anbindung
+
+```ini
+[Data]
+surface_maps = fx\SurfaceMaps.ini
+surface_maps = fx\SurfaceMapsShips.ini
+surface_maps = fx\SurfaceMapsSolar.ini
+; Für den vollständigen Datenbestand zusätzlich:
+surface_maps = fx\SurfaceMapsBases.ini
+```
+
+`FreelancerIni.SurfaceMapPaths` erhält die ausdrücklich konfigurierte Liste.
+`FreelancerData.LoadData` lädt sie über das bestehende VFS nach
+`FreelancerData.SurfaceMaps`. Ohne diese Einträge bleibt der Katalog leer.
+Die gewählte Dateiliste bestimmt derzeit den Umfang; die benannte Profilwahl erfolgt in den Performance-Optionen oder über
+`[Settings] surface_profile = original|minimal|standard|full`. Original ist
+der Standard. Änderungen werden gespeichert und gelten nach einem Neustart.
+
+`SurfaceMapsIni` liest Bibliotheken, Normalmap-Zuordnungen und den Cube-Katalog,
+validiert relative Assetpfade und skalare Felder und löst Namen ohne Beachtung
+der Schreibweise auf. Bei mehrfachen Definitionen gewinnt der letzte gültige
+Eintrag; unbekannte Schlüssel, fehlende INIs und ungültige Abschnitte erzeugen
+Diagnosen. `TryResolveNormalMap` liefert nur eine Metadatenbindung und meldet
+fehlende Bibliotheksdeklarationen als nicht auflösbar.
+
+Implementierte Zahlenbereiche: `strength` für Normalmaps 0–16, Cube-Stärke 0–1,
+Roughness-/Metallic-Faktoren 0–1, jeweils endlich. Nicht angegebene PBR-Faktoren
+bleiben ausdrücklich ungesetzt; sie aktivieren dadurch noch keinen PBR-Pfad.
+Normalmap- und Cube-Stärke haben den Metadatenstandard 1. Bibliotheksdateien
+und Texturknoten werden beim Metadatenladen nicht geöffnet oder auf die GPU
+übertragen. Materialvorrang, Tangentenbasis, Texturauflösung, Residency sowie
+die sichtbare Wirkung von Normal-, Roughness- und Metallic-Maps sind inzwischen
+implementiert und teilweise mit Retail-Daten geprüft. `uv` steuert die ergänzende
+Normalmap; optionales `pbr_uv` wählt unabhängig davon die Roughness-/Metallic-
+Maps. Der FVF- und Skinned-Normalmap-Tangentenrahmen folgt nun auch der
+signierten UV-Skalierung aus `MaterialAnim`. Offen bleiben insbesondere
+visuelle GPU-Draws mit UV1 und abweichender `MaterialAnim`, DFM-/LOD-Abnahme,
+breite Materialqualität und Performance.
+
+Nachweise: 17 Parser-/VFS-Tests sowie ein Client-Lauf mit der vollen Liste aus
+NAP (34 Bibliotheken, 2.807 Normalmap-Zuordnungen, 3 Cubes, keine Diagnosen).
+Die alten Auto-Kartenzahlen weiter unten sind ein historischer Datenstand;
+aktueller Reparaturstand im [Grafikplan](graphics-implementation-plan.md).
+[Prüfbefunde und Assembly-Hashes](evidence/surface-metadata-20261013.json).
+
+### Profilumfang und Konfiguration
+
+| Profil | Gewählte kanonische INIs | Bibliotheken | Normalmaps | Cubes |
+|---|---|---:|---:|---:|
+| Original | keine | 0 | 0 | 0 |
+| Minimal | SurfaceMaps.ini | 4 | 55 | 3 |
+| Standard | zusätzlich Ships und Solar | 8 | 186 | 3 |
+| Full | zusätzlich Bases | 34 | 2807 | 3 |
+
+Die Tabelle wurde mit dem reparierten NAP-Bestand geprüft. Die konfigurierte
+`surface_maps`-Liste bleibt maßgeblich: Das Profil ergänzt keine nicht
+aufgeführten Dateien. Explizite benutzerdefinierte INIs mit anderen Dateinamen
+sind gemeinsame Metadaten jedes aktivierten Profils. Original überspringt alle
+Quellen. Unbekannte oder numerische Konfigurationswerte fallen auf Original
+zurück. Die schema-interne API behält Full als Standard für bestehende
+Metadaten-Werkzeuge; der Spiel-Client setzt ausdrücklich sein Benutzerprofil.
+
+Der Optionsselektor zeigt Original/Minimal/Standard/Full und einen Neustart-
+Hinweis. Er ändert die gespeicherte Auswahl, ohne laufende Welt- oder
+Materialdaten neu aufzubauen. Native UI-Prüfung: Original → Standard,
+gespeichert; nach Neustart 186 Normalmaps. Beide Client-Läufe endeten über
+Exit mit Code 0. 30 Profil-/Parsertests bestehen. Materialwirkung und GPU-
+Residency sind dadurch noch nicht umgesetzt.
+
+[Profil-Prüfbefunde](evidence/surface-profiles-20261013.json).
+
+### Materialauflösung: Metadaten an MAT und BasicMaterial
+
+`GameDataManager` stellt den gewählten Katalog am `ResourceManager` bereit,
+bevor Ressourcen vorab geladen werden. `Material.Initialize` löst für reguläre
+Basic-Materialien anhand von `Dt_name` eine `SurfaceMaterialBinding` auf und
+reicht sie an `BasicMaterial.SurfaceBinding` weiter. Kopierte grafische
+Ressourcenmanager behalten dieselbe Katalogreferenz.
+
+Die Binding-Deskriptoren ergänzen ausschließlich fehlende MAT-Angaben:
+
+- Ein vorhandenes `Nm_name`, `Rt_name` oder `Mt_name` bleibt maßgeblich.
+- Eine vorhandene MAT-Map besitzt auch ihren Faktor; die Surface-INI ersetzt
+  diesen nicht, wenn die MAT keinen ausdrücklichen Faktor angibt.
+- Ausdrückliche MAT-Roughness-/Metallic-Faktoren bleiben erhalten.
+- Normalstärke 0 ergänzt keinen Normalmap-Verweis. Nicht angegebene Faktoren
+  bleiben ungesetzt. Nicht auflösbare Bibliotheksdeklarationen ergeben kein Binding.
+- Glass-/HUD-Materialien werden nicht ergänzt.
+
+Diese Metadatenstufe öffnet keine Surface-Bibliotheken. Beim Draw kann der
+separate opt-in Pfad eine zugeordnete Normalmap asynchron laden und über GPU-
+Cache/Frame-Fence binden, sofern geeignete Tangenten vorliegen. VMesh-/DFM-
+Tangenten und QuadSphere sind implementiert. Roughness-/Metallic-Sampler nutzen
+`surface_pbr_maps` und bleiben vom Normalmap-Schalter unabhängig. Ein LI_ELITE-
+A/B im Lit-Modus des ModelViewers zeigt bei aktiviertem Schalter eine deutliche
+Änderung im gerenderten Modell; Hintergrund-Kontrollpixel blieben unverändert.
+Das bestätigt den Preview-Pfad, aber weder die endgültige Materialqualität in
+einer Spielszene noch die GPU-Kosten. Der separate Cubemap-Pfad verändert im
+Offscreen-Produktionsdraw des geladenen LI_ELITE 13.160 Pixel je Katalog-Cube;
+Reflexionsqualität, ModelViewer-Auswahl und vollständige Spielabnahme bleiben
+offen. Der Binding-Resolver bleibt unabhängig von Residency.
+
+39 Material-/Profil-/Parsertests bestehen. Im nativen NAP-Client wurden 24
+passende Bindings beobachtet, darunter Liberty-MAT-Materialien mit
+`elite_256.TGA` → `nm_li_elite_hull`. Der Menüablauf endet mit Exit-Code 0.
+[Material-Prüfbefunde](evidence/surface-material-binding-20261013.json).
 
 ## 1. Ziel
 
@@ -43,6 +155,9 @@ Zusätzlich zu den 55 kuratierten Karten gibt es 2670 automatisch erzeugte, in `
 - Größe: Schiffe 512 px, Basen und Solar 256 px. Planeten haben keine.
 - Ableitung aus der Diffuse-Textur (Helligkeit, Sättigung, Detail), siehe `LN-Data/TODO-surface-maps.md`, Abschnitt 1c. Schätzung, keine Materialdaten.
 - Ohne Metallic-Karte steht `metallic = 0` in der INI. Der Engine-Standard ist sonst 1.
+- Ein LI_ELITE-Retail-VMesh hat die echten BC4-Karten getrennt und gemeinsam im PBR-Pfad gerendert. Roughness allein ändert 7.188 Pixel, Metallic allein 7.090 Pixel; der GPU-Cache hält danach zwei Einträge mit zusammen 349.520 Bytes. Bilder und genaue Laufbedingungen stehen im [Retail-PBR-Nachweis](renderer-comparison-gallery.md#li_elite-retailmesh-roughness-und-metallic-getrennt).
+- `uv` steuert ergänzende Normalmap und Tangentenbasis. `pbr_uv` wählt unabhängig den UV-Kanal für Roughness-/Metallic-Karten; fehlt der Schlüssel, übernimmt er rückwärtskompatibel den Wert von `uv`. MAT-eigene `Rt`-/`Mt`-Sampler behalten weiter ihre eigenen `SecondUV`-Flags.
+- Shader und OpenGL-Upload behandeln diese Karten linear: `getRoughness`/`getMetallic` lesen `.r`, die DDS-ATI1-Karten werden als `GL_COMPRESSED_RED_RGTC1_EXT` geladen. Diffuse-Albedo wird davon getrennt explizit in `SRGBtoLinear` umgerechnet.
 
 ## 3. INI-Syntax: `fx/SurfaceMaps.ini`
 
@@ -56,6 +171,8 @@ texture  = elite_256.tga         ; Dt_name der Diffuse-Textur (Groß-/Kleinschre
 library  = surface_normalmaps_ships ; Name aus [Texture] (je Gruppe: ships, bases, solar, planets)
 map      = nm_li_elite_hull      ; Texturknoten in der Bibliothek
 strength = 2.5                   ; Faktor auf die Normalenabweichung, 0 = aus, 1 = unverändert
+uv       = 0                     ; UV-Kanal für Normalmap und Tangentenbasis (Standard 0)
+pbr_uv   = 1                     ; optionaler UV-Kanal für Roughness-/Metallic-Maps; fehlt = uv
 roughness_map = rt_li_elite_hull ; optional, Einkanalkarte (R) in derselben Bibliothek
 roughness     = 1                ; Faktor auf die Karte
 metallic_map  = mt_li_elite_hull ; optional
@@ -66,6 +183,8 @@ nickname = envcube_space         ; Knoten in der .mat = envmap_material
 file     = fx\envcube_space.mat  ; = material_library
 kind     = space                 ; space | sun | nebula (Hinweis)
 strength = 0.35                  ; Vorschlag für die Stärke der Spiegelung (0..1)
+prefiltered = true               ; Mip-Kette enthält GGX-vorgefilterte Specular-Stufen
+irradiance_file = fx\envirradiance_space.mat ; diffuse Umgebung, cosine-konvolviert als E/pi
 ```
 
 Regeln für die Auflösung (Vorschlag):
@@ -73,8 +192,10 @@ Regeln für die Auflösung (Vorschlag):
 1. `[NormalMap]` gilt für jedes Material, dessen `Dt_name` gleich `texture` ist. Ein vorhandenes `Nm_name`, `Rt_name` oder `Mt_name` im `.mat` hat Vorrang, die INI füllt nur Lücken. Mit `roughness_map` oder `metallic_map` wird der PBR-Pfad des Materials benutzt.
 2. Mehrere `[NormalMap]` für dieselbe Textur: der letzte Eintrag gewinnt, der Rest wird gewarnt.
 3. Fehlt die Bibliothek oder die Karte, bleibt das Material unverändert (Warnung im Log, kein Fehler).
-4. `[CubeMap]` ist ein **Katalog**. Gebunden wird weiter über `material_library` und `envmap_material` in `ships\Shiparch.ini` und `solar\SolarArch.ini`.
-5. Der Original-Client ignoriert die Datei, solange sie nicht in der `Freelancer.ini` verlinkt ist.
+4. `prefiltered` ist optional und standardmäßig `false`. Nur `true`/`1` kennzeichnet GGX-Roughness-Mips. Legacy-Cubes mit gewöhnlichen Mips samplen für Specular weiter Level 0.
+5. `irradiance_file` ist optional. Verweist es auf einen Cube mit cosine-konvolvierter diffuser Umgebung, nutzt PBR diesen für den diffusen IBL-Anteil; andernfalls bleibt die letzte Cubemap-Mipstufe als Legacy-Fallback aktiv. Der Generator speichert `E/pi` in einer kompakten 16×16-Karte.
+6. `[CubeMap]` ist ein **Katalog**. Gebunden wird weiter über `material_library` und `envmap_material` in `ships\Shiparch.ini` und `solar\SolarArch.ini`.
+7. Der Original-Client ignoriert die Datei, solange sie nicht in der `Freelancer.ini` verlinkt ist.
 
 ## 4. Was die Engine heute tut (Client-Quelltext, nur gelesen)
 
@@ -97,39 +218,67 @@ Daraus ergeben sich Randbedingungen, die vor einer Umsetzung zu klären sind:
 
 ## 5. Aufgaben
 
+> Status 2026-10-15: INI-Auflösung, Materialbindung und GPU-Texturcache sind im Client integriert. Ergänzende Normal Maps laufen über `surface_normal_maps`; ergänzende Roughness-/Metallic-Maps und ihre skalaren Werte über den getrennten Schalter `surface_pbr_maps`. Der MAT-Eintrag hat Vorrang. DFM-Materialien können nun ebenfalls den PBR-Pfad nutzen; geskinte DFM-Meshes erhalten dafür den neuen `PBR_Skinned`-Vertexshader. Release-Build und NAP-only-Clientstart laden den Shaderbundle, eine sichtbare DFM-Materialabnahme im Spiel steht noch aus. LI_ELITE-ModelViewer und In-Game-A/B-Bilder liegen vor. Die Korrektur für Room-Vertex-Beleuchtung und Backface-Normalen beseitigt den zuvor beobachteten Schwarzeffekt im Liberty-Stadtbild. Der Produktionsdraw des geladenen LI_ELITE verändert bei Auswahl der Katalog-Cubemaps 13.160 Pixel gegenüber `envmapbasic`; die sichtbare Änderung bleibt subtil. Interaktive Auswahl, vollständige Spielabnahme, IBL-Qualität und Materialabnahme in weiteren Szenen bleiben offen.
+
+Ein separater LI_ELITE-Offscreen-A/B bestätigt außerdem die reine Surface-
+Normalmap im Basic-FVF-Pixellichtpfad bei ausgeschalteten PBR-Maps: 3.914 Pixel
+ändern sich. Damit ist die Bindung nicht von einer künstlichen Metallic- oder
+Roughness-Karte abhängig. Eine Normalmap-Stärke von 0 liefert pixelgenau das
+Bild des ausgeschalteten Schalters. Das Basic-FVF-Material zeichnet auch ohne
+Tangenten unverändert und bindet Slot 2 nicht; dieser Fallback wurde als
+synthetischer GPU-Draw geprüft. Eine BGRA8-Neutralwertkarte im Basic-FVF-
+Produktionsshader bleibt mit dem NAP-geladenen LI_ELITE-BasicMaterial pixelgenau
+gleich zur Map-frei-Kontrolle; die geneigte Positivkontrolle ändert 23.930 Pixel.
+Die Karte wurde nur im Speicher erzeugt. Gerichtete +X/+Y-Kontrollen mit
+passenden Tangentnormalen ändern je 23.930 Pixel und bestätigen die Shader-
+Achsenbelegung. Das geladene LI_ELITE-Retail-VMesh mit echter NAP-Normalmap
+ändert unter +X/+Y-Licht 7.252 bzw. 4.949 Pixel. Die Polarität der Asset-Normalen
+braucht noch eine unabhängige Referenz. Eine BC5-Neutralmap aus einem separat
+geprüften NAP wurde nun auf dem Retail-VMesh geladen: Sie ändert gegenüber der
+Map-freien Kontrolle 704 Pixel bei RMSE 0,039848; die Originalmap ändert 1.110
+Pixel bei RMSE 1,062918. Stärke 0 bleibt bytegleich. Die visuelle Abnahme im normalen Client bleibt offen. Echte Roughness- und
+Metallic-BC4-Karten wurden getrennt und zusammen auf dem Retail-VMesh geprüft;
+der damalige A/B teilte noch den `uv`-Kanal. `pbr_uv` wählt inzwischen
+unabhängig den UV-Kanal für diese Maps; UV1-Draws und MaterialAnim-Abnahme
+bleiben als visuelle Laufzeitprüfung offen. Details:
+[Retail-Licht-A/B](renderer-comparison-gallery.md#li_elite-retail-vmesh-unter-gerichteten-lichtern), [TBN-Kontrolle](renderer-comparison-gallery.md#tbn-achsen-und-y-kanal-gerichtete-shaderkontrolle), [NAP-Neutralmap-Lauf](renderer-comparison-gallery.md#retail-vmesh-mit-original--und-neutralmap-aus-nap) und [Retail-PBR-Maps](renderer-comparison-gallery.md#li_elite-retailmesh-roughness-und-metallic-getrennt).
+
 Parser und Daten:
 
-- [ ] Schema `SurfaceMapsIni` in `LibreLancer.Data` (Abschnitte `Texture`, `NormalMap`, `CubeMap`) mit Parsertests (Syntax aus 3, Groß-/Kleinschreibung, doppelte Einträge, unbekannte Schlüssel).
-- [ ] Ladeliste: Schlüssel in `Freelancer.ini [Data]` (Vorschlag `surface_maps`) oder feste Suche nach `fx\SurfaceMaps.ini`; Verhalten ohne Datei unverändert.
-- [ ] Bibliothek aus `[Texture]` über den `ResourceManager` laden (wie andere `.txm`), Karten nach Namen auflösen. Bei den 30 Bibliotheken aus `SurfaceMapsShips.ini`, `SurfaceMapsSolar.ini` und `SurfaceMapsBases.ini` (bis 50 MB, zusammen 0,95 GB) nur bei Bedarf laden (erst wenn eine passende Diffuse-Textur gebunden wird) und wieder freigeben; Index aus der INI (Textur → Bibliothek) im Speicher halten, nicht die Texturen.
+- [x] Schema `SurfaceMapsIni` in `LibreLancer.Data` mit Syntax-, Groß-/Kleinschreibungs-, Duplikat- und unbekannte-Schlüssel-Prüfungen umgesetzt; siehe `SurfaceMapsIniTests`.
+- [x] `Freelancer.ini [Data]`-Ladeliste über `surface_maps` umgesetzt; fehlende optionale Surface-INIs erzeugen eine Diagnose und lassen das Basisspiel weiterladen.
+- [x] Bibliotheken aus `[Texture]` werden bei passender Materialbindung über den `ResourceManager` aufgelöst. CPU-Bilder und GPU-Texturen laufen über getrennte Residency-Caches und Draw-Leases; die INI hält die Zuordnung statt alle Karten dauerhaft zu laden.
 
 Material:
 
-- [ ] In `Material.Initialize` (oder davor) `Nm_name` aus der INI ergänzen, wenn `Dt_name` passt und `Nm_name` leer ist. Regeln aus 3.
-- [ ] `strength` als Material-Parameter (Shader-Konstante) einführen oder ablehnen und die Karte vorskalieren. Roughness und Metallic haben bereits Faktoren (`PBRParameters.Roughness`/`Metallic`).
-- [ ] `Rt_name`/`Mt_name` aus der INI ergänzen und die UV-Menge festlegen: `GetTexCoord(3/4, …)` im Shader, `SetTextureCoordinates(…, MtFlags, RtFlags)`; Freelancer-Modelle haben meist nur ein bis zwei UV-Mengen.
-- [ ] Metallische Flächen ohne Umgebungsreflexion sind dunkel (`diffuseColor *= 1 - metallic`). Entscheiden: IBL/`envmap_material` im PBR-Pfad nutzen oder `metallic` in den INIs begrenzen.
-- [ ] Reflexionsstärke für `[CubeMap]` entscheiden (neue Konstante oder nicht unterstützt).
+- [x] `Nm_name`-Metadaten werden nur bei passender `Dt_name`-Zuordnung ergänzt; ausdrückliche MAT-Maps behalten Vorrang.
+- [x] Normalmap-`strength` wird als Materialparameter an den Shader weitergereicht; Roughness-/Metallic-Faktoren werden separat ausgewertet.
+- [x] `Rt_name`/`Mt_name` aus der INI ergänzen und die UV-Menge festlegen: `GetTexCoord(3/4, …)` im Shader, `SetTextureCoordinates(…, MtFlags, RtFlags)`; MAT-Werte haben Vorrang.
+- [ ] Metallische Flächen und Reflexionsstärke auf weiteren Assets prüfen; der geladene LI_ELITE-Produktionsdraw zeigt messbare, aber subtile Cubemap-Änderungen. GGX-IBL, visuelle Abnahme im Spiel und Materialtreue bleiben offen.
+- [x] `[CubeMap] strength` aus dem expliziten Katalog als opt-in Materialparameter bis zum Basic-/PBR-Shader weiterreichen.
+- [ ] Stärke und Cube-Orientierung auf Retail-Schiffen, Stationen und im Spiel visuell abnehmen.
 
 Rendering:
 
-- [ ] Tangentenraum für FVF-Modelle ohne Tangenten: Erzeugung beim Laden (aus Position und UV) oder im Shader über Ableitungen; Auswirkung auf Skinned/DFM-Modelle.
-- [ ] Entscheiden, ob Normal Maps im Standard-Shader (Vertexbeleuchtung) oder nur im PBR-Pfad wirken; `pbr`-Bedingung in `BasicMaterial.Use` entsprechend.
-- [ ] Tangentenraum der Daten (+Y oben) gegen den Shader prüfen. Bei invertiertem Grün das Vorzeichen in der Engine anpassen, nicht in den Daten.
-- [ ] Mip-Filter und Anisotropie für die Karten prüfen (Planeten-Detailkarten sind kachelnd).
+- [ ] Tangentenraum für FVF-Modelle ohne Tangenten vollständig abdecken. Authored FVF-Tangenten sowie generierte VMesh-/DFM-Tangenten und QuadSphere sind vorhanden; verbleibende FVF-Layouts und UV-/Nahtfälle brauchen gezielte Abdeckung.
+- [x] Ergänzende PBR-Maps aktivieren den PBR-Pfad unabhängig vom Normal-Map-Schalter. Normal Maps wirken bei vorhandener Tangentenbasis im PBR-Pfad; der Legacy-Shader bleibt kompatibel.
+- [ ] Asset-Normalenpolarität (+Y oben) gegen eine unabhängige Retail-Referenz prüfen. Die Shaderachsen sind kontrolliert, die Polarität echter Karten ist noch nicht belegt.
+- [x] Technische Filteranbindung für Surface-Maps: DDS-Mips werden erhalten, Material-Sampler übernehmen `PreferredFilterLevel`, und der OpenGL-Backend setzt Trilinearfilterung oder die gewählte Anisotropiestufe.
+- [ ] Bildqualität mit Mips und Anisotropie auf Schimmern und Specular-Artefakten prüfen; Planeten-Detailkarten zusätzlich auf Kachelung vergleichen.
 
 Prüfung:
 
-- [ ] Test: generierter Cube (`envcube_space.mat`) wird von `DDS.GetTextureCube` mit sechs Flächen und Mips gelesen.
+- [x] Test: generierter Cube (`envcube_space.mat`) wird von `DDS.GetTextureCube` mit sechs Flächen und Mips gelesen; die Flächen-/Mip-Readbacks und geladenen LI_ELITE-Bilder stehen im Cubemap-Probebericht und der [Vergleichsgalerie](renderer-comparison-gallery.md).
+- [x] DDS-Lader unterstützt zusätzlich DX10 `R16G16B16A16_FLOAT`-Cubemaps und reicht sie als lineare HalfVector4-Texturen an Basic- und PBR-Shader weiter. Vier headless Tests prüfen Cubemap/Mips, abgeschnittene Nutzdaten und nicht unterstützte Formate. Client und LancerEdit bauen; der visuelle ModelViewer-Nachweis mit dieser HDR-Cubemap fehlt weiterhin.
 - [ ] Test: Die vier `normalmaps_*.txm` liefern zusammen 55 Texturen 1024 × 1024 im Format `Rgtc2` mit 9 Mips; Test der BC5-Dekodierung im `DDS`-Pfad (`ATI2N`).
-- [ ] Sichttest mit einem Schiff (`li_fighter`), einer Station (`bw_pygar_airlock`) und einem Planeten mit Detailkarte; je mit und ohne Karte, Vergleich der Aufnahmen.
+- [ ] Sichttest mit einem Schiff (`li_fighter`), einer Station (`bw_pygar_airlock`) und einem Planeten mit Detailkarte; je mit und ohne Karte, Vergleich der Aufnahmen. Das Liberty-Stadtbild/full-Profil wurde nach dem Room-Lighting-Fix erneut verglichen; übrige Szenen und Materialtreue sind offen.
 - [ ] Verhalten bei fehlender Datei, fehlender Karte und fehlerhaftem DDS (kein Absturz).
 - [ ] Speicher und Ladezeit: 1,2 GB Normal-, Roughness- und Metallic-Karten (BC5/BC4), 3 × 2,1 MB Cube Maps.
 
 Editor und Dokumentation:
 
-- [ ] LancerEdit: Normal Map eines Materials anzeigen/setzen, optional die INI schreiben.
-- [ ] README und diese Datei nach der Umsetzung auf den tatsächlichen Stand bringen; Patch in `patches/series` eintragen.
+- [x] LancerEdit zeigt Materialmaps und erlaubt ergänzende Surface-Map-Zuordnungen im Render-Tab in einer Workspace-INI zu bearbeiten.
+- [x] Implementierungsstand und offene Abnahmen in dieser Dokumentation aktualisiert; Änderungen werden als Client-Patch in `patches/series` geführt.
 
 ## 6. Offene Entscheidungen
 

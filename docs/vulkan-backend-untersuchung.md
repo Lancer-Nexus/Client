@@ -1,5 +1,8 @@
 # Vulkan-Backend: Untersuchung des Clients
 
+Die aktuelle Umsetzungsreihenfolge und Abnahme stehen im
+[Grafik-Umsetzungsplan](graphics-implementation-plan.md).
+
 **Zweck:** Bestandsaufnahme der Grafikschicht, der Render-Pipeline, der Shader und der Lichtquellen als Grundlage für einen Plan zu einem Vulkan-Backend (oder einem gleichwertigen modernen Backend). Dieses Dokument enthält Befunde und offene Fragen, **keinen Plan und keinen Code**.
 
 **Stand der Untersuchung:** 2026-10-12, Checkout `Client` auf Commit `7a3518ce8` (Branch `codex/lancer-nexus-integration-2026-10-10`). Erweitert am selben Tag um die Sichtung der SDL_GPU-Dokumentation und der gebündelten SDL3-Version (Abschnitt 13).
@@ -95,7 +98,7 @@ Das Modell „3 Rahmen in Flug, Fences je Rahmen“ entspricht dem, was Vulkan o
 
 ### 3.1 Ablauf
 
-```text
+```
 *.hlsl + *.txt  ──►  LLShaderCompiler (DXC → SPIR-V → SPIRV-Cross)  ──►  *.bin (zstd)  ──►  eingebettete Ressource
                                                                          │
  ShaderBundle.Get(flags)  ◄── AllShaders.* ◄── Laufzeit: FromResource<T>(name + ".bin")
@@ -239,7 +242,7 @@ Die 2D-Ebene nutzt dieselbe Zustandsmaschine (`Set2DState(cull, depth)`).
 
 ### 5.2 Ablauf
 
-```text
+```
 Systemdaten (INI) ──► SystemLighting (Lichter, Ambient, Nebel)
                                │
  je Objekt: RenderHelpers.GetLighting(system, Mittelpunkt, Radius, LightGroup, nebula)
@@ -309,20 +312,25 @@ Tangenten werden in `Basic_FVF` als zwei `float2` auf zusätzlichen UV-Slots (`T
 
 ## 7. Abhängigkeiten von OpenGL außerhalb des Backends
 
-Diese Stellen müssen vor oder mit einem neuen Backend entkoppelt werden:
+Quellcodeabgleich am 2026-10-18: Die früher genannten GL-Werte in
+`VertexElementType` und `WrapMode` sowie der direkte Screenshot-Readback aus den
+SDL-Fensterklassen sind inzwischen backendneutralisiert. `SystemRenderer` ruft
+keine GL-Funktionen direkt auf; RenderGraph-Callbacks führen GPU-Operationen
+aber weiterhin sofort über den derzeitigen `RenderContext` aus. Außerhalb des
+OpenGL-Backends verbleiben folgende konkrete Kopplungen:
 
 | Fundstelle | Befund | Entkopplung |
 |---|---|---|
-| `Graphics/Vertices/VertexElementType.cs` | Aufzählung mit `GL.GL_FLOAT`, `GL.GL_UNSIGNED_SHORT`, `GL.GL_UNSIGNED_BYTE`, `GL.GL_SHORT` | eigene Werte, Umsetzung im Backend |
-| `Graphics/WrapMode.cs` | Werte `GL.GL_CLAMP_TO_EDGE`, `GL_CLAMP_TO_BORDER`, `GL_MIRRORED_REPEAT`, `GL_REPEAT` | eigene Werte |
-| `Platforms/SDL3Game.cs` (≈ Z. 243–260), `SDL2Game.cs` (≈ Z. 205–218) | `Screenshot` ruft `GL.ReadBuffer`, `GL.ReadPixels` direkt | Rückleser im Backend (`IRenderContext`) |
-| `Graphics/S3TC.cs` | GL-Aufrufe und Software-Entkompression | Teil des GL-Backends, Dekompression als Hilfsfunktion |
-| `Platforms/SDL3Game.cs`, `SDL2Game.cs`, `HeadlessContext.cs` | Fensterflag `SDL_WINDOW_OPENGL`, GL-Attribute | Fensterflags je Backend (bei SDL_GPU kein GL-Kontext) |
-| `GLSwap.cs` | `SDL_GL_*`-Aufrufe | gehört in das Backend |
-| `IRenderContext.MakeCurrent`, `SwapWindow` | Annahme: GL-Kontext des Fensters | in modernen Backends anders (Swapchain) |
-| `GraphicsFeature.GLES`, `SupportsWireframe` | GL-spezifische Fähigkeitsabfragen | allgemeinere Abfrage |
+| `Platforms/SDL3Game.cs`, `SDL2Game.cs`, `HeadlessContext.cs` | Fenstererzeugung und Fabrik wählen derzeit `GLRenderContext`; Fenster tragen `SDL_WINDOW_OPENGL` | Backendwahl muss vor Fenstererzeugung erfolgen; SDL_GPU beansprucht ein SDL-Fenster ohne GL-Kontext |
+| `GLSwap.cs` | `SDL_GL_*`-Aufrufe für Swap/V-Sync | Swapchain-Präsentation im jeweiligen Backend |
+| `IRenderContext.MakeCurrent`, `SwapWindow` | Vertrag setzt einen aktuellen Fensterkontext voraus | Frame-/Present-Vertrag auf explizite Backendoperationen umstellen |
+| `Graphics/S3TC.cs` | Dekodierung und Upload teilen eine Datei; der Upload ruft GL direkt auf | Dekompression als API-unabhängige Datenfunktion abtrennen |
+| `GraphicsFeature.GLES`, `SupportsWireframe` | Featureabfragen spiegeln teilweise GL-Eigenschaften wider | Fähigkeitsabfragen als backendunabhängige Renderer-Capabilities modellieren |
 
-Der restliche Client greift nicht auf GL zu (Stichprobe über das ganze `src/`: nur die genannten Dateien).
+Ein `rg`-Abgleich über `src/` findet die übrigen direkten GL-Aufrufe im
+OpenGL-Backend sowie in Build-/Diagnosecode. Die zentralen restlichen Blocker
+sind daher Backendauswahl, Ressourcen-/Kommandoausführung und die GL-spezifische
+Textur-Uploadhilfe, nicht direkte GL-Aufrufe im Systemrenderer.
 
 ---
 
@@ -380,7 +388,7 @@ Die Punkte folgen aus der Art, wie der Client die Schnittstellen benutzt.
 
 ### 10.2 Shader
 
-- [ ] Läuft das HLSL ohne Änderung durch den SDL_GPU-Pfad (DXIL, MSL)? Alle 361 Varianten kompilieren sich schon zu SPIR-V; Laufzeitprüfung steht aus.
+- [ ] Läuft das HLSL ohne Änderung durch den SDL_GPU-Pfad (DXIL, MSL)? Die registrierten Shaderbeschreibungen und Varianten kompilieren sich zu SPIR-V; Laufzeitprüfung steht aus.
 - [ ] `[[vk::location]]`-Zuordnung gegen die SDL_GPU-Vertexattribute (Offset/Format) abgleichen.
 - [ ] Fließkomma-Genauigkeit und `discard` im Basic-Shader (Alpha-Test-Variante) gegen GL vergleichen.
 - [ ] Merkmalsnamen (`NORMALMAP` im Code, `NORMAL_MAP` in `Basic_FVF.txt`) abgleichen.
@@ -526,7 +534,11 @@ Der Vulkan-Teil baut die Deskriptor-Layouts allein aus den **Anzahlen** (`num_sa
 
 Die Reflexion im `LLShaderCompiler` zählt die Ressourcen und prüft nur die **Set-Nummern** (`SpvcReflection`, Fehler `InvalidDescriptorSet`), nicht die Bindungsnummern. Die MSL-Übersetzung übernimmt die Bindungsnummern unverändert. Der GL-Teil nutzt Namen und braucht sie nicht.
 
-**Folge:** Für SDL_GPU (und analog für D3D12 und Metal) ist eine Umnummerierung nötig, entweder im Compiler (SPIR-V neu nummerieren, vor SPIRV-Cross) oder als Tabelle je Shader im Bündel (Client-Slot → SDL-Slot). Der Client setzt Uniform-Blöcke über feste Indizes (`SetUniformBlock(2, …)`, `3`, `5`), eine Tabelle würde diese Indizes auf SDL-Slots abbilden.
+**Stand 2026-10-18:** Der Compiler schreibt nun eine SDL_GPU-SPIR-V-Variante mit fortlaufenden Bindungen und speichert je Stufe die Zuordnung `(DescriptorSet, OriginalBinding, SdlBinding)` im Shaderbundle. DXIL-, MSL- und GLSL-Übersetzungen verwenden weiter den Original-SPIR-V-Code. Ein Lauf über alle 41 in den Projektdateien registrierten Shaderbeschreibungen und Varianten gelang; für `PBR.bin` wurden 512 Permutationen erzeugt und die gespeicherten Slotmaps gegen die resultierenden SPIR-V-Dekorationen geprüft. Der SDL_GPU-API-Smoke liest das neue Bundleformat und besteht weiterhin.
+
+Patch 2370 beseitigt für den ausgewählten PBR-Pfad die Uniformblock-Überzahl: Der View-Vektor wird als Vertexausgabe interpoliert, und UV-Selektoren liegen nun im PBR-Parameterblock. Die PBR-Fragmentshader benötigen damit drei Uniformblöcke ohne Schatten und höchstens vier mit Schatten. Die Slotmap ist jedoch weiterhin nicht an einen Spielshader- oder Renderer-Bindungspfad angeschlossen; feste Clientindizes müssen dort auf SDL-Slots abgebildet werden. Die DFM-Storage-Pufferbereiche (`BindTo(9, start, count)`) brauchen zusätzlich weiterhin einen Basisindex im Shader.
+
+Der SDL_GPU-Smoke lädt nun auch die Featurevariante `PBR_VIEW_VECTOR` aus dem eingebetteten Spielbundle und erstellt damit eine Pipeline auf dem Vulkan-Treiber. Der Pass pusht die drei Vertex- und Fragmentuniformblöcke, bindet beide kompaktierten Fragment-Sampler, zeichnet ein FVF3-Dreieck und liest die Swapchain-Pixel aus. Ein NAP-unabhängiger synthetischer Materiallauf ergab für den PBR-Pixel `(148, 78, 0, 255)`; damit sind Shadererstellung, Pipelinekompatibilität, Uniform-/Samplerbindung und tatsächliche Fragmentausgabe auf Mesa/Vulkan Intel Haswell belegt. Der Probe fehlen echte Freelancer-Meshes, Materialtexturen, DFM-Skinning und der Game-Renderer-Kommandopfad. Nachweis: `docs/evidence/renderer/sdl-gpu-production-pbr-draw-20261018.md`.
 
 **Weitere Einschränkung der Bindung:** `SDL_BindGPUVertexStorageBuffers` bindet **ganze Puffer** ohne Offset und Länge. Der Client bindet Bereiche (`BindTo(9, start, count)` für Partikel, Strahlen und Bones mit `BufferOffset`, `200` Matrizen). Bei SDL_GPU muss der Anfangsindex als Uniform in den Shader gegeben werden (neuer Uniform-Block oder im Material-Block). Das betrifft `Particle`, `ParticleBeam`, `Basic_Skinned`.
 
@@ -612,8 +624,8 @@ Aus der Dokumentation (3.2.0):
 
 - [ ] **Praktisch prüfen:** minimales SDL_GPU-Programm mit den gebündelten Shadern (SPIR-V und DXIL), eine Pipeline für `Basic_FVF`, auf Linux (Mesa/NVIDIA) und Windows (Vulkan und D3D12).
 - [ ] Ob ein SDL3-Fenster mit `SDL_WINDOW_OPENGL` für SDL_GPU beanspruchbar ist (sonst Fenstererzeugung je Backend).
-- [ ] Wie der Compiler die Umnummerierung am besten erhält (SPIR-V-Umschreibung gegenüber Tabelle im Bündel); Auswirkung auf den GL-Teil prüfen.
-- [ ] Verhalten der D3D12- und Metal-Übersetzungen (DXIL über SPIRV-Cross und DXC, MSL über SPIRV-Cross) bei den 361 Varianten.
+- [x] Compilerformat für die SDL_GPU-SPIR-V-Umnummerierung und Slotmap im Bündel umgesetzt; der OpenGL-Leser akzeptiert Shaderheader-Version 2. Eine tatsächliche Produktionsshader-Bindung ist weiterhin offen.
+- [ ] Verhalten der D3D12- und Metal-Übersetzungen (DXIL über SPIRV-Cross und DXC, MSL über SPIRV-Cross) bei den registrierten Shaderpermutationen.
 - [ ] Mindestversion von SDL3 für Linux und macOS und deren Bereitstellung im Paket (heute nur Windows gebündelt).
 - [ ] Messung: Zeichenaufrufe, Pipeline-Varianten und Uniform-Daten je Frame (10.3), erst damit lässt sich die Größe von Pipeline-Cache und Ringpuffern festlegen.
 - [ ] Einfluss der 3.4-Funktionen (Features lockern, Geräte-Eigenschaften) auf die Mindestanforderungen unter Android/Raspberry Pi.
