@@ -354,3 +354,4 @@ jump-gate route.
 | 2395 | Load and sample real NAP normal, roughness and metallic maps on a VMesh |
 | 2396 | Load and draw a skinned DFM with real surface maps through the SDL_GPU smoke using the active NAP provider |
 | 2397 | Keep SDL_GPU DFM diagnostic geometry inside Vulkan clip depth and add opt-in framebuffer captures |
+| 2398 | Load SDL_GPU VMesh diagnostic inputs through the active NAP provider |

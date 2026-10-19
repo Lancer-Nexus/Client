@@ -246,9 +246,18 @@ Archivprüfungen, Logauszug und Screenshot stehen unter
    `Basic_Skinned` und `PBR_Skinned` jene von `DfmTangentVertex`. Der
    Produktions-PBR-Draw-Smoke nutzt ebenfalls das aus der echten
    `FVFVertex`-Deklaration abgeleitete GPU-Layout. Als nächstes echte VMesh- und
-   DFM-Assets samt Materialbindung laden und zeichnen; BC4/BC5, Cubemaps,
-   Skinning, Renderziele und Präsentation müssen in realen Szenen zusammen
-   geprüft werden. Erst nach erfolgreichem vollständigem Spike den gesamten
+   DFM-Assets samt Materialbindung laden und zeichnen. Patch 2398 lädt jetzt
+   einen vollständigen indizierten VMesh-Materialdraw, seine MAT-Diffuse-Textur
+   und Surface-Normal/Roughness/Metallic aus dem aktiven NAP-Provider. Der
+   `br_elite`-Lauf auf SDL_GPU/Vulkan verwendete 1.299 Draw-Indizes und änderte
+   bei Surface-Maps 43.794 Pixel gegenüber der Off-Aufnahme. Die Aufnahme zeigt
+   Diagnose- und Schattenpanels und ist kein Qualitätsnachweis für
+   Schiffsoberflächen. Der Test nutzt nur einen Materialdraw und weiterhin
+   synthetische Szenegeometrie. Siehe
+   [NAP SDL_GPU Bretonia Elite A/B](evidence/renderer/br-elite-sdl-gpu-nap-20261019/README.md).
+   CMP-Teiltransforms, sämtliche Schiffsmaterialien, BC4/BC5, Cubemaps, Skinning,
+   Renderziele und Präsentation müssen in realen Szenen zusammen geprüft werden.
+   Erst nach erfolgreichem vollständigem Spike den gesamten
    Spiel- und Editorpfad portieren; OpenGL bleibt währenddessen die Vergleichs-
    und Rückfallreferenz. Der Audit auf Mesa/Vulkan Haswell ist wegen der
    eingeschränkten Treiberunterstützung kein GPU-Kompatibilitätsnachweis.
