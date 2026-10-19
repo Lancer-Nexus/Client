@@ -255,8 +255,13 @@ Archivprüfungen, Logauszug und Screenshot stehen unter
    Schiffsoberflächen. Der Test nutzt nur einen Materialdraw und weiterhin
    synthetische Szenegeometrie. Siehe
    [NAP SDL_GPU Bretonia Elite A/B](evidence/renderer/br-elite-sdl-gpu-nap-20261019/README.md).
-   CMP-Teiltransforms, sämtliche Schiffsmaterialien, BC4/BC5, Cubemaps, Skinning,
-   Renderziele und Präsentation müssen in realen Szenen zusammen geprüft werden.
+   Patch 2399 assembliert den CMP-Construct-Baum und wendet den authored
+   Teiltransform auf den ausgewählten Diagnose-VMesh an. Das bleibt ein Draw und
+   ist noch kein vollständiger Schiffsnachweis. CMP-Teiltransforms für alle
+   Komponenten, sämtliche Schiffsmaterialien, BC4/BC5, Cubemaps, Skinning,
+   Renderziele und Präsentation müssen in realen Szenen zusammen geprüft werden;
+   Patch 2399 braucht noch einen NAP-Lauf mit einem Teil, dessen Construct einen
+   sichtbaren Nicht-Identitätstransform hat.
    Erst nach erfolgreichem vollständigem Spike den gesamten
    Spiel- und Editorpfad portieren; OpenGL bleibt währenddessen die Vergleichs-
    und Rückfallreferenz. Der Audit auf Mesa/Vulkan Haswell ist wegen der
