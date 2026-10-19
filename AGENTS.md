@@ -38,6 +38,7 @@ Maintain the Lancer Nexus client fork while preserving compatibility with upstre
 - Native components are configured through the existing `CMakeLists.txt` and dependencies checked by `scripts/depcheck_unix`; do not replace this with a service-style `dotnet restore`-only workflow.
 - Maintain native decoder and text-renderer changes as `lancerdecode` and `blurgtext` targets in `patches/series`, with `base-lancerdecode-commit` and `base-blurgtext-commit` pins. Apply and verify these overlays before building; do not commit modified native submodule sources or publish vendor pointers for local fixes.
 - The current project files target `net10.0`. Keep cluster functionality optional and isolated behind existing configuration/capability boundaries while upstream synchronization remains possible.
+- On this Linux development host, the .NET 10 runtime and SDK are installed at `/opt/dotnet-10`. Set both `DOTNET_ROOT=/opt/dotnet-10` and `DOTNET_ROOT_X64=/opt/dotnet-10` when starting generated apphosts such as `InterfaceEdit` or `LLShaderCompiler`; the `dotnet` SDK command may work without them while those apphosts fail to locate the runtime.
 - `src/LibreLancer/LibreLancer.csproj` references the shared `Protocol` submodule for the optional Gateway version handshake; initialize that submodule before building the client.
 
 ## Working-model escalation
@@ -129,8 +130,156 @@ LLServer SystemIds defines owned worlds; SystemId is the primary fallback. Trave
 
 ## Consolidated functional bundles
 
-The active series is eleven Client bundles and two native bundles, described in
+The active series is twenty-one Client bundles and two native bundles, described in
 `patches/README.md`. Preserve the pinned baselines and the recorded overlay
 hashes when regenerating a bundle. Validate a fresh complete reconstruction
 before recording the applied state or publishing; historical patch numbers
 in older audit documents refer to Git history.
+
+## Shader lifetime
+
+- Shader and ShaderBundle are render-thread resources. Dispose short-lived
+  bundles explicitly; do not use disposed shaders or create them from loader
+  workers. RenderContext owns a registry for all remaining shaders.
+- Preserve `DisposeShaders()` before SDL/native context shutdown and its
+  finally path after the application cleanup hook. Do not delete GL programs or
+  free uniform pointers from GC finalizers or background threads.
+- Include shader/bundle rollback, wrong-thread access and normal native shutdown
+  when changing this ownership model. Headless tests require the built native
+  text library on the loader path. Context-wide texture/fence/crash-path cleanup
+  remains separate work; do not claim it from shader-only tests.
+
+## Runtime VMesh tangents
+
+- Keep the existing SimpleMesh submodule initialized and include its managed
+  assembly in the engine runtime. Do not fork its MikkTSpace implementation.
+- Tangent geometry is per material draw and real UV channel. Include both the
+  VMeshRef base vertex and TMeshHeader start vertex when resolving indices.
+  Retain per-corner tangents at mirrored UV seams; do not overwrite shared
+  source vertex tangents or modify original Freelancer/NAP assets.
+- Keep authored TEX3/TEX4 tangents unchanged and preserve both real UV sets,
+  normals, positions and diffuse bytes. VMeshTangentBuilder output is per draw and must
+  enter the async tangent cache; allocate GPU resources on the render thread and
+  dispose them with their VMeshResource before allocator shutdown.
+
+## Surface GPU upload ownership
+
+- SurfaceGpuTexture owns one explicit upload. Keep its CPU lease separate and
+  dispose the GPU resource on the owning render thread before context shutdown.
+- Apply both per-upload and aggregate residency budgets before allocation. Keep
+  bytes charged while a texture retires behind a GPU fence; subtract them only
+  after successful post-fence disposal. GPU leases are render-thread-only.
+  Surface CPU leases remain separately owned by the caller.
+- Keep UV animation/selection uniforms initialized in sampler tests. Compare
+  real BC5 texture sampling with a CPU reference, not only uniform-fed normals.
+  BasicMaterial consumes the cache for authored FVF3/FVF4 or asynchronously generated VMesh tangents from NORMAL+TEX1/TEX2.
+
+## Surface normal-map activation
+
+- `surface_normal_maps` and `surface_pbr_maps` stay independent and opt-in. BasicMaterial supports supplemental normal maps on authored FVF3/FVF4 tangents and generated FVF3/FVF4 geometry from VMesh NORMAL+TEX1/TEX2. Preserve MAT-owned `NmName`, `RtName`, and `MtName`. Supplemental roughness and metallic maps use PBR slots 4 and 3 with the configured UV channel; scalar values multiply their maps or provide map-free PBR values. DFM materials may use PBR through `PBR_Skinned` when skinned; tangent support controls normal mapping independently. Release each temporary GPU lease after its draw and restore the touched texture slots.
+- Keep `SurfaceNormalMapsEnabled` synchronized from GameSettings at startup and at every live settings apply. Turning it off retires unused GPU cache entries through the fence queue.
+- Keep `SurfacePbrMapsEnabled` synchronized from GameSettings at startup and every live settings apply. The `surface_pbr_maps` config entry and `--render-surface-pbr-maps=on|off` override control supplemental roughness and metallic maps only. Turning it off retires unused GPU cache entries through the fence queue.
+
+## GPU texture cache
+
+- Use `SurfaceGpuTextureCache` for shared supplemental uploads and dispose each
+  `SurfaceGpuTextureLease` after its last draw use. Load CPU images outside the
+  render thread and pass the lease to the render-thread upload. Active and
+  fence-retiring entries both count against the per-resource-manager 256 MiB
+  logical payload budget. A budget miss while fences are pending can be retried.
+- Cache shutdown queues active resources for retirement before native context
+  shutdown; outstanding leases must not be used after manager shutdown.
+
+## GPU retirement queue
+
+- Queue GPU releases through RetireAfterFrame after the last intended resource
+  use. Keep scopes alive until completion; Dispose of an already retired
+  SurfaceGpuTexture must not bypass its scheduled GPU release.
+- Preserve EndFrame submission and shutdown drain before shader/context teardown.
+  Submission or wait failures must not cause early release. Callback failures
+  are surfaced after attempting the remaining callbacks, not silently swallowed.
+- Fence lifecycle is not a global GPU residency cache. Device-loss recovery,
+  unsupported-sync platform runtime and budgets require their own evidence.
+
+## Runtime DFM tangents
+
+- Generate DFM tangents asynchronously per FaceGroup and selected `NmFlags` UV
+  channel after materials resolve. Preserve both real UV sets and bone data;
+  expand strips with alternating winding and retain mirrored per-corner seams.
+- Keep original DfmVertex buffers as fallback. DfmTangentVertex draws are
+  non-indexed to avoid 16-bit corner-index overflow. Charge uploads against the
+  shared 64 MiB generated-tangent payload budget; dispose on feature disable,
+  ClearMeshes and resource-manager shutdown on the render thread.
+- `surface_generated_tangents` gates all generated DFM geometry. Authored MAT
+  normal maps remain independent of the opt-in Surface normal-map setting.
+  PBR DFM draws use `PBR_Skinned` to preserve bone skinning; generated tangent
+  geometry enables normal mapping where available. Keep the original Basic
+  skinned fallback and carry bone buffer and offset with deferred transparent
+  draws. Visual material acceptance in an in-game DFM scene remains required.
+
+## Renderer startup overrides
+
+- Keep each renderer override independent so a launch can selectively enable
+  or disable supported features without changing `client.ini`. Values supplied
+  on the command line override only their matching setting; omitted values keep
+  the configuration value.
+- Supported controls and their corresponding `client.ini` settings are:
+  - `--render-normal-maps=on|off` → `surface_normal_maps`.
+  - `--render-surface-pbr-maps=on|off` → `surface_pbr_maps`.
+  - `--render-pbr-environment-maps=on|off` → `pbr_environment_maps`.
+  - `--render-pbr-diffuse-ibl=on|off` → `pbr_diffuse_ibl` (diffuse irradiance contribution; enabled by default when the PBR environment path is active).
+  - `--render-generated-tangents=on|off` → `surface_generated_tangents`.
+  - `--render-surface-profile=original|minimal|standard|full` → `surface_profile`.
+  - `--render-per-pixel-lighting=on|off` → `per_pixel_lighting`.
+  - `--render-dynamic-lighting=on|off` → `dynamic_lighting`.
+  - `--render-dynamic-light-budget=0|8|16|24|32` → `dynamic_light_budget` (maximum transient local lights admitted per frame; persistent system lights are unaffected).
+  - `--render-transient-effect-light-budget=0|32|64|128` → `transient_effect_light_budget` (maximum active `lgt_effect` light events; particle-effect simulation continues at 0).
+  - `--render-nebulae=on|off` → `render_nebulae`.
+  - `--render-starsphere=on|off` → `render_starsphere`.
+  - `--render-sun-lens-glow=on|off` → `render_sun_lens_glow`.
+  - `--render-sun-ambient=on|off` → `render_sun_ambient` (opt-in diffuse tint from locally weighted persistent system-light colors; off by default).
+  - `--render-sun-ambient-strength=0..1` → `render_sun_ambient_strength` (finite invariant-culture tint blend; default 0.25; validated in config and adjustable in Effects options).
+  - `--render-hdr-exposure=-4..4` → `render_hdr_exposure` (finite EV exposure compensation; default 0)
+  - `--render-ssao=on|off` → `render_ssao`; `--render-ssao-radius=0.05..50` → `render_ssao_radius` (view-space radius, default 3); `--render-ssao-strength=0..4` → `render_ssao_strength` (default 1.1); `--render-ssao-bias=0.0001..0.25` → `render_ssao_bias` (occlusion bias, default 0.025). SSAO remains off by default.
+- `--render-hdr=on|off` → `render_hdr` (opt-in float scene target and ACES tone mapping; falls back to LDR when the GPU target is unavailable).
+  - `--render-bloom=on|off` → `render_bloom` (opt-in bloom pass; requires `render_hdr`).
+  - `--render-depth-prepass=on|off` → `render_depth_prepass` (opt-in opaque model depth pass; Basic/PBR materials use depth-only fragment variants; off by default pending runtime performance measurements).
+  - `--render-shadows=on|off` → `render_shadows` (opt-in single directional shadow map with opaque model casters and 3×3 PCF receivers in Basic/PBR; off by default).
+  - `--render-shadow-source=auto|<light-nickname>` → `render_shadow_source` (defaults to `auto`, which selects the brightest active directional system light by Rec. 709 luminance; an explicit nickname selects only that active directional light and fails closed when it is unavailable).
+  - `--render-bloom-threshold=0..8` → `render_bloom_threshold` (finite invariant-culture float; default 1).
+  - `--render-bloom-strength=0..2` → `render_bloom_strength` (finite invariant-culture float; default 0.18).
+  - `--render-bloom-radius=0.25..4` → `render_bloom_radius` (finite invariant-culture float; default 1).
+  - `--render-bloom-resolution-scale=0.125..1` → `render_bloom_resolution_scale` (finite invariant-culture float; default 1; controls blur-target dimensions and is adjustable in Effects options).
+  - `--render-bloom-kernel-pairs=1..4` → `render_bloom_kernel_pairs` (integer number of bilinear Gaussian tap pairs; default 2; adjustable in Effects options).
+  - `--render-projectile-beams=on|off` → `render_projectile_beams` (only hides `vis_beam`; simulation and projectile particle effects remain active).
+  - `--render-particle-effects=on|off` → `render_particle_effects` (suppresses particle geometry while effect timing and simulation continue).
+  - `--render-jump-gate-effects=on|off` → `render_jump_gate_effects` (controls the configured jump-tunnel effect renderer).
+  - `--render-transient-effect-lights=on|off` → `render_transient_effect_lights` (controls short-lived `lgt_effect` lights independently of other dynamic lights).
+  - `--render-weapon-muzzle-lights=on|off` → `render_weapon_muzzle_lights` (controls weapon `light_anim` muzzle lights independently of transient effect lights).
+  - `--render-antialias=none|smaa-low|smaa-medium|smaa-high|smaa-ultra|msaa-2x|msaa-4x|msaa-8x` → `antialias`.
+  - `--render-anisotropy=0|2|4|8|16` → `anisotropy`.
+- `--invulnerable=on|off` applies only to the local player on the embedded
+  single-player server. `on` is rejected in Gateway/cluster mode; it is a test
+  aid and does not grant invulnerability to remote multiplayer players.
+- Boolean controls accept only `on` or `off`. Surface profile selects the
+  material-map quality preset; anti-aliasing and anisotropy remain subject to
+  backend and hardware support. Do not document controls without a runtime
+  setting and parser entry. The dynamic-light budget accepts only its listed
+  integer levels; the transient-effect event budget accepts only its listed
+  levels and evicts the least useful active lights when reduced.
+- Keep the in-game graphics Effects panel wired to these same `GameSettings`
+  fields. When adding a live renderer option, update both panel initialization
+  and its save/apply path; do not leave implemented features marked as planned.
+- For RenderDoc material-to-draw identification only, set `LL_RENDERDOC_MATERIAL_MARKERS=1`; OpenGL KHR_debug groups then label each `BasicMaterial` draw with shader type, diffuse sampler and material key. This is disabled by default and unavailable when the GL debug-group entry points are missing.
+- Example for an isolated comparison launch:
+  `lancer client.ini --render-normal-maps=on --render-nebulae=off --render-antialias=smaa-high`.
+
+## NAP test-container provenance
+
+- NAP containers used for Client, LancerEdit, or runtime validation must be
+  built solely from files under the project `Data/NAP/` source tree. Generated
+  QA assets must first be placed under `Data/NAP/` and then packaged.
+- A temporary archive output path is allowed; every packaged input must still
+  come from `Data/NAP/`. Do not validate with containers assembled from `/tmp`,
+  loose Freelancer installs, or other external sources.
+- Verify the archive and its active manifest before launching a test.
