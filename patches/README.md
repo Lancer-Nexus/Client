@@ -352,3 +352,4 @@ jump-gate route.
 
 | 2394 | Draw complete indexed NAP VMesh material surfaces through the SDL_GPU PBR smoke |
 | 2395 | Load and sample real NAP normal, roughness and metallic maps on a VMesh |
+| 2396 | Load and draw a skinned DFM with real surface maps through the SDL_GPU smoke using the active NAP provider |
