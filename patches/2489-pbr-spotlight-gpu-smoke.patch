@@ -1,0 +1,819 @@
+diff --git a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+--- a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
++++ b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+@@ -503,12 +503,16 @@
+         byte[]? realRoughnessDds = null, byte[]? realMetallicDds = null,
+         float realNormalStrength = 1.0f, float realRoughness = 0.55f, float realMetallic = 0.0f,
+         byte[]? skinnedVertexBytes = null, uint skinnedVertexCount = 0, byte[]? boneMatrixBytes = null,
+-        Matrix4x4? skinnedWorld = null, Matrix4x4? skinnedNormalMatrix = null)
++        Matrix4x4? skinnedWorld = null, Matrix4x4? skinnedNormalMatrix = null,
++        bool testPbrSpotlight = false)
+     {
+         ArgumentNullException.ThrowIfNull(freelancerFvfDeclarationProvider);
+         var skinnedDfm = skinnedVertexBytes != null;
+         if (realVmeshVertices != null || skinnedDfm)
+             realVmeshCoverageTriangle = RequireCoverageTriangle(realVmeshCoverageTriangle);
++        if (testPbrSpotlight && (realVmeshVertices != null || skinnedDfm))
++            throw new ArgumentException("The synthetic PBR spotlight probe cannot be combined with real mesh geometry.",
++                nameof(testPbrSpotlight));
+         var vertexDeclaration = freelancerFvfDeclarationProvider();
+         if (skinnedDfm && (realVmeshVertices != null || realVmeshIndices != null || boneMatrixBytes == null ||
+                            vertexDeclaration.Stride != 76 || skinnedVertexCount < 3 ||
+@@ -577,6 +581,8 @@
+         IntPtr textureUploadBuffer = IntPtr.Zero;
+         IntPtr realDiffuseTexture = IntPtr.Zero;
+         IntPtr realDiffuseUploadBuffer = IntPtr.Zero;
++        IntPtr pbrDiffuseTexture = IntPtr.Zero;
++        IntPtr pbrDiffuseUploadBuffer = IntPtr.Zero;
+         IntPtr realNormalTexture = IntPtr.Zero;
+         IntPtr realNormalUploadBuffer = IntPtr.Zero;
+         IntPtr realRoughnessTexture = IntPtr.Zero;
+@@ -665,6 +671,8 @@
+                   $"stride={freelancerFvfLayout.Stride}, indices={realVmeshIndexCount}.");
+             (diffuseTexture, textureUploadBuffer) = CreateNormalTexture(device);
+             Console.WriteLine("Uploaded SDL_GPU BC5 normal texture.");
++            (pbrDiffuseTexture, pbrDiffuseUploadBuffer) = CreatePbrDiffuseTexture(device);
++            Console.WriteLine("Uploaded SDL_GPU RGBA8 diffuse fixture for production PBR draws.");
+             if (realDiffuseDds != null)
+             {
+                 (realDiffuseTexture, realDiffuseUploadBuffer) = CreateDdsTexture(device, realDiffuseDds);
+@@ -793,7 +801,10 @@
+             colorTargets[0] = new SDL3.SDL_GPUColorTargetInfo
+             {
+                 texture = swapchainTexture,
+-                clear_color = new SDL3.SDL_FColor { r = 0.0f, g = 0.0f, b = 0.0f, a = 1.0f },
++                clear_color = new SDL3.SDL_FColor
++                {
++                    r = 0.0f, g = 0.0f, b = 0.0f, a = testPbrSpotlight ? 0.0f : 1.0f
++                },
+                 load_op = SDL3.SDL_GPULoadOp.SDL_GPU_LOADOP_CLEAR,
+                 store_op = SDL3.SDL_GPUStoreOp.SDL_GPU_STOREOP_STORE
+             };
+@@ -818,7 +829,7 @@
+ 
+             ExecuteProductionPbrDraw(commandBuffer, pbrPipeline, vertexBuffer, diffuseTexture, normalSampler,
+                 colorTargets, width, height, materialDiffuse: realMaterialDiffuse,
+-                materialTexture: realDiffuseTexture,
++                materialTexture: realDiffuseTexture != IntPtr.Zero ? realDiffuseTexture : pbrDiffuseTexture,
+                 normalTexture: realNormalTexture, roughnessTexture: realRoughnessTexture,
+                 metallicTexture: realMetallicTexture, normalStrength: realNormalStrength,
+                 roughness: realRoughness, metallic: realMetallic,
+@@ -837,7 +848,7 @@
+             ExecuteProductionPbrDraw(commandBuffer, shadowPbrPipeline, vertexBuffer, diffuseTexture,
+                 normalSampler, colorTargets, width, height, shadowed: true,
+                 shadowDepthTexture: shadowDepthTexture, viewportX: 0.39f, materialDiffuse: realMaterialDiffuse,
+-                materialTexture: realDiffuseTexture,
++                materialTexture: realDiffuseTexture != IntPtr.Zero ? realDiffuseTexture : pbrDiffuseTexture,
+                 samplerBindings: shadowPbrSamplerBindings,
+                 realIndexBuffer: realVmeshVertices == null ? IntPtr.Zero : indexBuffer,
+                 realIndexCount: realVmeshIndexCount, realBaseVertex: realVmeshBaseVertex,
+@@ -850,7 +861,7 @@
+             ExecuteProductionPbrDraw(commandBuffer, shadowPbrPipeline, vertexBuffer, diffuseTexture,
+                 normalSampler, colorTargets, width, height, shadowed: true,
+                 shadowDepthTexture: shadowDepthTexture, viewportX: 0.70f, materialDiffuse: realMaterialDiffuse,
+-                materialTexture: realDiffuseTexture,
++                materialTexture: realDiffuseTexture != IntPtr.Zero ? realDiffuseTexture : pbrDiffuseTexture,
+                 samplerBindings: shadowPbrSamplerBindings,
+                 realIndexBuffer: realVmeshVertices == null ? IntPtr.Zero : indexBuffer,
+                 realIndexCount: realVmeshIndexCount, realBaseVertex: realVmeshBaseVertex,
+@@ -859,6 +870,20 @@
+                 worldMatrix: skinnedDfm ? skinnedWorld : null,
+                 normalMatrix: skinnedDfm ? skinnedNormalMatrix : null,
+                 outputIsSrgb: swapchainIsSrgb);
++
++            if (testPbrSpotlight)
++            {
++                ExecuteProductionPbrDraw(commandBuffer, pbrPipeline, vertexBuffer, diffuseTexture,
++                    normalSampler, colorTargets, width, height, samplerBindings: pbrSamplerBindings,
++                    materialTexture: realDiffuseTexture != IntPtr.Zero ? realDiffuseTexture : pbrDiffuseTexture,
++                    spotlight: true, spotlightDirection: new Vector3(0.0f, 0.0f, -1.0f),
++                    viewportX: 0.04f, viewportY: 0.35f, outputIsSrgb: swapchainIsSrgb);
++                ExecuteProductionPbrDraw(commandBuffer, pbrPipeline, vertexBuffer, diffuseTexture,
++                    normalSampler, colorTargets, width, height, samplerBindings: pbrSamplerBindings,
++                    materialTexture: realDiffuseTexture != IntPtr.Zero ? realDiffuseTexture : pbrDiffuseTexture,
++                    spotlight: true, spotlightDirection: new Vector3(0.0f, 0.0f, 1.0f),
++                    viewportX: 0.70f, viewportY: 0.35f, outputIsSrgb: swapchainIsSrgb);
++            }
+ 
+             copyPass = SDL3.SDL_BeginGPUCopyPass(commandBuffer);
+             if (copyPass == IntPtr.Zero)
+@@ -938,6 +963,17 @@
+             shadowPixel.y = (uint)(height * (0.04f + viewportLocalY));
+             pixelDestination.offset = 12;
+             SDL3.SDL_DownloadFromGPUTexture(copyPass, shadowPixel, pixelDestination);
++            if (testPbrSpotlight)
++            {
++                var spotlightPixel = centerPixel;
++                spotlightPixel.x = (uint)(width * 0.165f);
++                spotlightPixel.y = (uint)(height * 0.475f);
++                pixelDestination.offset = 16;
++                SDL3.SDL_DownloadFromGPUTexture(copyPass, spotlightPixel, pixelDestination);
++                spotlightPixel.x = (uint)(width * 0.825f);
++                pixelDestination.offset = 20;
++                SDL3.SDL_DownloadFromGPUTexture(copyPass, spotlightPixel, pixelDestination);
++            }
+             if (realVmeshVertices != null || skinnedDfm)
+             {
+                 // Sample three interior barycentric points as well as the center:
+@@ -1039,7 +1075,7 @@
+             if (pbrAlpha < 240 || (skinnedDfm && Math.Abs(pbrRed - ToOutputByte(AcesFitted(0.08f), isSrgb)) +
+                 Math.Abs(pbrGreen - ToOutputByte(AcesFitted(0.32f), isSrgb)) +
+                 Math.Abs(pbrBlue - ToOutputByte(AcesFitted(0.62f), isSrgb)) < 40) ||
+-                (!skinnedDfm && realVmeshVertices == null &&
++                (!testPbrSpotlight && !skinnedDfm && realVmeshVertices == null &&
+                 (Math.Abs(pbrRed - expectedPbrRed) > 32 ||
+                  Math.Abs(pbrGreen - expectedPbrGreen) > 32 || pbrBlue > 24)) ||
+                 (realVmeshVertices != null && pbrRed + pbrGreen + pbrBlue < 24))
+@@ -1072,6 +1108,31 @@
+                 throw new InvalidOperationException(
+                     $"SDL_GPU production PBR shadow pixel was not occluded for {swapchainFormat}: " +
+                     $"({shadowRed}, {shadowGreen}, {shadowBlue}, {shadowAlpha}); expected a near-black pixel.");
++            if (testPbrSpotlight)
++            {
++                var inCone0 = Marshal.ReadByte(mappedPixel, 16);
++                var inConeGreen = Marshal.ReadByte(mappedPixel, 17);
++                var inCone2 = Marshal.ReadByte(mappedPixel, 18);
++                var inConeAlpha = Marshal.ReadByte(mappedPixel, 19);
++                var outOfCone0 = Marshal.ReadByte(mappedPixel, 20);
++                var outOfConeGreen = Marshal.ReadByte(mappedPixel, 21);
++                var outOfCone2 = Marshal.ReadByte(mappedPixel, 22);
++                var outOfConeAlpha = Marshal.ReadByte(mappedPixel, 23);
++                var inConeRed = isBgra ? inCone2 : inCone0;
++                var inConeBlue = isBgra ? inCone0 : inCone2;
++                var outOfConeRed = isBgra ? outOfCone2 : outOfCone0;
++                var outOfConeBlue = isBgra ? outOfCone0 : outOfCone2;
++                var inConeLuma = inConeRed + inConeGreen + inConeBlue;
++                var outOfConeLuma = outOfConeRed + outOfConeGreen + outOfConeBlue;
++                if (inConeAlpha < 240 || outOfConeAlpha < 240 || inConeLuma < outOfConeLuma + 24)
++                    throw new InvalidOperationException(
++                        $"SDL_GPU PBR spotlight response failed for {swapchainFormat}: " +
++                        $"in-cone ({inConeRed}, {inConeGreen}, {inConeBlue}, {inConeAlpha}), " +
++                        $"out-of-cone ({outOfConeRed}, {outOfConeGreen}, {outOfConeBlue}, {outOfConeAlpha}); " +
++                        "the front-facing aligned spotlight must illuminate the surface more strongly.");
++                Console.WriteLine($"PBR spotlight readback passed: in-cone luma={inConeLuma}, " +
++                                  $"out-of-cone luma={outOfConeLuma}.");
++            }
+             if (realVmeshVertices != null || skinnedDfm)
+             {
+                 var clearRed = ToOutputByte(AcesFitted(0.08f), isSrgb);
+@@ -1152,6 +1213,10 @@
+                     SDL3.SDL_ReleaseGPUTexture(device, realDiffuseTexture);
+                 if (realDiffuseUploadBuffer != IntPtr.Zero)
+                     SDL3.SDL_ReleaseGPUTransferBuffer(device, realDiffuseUploadBuffer);
++                if (pbrDiffuseTexture != IntPtr.Zero)
++                    SDL3.SDL_ReleaseGPUTexture(device, pbrDiffuseTexture);
++                if (pbrDiffuseUploadBuffer != IntPtr.Zero)
++                    SDL3.SDL_ReleaseGPUTransferBuffer(device, pbrDiffuseUploadBuffer);
+                 if (realNormalTexture != IntPtr.Zero)
+                     SDL3.SDL_ReleaseGPUTexture(device, realNormalTexture);
+                 if (realNormalUploadBuffer != IntPtr.Zero)
+@@ -1240,9 +1305,12 @@
+         var program = SDL3GpuShaderProgramReader.Parse(bundle.GetShader(index));
+         var vertex = program.Vertex;
+         var fragment = program.Fragment;
+-        var expectedSamplers = 2 + BitOperations.PopCount(features & 7) + ((features & (1u << 8)) != 0 ? 1 : 0);
++        var expectedSamplers = 3 + BitOperations.PopCount(features & 7) + ((features & (1u << 8)) != 0 ? 1 : 0);
+         if (vertex.UniformBuffers > 4 || fragment.UniformBuffers > 4 || fragment.Samplers != expectedSamplers)
+-            throw new InvalidDataException("Production PBR shader resources exceed the SDL_GPU probe contract.");
++            throw new InvalidDataException($"Production PBR shader resources exceed the SDL_GPU probe contract " +
++                $"for features 0x{features:X8}: vertex UBOs={vertex.UniformBuffers}, " +
++                $"fragment UBOs={fragment.UniformBuffers}, fragment samplers={fragment.Samplers}, " +
++                $"expected {expectedSamplers}.");
+ 
+         var vertexHandle = CreateSpirvShader(device, vertex, SDL3.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_VERTEX);
+         try
+@@ -1274,6 +1342,7 @@
+         float viewportX = -1.0f, float[]? materialDiffuse = null, IntPtr materialTexture = default,
+         IntPtr normalTexture = default, IntPtr roughnessTexture = default, IntPtr metallicTexture = default,
+         float normalStrength = 1.0f, float roughness = 0.55f, float metallic = 0.0f,
++        bool spotlight = false, Vector3? spotlightDirection = null,
+         SDL3GpuBindingRemap[]? samplerBindings = null,
+         IntPtr realIndexBuffer = default, uint realIndexCount = 0, int realBaseVertex = 3,
+         IntPtr boneStorageBuffer = default, uint boneStorageSlot = 0, uint realVertexCount = 0,
+@@ -1305,7 +1374,30 @@
+         Span<byte> lighting = stackalloc byte[912];
+         lighting.Clear();
+         WriteFloat(lighting, 8, 1.0f);
+-        if (shadowed)
++        if (spotlight)
++        {
++            WriteFloat(lighting, 16, 0.0f);
++            WriteFloat(lighting, 20, 0.0f);
++            WriteFloat(lighting, 24, 0.0f);
++            WriteFloat(lighting, 28, 1.0f);
++            WriteFloat(lighting, 48, 0.0f);
++            WriteFloat(lighting, 52, 0.0f);
++            WriteFloat(lighting, 56, 1.0f);
++            WriteFloat(lighting, 60, 1.0f);
++            WriteFloat(lighting, 64, 1.0f);
++            WriteFloat(lighting, 68, 0.85f);
++            WriteFloat(lighting, 72, 0.65f);
++            WriteFloat(lighting, 76, 10.0f);
++            WriteFloat(lighting, 96, 1.0f);
++            WriteFloat(lighting, 112, spotlightDirection?.X ?? 0.0f);
++            WriteFloat(lighting, 116, spotlightDirection?.Y ?? 0.0f);
++            WriteFloat(lighting, 120, spotlightDirection?.Z ?? -1.0f);
++            WriteFloat(lighting, 128, 1.0f);
++            WriteFloat(lighting, 132, 1.0f);
++            WriteFloat(lighting, 136, MathF.Cos(65.0f * MathF.PI / 180.0f));
++            WriteFloat(lighting, 140, MathF.Cos(75.0f * MathF.PI / 180.0f));
++        }
++        else if (shadowed)
+         {
+             WriteFloat(lighting, 28, 1.0f);
+             WriteFloat(lighting, 64, 1.0f);
+@@ -1323,7 +1415,7 @@
+             WriteFloat(lighting, 24, 1.0f);
+         }
+ 
+-        Span<byte> pbrParameters = stackalloc byte[144];
++        Span<byte> pbrParameters = stackalloc byte[176]; // PBRParameters follows reflected SPIR-V std430 offsets.
+         pbrParameters.Clear();
+         for (var i = 0; i < 4; i++)
+             WriteFloat(pbrParameters, i * sizeof(float),
+@@ -1335,9 +1427,9 @@
+         WriteFloat(pbrParameters, 40, metallic);
+         WriteFloat(pbrParameters, 44, normalStrength);
+         WriteFloat(pbrParameters, 52, 1.0f);
+-        WriteFloat(pbrParameters, 96, 1.0f);
+-        WriteFloat(pbrParameters, 100, 1.0f);
+-        WriteFloat(pbrParameters, 104, 1.0f);
++        WriteFloat(pbrParameters, 112, 1.0f);
++        WriteFloat(pbrParameters, 116, 1.0f);
++        WriteFloat(pbrParameters, 120, 1.0f);
+ 
+         Span<byte> colorSpace = stackalloc byte[16];
+         colorSpace.Clear();
+@@ -1752,6 +1844,108 @@
+     }
+ 
+ 
++    private static unsafe (IntPtr Texture, IntPtr TransferBuffer) CreatePbrDiffuseTexture(IntPtr device)
++    {
++        const uint width = 4;
++        const uint height = 4;
++        const uint bytesPerPixel = 4;
++        const byte red = 204;
++        const byte green = 153;
++        const byte blue = 0;
++        const byte alpha = 255;
++        var format = SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
++        var usage = SDL3.SDL_GPUTextureUsageFlags.SDL_GPU_TEXTUREUSAGE_SAMPLER;
++        if (!SDL3.SDL_GPUTextureSupportsFormat(device, format,
++                SDL3.SDL_GPUTextureType.SDL_GPU_TEXTURETYPE_2D, usage))
++            throw new InvalidOperationException("The selected SDL_GPU driver does not support sampleable RGBA8 textures.");
++
++        var texture = SDL3.SDL_CreateGPUTexture(device, new SDL3.SDL_GPUTextureCreateInfo
++        {
++            type = SDL3.SDL_GPUTextureType.SDL_GPU_TEXTURETYPE_2D,
++            format = format,
++            usage = usage,
++            width = width,
++            height = height,
++            layer_count_or_depth = 1,
++            num_levels = 1,
++            sample_count = SDL3.SDL_GPUSampleCount.SDL_GPU_SAMPLECOUNT_1
++        });
++        if (texture == IntPtr.Zero)
++            throw Failure("Creating the SDL_GPU PBR diffuse fixture failed");
++
++        const uint byteSize = width * height * bytesPerPixel;
++        var transfer = SDL3.SDL_CreateGPUTransferBuffer(device, new SDL3.SDL_GPUTransferBufferCreateInfo
++        {
++            usage = SDL3.SDL_GPUTransferBufferUsage.SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
++            size = byteSize
++        });
++        if (transfer == IntPtr.Zero)
++        {
++            SDL3.SDL_ReleaseGPUTexture(device, texture);
++            throw Failure("Creating the SDL_GPU PBR diffuse upload buffer failed");
++        }
++        var mapped = SDL3.SDL_MapGPUTransferBuffer(device, transfer, false);
++        if (mapped == IntPtr.Zero)
++        {
++            SDL3.SDL_ReleaseGPUTexture(device, texture);
++            SDL3.SDL_ReleaseGPUTransferBuffer(device, transfer);
++            throw Failure("Mapping the SDL_GPU PBR diffuse upload buffer failed");
++        }
++        for (uint pixel = 0; pixel < width * height; pixel++)
++        {
++            var offset = checked((int)(pixel * bytesPerPixel));
++            Marshal.WriteByte(mapped, offset, red);
++            Marshal.WriteByte(mapped, offset + 1, green);
++            Marshal.WriteByte(mapped, offset + 2, blue);
++            Marshal.WriteByte(mapped, offset + 3, alpha);
++        }
++        SDL3.SDL_UnmapGPUTransferBuffer(device, transfer);
++
++        var commandBuffer = SDL3.SDL_AcquireGPUCommandBuffer(device);
++        if (commandBuffer == IntPtr.Zero)
++        {
++            SDL3.SDL_ReleaseGPUTexture(device, texture);
++            SDL3.SDL_ReleaseGPUTransferBuffer(device, transfer);
++            throw Failure("Acquiring a command buffer for the PBR diffuse fixture upload failed");
++        }
++        var copyPass = SDL3.SDL_BeginGPUCopyPass(commandBuffer);
++        if (copyPass == IntPtr.Zero)
++        {
++            SDL3.SDL_CancelGPUCommandBuffer(commandBuffer);
++            SDL3.SDL_ReleaseGPUTexture(device, texture);
++            SDL3.SDL_ReleaseGPUTransferBuffer(device, transfer);
++            throw Failure("Beginning the PBR diffuse fixture upload pass failed");
++        }
++        var source = new SDL3.SDL_GPUTextureTransferInfo
++        {
++            transfer_buffer = transfer,
++            offset = 0,
++            pixels_per_row = width,
++            rows_per_layer = height
++        };
++        var destination = new SDL3.SDL_GPUTextureRegion
++        {
++            texture = texture,
++            mip_level = 0,
++            layer = 0,
++            x = 0,
++            y = 0,
++            z = 0,
++            w = width,
++            h = height,
++            d = 1
++        };
++        SDL3.SDL_UploadToGPUTexture(copyPass, source, destination, false);
++        SDL3.SDL_EndGPUCopyPass(copyPass);
++        if (!SDL3.SDL_SubmitGPUCommandBuffer(commandBuffer))
++        {
++            SDL3.SDL_ReleaseGPUTexture(device, texture);
++            SDL3.SDL_ReleaseGPUTransferBuffer(device, transfer);
++            throw Failure("Submitting the PBR diffuse fixture upload failed");
++        }
++        return (texture, transfer);
++    }
++
+     private static unsafe (IntPtr Texture, IntPtr TransferBuffer) CreateNormalTexture(IntPtr device,
+         byte red = 204, byte green = 153)
+     {
+diff --git a/src/lancer/Program.cs b/src/lancer/Program.cs
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -597,6 +597,13 @@
+                 D3DFVF.XYZ | D3DFVF.NORMAL | D3DFVF.TEX1).GetVertexDeclaration());
+             return;
+         }
++        if (args.Length == 1 && args[0] == "--sdl-gpu-pbr-spotlight-smoke")
++        {
++            Environment.ExitCode = SDL3GpuSmoke.Run(() => new FVFVertex(
++                D3DFVF.XYZ | D3DFVF.NORMAL | D3DFVF.TEX1).GetVertexDeclaration(),
++                testPbrSpotlight: true);
++            return;
++        }
+         if (args.Length is >= 2 and <= 5 && args[0] == "--sdl-gpu-vmesh-smoke")
+         {
+             try
+@@ -749,6 +756,7 @@
+             Console.WriteLine("       Standalone test option: --invulnerable=on|off (local embedded server only)");
+             Console.WriteLine("       Screenshot option: --capture-space-frame=<output.png> (capture after 120 loaded, non-cutscene space frames)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-smoke (SDL3 GPU shader, pipeline, draw, and swapchain test)");
++            Console.WriteLine("       Renderer lighting diagnostic: --sdl-gpu-pbr-spotlight-smoke (production PBR in-cone/out-of-cone pixel check)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-vmesh-smoke <cmp-path> [mat-path [surface-data-root [on|off]]] (draw a VMesh with MAT diffuse and optional NAP Surface maps)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-vmesh-nap-smoke <application-dir> <cmp-virtual-path> <mat-virtual-path|-> [part-name] [on|off] (draw one CMP part using embedded or external materials and active NAP Surface maps)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-dfm-smoke <dfm-path> [surface-data-root [on|off]] (draw an embedded DFM material with production GPU skinning)");
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -834,6 +834,35 @@
+ visuelle Kalibrierung offen. Quellenprüfung und Grenzen:
+ [`PBR-Nebelfarbpfad`](evidence/renderer/pbr-nebula-fog-20261020.md).
+ 
++## Synthetischer PBR-Spotlight-GPU-Probe
++
++`lancer --sdl-gpu-pbr-spotlight-smoke` rendert denselben Frontseiten-Draw zweimal
++mit dem Produktions-PBR-Shader: einmal innerhalb des Spotkegels und einmal
++außerhalb. Der Readback prüft, dass beide Pixel opak sind und der ausgerichtete
++Spot sichtbar mehr Licht beiträgt. Damit wird die Vorzeichenkorrektur aus Patch
++2488 im echten GPU-Shaderpfad abgenommen. Der synthetische Probe prüft keine
++Freelancer-Lichtdaten, Materialbindung oder Lichtpriorisierung in einer Szene.
++Der Release-Client und der Probe liefen am 20.10.2026 auf SDL_GPU/Vulkan mit
++Mesa Intel Haswell. Der ausgerichtete Spotpixel ergab Luma 241, der umgekehrte
++Spotpixel Luma 0; beide waren opak und lagen auf dem Dreieck. Der Treiber meldet
++unvollständige Haswell-Vulkan-Unterstützung. Diese Messung belegt die
++Kegelantwort auf diesem Treiber, nicht allgemeine PBR-Farbkalibrierung oder
++Leistung. Das Vergleichsbild liegt in der
++[`Spotlight-GPU-Probe`](evidence/renderer/pbr-spotlight-gpu-smoke-20261020/README.md).
++
++Die Reflektion des kompilierten SPIR-V zeigte für `PBRParameters` den Offset 80
++für `PBRPadding`, 96 für `DetailMapParameters`, 112 für `AmbientScale`, 128/144
++für die UV-Selektoren sowie 160/168 für Fade-Bereich und Padding; die Blockgröße
++beträgt 176 Byte. Der synthetische GPU-Probe verwendete zuvor eine 160-Byte-
++Payload und schrieb `AmbientScale` bei Offset 96. Nach Anpassung auf 176 Byte und
++den reflektierten Offsets besteht der normale PBR-Farbvergleich
++`(200, 150, 0, 255)` sowie der Schattenvergleich (sichtbar `(127, 100, 52, 255)`,
++verdeckt `(0, 0, 0, 255)`). Der Release-Build lief ohne Fehler. Der C#-
++`BasicMaterial.PBRParameters`-Block verwendete dieselbe frühere Packung und wird
++mit Patch 2490 auf die bestätigten Offsets korrigiert. Der synthetische Probe
++allein ist kein Nachweis für reale Materialbindung oder die Darstellung einer
++Freelancer-Szene.
++
+ ## NAP-Nebelvisualisierung in PBR und Legacy (2026-10-20)
+ 
+ Der Release-Client startete unter SDL3-Offscreen mit Mesa OpenGL 4.3
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 479 Client patches and two native patches. Each
++The active series contains 480 Client patches and two native patches. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -422,3 +422,4 @@
+ | 2486 | Skip CPU work for fully transparent particles before GPU submission |
+ | 2487 | Preflight active NAP snapshots before runtime launch |
+ | 2488 | Fix front-facing PBR spotlight attenuation direction |
++| 2489 | Add an SDL_GPU pixel probe for production PBR spotlights |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -480,3 +480,4 @@
+ client 2486-skip-zero-alpha-particle-work.patch
+ client 2487-preflight-active-nap-snapshot.patch
+ client 2488-fix-pbr-spotlight-normal-gate.patch
++client 2489-pbr-spotlight-gpu-smoke.patch
+diff --git a/docs/evidence/renderer/pbr-spotlight-gpu-smoke-20261020/README.md b/docs/evidence/renderer/pbr-spotlight-gpu-smoke-20261020/README.md
+new file mode 100644
+index 000000000..392db2253
+--- /dev/null
++++ b/docs/evidence/renderer/pbr-spotlight-gpu-smoke-20261020/README.md
+@@ -0,0 +1,30 @@
++# SDL_GPU production PBR spotlight probe
++
++Release build on 2026-10-20, run with:
++
++```text
++DOTNET_ROOT=/opt/dotnet-10 DOTNET_ROOT_X64=/opt/dotnet-10 \
++  src/lancer/bin/Release/net10.0/lancer --sdl-gpu-pbr-spotlight-smoke
++```
++
++The probe drew the same synthetic front-facing triangle twice with the
++production PBR shader. The aligned point spotlight produced a readback luma of
++241; reversing its direction put the sample outside the cone and produced luma
++0. Both samples were opaque. The run used SDL_GPU/Vulkan on Mesa Intel Haswell;
++Mesa warned that Haswell Vulkan support is incomplete.
++
++![Production PBR spotlight in-cone and out-of-cone comparison](spotlight-comparison.png)
++
++This demonstrates the PBR spotlight cone response on this driver. It does not
++validate retail light data, material binding in a Freelancer scene, or general
++PBR color calibration. The probe now uploads the reflected 176-byte PBR block,
++including `AmbientScale` at byte 112. The standard synthetic PBR readback is
++`(200, 150, 0, 255)` and its shadowed sample is `(0, 0, 0, 255)`; the standard
++PBR color and shadow checks pass. The aligned and reversed spotlight samples
++remain luma 241 and 0. Mesa reports incomplete Haswell Vulkan support.
++
++The probe writes the complete compare frame from the same Release run to
++[`spotlight-comparison.ppm`](spotlight-comparison.ppm) and the PNG above. It
++validates the shader and synthetic uniform payload, not the C# `BasicMaterial`
++uniform layout or a real Freelancer scene. The production material layout is
++checked separately by the PBR uniform-layout fix in patch 2490.
+diff --git a/docs/evidence/renderer/pbr-spotlight-gpu-smoke-20261020/spotlight-comparison.ppm b/docs/evidence/renderer/pbr-spotlight-gpu-smoke-20261020/spotlight-comparison.ppm
+new file mode 100644
+index 0000000000000000000000000000000000000000..3ebc7573dc7df4c314e455aaca34197e50b800d8
+GIT binary patch
+literal 691215
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/docs/evidence/renderer/pbr-spotlight-gpu-smoke-20261020/spotlight-comparison.png b/docs/evidence/renderer/pbr-spotlight-gpu-smoke-20261020/spotlight-comparison.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..713af8eabb36e1b280ab5d6c62f8224c28276af9
+GIT binary patch
+literal 5455
+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
+J)+#XV{{T?77yJMK
+
+literal 0
+HcmV?d00001
+

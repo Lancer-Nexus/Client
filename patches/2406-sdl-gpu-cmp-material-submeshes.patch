@@ -1,0 +1,337 @@
+diff --git a/src/lancer/Program.cs b/src/lancer/Program.cs
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -266,9 +266,9 @@
+         TMeshHeader? selectedMesh = null;
+         Material? selectedMaterial = null;
+         SurfaceMaterialBinding? selectedSurface = null;
+-        var selectedMeshIndex = -1;
+-        var selectedIndexStart = 0;
+         var largestDraw = 0;
++        var maxMaterialGroupHeaders = 0;
++        var maxMaterialGroupDescription = "none";
+         foreach (var cmpPart in cmp.ModelParts()
+                      .Where(x => x.Model != null)
+                      .OrderBy(x => x.ObjectName, StringComparer.Ordinal))
+@@ -285,33 +285,46 @@
+                 // source meshes may carry additional UV sets or vertex color.
+                 if (!data.VertexFormat.Normal || data.VertexFormat.TexCoords < 1)
+                     continue;
++                var validMeshes = new List<(int Index, TMeshHeader Mesh)>();
+                 for (var meshIndex = meshRef.StartMesh;
+                      meshIndex < meshRef.StartMesh + meshRef.MeshCount && meshIndex < data.Meshes.Length;
+                      meshIndex++)
+                 {
+                     var mesh = data.Meshes[meshIndex];
+-                    if (mesh.NumRefVertices < 3 || mesh.NumRefVertices % 3 != 0 ||
+-                        mesh.NumRefVertices <= largestDraw)
++                    if (mesh.NumRefVertices < 3 || mesh.NumRefVertices % 3 != 0 || mesh.StartVertex < 0 ||
++                        mesh.TriangleStart < 0 ||
++                        (long)mesh.TriangleStart + mesh.NumRefVertices > data.Indices.Length)
+                         continue;
+-                    var indexStart = mesh.TriangleStart;
+-                    if (indexStart < 0 || indexStart + mesh.NumRefVertices > data.Indices.Length)
+-                        continue;
+-                    var baseVertex = meshRef.StartVertex + mesh.StartVertex;
+                     var valid = true;
+                     for (var i = 0; i < mesh.NumRefVertices; i++)
+                     {
+-                        var vertex = baseVertex + data.Indices[indexStart + i];
+-                        if (vertex >= data.VertexCount)
++                        var sourceIndex = data.Indices[mesh.TriangleStart + i];
++                        var absoluteVertex = (long)meshRef.StartVertex + mesh.StartVertex + sourceIndex;
++                        if (mesh.StartVertex + sourceIndex > ushort.MaxValue || absoluteVertex < 0 ||
++                            absoluteVertex >= data.VertexCount)
+                         {
+                             valid = false;
+                             break;
+                         }
+                     }
+-                    if (!valid)
++                    if (valid) validMeshes.Add((meshIndex, mesh));
++                }
++                foreach (var materialGroup in validMeshes.GroupBy(x => x.Mesh.MaterialCrc))
++                {
++                    var groupHeaderCount = materialGroup.Count();
++                    if (groupHeaderCount > maxMaterialGroupHeaders)
++                    {
++                        maxMaterialGroupHeaders = groupHeaderCount;
++                        maxMaterialGroupDescription =
++                            $"{cmpPart.ObjectName}/{meshRef.MeshCrc:X8}/0x{materialGroup.Key:X8}";
++                    }
++                    var groupDraw = materialGroup.Sum(x => (long)x.Mesh.NumRefVertices);
++                    if (groupDraw <= largestDraw || groupDraw > int.MaxValue)
+                         continue;
+-                    var materialCandidate = model.MaterialLibrary?.Materials.GetValueOrDefault(mesh.MaterialCrc)
+-                                   ?? cmp.MaterialLibrary?.Materials.GetValueOrDefault(mesh.MaterialCrc)
+-                                   ?? externalMaterials?.Materials.GetValueOrDefault(mesh.MaterialCrc);
++                    var mesh = materialGroup.OrderByDescending(x => x.Mesh.NumRefVertices).First();
++                    var materialCandidate = model.MaterialLibrary?.Materials.GetValueOrDefault(mesh.Mesh.MaterialCrc)
++                                   ?? cmp.MaterialLibrary?.Materials.GetValueOrDefault(mesh.Mesh.MaterialCrc)
++                                   ?? externalMaterials?.Materials.GetValueOrDefault(mesh.Mesh.MaterialCrc);
+                     var surface = materialCandidate != null && surfaceMaps != null
+                         ? SurfaceMaterialResolver.Resolve(materialCandidate, surfaceMaps)
+                         : null;
+@@ -324,12 +337,10 @@
+                     selectedPart = cmpPart;
+                     selectedRef = meshRef;
+                     selectedData = data;
+-                    selectedMesh = mesh;
++                    selectedMesh = mesh.Mesh;
+                     selectedMaterial = materialCandidate;
+                     selectedSurface = surfaceEnabled ? surface : null;
+-                    selectedMeshIndex = meshIndex;
+-                    selectedIndexStart = indexStart;
+-                    largestDraw = mesh.NumRefVertices;
++                    largestDraw = (int)groupDraw;
+                 }
+             }
+         }
+@@ -361,10 +372,46 @@
+                 $"CMP part '{selectedPart.ObjectName}' has no assembled RigidModel transform: {path}");
+         var partTransform = rigidPart.LocalTransform.Matrix();
+ 
+-        var drawBaseVertex = selectedRef.StartVertex + selectedMesh.StartVertex;
+-        var drawIndexCount = (int)selectedMesh.NumRefVertices;
++        // A CMP part can split one material over several indexed mesh headers.
++        // Draw every compatible header for the selected material, rather than
++        // silently profiling only its largest submesh.
++        var drawMeshes = new List<(int Index, TMeshHeader Mesh)>();
++        for (var meshIndex = selectedRef.StartMesh;
++             meshIndex < selectedRef.StartMesh + selectedRef.MeshCount && meshIndex < selectedData.Meshes.Length;
++             meshIndex++)
++        {
++            var mesh = selectedData.Meshes[meshIndex];
++            if (mesh.MaterialCrc != selectedMesh.MaterialCrc || mesh.NumRefVertices < 3 || mesh.NumRefVertices % 3 != 0 ||
++                mesh.TriangleStart < 0 || mesh.TriangleStart + mesh.NumRefVertices > selectedData.Indices.Length)
++                continue;
++            var valid = true;
++            for (var i = 0; i < mesh.NumRefVertices; i++)
++            {
++                var vertex = selectedRef.StartVertex + mesh.StartVertex + selectedData.Indices[mesh.TriangleStart + i];
++                if (vertex >= selectedData.VertexCount)
++                {
++                    valid = false;
++                    break;
++                }
++            }
++            if (valid) drawMeshes.Add((meshIndex, mesh));
++        }
++        if (drawMeshes.Count == 0)
++            throw new InvalidDataException($"Selected CMP material has no valid submeshes: {path}");
++        var drawIndexCount = drawMeshes.Sum(x => (int)x.Mesh.NumRefVertices);
++        var drawBaseVertex = selectedRef.StartVertex + 3;
+         var drawIndices = new ushort[drawIndexCount + 1]; // Leading sentinel preserves firstIndex validation.
+-        Array.Copy(selectedData.Indices, selectedIndexStart, drawIndices, 1, drawIndexCount);
++        var sourceVertices = new int[drawIndexCount];
++        var drawCorner = 0;
++        foreach (var (_, mesh) in drawMeshes)
++        {
++            for (var i = 0; i < mesh.NumRefVertices; i++, drawCorner++)
++            {
++                var sourceIndex = selectedData.Indices[mesh.TriangleStart + i];
++                sourceVertices[drawCorner] = selectedRef.StartVertex + mesh.StartVertex + sourceIndex;
++                drawIndices[drawCorner + 1] = checked((ushort)(mesh.StartVertex + sourceIndex));
++            }
++        }
+ 
+         // Use a stable camera basis rather than aligning the camera to the first
+         // triangle, which can be a tiny decorative face unrelated to the model's
+@@ -381,7 +428,7 @@
+         var maxDepth = float.NegativeInfinity;
+         for (var i = 0; i < drawIndexCount; i++)
+         {
+-            var vertex = drawBaseVertex + selectedData.Indices[selectedIndexStart + i];
++            var vertex = sourceVertices[i];
+             var position = Vector3.Transform(selectedData.GetPosition(vertex), partTransform);
+             var projected = new Vector2(Vector3.Dot(position, axisX), Vector3.Dot(position, axisY));
+             projectedCorners[i] = projected;
+@@ -402,11 +449,12 @@
+ 
+         var vertices = new float[checked((selectedData.VertexCount + 3) * 8)];
+         var outputFvf = D3DFVF.XYZ | D3DFVF.NORMAL | D3DFVF.TEX1;
+-        var gpuBaseVertex = drawBaseVertex + 3;
++        var gpuBaseVertex = drawBaseVertex;
+         var coverageTriangle = new float[6];
++        var coverageArea = -1.0f;
+         for (var i = 0; i < drawIndexCount; i++)
+         {
+-            var vertex = drawBaseVertex + selectedData.Indices[selectedIndexStart + i];
++            var vertex = sourceVertices[i];
+             var offset = (vertex + 3) * 8;
+             var projected = (projectedCorners[i] - center2) / maxExtent * 0.78f;
+             var normal = Vector3.Normalize(Vector3.TransformNormal(selectedData.GetNormal(vertex), partTransform));
+@@ -422,10 +470,22 @@
+             var uv = selectedData.GetTexCoord(vertex, 0);
+             vertices[offset + 6] = uv.X;
+             vertices[offset + 7] = uv.Y;
+-            if (i < 3)
+-            {
+-                coverageTriangle[i * 2] = projected.X;
+-                coverageTriangle[i * 2 + 1] = projected.Y;
++            if (i % 3 == 2)
++            {
++                var a = (projectedCorners[i - 2] - center2) / maxExtent * 0.78f;
++                var b = (projectedCorners[i - 1] - center2) / maxExtent * 0.78f;
++                var c = (projectedCorners[i] - center2) / maxExtent * 0.78f;
++                var area = MathF.Abs((b.X - a.X) * (c.Y - a.Y) - (b.Y - a.Y) * (c.X - a.X));
++                if (area > coverageArea)
++                {
++                    coverageArea = area;
++                    coverageTriangle[0] = a.X;
++                    coverageTriangle[1] = a.Y;
++                    coverageTriangle[2] = b.X;
++                    coverageTriangle[3] = b.Y;
++                    coverageTriangle[4] = c.X;
++                    coverageTriangle[5] = c.Y;
++                }
+             }
+         }
+ 
+@@ -437,42 +497,51 @@
+         var metallicDds = ReadSurface(selectedSurface?.MetallicMap);
+         if (selectedSurface?.Normal is not null)
+         {
+-            var tangentMesh = VMeshTangentBuilder.Build(selectedData, selectedMeshIndex,
+-                selectedRef.StartVertex, selectedSurface.NormalUvChannel);
++            var tangentMeshes = drawMeshes.Select(x => (x.Mesh,
++                Geometry: VMeshTangentBuilder.Build(selectedData, x.Index,
++                    selectedRef.StartVertex, selectedSurface.NormalUvChannel))).ToArray();
++            var tangentVertexCount = tangentMeshes.Sum(x => x.Geometry.VertexCount);
+             outputFvf = D3DFVF.XYZ | D3DFVF.NORMAL | D3DFVF.TEX3;
+-            vertices = new float[checked((tangentMesh.VertexCount + 3) * 12)];
+-            drawIndices = new ushort[tangentMesh.Indices.Length + 1];
+-            for (var i = 0; i < tangentMesh.VertexCount; i++)
+-            {
+-                var absolute = drawBaseVertex + selectedData.Indices[selectedIndexStart + i];
+-                var position = Vector3.Transform(selectedData.GetPosition(absolute), partTransform);
+-                var normal = Vector3.Normalize(Vector3.TransformNormal(selectedData.GetNormal(absolute), partTransform));
+-                var uv = selectedData.GetTexCoord(absolute, selectedSurface.NormalUvChannel);
+-                var tangent = tangentMesh.GetTangent(i);
+-                var projected = (new Vector2(Vector3.Dot(position, axisX), Vector3.Dot(position, axisY)) - center2) /
+-                                maxExtent * 0.78f;
+-                var depth = Vector3.Dot(position, planeNormal);
+-                var normalProjected = Vector3.Normalize(new Vector3(Vector3.Dot(normal, axisX),
+-                    Vector3.Dot(normal, axisY), Vector3.Dot(normal, planeNormal)));
+-                var tangentVector = Vector3.TransformNormal(new Vector3(tangent.X, tangent.Y, tangent.Z), partTransform);
+-                var tangentProjected = Vector3.Normalize(new Vector3(Vector3.Dot(tangentVector, axisX),
+-                    Vector3.Dot(tangentVector, axisY), Vector3.Dot(tangentVector, planeNormal)));
+-                var offset = (i + 3) * 12;
+-                vertices[offset] = projected.X;
+-                vertices[offset + 1] = projected.Y;
+-                vertices[offset + 2] = depthExtent > 1e-6f
+-                    ? 0.5f + (depth - centerDepth) / depthExtent * 0.35f
+-                    : 0.5f;
+-                vertices[offset + 3] = normalProjected.X;
+-                vertices[offset + 4] = normalProjected.Y;
+-                vertices[offset + 5] = normalProjected.Z;
+-                vertices[offset + 6] = uv.X;
+-                vertices[offset + 7] = uv.Y;
+-                vertices[offset + 8] = tangentProjected.X;
+-                vertices[offset + 9] = tangentProjected.Y;
+-                vertices[offset + 10] = tangentProjected.Z;
+-                vertices[offset + 11] = tangent.W;
+-                drawIndices[i + 1] = tangentMesh.Indices[i];
++            vertices = new float[checked((tangentVertexCount + 3) * 12)];
++            drawIndices = new ushort[tangentVertexCount + 1];
++            var tangentOffset = 0;
++            foreach (var (mesh, tangentMesh) in tangentMeshes)
++            {
++                for (var i = 0; i < tangentMesh.VertexCount; i++)
++                {
++                    var absolute = selectedRef.StartVertex + mesh.StartVertex +
++                                   selectedData.Indices[mesh.TriangleStart + i];
++                    var position = Vector3.Transform(selectedData.GetPosition(absolute), partTransform);
++                    var normal = Vector3.Normalize(Vector3.TransformNormal(selectedData.GetNormal(absolute), partTransform));
++                    var uv = selectedData.GetTexCoord(absolute, selectedSurface.NormalUvChannel);
++                    var tangent = tangentMesh.GetTangent(i);
++                    var projected = (new Vector2(Vector3.Dot(position, axisX), Vector3.Dot(position, axisY)) - center2) /
++                                    maxExtent * 0.78f;
++                    var depth = Vector3.Dot(position, planeNormal);
++                    var normalProjected = Vector3.Normalize(new Vector3(Vector3.Dot(normal, axisX),
++                        Vector3.Dot(normal, axisY), Vector3.Dot(normal, planeNormal)));
++                    var tangentVector = Vector3.TransformNormal(new Vector3(tangent.X, tangent.Y, tangent.Z), partTransform);
++                    var tangentProjected = Vector3.Normalize(new Vector3(Vector3.Dot(tangentVector, axisX),
++                        Vector3.Dot(tangentVector, axisY), Vector3.Dot(tangentVector, planeNormal)));
++                    var outputVertex = tangentOffset + i + 3;
++                    var offset = outputVertex * 12;
++                    vertices[offset] = projected.X;
++                    vertices[offset + 1] = projected.Y;
++                    vertices[offset + 2] = depthExtent > 1e-6f
++                        ? 0.5f + (depth - centerDepth) / depthExtent * 0.35f
++                        : 0.5f;
++                    vertices[offset + 3] = normalProjected.X;
++                    vertices[offset + 4] = normalProjected.Y;
++                    vertices[offset + 5] = normalProjected.Z;
++                    vertices[offset + 6] = uv.X;
++                    vertices[offset + 7] = uv.Y;
++                    vertices[offset + 8] = tangentProjected.X;
++                    vertices[offset + 9] = tangentProjected.Y;
++                    vertices[offset + 10] = tangentProjected.Z;
++                    vertices[offset + 11] = tangent.W;
++                    drawIndices[outputVertex - 2] = checked((ushort)(tangentOffset + tangentMesh.Indices[i]));
++                }
++                tangentOffset += tangentMesh.VertexCount;
+             }
+             gpuBaseVertex = 3;
+         }
+@@ -511,7 +580,8 @@
+                               $"embeddedDiffuse={diffuseTexture?.GetType().Name ?? "<missing>"}/" +
+                               $"{diffuseImage?.Type.ToString() ?? "none"}:{diffuseImage?.Data.Length ?? 0} bytes, " +
+                               $"txmEntries={externalTextures?.Textures.Count ?? 0}, image={decodedDiffuseInfo}") +
+-                          $", sourceReferences={largestDraw}, baseVertex={drawBaseVertex}";
++                          $", sourceReferences={drawIndexCount}, sameMaterialSubmeshes={drawMeshes.Count}, baseVertex={drawBaseVertex}";
++        description += $", maxMaterialGroupHeaders={maxMaterialGroupHeaders}, maxMaterialGroup={maxMaterialGroupDescription}";
+         if (selectedSurface?.Normal != null)
+             description += $", surface={selectedSurface.Normal.File}:{selectedSurface.Normal.Node}, " +
+                            $"roughness={roughness:F3}, metallic={metallic:F3}";
+diff --git a/docs/evidence/renderer/cmp-material-group-scan-20261019/README.md b/docs/evidence/renderer/cmp-material-group-scan-20261019/README.md
+new file mode 100644
+--- /dev/null
++++ b/docs/evidence/renderer/cmp-material-group-scan-20261019/README.md
+@@ -0,0 +1,37 @@
++# SDL_GPU Material-Group Scan (2026-10-19)
++
++This runtime scan checks the current NAP-backed SDL_GPU VMesh diagnostic after
++selection was changed to rank complete same-material groups per `VMeshRef`.
++The diagnostic draws one selected material from one CMP component through the
++production PBR shader. It does not render a complete ship or the full game scene.
++
++## Build and package
++
++- `lancer` Release build: 0 warnings, 0 errors.
++- Active package: `cmp-multisubmesh-qa-20261019`.
++- Archive: `Data/NAP/.runtime-test-stage/cmp-multisubmesh-20261019/application/packages/cmp-multisubmesh-qa.nap`.
++- Archive size: 156,076,390 bytes; SHA-256: `4e3f1a57410f44866400184cb374cb6ba468932902cd4b4bbcada08fcf39aea7`.
++- `nexus-pack verify` checked all 23 entries. The 23 staged inputs were copied from files under `Data/NAP/`; `provenance.json` records each source path, size, and hash. The runtime application had an active NAP manifest and no loose `DATA` directory.
++
++## Runtime results
++
++All ten selected ship/base-independent ship CMP materials presented on SDL_GPU/Vulkan and passed the four real VMesh readback probes. The renderer reported both selected and maximum same-material header counts as one in every scanned CMP. Therefore this package confirms the mapped production material path and selection scan, but does not contain a runtime example with multiple headers sharing a material.
++
++| CMP | Selected component | Indices | Selected headers | Maximum headers in scan | Coverage |
++|---|---|---:|---:|---:|---:|
++| `Models/ships/order/or_osiris/or_osiris.cmp` | `osiris_rear_lod1` | 1,446 | 1 | 1 | 4/4 |
++| `Models/ships/rheinland/rh_battleship/rh_battleship.cmp` | `Rh_midfrnt_lod1` | 2,070 | 1 | 1 | 4/4 |
++| `Models/ships/liberty/li_dreadnought/li_dreadnought.cmp` | `Li_frnt_lod1` | 2,670 | 1 | 1 | 4/4 |
++| `Models/ships/bretonia/br_battleship/br_battleship.cmp` | `Root` | 810 | 1 | 1 | 4/4 |
++| `Models/ships/kusari/ku_battleship/ku_battleship.cmp` | `Ku_front_lod1` | 1,758 | 1 | 1 | 4/4 |
++| `Models/ships/utility/mining/mining_tuck.cmp` | `Root` | 1,152 | 1 | 1 | 4/4 |
++| `Models/ships/rheinland/rh_cruiser/rh_cruiser.cmp` | `Rh_reactor_lod1` | 1,320 | 1 | 1 | 4/4 |
++| `Models/ships/liberty/li_cruiser/li_cruiser.cmp` | `Root` | 2,691 | 1 | 1 | 4/4 |
++| `Models/ships/kusari/ku_destroyer/ku_destroyer.cmp` | `ku_reactor_lod1` | 1,596 | 1 | 1 | 4/4 |
++| `Models/ships/bretonia/br_destroyer/br_destroyer.cmp` | `Root` | 504 | 1 | 1 | 4/4 |
++
++The test ran on Mesa/Vulkan Intel Haswell, whose Vulkan support reports as
++incomplete. The smoke capture also contains synthetic diagnostic and shadow
++panels; it is not evidence of visual quality or a GPU compatibility matrix.
++A real multi-header same-material asset, full CMP composition, DFM skinning,
++other backends, and production scene acceptance remain open.
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -403,3 +403,4 @@
+ client 2403-sdl-gpu-vmesh-unmapped-part-off.patch
+ client 2404-cmp-part-transform-runtime-evidence.patch
+ client 2405-atmosphere-fade-property-table-evidence.patch
++client 2406-sdl-gpu-cmp-material-submeshes.patch

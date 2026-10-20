@@ -1,0 +1,141 @@
+diff --git a/src/LibreLancer/Shaders/PBR.frag.hlsl b/src/LibreLancer/Shaders/PBR.frag.hlsl
+--- a/src/LibreLancer/Shaders/PBR.frag.hlsl
++++ b/src/LibreLancer/Shaders/PBR.frag.hlsl
+@@ -411,11 +411,16 @@
+     if (HasFeature(16))
+         color = lerp(color, illuminationSample.rgb, illuminationSample.a);
+ 
++    // Match the legacy material path: fog attenuates the fully lit and emissive
++    // surface in linear scene space before HDR tone mapping or LDR encoding.
++    if (FogMode > 0)
++        color = ApplyFogLinear(input.viewPosition, color);
++
+     float outputAlpha = HasFeature(8) || HasFeature(16) || HasFeature(128) ? 1.0 : baseColor.a;
+     float fadeFactor = 1.0;
+     if (FadeRange.y > FadeRange.x)
+     {
+-        float dist = length(input.viewPosition);
++        float dist = length(input.viewPosition.xyz);
+         fadeFactor = saturate((FadeRange.y - dist) / (FadeRange.y - FadeRange.x));
+     }
+     return ToDisplayOutput(float4(color, outputAlpha * Oc * fadeFactor));
+diff --git a/src/LibreLancer/Shaders/includes/Lighting.hlsl b/src/LibreLancer/Shaders/includes/Lighting.hlsl
+--- a/src/LibreLancer/Shaders/includes/Lighting.hlsl
++++ b/src/LibreLancer/Shaders/includes/Lighting.hlsl
+@@ -171,10 +171,10 @@
+ #define FOGMODE_EXP 1
+ #define FOGMODE_EXP2 2
+ 
+-float3 ApplyFog(float4 viewPosition, float3 objectColor)
++float CalculateFogFactor(float4 viewPosition)
+ {
+     float fogFactor;
+-    float dist = length(viewPosition);
++    float dist = length(viewPosition.xyz);
+     if(FogMode == FOGMODE_EXP)
+     {
+         //FogRange - x: density
+@@ -190,8 +190,19 @@
+         //FogRange - x: near, y: far
+         fogFactor = (FogRange.y - dist) / (FogRange.y - FogRange.x);
+     }
+-    fogFactor = clamp(fogFactor, 0.0, 1.0);
++    return clamp(fogFactor, 0.0, 1.0);
++}
++
++float3 ApplyFog(float4 viewPosition, float3 objectColor)
++{
++    float fogFactor = CalculateFogFactor(viewPosition);
+     return lerp(LinearizeLegacyInput(FogColor.rgb), objectColor, fogFactor);
++}
++
++float3 ApplyFogLinear(float4 viewPosition, float3 linearObjectColor)
++{
++    float fogFactor = CalculateFogFactor(viewPosition);
++    return lerp(SRGBToLinearOutput(FogColor.rgb), linearObjectColor, fogFactor);
+ }
+ 
+ float4 ApplyVertexLighting(
+diff --git a/src/LibreLancer/Shaders/Basic.frag.hlsl b/src/LibreLancer/Shaders/Basic.frag.hlsl
+--- a/src/LibreLancer/Shaders/Basic.frag.hlsl
++++ b/src/LibreLancer/Shaders/Basic.frag.hlsl
+@@ -141,7 +141,7 @@
+ 
+ 
+ #ifdef FADE_ENABLED
+-    float dist = length(input.viewPosition);
++    float dist = length(input.viewPosition.xyz);
+     //FadeRange - x: near, y: far
+     float fadeFactor = (FadeRange.y - dist) / (FadeRange.y - FadeRange.x);
+     fadeFactor = clamp(fadeFactor, 0.0, 1.0);
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -777,3 +777,18 @@
+ ins Zeitlimit; es entstand keine CSV. Daraus folgen keine FPS- oder GPU-Kosten-
+ Aussagen. Die Release-Laufzeit und Bildausgabe sind damit belegt, während
+ Materialkalibrierung und Hardware-Performance weiter offen bleiben.
++
++## Nebel im PBR-Pfad (2026-10-20)
++
++Der PBR-Fragmentshader berechnete zuvor Beleuchtung, IBL und Emission, gab die
++Farbe aber ohne den Fog-Schritt des Legacy-Pfads aus. `PBR.frag.hlsl` wendet
++`ApplyFogLinear` jetzt nach allen linearen Farbbeiträgen und vor HDR-Tonemapping
++bzw. LDR-Ausgabe an. Der lineare PBR-Pfad decodiert die Fog-Farbe in HDR und
++LDR; der Legacy-Pfad behält seine bisherige Farbbehandlung. Beide verwenden
++denselben XYZ-Viewdistanzfaktor; der homogene `w`-Anteil fließt nicht als
++scheinbarer Abstand in Nebel und Material-Fades ein. Alpha und Depth-only-Ausgaben bleiben
++unverändert. PBR-, Legacy-FVF- und Legacy-Skinned-Shaderfamilien kompilieren
++in allen definierten Varianten. Eine feste
++Nebelszene mit Material-A/B sowie Retail- und Hardwarevergleich bleibt für die
++visuelle Kalibrierung offen. Quellenprüfung und Grenzen:
++[`PBR-Nebelfarbpfad`](evidence/renderer/pbr-nebula-fog-20261020.md).
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -395,3 +395,4 @@
+ | 2461 | Split renderer CPU profiles into update and draw plus GPU submit time |
+ 
+ | 2462 | Record Hi02 PBR and HDR runtime captures on Mesa llvmpipe with NAP-only provenance |
++| 2463 | Apply linear nebula fog and XYZ view distances to PBR and legacy materials |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -454,3 +454,4 @@
+ client 2460-render-graph-execution-guard.patch
+ client 2461-split-renderer-cpu-profile-times.patch
+ client 2462-hi02-llvmpipe-renderer-evidence.patch
++client 2463-pbr-nebula-fog.patch
+diff --git a/docs/evidence/renderer/pbr-nebula-fog-20261020.md b/docs/evidence/renderer/pbr-nebula-fog-20261020.md
+new file mode 100644
+--- /dev/null
++++ b/docs/evidence/renderer/pbr-nebula-fog-20261020.md
+@@ -0,0 +1,28 @@
++# Linear fog in the PBR material path (2026-10-20)
++
++`PBR.frag.hlsl` includes `Lighting.hlsl`, which defines the shared `ApplyFog`
++contract. The legacy lit-material shader calls it after diffuse and emissive
++lighting. The PBR shader already carries view-space position in its fragment
++input and accumulates direct light, ambient light, environment reflection,
++emission, and the optional illumination-detail layer in linear scene color.
++It previously sent that color directly to the output transform, so those PBR
++surfaces did not fade into the configured system nebula.
++
++The shared fog factor measures `viewPosition.xyz`; the homogeneous `w`
++component is not camera distance. The Basic and PBR material fades use the
++same XYZ distance rule. The PBR path applies
++`ApplyFogLinear(input.viewPosition, color)` after
++those contributions and before `ToDisplayOutput`. PBR remains linear in both
++HDR and LDR modes, so this helper always converts the legacy fog color from
++sRGB. The Legacy path retains its prior `ApplyFog` behavior, including its
++LDR color handling. Both paths share the same distance-factor calculation.
++The final alpha calculation is unchanged; the depth-only shader entry point
++does not shade color and is unchanged.
++
++The repository shader compiler completed all defined permutations for
++`PBR.txt`, `Basic_FVF.txt`, and `Basic_Skinned.txt` with the bundled DXC.
++This checks the shared helper in PBR, legacy mesh, and legacy skinned shader
++families; it does not measure pixel output.
++
++This is a source-level parity correction. A fixed-camera in-game fog scene,
++material A/B, retail comparison, and supported-GPU visual review remain open.

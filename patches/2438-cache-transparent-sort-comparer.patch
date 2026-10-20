@@ -1,0 +1,84 @@
+--- a/src/LibreLancer/Render/CommandBuffer.cs
++++ b/src/LibreLancer/Render/CommandBuffer.cs
+@@ -18,6 +18,7 @@
+ 		// public List<RenderCommand> Commands = new List<RenderCommand>();
+ 		// RenderCommand[] Commands = new RenderCommand[MAX_COMMANDS];
+         private RenderCommand[] Transparents = new RenderCommand[INITIAL_TRANSPARENT_COMMANDS];
++        private readonly KeyComparer transparentComparer;
+         private int currentCommand = 0;
+         private int transparentCommand = 0;
+         private RenderContext rstate;
+@@ -30,6 +31,7 @@
+         public CommandBuffer(RenderContext context)
+         {
+             rstate = context;
++            transparentComparer = new KeyComparer(Transparents);
+             BonesBuffer = new StorageBuffer(context, 65536, 64);
+             WorldBuffer = new WorldMatrixBuffer();
+         }
+@@ -191,11 +193,13 @@
+ 
+         private void SortTransparent()
+ 		{
++			if (transparentCommand == 0)
++				return;
+ 			for (var i = 0; i < transparentCommand; i++)
+ 			{
+ 				cmdptr[i] = i;
+ 			}
+-			Array.Sort<int>(cmdptr, 0, transparentCommand, new KeyComparer(Transparents));
++			Array.Sort<int>(cmdptr, 0, transparentCommand, transparentComparer);
+ 			for (var i = transparentCommand - 1; i >= 0; i--)
+ 			{
+ 				if (Transparents[cmdptr[i]].CmdType == RenderCmdType.Billboard)
+@@ -244,6 +248,7 @@
+ 			var capacity = GetExpandedCapacity(Transparents.Length, required);
+ 			Array.Resize(ref Transparents, capacity);
+ 			Array.Resize(ref cmdptr, capacity);
++			transparentComparer.UpdateCommands(Transparents);
+ 		}
+ 
+ 		internal static int GetExpandedCapacity(int currentCapacity, int requiredCapacity)
+@@ -303,6 +308,7 @@
+ 		{
+ 			cmds = commands;
+ 		}
++		public void UpdateCommands(RenderCommand[] commands) => cmds = commands;
+ 		public int Compare(int x, int y)
+ 		{
+             return cmds[x].Key.CompareTo(cmds[y].Key);
+--- a/src/LibreLancer.Tests/RenderCommandBufferCapacityTests.cs
++++ b/src/LibreLancer.Tests/RenderCommandBufferCapacityTests.cs
+@@ -66,12 +66,14 @@
+         try
+         {
+             using var commands = new CommandBuffer(context);
++            commands.DrawOpaque(context);
+             var material = new TransparentMaterial();
+             for (var i = 0; i < 16385; i++)
+             {
+                 commands.AddCommandFade(material, default, Lighting.Empty, null!,
+                     PrimitiveTypes.TriangleList, -1, 0, 3, 0, Vector2.Zero);
+             }
++            commands.DrawOpaque(context);
+ 
+             Assert.Equal(16385, commands.TransparentCommandCount);
+             Assert.Equal(32768, commands.TransparentCommandCapacity);
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -16,7 +16,7 @@
+ | HDR und Tonemapping | Linearisiertes Scene-Target, ACES-Tonemapping, linearisierte PBR-Albedo-/Licht-/Emissionswerte und exakte sRGB-Ausgabe im PBR-LDR-Pfad. System- und Nebel-Clearfarben werden ebenfalls vor dem HDR-Clear linearisiert; LDR bleibt unverändert. Ein Source-Audit hat alle 19 Ingame-Fragmentshader und den Postprocess-Ausgang geprüft; 2 Farbraum- und 21 Ambientlicht-Regressionstests bestehen. | Retail-Farbannahmen, visuelle Gleichheit zwischen Legacy/PBR, transparente Effekte, Fog und zusammengesetzte Ingame-Szenen brauchen weiterhin feste Bildvergleiche, Original-Client-Referenz und Hardware-GPU-Abnahme. HDR/LDR-Vergleiche: `docs/evidence/renderer/postprocess-four-mode-ab-20261017/` und der same-session-Hi02-Lauf `docs/evidence/renderer/hdr-ldr-hi02-live-ab-20261018/`; letzterer zeigt in dieser Legacy-Szene nur geringe Pixelabweichung und ersetzt keine Material-/Emissions-Referenz. Shaderaudit: `docs/evidence/renderer/hdr-shader-color-contract-audit-20261018.md`; Clear-Farbvertrag: `docs/evidence/renderer/hdr-clear-color-contract-20261018.md`. |
+ | Bloom | HDR-Extraktion mittelt jetzt ein vollständiges 4×4-Quellfenster in Viertelauflösung; aufrundende Zielmaße behalten Randpixel bei ungeraden Fenstergrößen. Basis-, mittlere und breite Blur-Stufen sowie Schwelle, Radius, Auflösung und Kernel sind konfigurierbar. | Die Extraktion beseitigt das bisherige Unterabtasten der zentralen vier Texel. Der Code führt alle drei Stufen aus. NAP-only M01A-Läufe am 19.10. vergleichen Bloom ein/aus und schalten in einem dritten Lauf zusätzlich Partikeleffekte aus. Der große Ring verschwindet mit den Explosionspartikeln; NAP-Fuse- und ALE-Daten verknüpfen ihn mit dem `planetflare`-Flashbang der Freeport-7-Explosion und grenzen ihn von Bloom ab. Die bewegten Frames sind nicht pixelgenau, die einzelne Flashbang-Instanz bleibt offen. Siehe [`NAP M01A Bloom-/Partikelmatrix`](evidence/renderer/nap-full-runtime-20261019/README.md). GPU-Kosten bleiben offen. |
+ | Partikelpuffer | `ParticleBuffer.RemoveAt` verschiebt beim Entfernen die kürzere Seite des Ringpuffers und bewahrt dabei die Reihenfolge. | Der maximale Verschiebeaufwand sinkt von der gesamten Restlänge auf `min(prefix, suffix)`; tatsächliche FPS-/GPU-Wirkung muss in festen Partikelszenen gemessen werden. |
+-| Transparente Draw-Commands | Transparent-Commands und Sortierindizes wachsen bei Bedarf geometrisch über die bisherige 16.384-Grenze hinaus; beide Arrays behalten dieselbe Kapazität. | Unit-Tests prüfen geometrisches Wachstum und fügen 16.385 Commands ein, um die gemeinsame Vergrößerung beider Puffer zu belegen. Dichte Ingame-Szenen müssen die höhere Kapazität und ihren Speicherbedarf noch prüfen. |
++| Transparente Draw-Commands | Transparent-Commands und Sortierindizes wachsen bei Bedarf geometrisch über die bisherige 16.384-Grenze hinaus; beide Arrays behalten dieselbe Kapazität. Der Sortiervergleich wird pro CommandBuffer wiederverwendet und nach einer Puffervergrößerung auf das neue Array umgestellt. Leere Queues werden ohne Sortieraufruf übersprungen. | Unit-Tests prüfen geometrisches Wachstum und fügen 16.385 Commands ein; derselbe Test sortiert die leere und anschließend vergrößerte Queue. Dichte Ingame-Szenen müssen die höhere Kapazität, ihren Speicherbedarf und die FPS-Wirkung der geringeren Allokationen noch prüfen. |
+ | Objektlicht-Bindung | `RenderHelpers.ApplyLights` übergibt die nach Priorität ausgewählten Quellindizes kompakt. `RenderMaterial.SetLights` verarbeitet so direkt höchstens acht Lichtindizes pro Materialdraw statt bis zu 128 Frame-Einträge erneut zu durchsuchen; manuell gebaute Lighting-Werte behalten den Bitset-Fallback. | Auswahl-/Bitset-Übereinstimmung ist im `TransientLightTests`-Pfad geprüft. Der CPU- und FPS-Gewinn muss mit derselben festen Szene vor/nach der Änderung gemessen werden. |
+ | LOD-/Modell-Culling | Die größte Archetyp- oder Mesh-LOD-Distanz wird ohne LINQ-Iteratoren ermittelt und pro Renderer gecacht, bis sich Modell oder Override-Array ändern. Leere Modelldistanzen blenden das Modell nicht mehr fälschlich aus; Mesh-eigene LOD-Distanzen aktivieren den frühen Distanz-Cull auch ohne Archetypwerte. | Vermeidet wiederholte Scans aller Modellteile im frühen Draw-Cull und erhält gültige Mesh-LODs. Der tatsächliche CPU-/FPS-Gewinn muss in festen Schiff-, Stations- und Asteroiden-Szenen gemessen werden. |
+ | Asteroidenfeld-Culling | Asteroidenwürfel und Billboards vergleichen ihre quadrierten Distanzen gegen die jeweiligen Reichweiten; die innere Kandidatenprüfung vermeidet damit wiederholte Quadratwurzeln. | Der Cull-Grenzwert bleibt mathematisch äquivalent für endliche, nichtnegative Reichweiten. Der CPU-Gewinn und Sichtbarkeit an Grenzfällen müssen in dichten NAP-Asteroidenfeldern gemessen werden. |
+--- a/patches/series
++++ b/patches/series
+@@ -429,3 +429,4 @@
+ client 2435-preserve-save-player-orientation.patch
+ client 2436-hi02-renderer-capture-evidence.patch
+ client 2437-profile-transparent-command-breakdown.patch
++client 2438-cache-transparent-sort-comparer.patch

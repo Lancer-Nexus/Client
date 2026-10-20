@@ -1,0 +1,258 @@
+--- a/src/LibreLancer/Render/Materials/BasicMaterial.cs
++++ b/src/LibreLancer/Render/Materials/BasicMaterial.cs
+@@ -101,6 +101,11 @@
+         public SamplerFlags BtFlags;
+         public float? Metallic;
+         public float? Roughness;
++        public bool DetailMapTilingEnabled;
++        public float DetailMapTileRate = 1f;
++        public float DetailMapFlipU;
++        public float DetailMapFlipV;
++        public Vector3 PbrAmbientScale = Vector3.One;
+         public bool Glass;
+ 
+         public BasicMaterial(string type, ResourceManager library) : base(library)
+@@ -295,6 +300,9 @@
+             public float EnvDiffuseEnabled;
+             public float FeatureFlags;
+             public Vector3 Padding;
++            public Vector4 DetailMapParameters;
++            public Vector3 AmbientScale;
++            public float AmbientPadding;
+             public Vector4 TexCoordSelectors1;
+             public Vector4 TexCoordSelectors2;
+         }
+@@ -450,10 +458,16 @@
+                       EnvDiffuseEnabled = pbrDiffuseIrradiance != null ? 1.0f : 0.0f,
+                       // Bit 0 selects diffuse IBL; bit 1 enables the legacy Bt detail map.
+                       FeatureFlags = (Library?.PbrDiffuseIblEnabled == true ? 1.0f : 0.0f) +
+-                                     (BtEnabled ? 2.0f : 0.0f),
++                                     (BtEnabled ? 2.0f : 0.0f) +
++                                     (DetailMapTilingEnabled && BtEnabled ? 4.0f : 0.0f),
+                       Padding = new Vector3(AlphaTest || dxt1 ? 1.0f : 0.0f,
+                           pbrEnvironment?.Format == SurfaceFormat.HalfVector4 ? 1.0f : 0.0f,
+                           pbrDiffuseIrradiance?.Format == SurfaceFormat.HalfVector4 ? 1.0f : 0.0f),
++                      DetailMapParameters = DetailMapTilingEnabled
++                          ? new Vector4(DetailMapTileRate, DetailMapFlipU, DetailMapFlipV, 0)
++                          : Vector4.Zero,
++                      AmbientScale = PbrAmbientScale,
++                      AmbientPadding = 0,
+                       TexCoordSelectors1 = new Vector4(
+                           UvSelector(DtFlags), UvSelector(EtFlags), UvSelector(normalFlags), UvSelector(metallicFlags)),
+                       TexCoordSelectors2 = new Vector4(
+--- a/src/LibreLancer/Render/Materials/DetailMapMaterial.cs
++++ b/src/LibreLancer/Render/Materials/DetailMapMaterial.cs
+@@ -53,7 +53,17 @@
+ 		public SamplerFlags DmFlags;
+ 		public string DtSampler;
+ 		public SamplerFlags DtFlags;
++		public string? NmSampler;
++		public SamplerFlags NmFlags;
++		public string? MtSampler;
++		public SamplerFlags MtFlags;
++		public string? RtSampler;
++		public SamplerFlags RtFlags;
++		public float? Metallic;
++		public float? Roughness;
+ 		public SurfaceMaterialBinding? SurfaceBinding;
++		private BasicMaterial? pbrMaterial;
++		private bool pbrDrawActive;
+ 		private SurfaceGpuTextureLease? activeSurfaceNormal;
+ 		private Texture? previousSurfaceTexture;
+ 		private bool surfaceTextureBound;
+@@ -70,6 +80,13 @@
+ 
+ 		public override void Use (RenderContext rstate, IVertexType vertextype, ref Lighting lights, int userData)
+ 		{
++			pbrDrawActive = false;
++			if (NeedsPbr(lights.Enabled))
++			{
++				UsePbr(rstate, vertextype, ref lights, userData);
++				return;
++			}
++
+ 			TryAcquireSurfaceNormal(vertextype, rstate);
+ 			rstate.DepthEnabled = true;
+ 			rstate.BlendMode = BlendMode.Opaque;
+@@ -107,6 +124,56 @@
+ 			SetLights(sh, ref lights, rstate.FrameNumber);
+             rstate.Shader = sh;
+         }
++
++		private bool NeedsPbr(bool lightingEnabled)
++		{
++			if (!lightingEnabled)
++				return false;
++			if (!string.IsNullOrWhiteSpace(MtSampler) || !string.IsNullOrWhiteSpace(RtSampler) ||
++			    Metallic.HasValue || Roughness.HasValue)
++				return true;
++			var binding = SurfaceBinding;
++			return Library?.SurfacePbrMapsEnabled == true &&
++			       (binding?.RoughnessMap != null || binding?.MetallicMap != null ||
++			        binding?.Roughness != null || binding?.Metallic != null);
++		}
++
++		private void UsePbr(RenderContext rstate, IVertexType vertexType, ref Lighting lights, int userData)
++		{
++			var pbr = pbrMaterial ??= new BasicMaterial("DetailMapMaterial", Library!);
++			pbr.Library = Library;
++			pbr.SurfaceBinding = SurfaceBinding;
++			pbr.Dc = Dc;
++			pbr.PbrAmbientScale = new Vector3(Ac.R, Ac.G, Ac.B);
++			pbr.Ec = Color4.Black;
++			pbr.DtSampler = DtSampler;
++			pbr.DtFlags = DtFlags;
++			pbr.NmSampler = NmSampler ?? string.Empty;
++			pbr.NmFlags = NmFlags;
++			pbr.MtSampler = MtSampler ?? string.Empty;
++			pbr.MtFlags = MtFlags;
++			pbr.RtSampler = RtSampler ?? string.Empty;
++			pbr.RtFlags = RtFlags;
++			pbr.Metallic = Metallic;
++			pbr.Roughness = Roughness;
++			pbr.BtEnabled = true;
++			pbr.BtSampler = DmSampler;
++			pbr.BtFlags = DmFlags;
++			pbr.DetailMapTilingEnabled = true;
++			pbr.DetailMapTileRate = TileRate;
++			pbr.DetailMapFlipU = FlipU;
++			pbr.DetailMapFlipV = FlipV;
++			pbr.EnvMap = EnvMap;
++			pbr.MaterialAnim = MaterialAnim;
++			pbr.World = World;
++			pbr.Bones = Bones;
++			pbr.BufferOffset = BufferOffset;
++			pbr.DepthOnlyPass = DepthOnlyPass;
++			pbr.OpacityMultiplier = OpacityMultiplier;
++			pbr.DoubleSided = DoubleSided;
++			pbr.Use(rstate, vertexType, ref lights, userData);
++			pbrDrawActive = true;
++		}
+ 
+ 		private void TryAcquireSurfaceNormal(IVertexType vertexType, RenderContext rstate)
+ 		{
+@@ -176,6 +243,12 @@
+ 
+ 		public override void AfterDraw(RenderContext rstate)
+ 		{
++			if (pbrDrawActive)
++			{
++				pbrDrawActive = false;
++				pbrMaterial!.AfterDraw(rstate);
++				return;
++			}
+ 			if (activeSurfaceNormal == null) return;
+ 			try {
+ 				if (surfaceTextureBound) rstate.Textures[2] = previousSurfaceTexture;
+--- a/src/LibreLancer/Utf/Mat/Material.cs
++++ b/src/LibreLancer/Utf/Mat/Material.cs
+@@ -533,6 +533,14 @@
+                             FlipU = FlipU,
+                             FlipV = FlipV,
+                             TileRate = TileRate,
++                            NmSampler = NmName,
++                            NmFlags = (SamplerFlags) NmFlags,
++                            MtSampler = MtName,
++                            MtFlags = (SamplerFlags) MtFlags,
++                            RtSampler = RtName,
++                            RtFlags = (SamplerFlags) RtFlags,
++                            Metallic = MFactor,
++                            Roughness = RFactor,
+                             DmFlags = (SamplerFlags) DmFlags,
+                             DtFlags = (SamplerFlags) DtFlags,
+                             SurfaceBinding = SurfaceMaterialResolver.Resolve(this, res.SurfaceMaps),
+--- a/src/LibreLancer/Shaders/PBR.frag.hlsl
++++ b/src/LibreLancer/Shaders/PBR.frag.hlsl
+@@ -71,6 +71,9 @@
+     float EnvDiffuseEnabled;
+     float FeatureFlags;
+     float3 PBRPadding;
++    float4 DetailMapParameters;
++    float3 AmbientScale;
++    float AmbientPadding;
+     float4 TexCoordSelectors1;
+     float4 TexCoordSelectors2;
+ };
+@@ -213,11 +216,25 @@
+     float metallic = saturate(getMetallic(input));
+     float perceptualRoughness = clamp(getRoughness(input), c_MinRoughness, 1.0);
+     float alphaRoughness = perceptualRoughness * perceptualRoughness;
+-
+-    float4 baseTexture = SRGBToLinearOutput(DtTexture.Sample(DtSampler, GetTexCoord(0, input)));
++    float3 ambientScale = SRGBToLinearOutput(float4(AmbientScale, 1.0)).rgb;
++
++    float2 baseUv = GetTexCoord(0, input);
++    if (FeatureFlags >= 4.0)
++    {
++        if (DetailMapParameters.y > 0.5) baseUv.x = 1.0 - baseUv.x;
++        if (DetailMapParameters.z > 0.5) baseUv.y = 1.0 - baseUv.y;
++    }
++    float4 baseTexture = SRGBToLinearOutput(DtTexture.Sample(DtSampler, baseUv));
+     if (FeatureFlags >= 2.0)
+     {
+-        float3 detail = SRGBToLinearOutput(BtTexture.Sample(BtSampler, GetTexCoord(5, input))).rgb;
++        float2 detailUv = GetTexCoord(5, input);
++        if (FeatureFlags >= 4.0)
++        {
++            if (DetailMapParameters.y > 0.5) detailUv.x = 1.0 - detailUv.x;
++            if (DetailMapParameters.z > 0.5) detailUv.y = 1.0 - detailUv.y;
++            detailUv *= DetailMapParameters.x;
++        }
++        float3 detail = SRGBToLinearOutput(BtTexture.Sample(BtSampler, detailUv)).rgb;
+         baseTexture.rgb = Mod2x(baseTexture.rgb, detail);
+     }
+     if (PBRPadding.x > 0.5 && baseTexture.a < 0.5)
+@@ -321,7 +338,7 @@
+         float3 lightAmbient = SRGBToLinearOutput(float4(Lights[i].Ambient, 1.0)).rgb;
+         color += NdotL * lightDiffuse * attenuation * shadowVisibility * specContrib;
+         color += NdotL * lightDiffuse * attenuation * shadowVisibility * diffuseContrib;
+-        color += diffuseColor * lightAmbient * attenuation;
++        color += diffuseColor * lightAmbient * attenuation * ambientScale;
+     }
+ #ifdef ENVMAP
+     // Environment cubes are world-aligned; do not rotate their lookup with the camera.
+@@ -346,12 +363,12 @@
+         float3 diffuseEnvironment = (EnvDiffuseEnabled > 0.5 ? PBRPadding.z : PBRPadding.y) > 0.5
+             ? diffuseEnvironmentSample.rgb
+             : SRGBToLinearOutput(diffuseEnvironmentSample).rgb;
+-        color += diffuseColor * diffuseEnvironment * (1.0 - envFresnel) * EnvMapStrength;
++        color += diffuseColor * diffuseEnvironment * (1.0 - envFresnel) * EnvMapStrength * ambientScale;
+     }
+ #endif
+     // PBR already evaluates its specular BRDF per pixel, so evaluate diffuse
+     // and ambient light here as well instead of using legacy vertex-light sums.
+-    color += diffuseColor * SRGBToLinearOutput(float4(AmbientColor.xyz, 1.0)).rgb;
++    color += diffuseColor * SRGBToLinearOutput(float4(AmbientColor.xyz, 1.0)).rgb * ambientScale;
+ 
+     #ifdef ET_ENABLED
+     float3 emissiveColor = SRGBToLinearOutput(float4(Ec.rgb, 1.0)).rgb;
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -676,3 +676,13 @@
+ [`Hi02-Planetenansicht`](evidence/renderer/hi02-save-orientation-20261019/README.md).
+ Ein HDR-aus-Wiederholungslauf lud die Spieldaten, erreichte aber vor Timeout
+ nicht `UI: Interface loaded`; ein valider HDR-A/B steht deshalb noch aus.
++
++## DetailMap-PBR-Abdeckung (2026-10-19)
++
++`DetailMapMaterial` übergibt MAT-Metallic-/Roughness-Faktoren und -Sampler sowie ergänzende Surface-PBR-Bindungen an den vorhandenen PBR-Materialpfad, wenn Beleuchtung aktiv ist. Die diffuse Detailtextur bleibt als PBR-Detail-Layer gebunden; Kachelrate, UV-Spiegelung und MAT-`Ac` als Faktor der ambienten Lichtbeiträge werden übernommen. Ohne aktive Metallic-/Roughness-Daten verwendet das Material weiterhin den bisherigen DetailMap-Shader. Der Release-Build und das SDL_GPU-Produktionspipeline-Audit waren erfolgreich (3495 Pipelines). Der Offscreen-Vulkan-Draw-Smoke konnte das Fenster wegen der fehlenden Erweiterung `VK_EXT_headless_surface` nicht übernehmen. Eine visuelle Laufzeitabnahme dieser Änderung steht daher noch aus.
++
++Ein neuer NAP-only-Spielstart mit dem aktualisierten Release-Client, dem geprüften
++14-Paket-Manifest und dem Hi02-Testsave blieb am 19.10.2026 unmittelbar nach
++`SDL: Using SDL3` stehen. Der Log enthält weder OpenGL-Initialisierung noch
++Spiel- oder Capture-Frames; der gestartete Prozess wurde beendet. Dieser Versuch
++lief über `WAYLAND_DISPLAY=wayland-0` und belegt keine Materialdarstellung.
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -377,3 +377,4 @@
+ | 2446 | Remove avoidable LINQ allocations from renderer frame and buffer paths |
+ 
+ | 2447 | Record the offscreen SDL_GPU production pipeline audit |
++| 2448 | Route DetailMap materials with metallic/roughness data through the PBR shader while preserving legacy fallback |
+--- a/patches/series
++++ b/patches/series
+@@ -439,3 +439,4 @@
+ client 2445-report-nap-version-mismatch-details.patch
+ client 2446-remove-projectile-render-filter-allocation.patch
+ client 2447-offscreen-sdl-gpu-pipeline-audit-evidence.patch
++client 2448-detailmap-surface-pbr.patch

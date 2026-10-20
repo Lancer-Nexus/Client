@@ -1,0 +1,995 @@
+--- a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
++++ b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+@@ -504,7 +504,7 @@
+         float realNormalStrength = 1.0f, float realRoughness = 0.55f, float realMetallic = 0.0f,
+         byte[]? skinnedVertexBytes = null, uint skinnedVertexCount = 0, byte[]? boneMatrixBytes = null,
+         Matrix4x4? skinnedWorld = null, Matrix4x4? skinnedNormalMatrix = null,
+-        bool testPbrSpotlight = false)
++        bool testPbrSpotlight = false, bool testPbrTransparency = false)
+     {
+         ArgumentNullException.ThrowIfNull(freelancerFvfDeclarationProvider);
+         var skinnedDfm = skinnedVertexBytes != null;
+@@ -725,7 +725,7 @@
+             if (copyPipeline == IntPtr.Zero)
+                 throw Failure("Creating the SDL_GPU scene-copy graphics pipeline failed");
+             pbrPipeline = CreatePipeline(device, pbrVertexShader, pbrFragmentShader, swapchainFormat,
+-                false, freelancerFvfLayout);
++                false, freelancerFvfLayout, alphaBlend: testPbrTransparency);
+             if (pbrPipeline == IntPtr.Zero)
+                 throw Failure("Creating an SDL_GPU pipeline for the embedded Freelancer PBR shader failed");
+             shadowPbrPipeline = CreatePipeline(device, shadowPbrVertexShader, shadowPbrFragmentShader,
+@@ -885,6 +885,35 @@
+                     viewportX: 0.70f, viewportY: 0.35f, outputIsSrgb: swapchainIsSrgb);
+             }
+ 
++            if (testPbrTransparency)
++            {
++                colorTargets[0] = new SDL3.SDL_GPUColorTargetInfo
++                {
++                    texture = swapchainTexture,
++                    clear_color = new SDL3.SDL_FColor { r = 0.0f, g = 0.0f, b = 0.0f, a = 1.0f },
++                    load_op = SDL3.SDL_GPULoadOp.SDL_GPU_LOADOP_CLEAR,
++                    store_op = SDL3.SDL_GPUStoreOp.SDL_GPU_STOREOP_STORE
++                };
++                renderPass = SDL3.SDL_BeginGPURenderPass(commandBuffer, colorTargets, 1, IntPtr.Zero);
++                if (renderPass == IntPtr.Zero)
++                    throw Failure("Beginning the SDL_GPU PBR transparency clear pass failed");
++                SDL3.SDL_EndGPURenderPass(renderPass);
++                renderPass = IntPtr.Zero;
++
++                ExecuteProductionPbrDraw(commandBuffer, pbrPipeline, vertexBuffer, diffuseTexture,
++                    normalSampler, colorTargets, width, height, samplerBindings: pbrSamplerBindings,
++                    materialTexture: pbrDiffuseTexture, spotlight: true,
++                    spotlightDirection: new Vector3(0.0f, 0.0f, -1.0f),
++                    viewportX: 0.04f, viewportY: 0.25f, opacity: 1.0f,
++                    outputIsSrgb: swapchainIsSrgb);
++                ExecuteProductionPbrDraw(commandBuffer, pbrPipeline, vertexBuffer, diffuseTexture,
++                    normalSampler, colorTargets, width, height, samplerBindings: pbrSamplerBindings,
++                    materialTexture: pbrDiffuseTexture, spotlight: true,
++                    spotlightDirection: new Vector3(0.0f, 0.0f, -1.0f),
++                    viewportX: 0.70f, viewportY: 0.25f, opacity: 0.5f,
++                    outputIsSrgb: swapchainIsSrgb);
++            }
++
+             copyPass = SDL3.SDL_BeginGPUCopyPass(commandBuffer);
+             if (copyPass == IntPtr.Zero)
+                 throw Failure("Beginning the SDL_GPU pixel readback pass failed");
+@@ -949,8 +978,8 @@
+                 pbrSampleX = skinnedDfm ? normalizedX : 0.04f + viewportLocalX;
+                 pbrSampleY = skinnedDfm ? normalizedY : 0.04f + viewportLocalY;
+             }
+-            pbrPixel.x = (uint)(width * pbrSampleX);
+-            pbrPixel.y = (uint)(height * pbrSampleY);
++            pbrPixel.x = (uint)(width * (testPbrTransparency ? 0.165f : pbrSampleX));
++            pbrPixel.y = (uint)(height * (testPbrTransparency ? 0.375f : pbrSampleY));
+             pixelDestination.offset = 4;
+             SDL3.SDL_DownloadFromGPUTexture(copyPass, pbrPixel, pixelDestination);
+             var visibleShadowPixel = pbrPixel;
+@@ -973,6 +1002,14 @@
+                 spotlightPixel.x = (uint)(width * 0.825f);
+                 pixelDestination.offset = 20;
+                 SDL3.SDL_DownloadFromGPUTexture(copyPass, spotlightPixel, pixelDestination);
++            }
++            if (testPbrTransparency)
++            {
++                var translucentPixel = centerPixel;
++                translucentPixel.x = (uint)(width * 0.825f);
++                translucentPixel.y = (uint)(height * 0.375f);
++                pixelDestination.offset = 20;
++                SDL3.SDL_DownloadFromGPUTexture(copyPass, translucentPixel, pixelDestination);
+             }
+             if (realVmeshVertices != null || skinnedDfm)
+             {
+@@ -1036,7 +1073,7 @@
+                 Marshal.Copy(IntPtr.Add(mappedPixel, 32), frame, 0, frame.Length);
+                 WritePpmCapture(capturePath, frame, width, height, isBgra);
+             }
+-            if (realVmeshVertices == null && !skinnedDfm)
++            if (!testPbrTransparency && realVmeshVertices == null && !skinnedDfm)
+             {
+                 if (alpha < 240 || Math.Abs(red - expectedRed) > 24 ||
+                     Math.Abs(green - expectedGreen) > 24 || Math.Abs(blue - expectedBlue) > 24)
+@@ -1075,7 +1112,7 @@
+             if (pbrAlpha < 240 || (skinnedDfm && Math.Abs(pbrRed - ToOutputByte(AcesFitted(0.08f), isSrgb)) +
+                 Math.Abs(pbrGreen - ToOutputByte(AcesFitted(0.32f), isSrgb)) +
+                 Math.Abs(pbrBlue - ToOutputByte(AcesFitted(0.62f), isSrgb)) < 40) ||
+-                (!testPbrSpotlight && !skinnedDfm && realVmeshVertices == null &&
++                (!testPbrSpotlight && !testPbrTransparency && !skinnedDfm && realVmeshVertices == null &&
+                 (Math.Abs(pbrRed - expectedPbrRed) > 32 ||
+                  Math.Abs(pbrGreen - expectedPbrGreen) > 32 || pbrBlue > 24)) ||
+                 (realVmeshVertices != null && pbrRed + pbrGreen + pbrBlue < 24))
+@@ -1097,13 +1134,13 @@
+             var shadowAlpha = Marshal.ReadByte(mappedPixel, 15);
+             var shadowRed = isBgra ? shadowChannel2 : shadowChannel0;
+             var shadowBlue = isBgra ? shadowChannel0 : shadowChannel2;
+-            if (realVmeshVertices == null && !skinnedDfm && (visibleShadowAlpha < 240 ||
++            if (!testPbrTransparency && realVmeshVertices == null && !skinnedDfm && (visibleShadowAlpha < 240 ||
+                 visibleShadowRed + visibleShadowGreen + visibleShadowBlue < 50))
+                 throw new InvalidOperationException(
+                     $"SDL_GPU production PBR shadow visibility pixel was not lit for {swapchainFormat}: " +
+                     $"({visibleShadowRed}, {visibleShadowGreen}, {visibleShadowBlue}, {visibleShadowAlpha}); " +
+                     "expected a lit pixel when the depth map is clear.");
+-            if (realVmeshVertices == null && !skinnedDfm &&
++            if (!testPbrTransparency && realVmeshVertices == null && !skinnedDfm &&
+                 (shadowAlpha < 240 || shadowRed > 40 || shadowGreen > 40 || shadowBlue > 40))
+                 throw new InvalidOperationException(
+                     $"SDL_GPU production PBR shadow pixel was not occluded for {swapchainFormat}: " +
+@@ -1132,6 +1169,28 @@
+                         "the front-facing aligned spotlight must illuminate the surface more strongly.");
+                 Console.WriteLine($"PBR spotlight readback passed: in-cone luma={inConeLuma}, " +
+                                   $"out-of-cone luma={outOfConeLuma}.");
++            }
++            if (testPbrTransparency)
++            {
++                var opaqueRed = isBgra ? Marshal.ReadByte(mappedPixel, 6) : Marshal.ReadByte(mappedPixel, 4);
++                var opaqueGreen = Marshal.ReadByte(mappedPixel, 5);
++                var opaqueBlue = isBgra ? Marshal.ReadByte(mappedPixel, 4) : Marshal.ReadByte(mappedPixel, 6);
++                var opaqueAlpha = Marshal.ReadByte(mappedPixel, 7);
++                var translucentRed = isBgra ? Marshal.ReadByte(mappedPixel, 22) : Marshal.ReadByte(mappedPixel, 20);
++                var translucentGreen = Marshal.ReadByte(mappedPixel, 21);
++                var translucentBlue = isBgra ? Marshal.ReadByte(mappedPixel, 20) : Marshal.ReadByte(mappedPixel, 22);
++                var translucentAlpha = Marshal.ReadByte(mappedPixel, 23);
++                var opaqueLuma = opaqueRed + opaqueGreen + opaqueBlue;
++                var translucentLuma = translucentRed + translucentGreen + translucentBlue;
++                if (opaqueAlpha < 240 || translucentAlpha < 240 || opaqueLuma < 60 ||
++                    translucentLuma < opaqueLuma * 0.35f || translucentLuma > opaqueLuma * 0.95f)
++                    throw new InvalidOperationException(
++                        $"SDL_GPU PBR alpha blend failed for {swapchainFormat}: " +
++                        $"opaque=({opaqueRed}, {opaqueGreen}, {opaqueBlue}, {opaqueAlpha}), " +
++                        $"50%-opacity=({translucentRed}, {translucentGreen}, {translucentBlue}, {translucentAlpha}); " +
++                        "the translucent PBR draw must blend between the opaque surface and black clear.");
++                Console.WriteLine($"PBR transparency readback passed: opaque luma={opaqueLuma}, " +
++                                  $"50%-opacity luma={translucentLuma}.");
+             }
+             if (realVmeshVertices != null || skinnedDfm)
+             {
+@@ -1343,6 +1402,7 @@
+         IntPtr normalTexture = default, IntPtr roughnessTexture = default, IntPtr metallicTexture = default,
+         float normalStrength = 1.0f, float roughness = 0.55f, float metallic = 0.0f,
+         bool spotlight = false, Vector3? spotlightDirection = null,
++        float opacity = 1.0f,
+         SDL3GpuBindingRemap[]? samplerBindings = null,
+         IntPtr realIndexBuffer = default, uint realIndexCount = 0, int realBaseVertex = 3,
+         IntPtr boneStorageBuffer = default, uint boneStorageSlot = 0, uint realVertexCount = 0,
+@@ -1422,7 +1482,7 @@
+                 materialDiffuse != null && i < materialDiffuse.Length ? materialDiffuse[i] : 1.0f);
+         for (var i = 4; i < 8; i++)
+             WriteFloat(pbrParameters, i * sizeof(float), 1.0f);
+-        WriteFloat(pbrParameters, 32, 1.0f);
++        WriteFloat(pbrParameters, 32, opacity);
+         WriteFloat(pbrParameters, 36, roughness);
+         WriteFloat(pbrParameters, 40, metallic);
+         WriteFloat(pbrParameters, 44, normalStrength);
+@@ -2250,7 +2310,7 @@
+ 
+     private static unsafe IntPtr CreatePipeline(IntPtr device, IntPtr vertexShader, IntPtr fragmentShader,
+         SDL3.SDL_GPUTextureFormat colorFormat, bool depthTest,
+-        SDL3GpuVertexInputLayout? vertexLayout = null)
++        SDL3GpuVertexInputLayout? vertexLayout = null, bool alphaBlend = false)
+     {
+         if (vertexLayout is { } declaredLayout)
+         {
+@@ -2258,7 +2318,7 @@
+             {
+                 return CreatePipelineWithVertexAttributes(device, vertexShader, fragmentShader,
+                     colorFormat, depthTest, attributes, (uint)declaredLayout.Attributes.Length,
+-                    declaredLayout.Stride);
++                    declaredLayout.Stride, alphaBlend);
+             }
+         }
+ 
+@@ -2285,12 +2345,12 @@
+             offset = 6 * sizeof(float)
+         };
+         return CreatePipelineWithVertexAttributes(device, vertexShader, fragmentShader,
+-            colorFormat, depthTest, smokeAttributes, 3, 8 * sizeof(float));
++            colorFormat, depthTest, smokeAttributes, 3, 8 * sizeof(float), alphaBlend);
+     }
+ 
+     private static unsafe IntPtr CreatePipelineWithVertexAttributes(IntPtr device, IntPtr vertexShader,
+         IntPtr fragmentShader, SDL3.SDL_GPUTextureFormat colorFormat, bool depthTest,
+-        SDL3.SDL_GPUVertexAttribute* attributes, uint attributeCount, uint vertexStride)
++        SDL3.SDL_GPUVertexAttribute* attributes, uint attributeCount, uint vertexStride, bool alphaBlend = false)
+     {
+         var vertexBuffer = new SDL3.SDL_GPUVertexBufferDescription
+         {
+@@ -2301,10 +2361,23 @@
+         };
+         var blend = new SDL3.SDL_GPUColorTargetBlendState
+         {
++            src_color_blendfactor = alphaBlend
++                ? SDL3.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_SRC_ALPHA
++                : SDL3.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ONE,
++            dst_color_blendfactor = alphaBlend
++                ? SDL3.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA
++                : SDL3.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ZERO,
++            color_blend_op = SDL3.SDL_GPUBlendOp.SDL_GPU_BLENDOP_ADD,
++            src_alpha_blendfactor = SDL3.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ONE,
++            dst_alpha_blendfactor = alphaBlend
++                ? SDL3.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA
++                : SDL3.SDL_GPUBlendFactor.SDL_GPU_BLENDFACTOR_ZERO,
++            alpha_blend_op = SDL3.SDL_GPUBlendOp.SDL_GPU_BLENDOP_ADD,
+             color_write_mask = SDL3.SDL_GPUColorComponentFlags.SDL_GPU_COLORCOMPONENT_R |
+                                SDL3.SDL_GPUColorComponentFlags.SDL_GPU_COLORCOMPONENT_G |
+                                SDL3.SDL_GPUColorComponentFlags.SDL_GPU_COLORCOMPONENT_B |
+                                SDL3.SDL_GPUColorComponentFlags.SDL_GPU_COLORCOMPONENT_A,
++            enable_blend = alphaBlend,
+             enable_color_write_mask = true
+         };
+         var colorTarget = new SDL3.SDL_GPUColorTargetDescription
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -604,6 +604,13 @@
+                 testPbrSpotlight: true);
+             return;
+         }
++        if (args.Length == 1 && args[0] == "--sdl-gpu-pbr-transparency-smoke")
++        {
++            Environment.ExitCode = SDL3GpuSmoke.Run(() => new FVFVertex(
++                D3DFVF.XYZ | D3DFVF.NORMAL | D3DFVF.TEX1).GetVertexDeclaration(),
++                testPbrTransparency: true);
++            return;
++        }
+         if (args.Length is >= 2 and <= 5 && args[0] == "--sdl-gpu-vmesh-smoke")
+         {
+             try
+@@ -757,6 +764,7 @@
+             Console.WriteLine("       Screenshot option: --capture-space-frame=<output.png> (capture after 120 loaded, non-cutscene space frames)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-smoke (SDL3 GPU shader, pipeline, draw, and swapchain test)");
+             Console.WriteLine("       Renderer lighting diagnostic: --sdl-gpu-pbr-spotlight-smoke (production PBR in-cone/out-of-cone pixel check)");
++            Console.WriteLine("       Renderer alpha diagnostic: --sdl-gpu-pbr-transparency-smoke (production PBR alpha-blend pixel check)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-vmesh-smoke <cmp-path> [mat-path [surface-data-root [on|off]]] (draw a VMesh with MAT diffuse and optional NAP Surface maps)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-vmesh-nap-smoke <application-dir> <cmp-virtual-path> <mat-virtual-path|-> [part-name] [on|off] (draw one CMP part using embedded or external materials and active NAP Surface maps)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-dfm-smoke <dfm-path> [surface-data-root [on|off]] (draw an embedded DFM material with production GPU skinning)");
+--- a/src/LibreLancer/Render/Materials/BasicMaterial.cs
++++ b/src/LibreLancer/Render/Materials/BasicMaterial.cs
+@@ -735,6 +735,8 @@
+             return tex is Texture2D { Dxt1: true };
+         }
+ 
+-        public override bool IsTransparent => AlphaEnabled && !GetDxt1();
++        public override bool IsTransparent =>
++            (OcEnabled && Oc * OpacityMultiplier < 1.0f) ||
++            (AlphaEnabled && !GetDxt1());
+     }
+ }
+--- a/src/LibreLancer/Render/Materials/AtmosphereMaterial.cs
++++ b/src/LibreLancer/Render/Materials/AtmosphereMaterial.cs
+@@ -41,7 +41,13 @@
+         {
+             var sh = AllShaders.Atmosphere.Get(VertexLighting ? 1U : 0U);
+             SetWorld(sh);
+-            var p = new AtmosphereParameters() { Dc = Dc, Ac = Ac, Fade = Fade, Oc = Alpha };
++            var p = new AtmosphereParameters()
++            {
++                Dc = Dc,
++                Ac = Ac,
++                Fade = Fade,
++                Oc = Alpha * OpacityMultiplier
++            };
+             if (GetTexture(0, DtSampler) == null)
+                 p.Oc = 0;
+             sh.SetUniformBlock(3, ref p);
+--- a/src/LibreLancer/Render/Materials/NebulaMaterial.cs
++++ b/src/LibreLancer/Render/Materials/NebulaMaterial.cs
+@@ -35,7 +35,9 @@
+             // fragment shader you multiply tex sampler rgb by vertex color and alpha the same (that is should texture have alpha of its own, sometimes they may as well)
+ 			rstate.BlendMode = BlendMode.Additive;
+ 			var shader = GetShader(vertextype);
+-            shader.SetUniformBlock(3, ref Dc);
++			var diffuse = new Color4(Dc.R * OpacityMultiplier, Dc.G * OpacityMultiplier,
++				Dc.B * OpacityMultiplier, Dc.A * OpacityMultiplier);
++			shader.SetUniformBlock(3, ref diffuse);
+ 			SetWorld(shader);
+ 			// Dt
+ 			BindTexture (rstate, 0, DtSampler, 0, DtFlags);
+--- a/src/LibreLancer/Render/Materials/DetailMapMaterial.cs
++++ b/src/LibreLancer/Render/Materials/DetailMapMaterial.cs
+@@ -30,7 +30,7 @@
+             public float FlipU;
+             public float FlipV;
+ 			public float NormalStrength;
+-			private Vector4 _padding;
++			public Vector4 Padding;
+         }
+ 
+         private MaterialParameters parameters;
+@@ -89,7 +89,7 @@
+ 
+ 			TryAcquireSurfaceNormal(vertextype, rstate);
+ 			rstate.DepthEnabled = true;
+-			rstate.BlendMode = BlendMode.Opaque;
++			rstate.BlendMode = OpacityMultiplier < 1.0f ? BlendMode.Normal : BlendMode.Opaque;
+ 
+             var features = 0U;
+             var hasTangents = vertextype is VertexPositionNormalTextureTangent or DfmTangentVertex or
+@@ -108,6 +108,7 @@
+ 			if (skinnedDfm)
+ 				Bones!.BindTo(9, BufferOffset, 200);
+             SetWorld(sh);
++			parameters.Padding = new Vector4(OpacityMultiplier, 0, 0, 0);
+ 			parameters.NormalStrength = activeSurfaceNormal != null ? activeSurfaceNormalStrength : 1f;
+ 			sh.SetUniformBlock(3, ref parameters);
+ 
+--- a/src/LibreLancer/Render/Materials/Masked2DetailMapMaterial.cs
++++ b/src/LibreLancer/Render/Materials/Masked2DetailMapMaterial.cs
+@@ -24,6 +24,7 @@
+             public float TileRate1;
+             public float FlipU;
+             public float FlipV;
++            public Vector4 Padding;
+         }
+ 
+         private MaterialParameters parameters;
+@@ -80,9 +81,10 @@
+ 				return;
+ 			}
+ 			rstate.DepthEnabled = true;
+-			rstate.BlendMode = BlendMode.Opaque;
++			rstate.BlendMode = OpacityMultiplier < 1.0f ? BlendMode.Normal : BlendMode.Opaque;
+             var sh = AllShaders.Masked2DetailMapMaterial.Get(VertexLighting ? 1U : 0U);
+             SetWorld(sh);
++            parameters.Padding = new Vector4(OpacityMultiplier, 0, 0, 0);
+             sh.SetUniformBlock(3, ref parameters);
+             Vector4 noAnim = new Vector4(0, 0, 1, 1);
+             sh.SetUniformBlock(4, ref noAnim);
+--- a/src/LibreLancer/Render/Materials/DetailMap2Dm1Msk2PassMaterial.cs
++++ b/src/LibreLancer/Render/Materials/DetailMap2Dm1Msk2PassMaterial.cs
+@@ -23,7 +23,7 @@
+             public float TileRate;
+             public float FlipU;
+             public float FlipV;
+-            private float _padding;
++            public float Opacity;
+         }
+ 
+         private MaterialParameters parameters;
+@@ -74,10 +74,11 @@
+ 				return;
+ 			}
+ 			rstate.DepthEnabled = true;
+-			rstate.BlendMode = BlendMode.Opaque;
++			rstate.BlendMode = OpacityMultiplier < 1.0f ? BlendMode.Normal : BlendMode.Opaque;
+ 
+             var sh = AllShaders.DetailMap2Dm1Msk2PassMaterial.Get(VertexLighting ? 1U : 0U);
+             SetWorld(sh);
++            parameters.Opacity = OpacityMultiplier;
+             sh.SetUniformBlock(3, ref parameters);
+             Vector4 noAnim = new Vector4(0, 0, 1, 1);
+             sh.SetUniformBlock(4, ref noAnim);
+--- a/src/LibreLancer/Render/Materials/IllumDetailMapMaterial.cs
++++ b/src/LibreLancer/Render/Materials/IllumDetailMapMaterial.cs
+@@ -24,6 +24,7 @@
+             public float TileRate1;
+             public float FlipU;
+             public float FlipV;
++            public Vector4 Padding;
+         }
+ 
+         private MaterialParameters parameters;
+@@ -78,9 +79,10 @@
+ 				return;
+ 			}
+             rstate.DepthEnabled = true;
+-            rstate.BlendMode = BlendMode.Opaque;
++			rstate.BlendMode = OpacityMultiplier < 1.0f ? BlendMode.Normal : BlendMode.Opaque;
+             var sh = AllShaders.IllumDetailMapMaterial.Get(VertexLighting ? 1U : 0U);
+             SetWorld(sh);
++            parameters.Padding = new Vector4(OpacityMultiplier, 0, 0, 0);
+             sh.SetUniformBlock(3, ref parameters);
+             Vector4 noAnim = new Vector4(0, 0, 1, 1);
+             sh.SetUniformBlock(4, ref noAnim);
+--- /dev/null
++++ b/src/LibreLancer.Tests/BasicMaterialTransparencyTests.cs
+@@ -0,0 +1,55 @@
++using LibreLancer.Render.Materials;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class BasicMaterialTransparencyTests
++{
++    [Fact]
++    public void FractionalMaterialOpacityUsesTransparentPass()
++    {
++        var material = new BasicMaterial("DcDt", null!)
++        {
++            OcEnabled = true,
++            Oc = 0.5f
++        };
++
++        Assert.True(material.IsTransparent);
++    }
++
++    [Fact]
++    public void OpaqueMaterialOpacityDoesNotUseTransparentPass()
++    {
++        var material = new BasicMaterial("DcDt", null!)
++        {
++            OcEnabled = true,
++            Oc = 1.0f
++        };
++
++        Assert.False(material.IsTransparent);
++    }
++
++    [Fact]
++    public void MaterialOpacityMultiplierUsesTransparentPass()
++    {
++        var material = new BasicMaterial("DcDt", null!)
++        {
++            OcEnabled = true,
++            Oc = 1.0f,
++            OpacityMultiplier = 0.5f
++        };
++
++        Assert.True(material.IsTransparent);
++    }
++
++    [Fact]
++    public void OpacityFieldWithoutOpacityFlagRemainsOpaque()
++    {
++        var material = new BasicMaterial("DcDt", null!)
++        {
++            Oc = 0.5f
++        };
++
++        Assert.False(material.IsTransparent);
++    }
++}
+--- a/src/LibreLancer/Render/Materials/DetailMapMaterial.cs
++++ b/src/LibreLancer/Render/Materials/DetailMapMaterial.cs
+@@ -264,7 +264,7 @@
+ 		public override bool IsTransparent
+ 		{
+ 			get
+ 			{
+-				return false;
++				return OpacityMultiplier < 1.0f;
+ 			}
+ 		}
+--- a/src/LibreLancer/Render/Materials/Masked2DetailMapMaterial.cs
++++ b/src/LibreLancer/Render/Materials/Masked2DetailMapMaterial.cs
+@@ -154,7 +154,7 @@
+ 		public override bool IsTransparent
+ 		{
+ 			get
+ 			{
+-				return false;
++				return OpacityMultiplier < 1.0f;
+ 			}
+ 		}
+--- a/src/LibreLancer/Render/Materials/DetailMap2Dm1Msk2PassMaterial.cs
++++ b/src/LibreLancer/Render/Materials/DetailMap2Dm1Msk2PassMaterial.cs
+@@ -156,7 +156,7 @@
+ 		public override bool IsTransparent
+ 		{
+ 			get
+ 			{
+-				return false;
++				return OpacityMultiplier < 1.0f;
+ 			}
+ 		}
+--- a/src/LibreLancer/Render/Materials/IllumDetailMapMaterial.cs
++++ b/src/LibreLancer/Render/Materials/IllumDetailMapMaterial.cs
+@@ -165,7 +165,7 @@
+ 		public override bool IsTransparent
+ 		{
+ 			get
+ 			{
+-				return false;
++				return OpacityMultiplier < 1.0f;
+ 			}
+ 		}
+--- a/src/LibreLancer/Shaders/DetailMapMaterial.frag.hlsl
++++ b/src/LibreLancer/Shaders/DetailMapMaterial.frag.hlsl
+@@ -80,5 +80,7 @@
+     baseColor = ApplyPixelLighting(Ac, 0, Dc, float4(1,1,1,1), tex, input.worldPosition, input.viewPosition, normal, input.frontFacing);
+ #endif
+ 
+-    return ToLinearSceneOutput(Mod2x(baseColor, detail));
++    float4 outputColor = Mod2x(baseColor, detail);
++    outputColor.a *= _padding.x;
++    return ToLinearSceneOutput(outputColor);
+ };
+--- a/src/LibreLancer/Shaders/Masked2DetailMapMaterial.frag.hlsl
++++ b/src/LibreLancer/Shaders/Masked2DetailMapMaterial.frag.hlsl
+@@ -36,6 +36,7 @@
+     float TileRate1;
+     float FlipU;
+     float FlipV;
++    float4 Padding;
+ };
+ 
+ float4 main(Input input) : SV_Target0
+@@ -62,5 +63,7 @@
+ 
+     float4 detail = float4(tex.a < 0.99 ? detail0.rgb : detail1.rgb, 1.0);
+ 
+-    return ToLinearSceneOutput(Mod2x(baseColor, detail));
++    float4 outputColor = Mod2x(baseColor, detail);
++    outputColor.a = Padding.x;
++    return ToLinearSceneOutput(outputColor);
+ };
+--- a/src/LibreLancer/Shaders/DetailMap2Dm1Msk2PassMaterial.frag.hlsl
++++ b/src/LibreLancer/Shaders/DetailMap2Dm1Msk2PassMaterial.frag.hlsl
+@@ -32,6 +32,7 @@
+     float TileRate;
+     float FlipU;
+     float FlipV;
++    float Opacity;
+ };
+ 
+ float4 main(Input input) : SV_Target0
+@@ -54,5 +55,5 @@
+ 
+     float4 masked = tex.a < 0.99 ? Mod2x(baseColor, detail) : baseColor;
+ 
+-    return ToLinearSceneOutput(float4(masked.rgb, 1.0));
++    return ToLinearSceneOutput(float4(masked.rgb, Opacity));
+ };
+--- a/src/LibreLancer/Shaders/IllumDetailMapMaterial.frag.hlsl
++++ b/src/LibreLancer/Shaders/IllumDetailMapMaterial.frag.hlsl
+@@ -19,6 +19,7 @@
+     float TileRate1;
+     float FlipU;
+     float FlipV;
++    float4 Padding;
+ };
+ 
+ struct Input
+@@ -66,5 +67,5 @@
+ 
+     float4 illum = Mod2x(detail1, illumTexture);
+ 
+-    return ToLinearSceneOutput(float4(lerp(baseColor.rgb, illum.rgb, illum.a), 1.0));
++    return ToLinearSceneOutput(float4(lerp(baseColor.rgb, illum.rgb, illum.a), Padding.x));
+ }
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -10,7 +10,7 @@
+ |---|---|---|
+ | Freelancer-Forward-Renderer | Vorhandener OpenGL-Renderpfad mit Depth-Prepass, opaken Objekten, Sternen/Nebeln, Transparenz und AA-Auflösung. | `SystemRenderer.Draw()` und `docs/evidence/renderer/forward-pass-order-audit-20261015.md`. Der Render-Graph beschreibt Verträge; er ersetzt noch nicht alle direkten Backend-Aufrufe. |
+ | Normalmaps | MAT-Normalmaps und optionale Surface-Zuordnungen für Meshes und DFM; UV-Auswahl, Tangentenaufbau, Cache und Laufzeitoptionen sind vorhanden. DFM-DetailMap-Materialien wählen für skinned Vertices eine eigene Shader-Variante, binden den Bone-Matrix-Puffer und transformieren generierte Tangenten. | Viewer-A/B für Schiffe, Basen und DFM liegen unter `docs/evidence/renderer/`. Der neue DFM-DetailMap-Pfad ist gebaut, aber visuelle Laufzeitabnahme und Kosten über weitere Szenen bleiben offen. |
+-| Metallic/Roughness | Ergänzende Karten sind in Materialauflösung und PBR-Shader eingebunden; DFM besitzt einen skinned PBR-Pfad. PBR berücksichtigt nun auch lineare Vertex-Tints und `Oc`-Materialopazität. | Kartenwirkung ist asset- und materialabhängig. Tinted/transparent PBR-Materialien, vollständige Asset-Abdeckung und systematische Spielabnahme fehlen noch. |
++| Metallic/Roughness | Ergänzende Karten sind in Materialauflösung und PBR-Shader eingebunden; DFM besitzt einen skinned PBR-Pfad. PBR berücksichtigt lineare Vertex-Tints und `Oc`-Materialopazität. Ein SDL_GPU-Pixeltest prüft jetzt zusätzlich die Alpha-Ausgabe des Produktions-PBR-Shaders mit Source-over-Blending. | Kartenwirkung ist asset- und materialabhängig. Transparenzsortierung, getönte/transparente Spielmaterialien, vollständige Asset-Abdeckung und systematische Spielabnahme fehlen noch. |
+ | Cubemaps / Reflexion | PBR bindet GGX-vorgefilterte Specular-Cubes und cosine-konvolvierte diffuse Irradiance. DDS-Cubemaps unterstützen zusätzlich lineare DX10-RGBA16F-Daten für HDR-Werte über 1. Die drei erzeugten Umwelt-Cubes und Metadaten liegen in `Data/NAP/Surface/` und `Data/SDK/fx/SurfaceMaps.ini`. | Ein NAP-only-LancerEdit-A/B lädt `envcube_sun` als `TextureCube`; im LI-Elite-Modellcrop ändern sich 13.492/99.000 Pixel, der Hintergrund bleibt pixelidentisch. Der Effekt ist subtil. Retail-Orientierung, Materialkalibrierung und Ingame-/Hardwareabnahme bleiben offen. Siehe [HDR-Cubemap-Laufzeittest](evidence/renderer/hdr-cubemap-live-ab-20261018/README.md). |
+ | Legacy-Environment-Maps | Bestehende Freelancer-Cubemap-Reflexionen lassen sich unabhängig vom PBR-IBL per Einstellung oder `--render-legacy-environment-maps=on|off` umschalten. Der Standard bleibt `on`, damit ältere Materialien ihr bisheriges Verhalten behalten. | Beide Startwerte laden bis ins Intro. Der gleiche Kamera-A/B-Bildvergleich fehlt noch; externe Bildschirmaufnahmen waren in der letzten Sitzung schwarz. |
+ | HDR und Tonemapping | Linearisiertes Scene-Target, ACES-Tonemapping, linearisierte PBR-Albedo-/Licht-/Emissionswerte und exakte sRGB-Ausgabe im PBR-LDR-Pfad. System- und Nebel-Clearfarben werden ebenfalls vor dem HDR-Clear linearisiert; LDR bleibt unverändert. Ein Source-Audit hat alle 19 Ingame-Fragmentshader und den Postprocess-Ausgang geprüft; 2 Farbraum- und 21 Ambientlicht-Regressionstests bestehen. | Retail-Farbannahmen, visuelle Gleichheit zwischen Legacy/PBR, transparente Effekte, Fog und zusammengesetzte Ingame-Szenen brauchen weiterhin feste Bildvergleiche, Original-Client-Referenz und Hardware-GPU-Abnahme. HDR/LDR-Vergleiche: `docs/evidence/renderer/postprocess-four-mode-ab-20261017/` und der same-session-Hi02-Lauf `docs/evidence/renderer/hdr-ldr-hi02-live-ab-20261018/`; letzterer zeigt in dieser Legacy-Szene nur geringe Pixelabweichung und ersetzt keine Material-/Emissions-Referenz. Shaderaudit: `docs/evidence/renderer/hdr-shader-color-contract-audit-20261018.md`; Clear-Farbvertrag: `docs/evidence/renderer/hdr-clear-color-contract-20261018.md`. |
+@@ -1012,3 +1012,43 @@
+ belegen den Profil-Export und den Renderpfad, aber weder eine belastbare
+ Hardware-Baseline noch einen isolierten Leistungsgewinn der Culling-Patches.
+ Der Screenshot zeigt die Szene, löst einzelne Asteroiden jedoch nicht klar auf.
++
++
++## Transparenter PBR-Produktionsshader (2026-10-20)
++
++Patch 2492 ergänzt einen SDL_GPU-Pixel-Smoke für den tatsächlichen PBR-
++Fragmentshader. Zwei identische Dreiecke werden mit `Oc` 1,0 und 0,5 über
++demselben schwarzen Ziel gerendert; die Pipeline nutzt `SRC_ALPHA` und
++`ONE_MINUS_SRC_ALPHA`. Auf Mesa Vulkan/Haswell lagen die Readback-Lumas bei
++241 und 120; die komponierten Zielalphas waren jeweils 255. Das bestätigt
++Shader-Alpha und Source-over-Blending im synthetischen Draw. Es prüft weder
++Freelancer-Materialflag-Wiring noch transparente Sortierung, additive
++Materialien oder eine vollständige Ingame-Szene. Siehe
++[`PBR-Alpha-Blending-Smoke`](evidence/renderer/pbr-transparent-alpha-gpu-smoke-20261020/README.md).
++
++Die Materialklassifizierung berücksichtigt `Oc < 1` und einen reduzierten
++`OpacityMultiplier` zusätzlich zum `Ot`-Typflag. Der Scan aller 110
++`Data/NAP/Material/*.mat`-Dateien fand 23 Materialien mit partieller Opazität;
++alle 23 verwenden `Ot`. Fünf dieser Retail-Materialien kombinieren `Oc < 1`
++mit einer eingebetteten DXT1-Diffusetextur. Der frühere DXT1-Sonderfall konnte
++ihre Alpha-Sortierung unterdrücken, obwohl Material-Opacity Source-over-Blending
++benötigt. Patch 2492 sortiert diese Materialien anhand von `Oc` in den
++Transparent-Pass ein. Vier `BasicMaterialTransparencyTests` decken fraktionale
++Opazität, den opaken Grenzwert, den Laufzeitmultiplikator und das fehlende
++MAT-Opacity-Flag ab. Die konkrete Retail-Inventur ist dokumentiert; die
++Sortierreihenfolge in repräsentativen Spielszenen bleibt abzunehmen. Details:
++[`Retail MAT opacity scan`](evidence/renderer/material-opacity-asset-scan-20261020.md).
++
++Die Legacy-Fallbacks von `DetailMapMaterial`, `Masked2DetailMapMaterial`,
++`DetailMap2Dm1Msk2PassMaterial` und `IllumDetailMapMaterial` übernehmen jetzt
++`OpacityMultiplier` in den Shader-Alpha-Kanal und aktivieren Source-over-
++Blending bei Werten unter 1; ihre `IsTransparent`-Overrides reihen Fades
++ebenfalls in den Transparent-Pass ein. `AtmosphereMaterial` multipliziert die
++Objektopazität mit seiner MAT-Alpha-Stärke; `NebulaMaterial` skaliert bei seinem
++additiven Pfad die Materialfarbe. `BasicMaterial`, `NomadMaterial` und die
++PBR-Unterpfade verarbeiten die Objektopazität bereits. Der Release-Build
++kompiliert diese C#/HLSL-Änderungen. Zusammen prüfen vier
++`BasicMaterialTransparencyTests` den MAT-/Laufzeit-Opacity-Pfad sowie zwei
++`DetailMapOpacityPassTests` den transparenten Pass bei 50 % und den opaken
++Pass bei 100 % für alle vier Detail-Map-Materialien; gemeinsam bestanden sie
++6/6. Eine sichtbare Ingame-Abnahme der sechs Spezialpfade bleibt offen.
+--- /dev/null
++++ b/docs/evidence/renderer/material-opacity-asset-scan-20261020.md
+@@ -0,0 +1,34 @@
++# Retail MAT opacity scan (2026-10-20)
++
++The current `Data/NAP/Material/` tree contains 110 MAT files and 1,024 parsed
++material definitions. The scan used the Client's `UtfLoader.LoadResourceFile`
++and `MaterialMap` parser path; all 110 files parsed without errors.
++
++| Check | Count |
++|---|---:|
++| Materials with an `Oc` field | 24 |
++| Materials with `Oc < 1` | 23 |
++| `DetailMap*` materials with `Oc` | 0 |
++| Partial-opacity materials whose type includes `Ot` | 23 |
++| Partial-opacity materials with embedded DXT1 diffuse data | 5 |
++
++The observed partial-opacity types are `DcDtOcOt`, `DcDtOcOtTwo`, and
++`DcDtBtOcOtTwo`. These five stock materials contain diffuse DXT1 payloads in
++their MAT-embedded TXM resources:
++
++| MAT file | Material | `Oc` | Diffuse texture |
++|---|---|---:|---|
++| `solar/solar_mat_dockable01.mat` | `glass` | 0.5 | `glass_generic.tga` |
++| `solar/solar_mat_dockable01.mat` | `planet_glass_window` | 0.5 | `pygar_metal_deck_g.tga` |
++| `solar/asteroid_dock.mat` | `metal_deck_g.tga` | 0.6 | `metal_deck_g.tga` |
++| `solar/solar_mat_mbase.mat` | `metal_deck_g.tga` | 0.6 | `metal_deck_g.tga` |
++| `solar/solar_mat_co_base.mat` | `metal_deck_g.tga` | 0.6 | `metal_deck_g.tga` |
++
++The legacy `GetDxt1()` heuristic suppresses alpha sorting for binary DXT1
++cutouts. Before patch 2492, the same heuristic kept these `Ot` materials in the
++opaque pass even though their fractional material opacity enables normal
++source-over blending. Patch 2492 now includes `Oc * OpacityMultiplier < 1` in
++`BasicMaterial.IsTransparent`, fixing the confirmed retail classification
++overlap. The four unit tests cover fractional opacity, opaque opacity, runtime
++opacity multipliers, and `Oc` without its enabling flag. A live scene proving
++the resulting draw order and visual appearance remains outstanding.
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 482 Client patches and two native patches. Each
++The active series contains 483 Client patches and two native patches. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -425,3 +425,4 @@
+ | 2489 | Add an SDL_GPU pixel probe for production PBR spotlights |
+ | 2490 | Align PBR uniform layout with compiled SPIR-V |
+ | 2491 | Record Hi02 live render after PBR uniform alignment |
++| 2492 | Verify PBR alpha blending and legacy material opacity routing |
+--- a/patches/series
++++ b/patches/series
+@@ -483,3 +483,4 @@
+ client 2489-pbr-spotlight-gpu-smoke.patch
+ client 2490-align-pbr-uniform-std140-layout.patch
+ client 2491-pbr-uniform-live-runtime-evidence.patch
++client 2492-pbr-transparent-alpha-and-material-opacity.patch
+--- /dev/null
++++ b/docs/evidence/renderer/pbr-transparent-alpha-gpu-smoke-20261020/README.md
+@@ -0,0 +1,16 @@
++# Production PBR alpha blending smoke (2026-10-20)
++
++The SDL_GPU diagnostic `lancer --sdl-gpu-pbr-transparency-smoke` draws two identical front-facing triangles with the embedded production Freelancer PBR shader. Both receive the same directional light fixture and white diffuse texture. The left triangle writes opacity 1; the right writes `PBRParameters.Oc = 0.5`. The target is cleared to opaque black and uses the renderer's normal RGB blend factors (`SRC_ALPHA`, `ONE_MINUS_SRC_ALPHA`) with standard source-over alpha factors.
++
++The readback passed on Mesa Vulkan / Intel Haswell:
++
++| Draw | Readback luma | Alpha after blend |
++|---|---:|---:|
++| Opaque, left | 241 | 255 |
++| 50% opacity, right | 120 | 255 |
++
++The comparison image shows the corresponding opacities against the same black clear:
++
++![Production PBR opaque and half-opacity triangles](transparency-comparison.png)
++
++The Release build succeeded (0 errors). Runtime log: [`runtime.log.txt`](runtime.log.txt). Mesa reports incomplete Haswell Vulkan support, so this is a functional shader/blend-path check on one driver. It uses synthetic geometry and does not establish correct transparency sorting, real Freelancer material flags, additive/translucent asset parity, or visual quality in a complete game scene.
+--- /dev/null
++++ b/docs/evidence/renderer/pbr-transparent-alpha-gpu-smoke-20261020/runtime.log.txt
+@@ -0,0 +1,25 @@
++Using production Freelancer FVF input declaration: stride=32, attributes=3.
++MESA-INTEL: warning: Haswell Vulkan support is incomplete
++MESA-INTEL: warning: Haswell Vulkan support is incomplete
++SDL_GPU driver: vulkan
++SDL_GPU shader formats: SDL_GPU_SHADERFORMAT_SPIRV
++SDL_GPU shader bindings: vertex samplers=0, fragment samplers=1, compacted slots=1
++SDL_GPU shader bindings: vertex samplers=0, fragment samplers=1, compacted slots=1
++Loaded production PBR variant 512: vertex UBOs=3, fragment UBOs=3, fragment samplers=3; fragment binding map=2:0->0,2:8->1,2:9->2,3:2->0,3:3->1,3:6->2.
++Loaded production PBR variant 768: vertex UBOs=3, fragment UBOs=4, fragment samplers=4; fragment binding map=2:0->0,2:6->1,2:8->2,2:9->3,3:2->0,3:3->1,3:6->2,3:7->3.
++Created SDL_GPU synthetic FVF3 vertex and 16-bit VMesh index buffers.
++Uploaded SDL_GPU BC5 normal texture.
++Uploaded SDL_GPU RGBA8 diffuse fixture for production PBR draws.
++Uploaded alternate BC5 texture for the depth rejection check.
++Created SDL_GPU normal-map sampler.
++Created SDL_GPU D32 depth target at 640x360.
++Created a sampleable D32 shadow map for the PBR shadow variant.
++Created sampleable RGBA16F scene target at 640x360.
++Executed the embedded Freelancer PBR shader in an SDL_GPU production-variant pass.
++Executed the embedded Freelancer PBR shader in an SDL_GPU production-variant pass.
++Executed the embedded Freelancer PBR shader in an SDL_GPU production-variant pass.
++Executed the embedded Freelancer PBR shader in an SDL_GPU production-variant pass.
++Executed the embedded Freelancer PBR shader in an SDL_GPU production-variant pass.
++Captured SDL_GPU framebuffer to /home/masterbee/Dokumente/GitHub/Lancer-Nexus/Client/docs/evidence/renderer/pbr-transparent-alpha-gpu-smoke-20261020/transparency-comparison.ppm.
++PBR transparency readback passed: opaque luma=241, 50%-opacity luma=120.
++Presented SDL_GPU synthetic with the synthetic BC5 normal map through an RGBA16F target and depth-tested pass at 640x360; center sample (0, 0, 0, 255), production PBR sample (127, 84, 30, 255), visible-shadow sample (0, 0, 0, 255) and shadowed PBR sample (0, 0, 0, 255) recorded; 16-bit indices, first-index offset and vertex offset were used.
+--- /dev/null
++++ b/src/LibreLancer.Tests/DetailMapOpacityPassTests.cs
+@@ -0,0 +1,33 @@
++using LibreLancer.Render;
++using LibreLancer.Render.Materials;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class DetailMapOpacityPassTests
++{
++    private static RenderMaterial[] CreateDetailMapMaterials(float opacity) =>
++    [
++        new DetailMapMaterial(null!, "diffuse", "detail") { OpacityMultiplier = opacity },
++        new Masked2DetailMapMaterial(null!, "diffuse", "detail0", "detail1")
++            { OpacityMultiplier = opacity },
++        new DetailMap2Dm1Msk2PassMaterial(null!, "diffuse", "detail")
++            { OpacityMultiplier = opacity },
++        new IllumDetailMapMaterial(null!, "diffuse", "detail0", "detail1")
++            { OpacityMultiplier = opacity }
++    ];
++
++    [Fact]
++    public void FractionalOpacityUsesTransparentPassForEveryDetailMapMaterial()
++    {
++        foreach (var material in CreateDetailMapMaterials(0.5f))
++            Assert.True(material.IsTransparent, material.GetType().Name);
++    }
++
++    [Fact]
++    public void FullOpacityKeepsEveryDetailMapMaterialInOpaquePass()
++    {
++        foreach (var material in CreateDetailMapMaterials(1.0f))
++            Assert.False(material.IsTransparent, material.GetType().Name);
++    }
++}
++
+diff --git a/docs/evidence/renderer/pbr-transparent-alpha-gpu-smoke-20261020/transparency-comparison.ppm b/docs/evidence/renderer/pbr-transparent-alpha-gpu-smoke-20261020/transparency-comparison.ppm
+new file mode 100644
+index 0000000000000000000000000000000000000000..42ac242d50de33b463ea33ca594f4cdabaf6cff9
+GIT binary patch
+literal 691215
+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
+z5FkK+009C72oNAZfB*pk1PBlyK!5-N0t5&UAV7cs0RjXF5FkK+009C72oNAZfB*pk
+z1PBlyK!5-N0t5&UAV7cs0RjXF5FkK+009C72oNAZfB*pk1PBlyK!5-N0t5&UAV7cs
+z0RjXF5FkK+009C72oNAZfB*pk1PBlyK!5-N0t5&UAV7cs0RjXF5FkK+009C72oNAZ
+zfB*pk1PBlyK!5-N0t5&UAV7cs0RjXF5FkK+009C72oNAZfB*pk1PBlyK!5-N0t5&U
+zAV7cs0RjXF5FkK+009C72oNAZfB*pk1PBlyK!5-N0t5&UAV7cs0RjXF5FkK+009C7
+z2oNAZfB*pk1PBlyK!5-N0t5&UAV7cs0RjXF5FkK+009C72oNAZfB*pk1PBlyK!5-N
+z0t5&UAV7cs0RjXF5FkK+009C72oNAZfB*pk1PBlyK!5-N0t5&UAV7cs0RjXF5FkK+
+z009C72oNAZfB*pk1PBlyK!5-N0t5&UAV7cs0RjXF5FkK+009C72oNAZfB*pk1PBly
+zK!5-N0t5&UAV7cs0RjXF5FkK+009C72oNAZfB*pk1PBlyK!5-N0t5&UAV7cs0RjXF
+z5FkK+009C72oNAZfB*pk1PBlyK!5-N0t5&UAV7cs0RjXF5FkK+009C72oNAZfB*pk
+z1PBlyK!5-N0t5&UAV7cs0RjXF5FkK+009C72oNAZfB*pk1PBlyK!5-N0t5&UAV7cs
+z0RjXF5FkK+009C72oNAZfB*pk1PBlyK!5-N0t5&UAV7cs0RjXF5FkK+009C72oNAZ
+zfB*pk1PBlyK!5-N0t5&UAV7cs0RjXF5FkK+009C72oNAZfB*pk1PBlyK!5-N0t5&U
+zAV7cs0RjXF5FkK+009C72oNAZfB*pk1PBlyK!5-N0t5&UAV7cs0RjXF5FkK+009C7
+z2oNAZfB*pk1PBlyK!5-N0t5&UAV7cs0RjXF5FkK+009C72oNAZfB*pk1PBlyK!5-N
+z0t5&UAV7cs0RjXF5FkK+009C72oNAZfB*pk1PBlyK!5-N0t5&UAV7cs0RjXF5FkK+
+z009C72oNAZfB*pk1PBlyK!5-N0t5&UAV7cs0RjXF5FkK+009C72oNAZfB*pk1PBly
+zK!5-N0t5&UAV7cs0RjXF5FkK+009C72oNAZfB*pk1PBlyK!5-N0t5&UAV7cs0RjXF
+z5FkK+009C72oNAZfB*pk1PBlyK!5-N0t5&UAV7cs0RjXF5FkK+009C72oNAZfB*pk
+l1PBlyK!5-N0t5&UAV7cs0RjXF5FkK+009C72%IZ{{|DnWFIE5m
+
+literal 0
+HcmV?d00001
+
+diff --git a/docs/evidence/renderer/pbr-transparent-alpha-gpu-smoke-20261020/transparency-comparison.png b/docs/evidence/renderer/pbr-transparent-alpha-gpu-smoke-20261020/transparency-comparison.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..84f6cc1db667a1f49093f16281b449ad63b6f52a
+GIT binary patch
+literal 3815
+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
+
+literal 0
+HcmV?d00001
+

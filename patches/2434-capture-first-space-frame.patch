@@ -1,0 +1,166 @@
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -747,6 +747,7 @@
+         {
+             Console.WriteLine("Usage: lancer [configuration-path] [--new-game | --load-save <savegame.fl>]");
+             Console.WriteLine("       Standalone test option: --invulnerable=on|off (local embedded server only)");
++            Console.WriteLine("       Screenshot option: --capture-space-frame=<output.png> (capture after 120 loaded, non-cutscene space frames)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-smoke (SDL3 GPU shader, pipeline, draw, and swapchain test)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-vmesh-smoke <cmp-path> [mat-path [surface-data-root [on|off]]] (draw a VMesh with MAT diffuse and optional NAP Surface maps)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-vmesh-nap-smoke <application-dir> <cmp-virtual-path> <mat-virtual-path|-> [part-name] [on|off] (draw one CMP part using embedded or external materials and active NAP Surface maps)");
+@@ -805,7 +806,7 @@
+             return;
+         }
+         if (!TryParseStartupArguments(args, out var startupArgs, out var startNewGame,
+-                out var loadSavePath, out var startInvulnerable, out var renderOverrides,
++                out var loadSavePath, out var startInvulnerable, out var screenshotOnSpaceFrame, out var renderOverrides,
+                 out var startupError))
+         {
+             Console.Error.WriteLine(startupError);
+@@ -871,7 +872,8 @@
+             {
+                 StartNewGameOnLaunch = startNewGame,
+                 LoadSaveOnLaunch = loadSavePath,
+-                StartInvulnerableOnLaunch = startInvulnerable
++                StartInvulnerableOnLaunch = startInvulnerable,
++                ScreenshotOnFirstSpaceFrame = screenshotOnSpaceFrame
+             };
+ #if DEBUG
+             game.DebugLoginEmail = email;
+@@ -892,12 +894,13 @@
+ 
+     private static bool TryParseStartupArguments(string[] args, out string[] remainingArgs,
+         out bool startNewGame, out string? loadSavePath, out bool startInvulnerable,
+-        out RenderStartupOverrides renderOverrides, out string? error)
++        out string? screenshotOnSpaceFrame, out RenderStartupOverrides renderOverrides, out string? error)
+     {
+         var remaining = new System.Collections.Generic.List<string>();
+         startNewGame = false;
+         loadSavePath = null;
+         startInvulnerable = false;
++        screenshotOnSpaceFrame = null;
+         bool? invulnerable = null;
+         renderOverrides = new RenderStartupOverrides();
+         error = null;
+@@ -947,6 +950,33 @@
+                 else
+                 {
+                     error = "--invulnerable accepts only 'on' or 'off'.";
++                    remainingArgs = Array.Empty<string>();
++                    return false;
++                }
++            }
++            else if (arg.StartsWith("--capture-space-frame=", StringComparison.Ordinal))
++            {
++                if (screenshotOnSpaceFrame is not null)
++                {
++                    error = "--capture-space-frame may be specified only once.";
++                    remainingArgs = Array.Empty<string>();
++                    return false;
++                }
++                var path = arg["--capture-space-frame=".Length..];
++                if (string.IsNullOrWhiteSpace(path) ||
++                    !Path.GetExtension(path).Equals(".png", StringComparison.OrdinalIgnoreCase))
++                {
++                    error = "--capture-space-frame requires a PNG output path.";
++                    remainingArgs = Array.Empty<string>();
++                    return false;
++                }
++                try
++                {
++                    screenshotOnSpaceFrame = Path.GetFullPath(path);
++                }
++                catch (Exception e) when (e is ArgumentException or NotSupportedException or PathTooLongException)
++                {
++                    error = "--capture-space-frame requires a valid output path.";
+                     remainingArgs = Array.Empty<string>();
+                     return false;
+                 }
+--- a/src/LibreLancer/FreelancerGame.cs
++++ b/src/LibreLancer/FreelancerGame.cs
+@@ -52,6 +52,9 @@
+         public bool StartNewGameOnLaunch { get; set; }
+         public string? LoadSaveOnLaunch { get; set; }
+         public bool StartInvulnerableOnLaunch { get; set; }
++        public string? ScreenshotOnFirstSpaceFrame { get; set; }
++        private bool screenshotOnFirstSpaceFrameQueued;
++        private int screenshotSpaceFrameDelay;
+         public long DroppedSimulationTicks { get; private set; }
+ 
+         public void RecordDroppedSimulationTicks(long count)
+@@ -230,9 +232,27 @@
+ 				fps_updatetimer = FPS_INTERVAL;
+ 			}
+ 			RenderContext.ClearAll ();
+-			if (currentState != null)
+-				currentState.Draw (elapsed);
++			var drawnState = currentState;
++			if (drawnState != null)
++				drawnState.Draw (elapsed);
+             Typewriter.Render();
++            if (!screenshotOnFirstSpaceFrameQueued && ScreenshotOnFirstSpaceFrame is { } screenshotPath &&
++                drawnState is SpaceGameplay { IsReadyForSpaceFrameCapture: true } && currentState == drawnState &&
++                ++screenshotSpaceFrameDelay >= 120)
++            {
++                screenshotOnFirstSpaceFrameQueued = true;
++                try
++                {
++                    var directory = Path.GetDirectoryName(screenshotPath);
++                    if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
++                    FLLog.Info("Screenshot", $"Capturing first space-game frame to {screenshotPath}");
++                    Screenshot(screenshotPath);
++                }
++                catch (Exception e)
++                {
++                    FLLog.Error("Screenshot", $"Could not prepare first space-game frame capture: {e.Message}");
++                }
++            }
+ 			drawCallsPerFrame = VertexBuffer.TotalDrawcalls;
+ 			VertexBuffer.TotalDrawcalls = 0;
+         }
+@@ -244,6 +263,7 @@
+                 return;
+             }
+ 
++			FLLog.Info("Screenshot", $"Read back {width}x{height} frame to {filename}");
+ 			Screenshots.Save(filename, width, height, data);
+ 		}
+     }
+--- a/src/LibreLancer/GameStates/SpaceGameplay.cs
++++ b/src/LibreLancer/GameStates/SpaceGameplay.cs
+@@ -74,6 +74,7 @@
+         private CPlayerCargoComponent cargo = null!;
+         private bool loading = true;
+         private LoadingScreen? loader;
++        public bool IsReadyForSpaceFrameCapture => !loading && player != null && Thn is not { Running: true };
+         private readonly List<ParticleEffectRenderer> transientShipEffects = [];
+         private SoundInstance? jumpTunnelSound;
+         private double jumpTunnelSoundRemaining;
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -629,3 +629,18 @@
+ visuelle Qualität der Effekte. Ein späterer Frame-Capture zeigt Station, Schiffe,
+ Nebel, Sterne und Explosion in der M01A-Intro-Szene; er ist kein Ein/Aus-A/B und
+ belegt keine FPS. NAP-Manifest, Paketverifikation, Bild und Laufzeitgrenzen stehen unter [`Vollständiger NAP-only-Renderer-Lauf`](evidence/renderer/nap-full-runtime-20261019/README.md).
++
++Ein zusätzlicher NAP-only-Lauf mit HDR, Normalmaps und Surface-PBR-Maps aktiv
++und Bloom, SSAO sowie Schatten deaktiviert startete am 19.10. auf Mesa OpenGL
++4.6 / Intel HD 4600 über den nativen Wayland-Treiber und betrat Hi02. Der
++Test-Save steht in `Data/NAP/.runtime-test-stage/illum-detail-hdr-20261019/`;
++sein `planet-hdr-profile.nap` (Inhaltsversion 4) wurde zusammen mit dem
++aktiven Manifest geprüft. Damit ist der zuvor gemeldete
++`asteroid-profile`-Versionsfehler für den aktuellen Manifeststand beseitigt.
++Der Xwayland-Displaypfad hing bei einfachen X11-Abfragen; Wayland umging das
++Problem. Der Capture wartet nach dem Laden und Ende einer THN-Cutscene weitere
++120 gerenderte Space-Frames, da auch der erste Spawn-Frame schwarz war. Beide
++HDR-an/aus-Läufe zeichneten Hi02 erfolgreich auf. Die Bilder [HDR an](../../Data/NAP/.runtime-test-stage/illum-detail-hdr-20261019/logs/hi02-hdr-on.png)
++und [HDR aus](../../Data/NAP/.runtime-test-stage/illum-detail-hdr-20261019/logs/hi02-hdr-off.png)
++sind wegen unterschiedlicher Simulationszustände kein valider A/B-Vergleich
++und zeigen nicht Cella Dor. Die Abnahme des IllumDetail-Materials steht aus.
+--- a/patches/series
++++ b/patches/series
+@@ -425,3 +425,4 @@
+ client 2431-full-render-options-nap-profile-evidence.patch
+ client 2432-armed-render-profile-capture.patch
+ client 2433-fix-illum-detail-hdr-double-decode.patch
++client 2434-capture-first-space-frame.patch

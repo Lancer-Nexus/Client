@@ -1,0 +1,69 @@
+diff --git a/src/LibreLancer.Tests/SurfaceMapProfileTests.cs b/src/LibreLancer.Tests/SurfaceMapProfileTests.cs
+--- a/src/LibreLancer.Tests/SurfaceMapProfileTests.cs
++++ b/src/LibreLancer.Tests/SurfaceMapProfileTests.cs
+@@ -2,6 +2,7 @@
+ using System.Collections.Generic;
+ using System.IO;
+ using System.Linq;
++using System.Reflection;
+ using System.Text;
+ using LibreLancer.Data.Ini;
+ using LibreLancer.Data.Schema;
+@@ -115,6 +116,49 @@
+     }
+ 
+     [Fact]
++    public void FreelancerIniRendererOptionsApplyEveryRendererEntry()
++    {
++        var defaults = new GameSettings();
++        var ini = new StringBuilder("[LancerNexusRender]\n");
++        var rendererFields = typeof(GameSettings).GetFields(BindingFlags.Instance | BindingFlags.Public)
++            .SelectMany(field => field.GetCustomAttributes<EntryAttribute>()
++                .Where(attribute => IsRendererOption(attribute.Name))
++                .Select(attribute => (attribute.Name, Field: field)))
++            .ToArray();
++
++        foreach (var (name, field) in rendererFields)
++        {
++            var value = field.FieldType == typeof(bool)
++                ? (!(bool)field.GetValue(defaults)!).ToString().ToLowerInvariant()
++                : field.FieldType == typeof(int)
++                    ? ((int)field.GetValue(defaults)! == 32 ? 8 : (int)field.GetValue(defaults)! + 1).ToString()
++                    : field.FieldType == typeof(float)
++                        ? ((float)field.GetValue(defaults)! + 0.25f).ToString(System.Globalization.CultureInfo.InvariantCulture)
++                        : "always";
++            ini.Append(name).Append(" = ").Append(value).Append('\n');
++        }
++
++        ini.Append("surface_profile = full\n");
++        using var stream = new MemoryStream(Encoding.UTF8.GetBytes(ini.ToString()));
++        var section = Assert.Single(IniFile.ParseFile("freelancer.ini", stream));
++        Assert.True(GameSettings.TryParse(section, out var expected));
++        var actual = new GameSettings();
++
++        actual.ApplyFreelancerRendererOptions(section);
++
++        foreach (var (_, field) in rendererFields)
++            Assert.Equal(field.GetValue(expected), field.GetValue(actual));
++        Assert.Equal(expected!.SurfaceProfile, actual.SurfaceProfile);
++    }
++
++    private static bool IsRendererOption(string name) =>
++        name.StartsWith("render_", StringComparison.OrdinalIgnoreCase) ||
++        name.StartsWith("surface_", StringComparison.OrdinalIgnoreCase) ||
++        name.StartsWith("pbr_", StringComparison.OrdinalIgnoreCase) ||
++        name is "anisotropy" or "antialias" or "lod_multiplier" or "per_pixel_lighting" or
++            "dynamic_lighting" or "dynamic_light_budget" or "transient_effect_light_budget";
++
++    [Fact]
+     public void FreelancerIniLoadsGlobalRendererOptionsWithLocalOverrides()
+     {
+         var directory = Path.Combine(Path.GetTempPath(), "lancer-render-options-" + Guid.NewGuid().ToString("N"));
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -488,3 +488,4 @@
+ client 2494-retail-weapon-muzzle-light-asset-audit.patch
+ client 2495-weapon-muzzle-light-budget-diagnostics.patch
+ client 2496-freelancer-ini-renderer-options.patch
++client 2497-renderer-ini-complete-option-coverage.patch

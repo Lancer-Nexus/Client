@@ -1,0 +1,317 @@
+--- a/src/LibreLancer/Render/Materials/BasicMaterial.cs
++++ b/src/LibreLancer/Render/Materials/BasicMaterial.cs
+@@ -104,6 +104,11 @@
+         public bool SecondaryBtEnabled;
+         public string? SecondaryBtSampler;
+         public SamplerFlags SecondaryBtFlags;
++        public bool SecondaryBtMaskSelectEnabled;
++        public bool IllumDetailMapEnabled;
++        public bool ForcePbr;
++        public bool SuppressDxt1AlphaForPbr;
++        public bool PbrVertexColorEnabled = true;
+         public bool DetailMapTilingEnabled;
+         public float DetailMapTileRate = 1f;
+         public float DetailMapSecondaryTileRate = 1f;
+@@ -324,13 +329,13 @@
+                 TryAcquireSurfaceNormal(vertextype, rstate);
+                 TryAcquireSurfacePbrMaps(vertextype, lights.Enabled);
+             }
+-            var pbr = (!string.IsNullOrWhiteSpace(RtSampler) ||
++            var pbr = ForcePbr || (!string.IsNullOrWhiteSpace(RtSampler) ||
+                        !string.IsNullOrWhiteSpace(MtSampler) || Metallic != null || Roughness != null ||
+                        (Library?.SurfacePbrMapsEnabled == true &&
+                         (SurfaceBinding?.RoughnessMap != null || SurfaceBinding?.MetallicMap != null ||
+                          SurfaceBinding?.Roughness != null || SurfaceBinding?.Metallic != null))) &&
+                       lights.Enabled;
+-            var dxt1 = GetDxt1();
++            var dxt1 = !SuppressDxt1AlphaForPbr && GetDxt1();
+ 
+             bool envMapping = false;
+             bool pbrEnvMapping = false;
+@@ -462,11 +467,14 @@
+                       EnvMapStrength = envMapStrength,
+                       EnvPrefiltered = pbrEnvironmentPrefiltered ? 1.0f : 0.0f,
+                       EnvDiffuseEnabled = pbrDiffuseIrradiance != null ? 1.0f : 0.0f,
+-                      // Bit 0 selects diffuse IBL; bit 1 enables Bt; bit 3 enables alpha-selected B2.
+-                      FeatureFlags = (Library?.PbrDiffuseIblEnabled == true ? 1.0f : 0.0f) +
+-                                     (BtEnabled ? 2.0f : 0.0f) +
+-                                     (DetailMapTilingEnabled && BtEnabled ? 4.0f : 0.0f) +
+-                                     (SecondaryBtEnabled && BtEnabled ? 8.0f : 0.0f),
++                      // Bit 0 selects diffuse IBL; bit 1 enables Bt; bit 2 enables detail UV settings;
++                      // bit 3 selects B2 by diffuse alpha; bit 4 blends B2 as the Illum detail layer.
++                      FeatureFlags = (Library?.PbrDiffuseIblEnabled == true ? 1u : 0u) |
++                                     (BtEnabled ? 2u : 0u) |
++                                     (DetailMapTilingEnabled && BtEnabled ? 4u : 0u) |
++                                     (SecondaryBtMaskSelectEnabled && SecondaryBtEnabled && BtEnabled ? 8u : 0u) |
++                                     (IllumDetailMapEnabled && SecondaryBtEnabled && BtEnabled ? 16u : 0u) |
++                                     (PbrVertexColorEnabled ? 32u : 0u),
+                       Padding = new Vector3(AlphaTest || dxt1 ? 1.0f : 0.0f,
+                           pbrEnvironment?.Format == SurfaceFormat.HalfVector4 ? 1.0f : 0.0f,
+                           pbrDiffuseIrradiance?.Format == SurfaceFormat.HalfVector4 ? 1.0f : 0.0f),
+--- a/src/LibreLancer/Render/Materials/Masked2DetailMapMaterial.cs
++++ b/src/LibreLancer/Render/Materials/Masked2DetailMapMaterial.cs
+@@ -131,6 +131,7 @@
+ 			pbr.SecondaryBtEnabled = true;
+ 			pbr.SecondaryBtSampler = Dm1Sampler;
+ 			pbr.SecondaryBtFlags = Dm1Flags & ~SamplerFlags.SecondUV;
++			pbr.SecondaryBtMaskSelectEnabled = true;
+ 			pbr.DetailMapTilingEnabled = true;
+ 			pbr.DetailMapTileRate = TileRate0;
+ 			pbr.DetailMapSecondaryTileRate = TileRate1;
+--- a/src/LibreLancer/Render/Materials/IllumDetailMapMaterial.cs
++++ b/src/LibreLancer/Render/Materials/IllumDetailMapMaterial.cs
+@@ -4,6 +4,7 @@
+ 
+ using System.Numerics;
+ using System.Runtime.InteropServices;
++using System;
+ using LibreLancer.Graphics;
+ using LibreLancer.Graphics.Vertices;
+ using LibreLancer.Resources;
+@@ -48,6 +49,17 @@
+ 		public SamplerFlags Dm0Flags;
+ 		public string Dm1Sampler;
+ 		public SamplerFlags Dm1Flags;
++        public string? NmSampler;
++        public SamplerFlags NmFlags;
++        public string? MtSampler;
++        public SamplerFlags MtFlags;
++        public string? RtSampler;
++        public SamplerFlags RtFlags;
++        public float? Metallic;
++        public float? Roughness;
++        public SurfaceMaterialBinding? SurfaceBinding;
++        private BasicMaterial? pbrMaterial;
++        private bool pbrDrawActive;
+ 
+         public IllumDetailMapMaterial(ResourceManager library, string dtSampler, string dm0Sampler, string dm1Sampler) :
+             base(library)
+@@ -59,6 +71,12 @@
+ 
+ 		public override void Use(RenderContext rstate, IVertexType vertextype, ref Lighting lights, int userData)
+ 		{
++			pbrDrawActive = false;
++			if (NeedsPbr(lights.Enabled))
++			{
++				UsePbr(rstate, vertextype, ref lights, userData);
++				return;
++			}
+             rstate.DepthEnabled = true;
+             rstate.BlendMode = BlendMode.Opaque;
+             var sh = AllShaders.IllumDetailMapMaterial.Get(VertexLighting ? 1U : 0U);
+@@ -73,6 +91,75 @@
+             rstate.Shader = sh;
+         }
+ 
++		private bool NeedsPbr(bool lightingEnabled)
++		{
++			if (!lightingEnabled)
++				return false;
++			if (!string.IsNullOrWhiteSpace(NmSampler) || !string.IsNullOrWhiteSpace(MtSampler) ||
++			    !string.IsNullOrWhiteSpace(RtSampler) || Metallic.HasValue || Roughness.HasValue)
++				return true;
++			var binding = SurfaceBinding;
++			return (Library?.SurfaceNormalMapsEnabled == true && binding?.Normal != null) ||
++			       (Library?.SurfacePbrMapsEnabled == true &&
++			        (binding?.RoughnessMap != null || binding?.MetallicMap != null ||
++			         binding?.Roughness != null || binding?.Metallic != null));
++		}
++
++		private void UsePbr(RenderContext rstate, IVertexType vertexType, ref Lighting lights, int userData)
++		{
++			var pbr = pbrMaterial ??= new BasicMaterial("IllumDetailMapMaterial", Library!);
++			pbr.Library = Library;
++			pbr.SurfaceBinding = SurfaceBinding;
++			pbr.ForcePbr = true;
++			pbr.SuppressDxt1AlphaForPbr = true;
++			pbr.PbrVertexColorEnabled = false;
++			pbr.Dc = Dc;
++			pbr.Oc = 1f;
++			pbr.PbrAmbientScale = new Vector3(Ac.R, Ac.G, Ac.B);
++			pbr.Ec = Color4.Black;
++			pbr.EtEnabled = false;
++			pbr.DtSampler = DtSampler;
++			pbr.DtFlags = DtFlags & ~SamplerFlags.SecondUV;
++			pbr.NmSampler = NmSampler ?? string.Empty;
++			pbr.NmFlags = NmFlags;
++			pbr.MtSampler = MtSampler ?? string.Empty;
++			pbr.MtFlags = MtFlags;
++			pbr.RtSampler = RtSampler ?? string.Empty;
++			pbr.RtFlags = RtFlags;
++			pbr.Metallic = Metallic;
++			pbr.Roughness = Roughness;
++			pbr.BtEnabled = true;
++			pbr.BtSampler = Dm0Sampler;
++			pbr.BtFlags = Dm0Flags & ~SamplerFlags.SecondUV;
++			pbr.SecondaryBtEnabled = true;
++			pbr.SecondaryBtSampler = Dm1Sampler;
++			pbr.SecondaryBtFlags = Dm1Flags & ~SamplerFlags.SecondUV;
++			pbr.SecondaryBtMaskSelectEnabled = false;
++			pbr.IllumDetailMapEnabled = true;
++			pbr.DetailMapTilingEnabled = true;
++			pbr.DetailMapTileRate = TileRate0;
++			pbr.DetailMapSecondaryTileRate = TileRate1;
++			pbr.DetailMapFlipU = FlipU;
++			pbr.DetailMapFlipV = FlipV;
++			pbr.EnvMap = EnvMap;
++			pbr.MaterialAnim = MaterialAnim;
++			pbr.World = World;
++			pbr.Bones = Bones;
++			pbr.BufferOffset = BufferOffset;
++			pbr.DepthOnlyPass = DepthOnlyPass;
++			pbr.OpacityMultiplier = OpacityMultiplier;
++			pbr.DoubleSided = DoubleSided;
++			pbr.Use(rstate, vertexType, ref lights, userData);
++			pbrDrawActive = true;
++		}
++
++		public override void AfterDraw(RenderContext rstate)
++		{
++			if (!pbrDrawActive) return;
++			pbrDrawActive = false;
++			pbrMaterial!.AfterDraw(rstate);
++		}
++
+ 		public override bool IsTransparent
+ 		{
+ 			get
+--- a/src/LibreLancer/Shaders/PBR.frag.hlsl
++++ b/src/LibreLancer/Shaders/PBR.frag.hlsl
+@@ -81,6 +81,11 @@
+     float4 TexCoordSelectors2;
+ };
+ 
++bool HasFeature(uint feature)
++{
++    return (((uint)FeatureFlags) & feature) != 0;
++}
++
+ float2 GetTexCoord(int index, Input input)
+ {
+     float selector = index > 3
+@@ -222,34 +227,45 @@
+     float3 ambientScale = SRGBToLinearOutput(float4(AmbientScale, 1.0)).rgb;
+ 
+     float2 baseUv = GetTexCoord(0, input);
+-    if (FeatureFlags >= 4.0)
++    if (HasFeature(4))
+     {
+         if (DetailMapParameters.y > 0.5) baseUv.x = 1.0 - baseUv.x;
+         if (DetailMapParameters.z > 0.5) baseUv.y = 1.0 - baseUv.y;
+     }
+     float4 baseTexture = SRGBToLinearOutput(DtTexture.Sample(DtSampler, baseUv));
+-    if (FeatureFlags >= 2.0)
++    float4 illuminationTexture = baseTexture;
++    float4 illuminationSample = 0;
++    if (HasFeature(2))
+     {
+         float2 detailUv = GetTexCoord(5, input);
+         float tileRate = 1.0;
+-        if (FeatureFlags >= 4.0)
++        if (HasFeature(4))
+         {
+             if (DetailMapParameters.y > 0.5) detailUv.x = 1.0 - detailUv.x;
+             if (DetailMapParameters.z > 0.5) detailUv.y = 1.0 - detailUv.y;
+             tileRate = DetailMapParameters.x;
+         }
+         float4 detailSample = BtTexture.Sample(BtSampler, detailUv * tileRate);
+-        if (FeatureFlags >= 8.0)
++        if (HasFeature(8))
+         {
+             if (baseTexture.a >= 0.99)
+                 detailSample = B2Texture.Sample(B2Sampler, detailUv * DetailMapParameters.w);
+         }
+         float3 detail = SRGBToLinearOutput(detailSample).rgb;
+         baseTexture.rgb = Mod2x(baseTexture.rgb, detail);
++
++        if (HasFeature(16))
++        {
++            float4 illuminationDetail = SRGBToLinearOutput(
++                B2Texture.Sample(B2Sampler, detailUv * DetailMapParameters.w));
++            illuminationSample = Mod2x(illuminationDetail, illuminationTexture);
++        }
+     }
+     if (PBRPadding.x > 0.5 && baseTexture.a < 0.5)
+         discard;
+-    float4 vertexColor = SRGBToLinearOutput(input.color);
++    float4 vertexColor = HasFeature(32)
++        ? SRGBToLinearOutput(input.color)
++        : float4(1.0, 1.0, 1.0, 1.0);
+     float4 baseColor = baseTexture * SRGBToLinearOutput(Dc) * vertexColor;
+ 
+     float3 f0 = 0.04;
+@@ -365,7 +381,7 @@
+     color += envColor * (specularColor * envBrdf.x + envBrdf.y) * EnvMapStrength;
+     // Surface metadata can provide cosine-convolved irradiance (stored as E/pi).
+     // Older catalogs retain the low-frequency final-mip fallback.
+-    if (FeatureFlags == 1.0 || FeatureFlags == 3.0)
++    if (HasFeature(1))
+     {
+         float4 diffuseEnvironmentSample = EnvDiffuseEnabled > 0.5
+             ? EnvDiffuseTexture.SampleLevel(EnvSampler, n, 0.0)
+@@ -387,7 +403,10 @@
+     color += emissiveColor * emissiveTexture;
+     #endif
+ 
+-    float outputAlpha = FeatureFlags >= 8.0 ? 1.0 : baseColor.a;
++    if (HasFeature(16))
++        color = lerp(color, illuminationSample.rgb, illuminationSample.a);
++
++    float outputAlpha = HasFeature(8) || HasFeature(16) ? 1.0 : baseColor.a;
+     return ToDisplayOutput(float4(color, outputAlpha * Oc));
+ }
+ #endif
+--- a/src/LibreLancer/Utf/Mat/Material.cs
++++ b/src/LibreLancer/Utf/Mat/Material.cs
+@@ -501,6 +501,15 @@
+                             DtFlags = (SamplerFlags) DtFlags,
+                             Dm0Flags = (SamplerFlags) Dm0Flags,
+                             Dm1Flags = (SamplerFlags) Dm1Flags,
++                            NmSampler = NmName,
++                            NmFlags = (SamplerFlags) NmFlags,
++                            MtSampler = MtName,
++                            MtFlags = (SamplerFlags) MtFlags,
++                            RtSampler = RtName,
++                            RtFlags = (SamplerFlags) RtFlags,
++                            Metallic = MFactor,
++                            Roughness = RFactor,
++                            SurfaceBinding = SurfaceMaterialResolver.Resolve(this, res.SurfaceMaps),
+                             Library = res
+                         };
+ 
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -698,3 +698,19 @@
+ bestanden (0 Fehler, 168 Warnungen); der Produktionspipeline-Audit erstellte
+ und gab 3495 Pipelines frei. Visuelle Laufzeit- und Materialabnahme bleibt
+ offen, da der aktuelle Displaystart vor OpenGL-Initialisierung hängen bleibt.
++
++## IllumDetailMap-PBR-Abdeckung (2026-10-19)
++
++`IllumDetailMapMaterial` führt MAT-Normal-, Metallic- und Roughness-Maps,
++Faktoren sowie Surface-Bindings an den PBR-Pfad weiter. Die erste Detailkarte
++moduliert weiterhin die diffuse Textur. Die zweite wird wie im Legacy-Shader
++mit der unveränderten Diffuse-Textur kombiniert und ihr Alpha mischt das
++unbeleuchtete Illum-Ergebnis über das PBR-Lichtresultat. UV0, beide Kachelraten,
++UV-Spiegelung und `Ac` bleiben erhalten. Ohne PBR-Daten läuft der Legacy-Shader.
++Das Diffuse-Alpha bleibt hier eine Glow-Mischmaske; die automatische DXT1-
++Schnittmaske und die sonst übliche PBR-Vertexfarbe sind für diesen PBR-Pfad
++deaktiviert, wie im Legacy-Illum-Shader.
++Die gemeinsamen PBR-Featureflags werden als Bitmaske dekodiert, damit diffuse
++IBL bei aktivierten Detail-Features eingeschaltet bleibt. Der Release-Build
++bestätigt die Shader- und C#-Kompilierung; eine visuelle Abnahme der
++Illum-Mischung steht noch aus.
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -379,3 +379,4 @@
+ | 2447 | Record the offscreen SDL_GPU production pipeline audit |
+ | 2448 | Route DetailMap materials with metallic/roughness data through the PBR shader while preserving legacy fallback |
+ | 2449 | Route Masked2 detail maps through PBR while preserving alpha selection, tile rates and the second sampler |
++| 2450 | Route IllumDetailMap through PBR while preserving its alpha-weighted illumination layer and feature flags |
+--- a/patches/series
++++ b/patches/series
+@@ -441,3 +441,4 @@
+ client 2447-offscreen-sdl-gpu-pipeline-audit-evidence.patch
+ client 2448-detailmap-surface-pbr.patch
+ client 2449-masked2-detailmap-pbr.patch
++client 2450-illum-detailmap-pbr.patch

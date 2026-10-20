@@ -1,0 +1,107 @@
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -810,26 +810,43 @@
+                         starsAndNebulaPassCallback, SystemRenderResource.None, frameSetup);
+                 }
+ 
+-                framePassGraph.AddAction(opaqueHook, opaqueHookCallback, priority: 11,
+-                    SystemRenderPassGraph.Name(drawStars ? SystemRenderPass.StarsAndNebula : SystemRenderPass.Opaque));
++                framePassGraph.AddResourceAction(opaqueHook, opaqueHookCallback,
++                    reads: SystemRenderResource.SceneColor | SystemRenderResource.SceneDepth,
++                    writes: SystemRenderResource.SceneColor | SystemRenderResource.SceneDepth,
++                    optionalReads: SystemRenderResource.SceneDepth,
++                    optionalWrites: SystemRenderResource.SceneDepth,
++                    priority: 11);
+                 var softParticleReads = Settings.RenderSoftParticles && Settings.RenderParticleEffects &&
+                                         sampleableSceneDepth != null
+                     ? SystemRenderResource.SampleableSceneDepth
+                     : SystemRenderResource.None;
+                 framePassGraph.AddPass(SystemRenderPass.Transparent, transparentPassCallback,
+-                    softParticleReads, opaqueHook);
++                    softParticleReads);
+ 
+                 var physicsHook = "Physics hook";
+                 var debugOverlay = "Debug overlay";
+-                framePassGraph.AddAction(physicsHook, physicsHookCallback, priority: 13,
+-                    SystemRenderPassGraph.Name(SystemRenderPass.Transparent));
+-
+-                framePassGraph.AddAction(debugOverlay, debugOverlayCallback, priority: 14, physicsHook);
++                framePassGraph.AddResourceAction(physicsHook, physicsHookCallback,
++                    reads: SystemRenderResource.SceneColor | SystemRenderResource.SceneDepth,
++                    writes: SystemRenderResource.SceneColor,
++                    optionalReads: SystemRenderResource.SceneDepth,
++                    optionalWrites: SystemRenderResource.None,
++                    priority: 13);
++
++                framePassGraph.AddResourceAction(debugOverlay, debugOverlayCallback,
++                    reads: SystemRenderResource.SceneColor | SystemRenderResource.SceneDepth,
++                    writes: SystemRenderResource.SceneColor,
++                    optionalReads: SystemRenderResource.SceneDepth,
++                    optionalWrites: SystemRenderResource.None,
++                    priority: 14);
+ 
+                 if (msaa is { } antialiasTarget)
+                 {
+-                    framePassGraph.AddAction("AA resolve", antialiasResolveCallback,
+-                        priority: 15, debugOverlay);
++                    framePassGraph.AddResourceAction("AA resolve", antialiasResolveCallback,
++                        reads: SystemRenderResource.SceneColor,
++                        writes: SystemRenderResource.PresentationColor,
++                        optionalReads: SystemRenderResource.None,
++                        optionalWrites: SystemRenderResource.None,
++                        priority: 15);
+                 }
+ 
+                 framePassGraph.Execute();
+--- a/src/LibreLancer.Tests/SystemRenderPassGraphTests.cs
++++ b/src/LibreLancer.Tests/SystemRenderPassGraphTests.cs
+@@ -18,6 +18,26 @@
+         graph.Execute();
+ 
+         Assert.Equal(2, executions);
++    }
++
++    [Fact]
++    public void ResourceReadRunsBeforeNextWriterEvenWhenItsPriorityIsLater()
++    {
++        var graph = new SystemRenderPassGraph();
++        var executionOrder = new System.Collections.Generic.List<string>();
++
++        graph.AddPass(SystemRenderPass.FrameClear, () => executionOrder.Add("clear"));
++        graph.AddResourceAction("Resolve", () => executionOrder.Add("resolve"),
++            reads: SystemRenderResource.SceneColor,
++            writes: SystemRenderResource.PresentationColor,
++            optionalReads: SystemRenderResource.None,
++            optionalWrites: SystemRenderResource.None,
++            priority: 100);
++        graph.AddPass(SystemRenderPass.Opaque, () => executionOrder.Add("opaque"));
++
++        graph.Execute();
++
++        Assert.Equal(new[] { "clear", "resolve", "opaque" }, executionOrder);
+     }
+ }
+ 
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -244,7 +244,12 @@
+    führen ihre Pässe bereits über den Graph-Scheduler aus und validieren
+    Attachment-Verträge. Die Attachment-Formate in den Contracts tragen nun keine
+    GL-Backendnamen mehr; die konkreten Speicherformate werden weiterhin vom
+-   Backend angefordert. Der aktuelle Systemrenderer enthält keine direkten
++   Backend angefordert. Editor-Overlay, Physik-Debuglinien und AA-Auflösung
++   deklarieren ihre Farb-/Tiefenzugriffe jetzt im Graph; dessen Ressourcen-
++   abhängigkeiten ordnen diese Actions auch ohne Namensverkettung ein. Ein
++   Graph-Test sichert ab, dass ein Lesezugriff vor dem nächsten Writer bleibt,
++   selbst wenn dessen Priorität den Writer sonst vorziehen würde. Der aktuelle
++   Systemrenderer enthält keine direkten
+    GL-Aufrufe; seine Pass-Callbacks setzen jedoch sofort Zustand und Ressourcen
+    über den konkreten `RenderContext`, dessen Laufzeitfabrik weiterhin das
+    OpenGL-Backend erzeugt. Der Pass-Graph plant und validiert Callbacks, zeichnet
+--- a/patches/series
++++ b/patches/series
+@@ -431,3 +431,4 @@
+ client 2437-profile-transparent-command-breakdown.patch
+ client 2438-cache-transparent-sort-comparer.patch
+ client 2439-fix-hdr-nap-profile-version-in-roadmap.patch
++client 2440-declare-system-render-hook-resources.patch

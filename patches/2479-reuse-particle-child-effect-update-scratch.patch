@@ -1,0 +1,106 @@
+diff --git a/src/LibreLancer/Fx/ParticleEffectInstance.cs b/src/LibreLancer/Fx/ParticleEffectInstance.cs
+--- a/src/LibreLancer/Fx/ParticleEffectInstance.cs
++++ b/src/LibreLancer/Fx/ParticleEffectInstance.cs
+@@ -51,6 +51,8 @@
+ 
+         public ParticleBuffer Buffer;
+         private readonly Dictionary<(int Appearance, int Particle), ParticleEffectInstance> childEffects = [];
++        private HashSet<int>? activeChildParticleScratch;
++        private List<(int Appearance, int Particle)>? staleChildEffectScratch;
+         private int nextParticleId;
+ 
+         public Matrix4x4[] NodeTransforms;
+@@ -126,10 +128,27 @@
+             [MaybeNullWhen(false)] out ParticleEffectInstance effect) =>
+             childEffects.TryGetValue((appearanceIndex, particleId), out effect);
+ 
++        internal HashSet<int> BeginChildParticleUpdate()
++        {
++            var activeParticles = activeChildParticleScratch ??= [];
++            activeParticles.Clear();
++            return activeParticles;
++        }
++
+         public void RemoveUnusedChildEffects(int appearanceIndex, HashSet<int> activeParticles)
+         {
+-            foreach (var key in childEffects.Keys.Where(x =>
+-                         x.Appearance == appearanceIndex && !activeParticles.Contains(x.Particle)).ToArray())
++            if (childEffects.Count == 0) return;
++
++            var stale = staleChildEffectScratch ??= [];
++            stale.Clear();
++            foreach (var pair in childEffects)
++            {
++                if (pair.Key.Appearance == appearanceIndex &&
++                    !activeParticles.Contains(pair.Key.Particle))
++                    stale.Add(pair.Key);
++            }
++
++            foreach (var key in stale)
+                 childEffects.Remove(key);
+         }
+ 
+diff --git a/src/LibreLancer/Fx/Appearances/FxParticleAppearance.cs b/src/LibreLancer/Fx/Appearances/FxParticleAppearance.cs
+--- a/src/LibreLancer/Fx/Appearances/FxParticleAppearance.cs
++++ b/src/LibreLancer/Fx/Appearances/FxParticleAppearance.cs
+@@ -35,7 +35,7 @@
+         {
+             if (LifeEffect == null) return;
+             var attachment = GetAttachment(node, transform);
+-            var activeParticles = new HashSet<int>();
++            var activeParticles = instance.BeginChildParticleUpdate();
+             var count = instance.Buffer.GetCount(nodeIdx);
+             for (var i = 0; i < count; i++)
+             {
+diff --git a/src/LibreLancer.Tests/FxParticleRuntimeTests.cs b/src/LibreLancer.Tests/FxParticleRuntimeTests.cs
+--- a/src/LibreLancer.Tests/FxParticleRuntimeTests.cs
++++ b/src/LibreLancer.Tests/FxParticleRuntimeTests.cs
+@@ -66,4 +66,20 @@
+         Assert.Equal(0, instance.Buffer.GetCount(0));
+         Assert.False(instance.TryGetChildEffect(0, particleId, out _));
+     }
++
++    [Fact]
++    public void ChildParticleScratchSetIsReusedAndClearedBetweenAppearances()
++    {
++        var emitter = new FxCubeEmitter("cube") { InitialParticles = 1 };
++        emitter.InitLifeSpan = new(1);
++        var effect = CreateEffect(emitter, new FxParticleAppearance("particle"));
++        var instance = CreateInstance(effect);
++
++        var first = instance.BeginChildParticleUpdate();
++        first.Add(17);
++        var second = instance.BeginChildParticleUpdate();
++
++        Assert.Same(first, second);
++        Assert.Empty(second);
++    }
+ }
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -22,7 +22,7 @@
+ | Asteroidenfeld-Culling | Asteroidenwürfel und Billboards vergleichen ihre quadrierten Distanzen gegen die jeweiligen Reichweiten; die innere Kandidatenprüfung vermeidet damit wiederholte Quadratwurzeln. | Der Cull-Grenzwert bleibt mathematisch äquivalent für endliche, nichtnegative Reichweiten. Der CPU-Gewinn und Sichtbarkeit an Grenzfällen müssen in dichten NAP-Asteroidenfeldern gemessen werden. |
+ | Asteroidenfeld-Puffer | Kandidatenpuffer für dynamische Billboards und Asteroidenwürfel wachsen vor dem Einfügen, wenn ein dichtes Feld die bisherige Standardkapazität überschreitet. | Verhindert Indexfehler bei größeren Feldern; Billboard-Endausgabe bleibt weiterhin auf die konfigurierte Zahl begrenzt und nach Distanz sortiert. Speicherkosten bei Extremfeldern müssen noch gemessen werden. |
+ | Asteroidenfeld-Culling | Ausschlusszonen werden ohne LINQ-Iterator geprüft; die Cube-Oberflächenentfernung wird einmal je Cube berechnet. Vor der Wiederverwendung gemeinsamer Cull-Puffer wartet `Update` auf Aufgaben eines vorherigen Fixed-Updates. | Entfernt pro Kandidat Iterator-Allokationen und wiederholte Quadratwurzeln; verhindert parallele Schreibzugriffe, wenn mehrere Fixed-Updates vor `Draw` laufen. FPS-Wirkung und Grenzsichtbarkeit brauchen weiterhin ein festes Asteroidenfeld-Profil. |
+-| Temporäre Effekte | `SystemRenderer.SpawnTempFx` reiht keine fehlenden ParticleEffects ein; `ParticleEffectRenderer(null)` gilt sofort als beendet und bleibt auch nach `Restart()` beendet. Der Partikel-Cull verwendet die vorhandene vorberechnete Distanzkonstante statt `Math.Pow` pro Effekt und Frame. Kurzlebige Effektlichter akkumulieren nur endliche Framezeiten und sättigen ihr Animationsalter, bevor es nicht-endlich werden kann. Über `SpawnTempFx` erzeugte Partikeleffekte simulieren außerhalb der Distanzgrenze weiter und können regulär auslaufen; dauerhafte Effekte bleiben gecullt. | Ein Regressionstest deckt den Null-Effekt-Lebenszyklus ab. Fehlende oder nicht auflösbare ALE-Effekte bleiben als mögliche Ursache unsichtbarer Einzel-Explosionen gesondert zu diagnostizieren. |
++| Temporäre Effekte | `SystemRenderer.SpawnTempFx` reiht keine fehlenden ParticleEffects ein; `ParticleEffectRenderer(null)` gilt sofort als beendet und bleibt auch nach `Restart()` beendet. Der Partikel-Cull verwendet die vorhandene vorberechnete Distanzkonstante statt `Math.Pow` pro Effekt und Frame. Kurzlebige Effektlichter akkumulieren nur endliche Framezeiten und sättigen ihr Animationsalter, bevor es nicht-endlich werden kann. Über `SpawnTempFx` erzeugte Partikeleffekte simulieren außerhalb der Distanzgrenze weiter und können regulär auslaufen; dauerhafte Effekte bleiben gecullt. Verschachtelte Partikel-Lebenseffekte verwenden wiederverwendete IDsammlungen und entfernen beendete Kind-Effekte ohne HashSet- und LINQ-Array-Allokationen pro Update. | Regressionstests decken Null-Effekt-Lebenszyklus, Kind-Effekt-Ende und die Wiederverwendung der IDsammlung ab. Fehlende oder nicht auflösbare ALE-Effekte bleiben als mögliche Ursache unsichtbarer Einzel-Explosionen gesondert zu diagnostizieren. |
+ | Antialiasing | SMAA-Pässe und MSAA-Auflösung; HDR/LDR-Kombinationen sowie Resize und Minimize/Restore wurden auf OpenGL/Mesa geprüft. | Andere Backends/Treiber, wiederholte Lifecycle-Zyklen und Fehler-Injektion stehen aus. |
+ | GPU-Subpass-Abbruch | Postprocess-, Bloom-, SMAA-, SSAO- und MSAA-Subpasses melden `Begin`, `End` oder `Abort`. Nur ein erfolgreich beendeter Subpass veröffentlicht seine geschriebenen Ressourcen für nachfolgende Pässe. | Zwei Regressionstests prüfen, dass abgebrochene Ausgaben nicht verfügbar werden und erfolgreiche Ausgaben weitergereicht werden. Fehler-Injektion im nativen Backend bleibt offen. Siehe Patch `2407-render-subpass-abort-contract.patch`. |
+ | Nomad-Gradient | Der HLSL-Shader begrenzt den View-/Normal-Dot-Product wie der frühere LibreLancer-Shader auf `[0, 1]` und bindet MAT-`BtSampler` als Legacy-Facing-Gradient; `NtSampler` bleibt Rückfall, falls BT fehlt. | Auswahlfälle sind regressionsgeprüft und der Shader wird im Release-Build kompiliert. Gezielter Nomad-Schiff-A/B mit Retail-NAP-Daten und Hardware-GPU steht aus. Quellvergleich: `docs/evidence/renderer/nomad-gradient-legacy-parity-20261018.md`. |
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -412,3 +412,4 @@
+ | 2476 | Attribute transparent renderer drawcalls to scene, asteroid, nebula, effect, billboard and fallback groups |
+ | 2477 | Split transparent object drawcalls by model, renderer type and batched beams |
+ | 2478 | Map SDL3-offscreen NVE7 profiles to Quadro K1100M and correct renderer evidence |
++| 2479 | Reuse particle child-effect update scratch collections |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -470,3 +470,4 @@
+ client 2476-profile-transparent-drawcall-sources.patch
+ client 2477-profile-transparent-object-subgroups.patch
+ client 2478-map-nve7-profile-adapter.patch
++client 2479-reuse-particle-child-effect-update-scratch.patch

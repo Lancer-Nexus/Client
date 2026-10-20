@@ -1,0 +1,130 @@
+diff --git a/src/LibreLancer/Render/RenderHelpers.cs b/src/LibreLancer/Render/RenderHelpers.cs
+--- a/src/LibreLancer/Render/RenderHelpers.cs
++++ b/src/LibreLancer/Render/RenderHelpers.cs
+@@ -230,9 +230,16 @@
+         internal static Color4 PrepareSceneClearColor(Color4 color, bool hdrOutput)
+         {
+             if (!hdrOutput) return color;
+-            return new Color4(DecodeSrgbChannel(color.R), DecodeSrgbChannel(color.G),
+-                DecodeSrgbChannel(color.B), color.A);
+-        }
++            return DecodeSrgb(color);
++        }
++
++        internal static Color4 DecodeSrgb(Color4 color) => new(
++            DecodeSrgbChannel(color.R), DecodeSrgbChannel(color.G),
++            DecodeSrgbChannel(color.B), color.A);
++
++        internal static Color4 EncodeSrgb(Color4 color) => new(
++            EncodeSrgbChannel(color.R), EncodeSrgbChannel(color.G),
++            EncodeSrgbChannel(color.B), color.A);
+ 
+         private static Color3f EncodeSrgb(Color3f color) => new(
+             EncodeSrgbChannel(color.R), EncodeSrgbChannel(color.G), EncodeSrgbChannel(color.B));
+diff --git a/src/LibreLancer.Tests/RendererColorSpaceTests.cs b/src/LibreLancer.Tests/RendererColorSpaceTests.cs
+--- a/src/LibreLancer.Tests/RendererColorSpaceTests.cs
++++ b/src/LibreLancer.Tests/RendererColorSpaceTests.cs
+@@ -27,4 +27,38 @@
+ 
+         Assert.Equal(color, result);
+     }
++
++    [Theory]
++    [InlineData(0f)]
++    [InlineData(0.0031308f)]
++    [InlineData(0.04045f)]
++    [InlineData(0.18f)]
++    [InlineData(0.5f)]
++    [InlineData(1f)]
++    [InlineData(2f)]
++    public void SrgbTransferFunctionsRoundTripRgbAndPreserveAlpha(float value)
++    {
++        var encoded = new Color4(value, value, value, 0.37f);
++
++        var decoded = RenderHelpers.DecodeSrgb(encoded);
++        var roundTrip = RenderHelpers.EncodeSrgb(decoded);
++
++        Assert.Equal(value, roundTrip.R, 5);
++        Assert.Equal(value, roundTrip.G, 5);
++        Assert.Equal(value, roundTrip.B, 5);
++        Assert.Equal(encoded.A, decoded.A);
++        Assert.Equal(encoded.A, roundTrip.A);
++    }
++
++    [Fact]
++    public void SrgbTransferFunctionsMatchThePiecewiseBreakpoints()
++    {
++        var decoded = RenderHelpers.DecodeSrgb(new Color4(0.04045f, 0, 0, 0.8f));
++        var encoded = RenderHelpers.EncodeSrgb(new Color4(0.0031308f, 0, 0, 0.6f));
++
++        Assert.Equal(0.0031308f, decoded.R, 6);
++        Assert.Equal(0.04044994f, encoded.R, 6);
++        Assert.Equal(0.8f, decoded.A);
++        Assert.Equal(0.6f, encoded.A);
++    }
+ }
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -178,6 +178,13 @@
+    Diffuse-Sample bereits; für die Illumination-Mischung wird jetzt eine eigene
+    lineare Kopie benutzt. Der LDR-Pfad bleibt unverändert. Die vollständige
+    Farbvertrag-Abnahme mit Material-, Alpha- und Clear-Fixtures bleibt offen.
++   Patch 2473 stellt die CPU-seitige sRGB-EOTF/OETF als gemeinsame
++   Renderhilfen bereit und prüft Transfer, Breakpoints, Werte über 1.0 sowie
++   unverändertes Alpha. Zusammen mit den vorhandenen Clear-Tests bestehen jetzt
++   alle 10 `RendererColorSpaceTests`. Feste HDR/LDR-Bildvergleiche für reale
++   Materialien und Effekte sowie die Annahme sRGB-kodierter Retail-Farben
++   bleiben offen. Testumfang und Grenzen:
++   [Farbtransfer-Regressionen](evidence/renderer/color-space-transfer-tests-20261020.md).
+ 2. **PBR/IBL visuell abnehmen.** GGX-Prefilterung und diffuse Irradiance sind
+    in Generator, NAP-Assets, Metadaten und Shaderpfad vorhanden. Cubemap-
+    Orientierung, Roughness-Verlauf, Energieerhaltung, Normalstärke und fehlende
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -406,3 +406,4 @@
+ | 2470 | Record Freelancer main-executable atmosphere registration trace and remaining Fade uncertainty |
+ | 2471 | Extract SDL_GPU device lifetime ownership for the renderer backend |
+ | 2472 | Reuse checked SDL_GPU device ownership in the production pipeline audit |
++| 2473 | Add sRGB transfer and alpha regression coverage for HDR color handling |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -464,3 +464,4 @@
+ client 2470-atmosphere-fade-main-executable-trace.patch
+ client 2471-sdl-gpu-device-owner.patch
+ client 2472-unify-sdl-gpu-audit-device-lifecycle.patch
++client 2473-add-srgb-transfer-regression-coverage.patch
+diff --git a/docs/evidence/renderer/color-space-transfer-tests-20261020.md b/docs/evidence/renderer/color-space-transfer-tests-20261020.md
+new file mode 100644
+--- /dev/null
++++ b/docs/evidence/renderer/color-space-transfer-tests-20261020.md
+@@ -0,0 +1,27 @@
++# Renderer color transfer regression checks — 2026-10-20
++
++Patch 2473 exposes the renderer's CPU-side sRGB transfer helpers and uses the
++same decode helper for HDR scene clear colors. The helper preserves alpha and
++keeps values above 1.0 available for extended linear/HDR round trips.
++
++`RendererColorSpaceTests` checks:
++
++- HDR clear RGB decoding and alpha preservation;
++- unchanged LDR clear values;
++- sRGB decode/encode round trips from black through values above 1.0;
++- both piecewise transfer breakpoints and unchanged alpha.
++
++Command:
++
++```text
++DOTNET_ROOT=/opt/dotnet-10 DOTNET_ROOT_X64=/opt/dotnet-10 \
++  /opt/dotnet-10/dotnet test src/LibreLancer.Tests/LibreLancer.Tests.csproj \
++  --no-restore -p:UseSharedCompilation=false \
++  --filter FullyQualifiedName~RendererColorSpaceTests
++Passed: 10, Failed: 0, Skipped: 0.
++```
++
++These tests validate CPU transfer arithmetic and clear-color preparation.
++They do not prove that every retail material, particle, transparent blend, or
++HDR/LDR scene matches the original game; fixed-camera visual comparisons remain
++required.

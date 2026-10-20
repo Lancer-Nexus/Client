@@ -1,0 +1,69 @@
+diff --git a/src/LibreLancer/Render/Materials/DetailMapMaterial.cs b/src/LibreLancer/Render/Materials/DetailMapMaterial.cs
+--- a/src/LibreLancer/Render/Materials/DetailMapMaterial.cs
++++ b/src/LibreLancer/Render/Materials/DetailMapMaterial.cs
+@@ -129,8 +129,8 @@
+ 		{
+ 			if (!lightingEnabled)
+ 				return false;
+-			if (!string.IsNullOrWhiteSpace(MtSampler) || !string.IsNullOrWhiteSpace(RtSampler) ||
+-			    Metallic.HasValue || Roughness.HasValue)
++			if (!string.IsNullOrWhiteSpace(NmSampler) || !string.IsNullOrWhiteSpace(MtSampler) ||
++			    !string.IsNullOrWhiteSpace(RtSampler) || Metallic.HasValue || Roughness.HasValue)
+ 				return true;
+ 			var binding = SurfaceBinding;
+ 			return Library?.SurfacePbrMapsEnabled == true &&
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -689,7 +689,7 @@
+ 
+ ## DetailMap-PBR-Abdeckung (2026-10-19)
+ 
+-`DetailMapMaterial` übergibt MAT-Metallic-/Roughness-Faktoren und -Sampler sowie ergänzende Surface-PBR-Bindungen an den vorhandenen PBR-Materialpfad, wenn Beleuchtung aktiv ist. Die diffuse Detailtextur bleibt als PBR-Detail-Layer gebunden; Kachelrate, UV-Spiegelung und MAT-`Ac` als Faktor der ambienten Lichtbeiträge werden übernommen. Ohne aktive Metallic-/Roughness-Daten verwendet das Material weiterhin den bisherigen DetailMap-Shader. Der Release-Build und das SDL_GPU-Produktionspipeline-Audit waren erfolgreich (3495 Pipelines). Der Offscreen-Vulkan-Draw-Smoke konnte das Fenster wegen der fehlenden Erweiterung `VK_EXT_headless_surface` nicht übernehmen. Eine visuelle Laufzeitabnahme dieser Änderung steht daher noch aus.
++`DetailMapMaterial` übergibt MAT-Metallic-/Roughness-Faktoren und -Sampler sowie ergänzende Surface-PBR-Bindungen an den vorhandenen PBR-Materialpfad, wenn Beleuchtung aktiv ist. Die diffuse Detailtextur bleibt als PBR-Detail-Layer gebunden; Kachelrate, UV-Spiegelung und MAT-`Ac` als Faktor der ambienten Lichtbeiträge werden übernommen. Ein MAT-`NmSampler` wählt jetzt ebenfalls diesen PBR-Pfad, damit die Normaltextur bei aktivem Licht tatsächlich gebunden wird; ohne Beleuchtung bleibt der PBR-Pfad aus. Ein Regressionstest deckt diese Auswahlbedingung ab. Ohne aktive MAT-Normal-, Metallic- oder Roughness-Daten verwendet das Material weiterhin den bisherigen DetailMap-Shader. Der Release-Build und das SDL_GPU-Produktionspipeline-Audit waren erfolgreich (3495 Pipelines). Der Offscreen-Vulkan-Draw-Smoke konnte das Fenster wegen der fehlenden Erweiterung `VK_EXT_headless_surface` nicht übernehmen. Eine visuelle Laufzeitabnahme dieser Änderung steht daher noch aus.
+ 
+ Ein neuer NAP-only-Spielstart mit dem aktualisierten Release-Client, dem geprüften
+ 14-Paket-Manifest und dem Hi02-Testsave blieb am 19.10.2026 unmittelbar nach
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -446,3 +446,4 @@
+ client 2452-update-pbr-pipeline-audit-evidence.patch
+ client 2453-report-nap-manifest-roots.patch
+ client 2454-document-nap-runtime-root-diagnosis.patch
++client 2455-detailmap-mat-normal-pbr-route.patch
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -384,3 +384,4 @@
+ | 2452 | Record current SDL_GPU PBR material pipeline coverage and the OpenGL NAP capture limit |
+ | 2453 | Include NAP manifest identity and resolved paths in package version mismatch errors |
+ | 2454 | Record NAP stage package verification and distinguish stale app manifests from display startup failures |
++| 2455 | Route DetailMap MAT normal maps through the lit PBR shader and cover the routing gate |
+diff --git a/src/LibreLancer.Tests/DetailMapPbrRoutingTests.cs b/src/LibreLancer.Tests/DetailMapPbrRoutingTests.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Tests/DetailMapPbrRoutingTests.cs
+@@ -0,0 +1,22 @@
++using System.Reflection;
++using LibreLancer.Render.Materials;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class DetailMapPbrRoutingTests
++{
++    [Fact]
++    public void DetailMapMaterialRoutesMatNormalSamplerThroughPbrWhenLit()
++    {
++        var material = new DetailMapMaterial(null!, "diffuse", "detail")
++        {
++            NmSampler = "hull_normal"
++        };
++        var needsPbr = typeof(DetailMapMaterial).GetMethod("NeedsPbr",
++            BindingFlags.Instance | BindingFlags.NonPublic)!;
++
++        Assert.True((bool)needsPbr.Invoke(material, [true])!);
++        Assert.False((bool)needsPbr.Invoke(material, [false])!);
++    }
++}

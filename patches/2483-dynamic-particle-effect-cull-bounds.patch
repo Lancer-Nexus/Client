@@ -1,0 +1,201 @@
+diff --git a/src/LibreLancer/Fx/ParticleEffectInstance.cs b/src/LibreLancer/Fx/ParticleEffectInstance.cs
+--- a/src/LibreLancer/Fx/ParticleEffectInstance.cs
++++ b/src/LibreLancer/Fx/ParticleEffectInstance.cs
+@@ -161,16 +161,152 @@
+ 
+         public bool Culled = false;
+ 
++        public bool HasCullBounds { get; private set; }
++
+         public void UpdateCull(ICamera camera)
+         {
+-            if (!float.IsFinite(Effect.Radius))
+-            {
++            if (!IsFinite(Position) || !TryGetCullRadius(out var radius, 0))
++            {
++                HasCullBounds = false;
++                Culled = false;
+                 return;
+             }
+ 
+-            var sph = new BoundingSphere(Position, Effect.Radius);
+-            Culled = !camera.FrustumCheck(sph);
+-        }
++            HasCullBounds = true;
++            Culled = !camera.FrustumCheck(new BoundingSphere(Position, radius));
++        }
++
++        private bool HasLiveChildEffects()
++        {
++            for (var i = 0; i < Effect.Appearances.Count; i++)
++            {
++                if (Effect.Appearances[i].Appearance is FxParticleAppearance { LifeEffect: not null } &&
++                    Buffer.GetCount(i) > 0)
++                    return true;
++            }
++
++            return false;
++        }
++
++        private bool TryGetCullRadius(out float radius, int depth)
++        {
++            radius = 0;
++            if (depth > 16 || !IsFinite(Position))
++                return false;
++
++            if (!HasLiveChildEffects() && float.IsFinite(Effect.Radius) && Effect.Radius >= 0)
++            {
++                radius = Effect.Radius;
++                return true;
++            }
++
++            for (var appearanceIndex = 0; appearanceIndex < Effect.Appearances.Count; appearanceIndex++)
++            {
++                var appearanceNode = Effect.Appearances[appearanceIndex];
++                if (!appearanceNode.Enabled)
++                    continue;
++
++                var appearance = appearanceNode.Appearance;
++                var count = Buffer.GetCount(appearanceIndex);
++                if (appearance is FxParticleAppearance particleAppearance)
++                {
++                    if (particleAppearance.LifeEffect == null)
++                        continue;
++
++                    for (var particleIndex = 0; particleIndex < count; particleIndex++)
++                    {
++                        ref var particle = ref Buffer[appearanceIndex, particleIndex];
++                        if (!TryGetChildEffect(appearanceIndex, particle.Id, out var child))
++                            continue;
++                        if (!child.TryGetCullRadius(out var childRadius, depth + 1))
++                            return false;
++
++                        var childDistance = Vector3.Distance(Position, child.Position);
++                        if (!float.IsFinite(childDistance))
++                            return false;
++                        radius = Math.Max(radius, childDistance + childRadius);
++                    }
++
++                    continue;
++                }
++
++                // These appearances do not emit geometry in the current runtime.
++                if (appearance is FxMeshAppearance || appearance.GetType() == typeof(FxAppearance))
++                    continue;
++
++                if (!TryGetParticleExtent(appearance, out var extent))
++                    return false;
++
++                var nodeTransform = NodeTransforms[appearanceNode.NodeIdx];
++                var nodeOrigin = Vector3.Transform(Vector3.Zero, nodeTransform);
++                var nodeOffset = Vector3.Distance(Position, nodeOrigin);
++                if (!IsFinite(nodeOrigin) || !float.IsFinite(nodeOffset))
++                    return false;
++
++                for (var particleIndex = 0; particleIndex < count; particleIndex++)
++                {
++                    ref var particle = ref Buffer[appearanceIndex, particleIndex];
++                    var particleDistance = particle.Position.Length();
++                    var particleExtent = extent;
++                    if (appearance is FxBasicAppearance { MotionBlur: true })
++                    {
++                        var velocity = Vector3.TransformNormal(particle.Velocity, nodeTransform).Length();
++                        if (!float.IsFinite(velocity))
++                            return false;
++                        particleExtent += velocity * 0.03f;
++                    }
++
++                    if (!float.IsFinite(particleDistance) || !float.IsFinite(particleExtent))
++                        return false;
++                    radius = Math.Max(radius, nodeOffset + particleDistance + particleExtent);
++                }
++            }
++
++            return float.IsFinite(radius) && radius >= 0;
++        }
++
++        private static bool TryGetParticleExtent(FxAppearance appearance, out float extent)
++        {
++            switch (appearance)
++            {
++                case FLBeamAppearance beam:
++                    extent = beam.Width.GetMax(true) * 0.5f;
++                    break;
++                case FxRectAppearance rect:
++                {
++                    var scale = rect.Scale.GetMax(true);
++                    var length = rect.Length.GetMax(true) * scale;
++                    var width = rect.Width.GetMax(true) * scale;
++                    extent = length + MathF.Sqrt(length * length + width * width);
++                    break;
++                }
++                case FxOrientedAppearance oriented:
++                {
++                    var width = oriented.Width?.GetMax(true) ?? 1f;
++                    var height = oriented.Height?.GetMax(true) ?? 1f;
++                    extent = MathF.Sqrt(width * width + height * height);
++                    break;
++                }
++                case FxPerpAppearance perpendicular:
++                    extent = perpendicular.Size.GetMax(true);
++                    break;
++                case FxBasicAppearance basic:
++                {
++                    var size = basic.Size.GetMax(true);
++                    var aspect = basic.HToVAspect?.GetMax(true) ?? 1f;
++                    extent = MathF.Sqrt(size * size * aspect * aspect + size * size);
++                    break;
++                }
++                default:
++                    extent = 0;
++                    return false;
++            }
++
++            return float.IsFinite(extent) && extent >= 0;
++        }
++
++        private static bool IsFinite(Vector3 value) =>
++            float.IsFinite(value.X) && float.IsFinite(value.Y) && float.IsFinite(value.Z);
+ 
+         public void Update(double delta, Matrix4x4 transform, float sparam)
+         {
+diff --git a/src/LibreLancer/Render/ProjectileRenderer.cs b/src/LibreLancer/Render/ProjectileRenderer.cs
+--- a/src/LibreLancer/Render/ProjectileRenderer.cs
++++ b/src/LibreLancer/Render/ProjectileRenderer.cs
+@@ -44,7 +44,7 @@
+                     projectile.Effect!.Pool = sys.FxPool;
+                     if (profileProjectileEffectCulling)
+                         GpuPassProfile.RecordProjectileEffectCull(
+-                            float.IsFinite(projectile.Effect.Effect.Radius), projectile.Effect.Culled);
++                            projectile.Effect.HasCullBounds, projectile.Effect.Culled);
+                 }
+ 
+                 if (sys.Settings.RenderTransientEffectLights &&
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -16,7 +16,7 @@
+ | HDR und Tonemapping | Linearisiertes Scene-Target, ACES-Tonemapping, linearisierte PBR-Albedo-/Licht-/Emissionswerte und exakte sRGB-Ausgabe im PBR-LDR-Pfad. System- und Nebel-Clearfarben werden ebenfalls vor dem HDR-Clear linearisiert; LDR bleibt unverändert. Ein Source-Audit hat alle 19 Ingame-Fragmentshader und den Postprocess-Ausgang geprüft; 2 Farbraum- und 21 Ambientlicht-Regressionstests bestehen. | Retail-Farbannahmen, visuelle Gleichheit zwischen Legacy/PBR, transparente Effekte, Fog und zusammengesetzte Ingame-Szenen brauchen weiterhin feste Bildvergleiche, Original-Client-Referenz und Hardware-GPU-Abnahme. HDR/LDR-Vergleiche: `docs/evidence/renderer/postprocess-four-mode-ab-20261017/` und der same-session-Hi02-Lauf `docs/evidence/renderer/hdr-ldr-hi02-live-ab-20261018/`; letzterer zeigt in dieser Legacy-Szene nur geringe Pixelabweichung und ersetzt keine Material-/Emissions-Referenz. Shaderaudit: `docs/evidence/renderer/hdr-shader-color-contract-audit-20261018.md`; Clear-Farbvertrag: `docs/evidence/renderer/hdr-clear-color-contract-20261018.md`. |
+ | Bloom | HDR-Extraktion mittelt jetzt ein vollständiges 4×4-Quellfenster in Viertelauflösung; aufrundende Zielmaße behalten Randpixel bei ungeraden Fenstergrößen. Basis-, mittlere und breite Blur-Stufen sowie Schwelle, Radius, Auflösung und Kernel sind konfigurierbar. | Die Extraktion beseitigt das bisherige Unterabtasten der zentralen vier Texel. Der Code führt alle drei Stufen aus. NAP-only M01A-Läufe am 19.10. vergleichen Bloom ein/aus und schalten in einem dritten Lauf zusätzlich Partikeleffekte aus. Der große Ring verschwindet mit den Explosionspartikeln; NAP-Fuse- und ALE-Daten verknüpfen ihn mit dem `planetflare`-Flashbang der Freeport-7-Explosion und grenzen ihn von Bloom ab. Die bewegten Frames sind nicht pixelgenau, die einzelne Flashbang-Instanz bleibt offen. Siehe [`NAP M01A Bloom-/Partikelmatrix`](evidence/renderer/nap-full-runtime-20261019/README.md). GPU-Kosten bleiben offen. |
+ | Partikelpuffer | `ParticleBuffer.RemoveAt` verschiebt beim Entfernen die kürzere Seite des Ringpuffers und bewahrt dabei die Reihenfolge. | Der maximale Verschiebeaufwand sinkt von der gesamten Restlänge auf `min(prefix, suffix)`; tatsächliche FPS-/GPU-Wirkung muss in festen Partikelszenen gemessen werden. |
+-| Projektil-Effekt-Culling | Nach dem Simulationsupdate prüft `ProjectileRenderer` den Partikel-Effekt gegen die aktuelle Kamerafrustum und überspringt nur dessen Draw, wenn der Effekt außerhalb liegt. Simulation, Beams und Effektlichter laufen weiter. Bei aktivem GPU-Profiling erfasst die CSV nun je Frame alle geprüften Projektil-Effekte, davon Effekte mit endlichem Radius und davon tatsächlich verworfene Draws. | Es gilt derselbe Radiusvertrag wie bei anderen Partikeleffekt-Renderern. Effekte mit unendlichem Radius (z. B. nicht an einen Node gebundene Root-Emitter) bleiben sichtbar. Die Zähler zeigen, ob die Abfrage greift, belegen aber noch keine eingesparten GPU-Zeit oder FPS. Ein fester Szenenvergleich vor/nach bleibt offen. |
++| Projektil-Effekt-Culling | `ProjectileRenderer` prüft den Partikeleffekt nach der Simulation gegen die aktuelle Kamerafrustum und lässt Simulation, Beams und Effektlichter weiterlaufen. Für Effekte ohne statischen Radius berechnet `ParticleEffectInstance` einen konservativen Radius aus den aktuell lebenden Billboards, Rechtecken, Beam-Punkten und verschachtelten Partikeleffekten. Profil-CSV-Zähler unterscheiden geprüfte Effekte, verfügbare Bounds und verworfene Draws. | Unbekannte Appearance-Typen, ungültige Werte und mehr als 16 Verschachtelungsebenen deaktivieren das Culling sicher für diesen Effekt. In Hi02 hatten vor dieser Erweiterung alle aktiven Projektil-Effekte unendliche statische Radien; dadurch cullte Patch 2481 dort keinen Effekt. Die neue Berechnung muss durch einen Laufzeitprofil-Lauf und eine visuelle Szenenprüfung bestätigt werden; FPS- und GPU-Zeitgewinn bleiben offen. |
+ | Transparente Draw-Commands | Transparent-Commands und Sortierindizes wachsen bei Bedarf geometrisch über die bisherige 16.384-Grenze hinaus; beide Arrays behalten dieselbe Kapazität. Der Sortiervergleich wird pro CommandBuffer wiederverwendet und nach einer Puffervergrößerung auf das neue Array umgestellt. Leere Queues werden ohne Sortieraufruf übersprungen. | Unit-Tests prüfen geometrisches Wachstum und fügen 16.385 Commands ein; derselbe Test sortiert die leere und anschließend vergrößerte Queue. Dichte Ingame-Szenen müssen die höhere Kapazität, ihren Speicherbedarf und die FPS-Wirkung der geringeren Allokationen noch prüfen. |
+ | Objektlicht-Bindung | `RenderHelpers.ApplyLights` übergibt die nach Priorität ausgewählten Quellindizes kompakt. `RenderMaterial.SetLights` verarbeitet so direkt höchstens acht Lichtindizes pro Materialdraw statt bis zu 128 Frame-Einträge erneut zu durchsuchen; manuell gebaute Lighting-Werte behalten den Bitset-Fallback. | Auswahl-/Bitset-Übereinstimmung ist im `TransientLightTests`-Pfad geprüft. Der CPU- und FPS-Gewinn muss mit derselben festen Szene vor/nach der Änderung gemessen werden. |
+ | LOD-/Modell-Culling | Die größte Archetyp- oder Mesh-LOD-Distanz wird ohne LINQ-Iteratoren ermittelt und pro Renderer gecacht, bis sich Modell oder Override-Array ändern. Leere Modelldistanzen blenden das Modell nicht mehr fälschlich aus; Mesh-eigene LOD-Distanzen aktivieren den frühen Distanz-Cull auch ohne Archetypwerte. | Vermeidet wiederholte Scans aller Modellteile im frühen Draw-Cull und erhält gültige Mesh-LODs. Der tatsächliche CPU-/FPS-Gewinn muss in festen Schiff-, Stations- und Asteroiden-Szenen gemessen werden. |
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -415,3 +415,4 @@
+ | 2480 | Record NAP-only particle child-effect runtime and baseline limits |
+ | 2481 | Cull projectile particle effects outside the camera frustum |
+ | 2482 | Profile projectile effect culling candidates, finite bounds and skipped draws |
++| 2483 | Compute conservative bounds for live particles in unbounded effects |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -474,3 +474,4 @@
+ client 2480-particle-child-effect-runtime-evidence.patch
+ client 2481-cull-offscreen-projectile-effects.patch
+ client 2482-profile-projectile-effect-culling.patch
++client 2483-dynamic-particle-effect-cull-bounds.patch

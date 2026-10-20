@@ -1,0 +1,112 @@
+diff --git a/src/LibreLancer/Render/ProjectileRenderer.cs b/src/LibreLancer/Render/ProjectileRenderer.cs
+--- a/src/LibreLancer/Render/ProjectileRenderer.cs
++++ b/src/LibreLancer/Render/ProjectileRenderer.cs
+@@ -2,7 +2,6 @@
+ // This file is subject to the terms and conditions defined in
+ // LICENSE, which is part of this source code package
+ 
+-using System.Linq;
+ using System.Numerics;
+ using LibreLancer.Data.GameData;
+ using LibreLancer.Graphics;
+@@ -30,9 +29,11 @@
+             beams = sys.Beams;
+             renderBeams = sys.Settings.RenderProjectileBeams;
+             renderCount = 0;
+-            foreach (var i in Projectiles.Ids.GetAllocated().Where(i => Projectiles.Projectiles[i].Alive))
++            foreach (var i in Projectiles.Ids.GetAllocated())
+             {
+                 ref var projectile = ref Projectiles.Projectiles[i];
++                if (!projectile.Alive)
++                    continue;
+                 if (projectile.Effect != null)
+                 {
+                     projectile.Effect!.Resources = sys.ResourceManager;
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -331,7 +331,16 @@
+    außerdem pro Frame die Anzahl transparenter Render-Commands sowie die bis zum
+    Capture-Punkt ausgeführten VertexBuffer-Drawcalls. Live-Änderungen während
+    einer Aufnahme müssen weiterhin getrennt protokolliert
+-   werden. Die Profil-CSV schlüsselt transparente Befehle zusätzlich in
++   werden. `ProjectileRenderer.PrepareRender` prüft aktive Projektile jetzt
++   direkt in der struct-basierten `Ids.GetAllocated()`-Iteration statt über
++   LINQ-`Where`; damit entfallen Filteriterator und Boxing pro Frame. Der
++   CPU-/FPS-Effekt muss in einer festen Kampfaufnahme gemessen werden.
++   `VertexResourceAllocator.FreeList.TryAllocate` sucht den kleinsten passenden
++   freien Indexbereich jetzt mit einer direkten Schleife; LINQ-Iterator,
++   Zwischentupel und `MinBy`-Suche entfallen beim GPU-Pufferbezug. Die
++   Auswahl bleibt Best-Fit. Der Effekt betrifft Pufferallokationen und muss
++   unter hoher Mesh-/Effektlast gemessen werden. Die
++   Profil-CSV schlüsselt transparente Befehle zusätzlich in
+    Material-, Fade-, Override- und Billboard-Typen auf; diese Zähler zeigen
+    eingereihte Arbeit und ersetzen keine GPU-Draw- oder Pixelkostenmessung.
+    Die CSV führt jetzt außerdem `dropped_simulation_ticks_total` pro
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -437,3 +437,4 @@
+ client 2443-trace-fp7-intro-render-assets.patch
+ client 2444-null-safe-gpu-timer-profile.patch
+ client 2445-report-nap-version-mismatch-details.patch
++client 2446-remove-projectile-render-filter-allocation.patch
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -373,3 +373,5 @@
+ | 2432 | Arm a renderer profile for paused F9 capture, route F1 around UI keyboard focus, and record NAP-only evidence |
+ 
+ | 2445 | Include expected and archive versions in NAP manifest mismatch errors |
++
++| 2446 | Remove avoidable LINQ allocations from renderer frame and buffer paths |
+diff --git a/src/LibreLancer/Render/VertexResource.cs b/src/LibreLancer/Render/VertexResource.cs
+index c277ffcad..fabae4d3b 100644
+--- a/src/LibreLancer/Render/VertexResource.cs
++++ b/src/LibreLancer/Render/VertexResource.cs
+@@ -4,7 +4,6 @@
+ 
+ using System;
+ using System.Collections.Generic;
+-using System.Linq;
+ using LibreLancer.Graphics;
+ using LibreLancer.Graphics.Vertices;
+ using LibreLancer.Utf.Vms;
+@@ -186,22 +185,29 @@ namespace LibreLancer.Render
+ 
+             public bool TryAllocate(int length, out int start)
+             {
+-                var freeItem = list
+-                    .Select((x, index) => (x.Start, x.Count, Index: index))
+-                    .Where(x => x.Count >= length)
+-                    .DefaultIfEmpty()
+-                    .MinBy(x => x.Count);
++                var bestIndex = -1;
++                var bestCount = int.MaxValue;
++                for (var i = 0; i < list.Count; i++)
++                {
++                    var candidateCount = list[i].Count;
++                    if (candidateCount >= length && candidateCount < bestCount)
++                    {
++                        bestIndex = i;
++                        bestCount = candidateCount;
++                    }
++                }
+ 
+-                if (freeItem.Count != 0)
++                if (bestIndex >= 0 && bestCount != 0)
+                 {
++                    var freeItem = list[bestIndex];
+                     if (freeItem.Count > length)
+                     {
+-                        list[freeItem.Index] = new FreeItem()
++                        list[bestIndex] = new FreeItem()
+                             { Start = freeItem.Start + length, Count = freeItem.Count - length };
+                     }
+                     else
+                     {
+-                        list.RemoveAt(freeItem.Index);
++                        list.RemoveAt(bestIndex);
+                     }
+ 
+                     start = freeItem.Start;

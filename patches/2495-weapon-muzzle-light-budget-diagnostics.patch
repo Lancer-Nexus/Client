@@ -1,0 +1,141 @@
+diff --git a/src/LibreLancer/Render/SystemLighting.cs b/src/LibreLancer/Render/SystemLighting.cs
+--- a/src/LibreLancer/Render/SystemLighting.cs
++++ b/src/LibreLancer/Render/SystemLighting.cs
+@@ -22,9 +22,23 @@
+         public float SunAmbientStrength = 0.25f;
+ 		private readonly List<DynamicLight> frameLights = new(64);
+         private readonly List<float> frameLightPriorities = new(64);
++		private readonly HashSet<DynamicLight> frameWeaponMuzzleLights = [];
+ 		private bool frameStarted;
+ 		public List<DynamicLight> FrameLights => frameStarted ? frameLights : Lights;
+ 		public int FrameTransientLightCount => frameStarted ? Math.Max(0, frameLights.Count - transientStart) : 0;
++		public int FrameWeaponMuzzleLightCount
++		{
++			get
++			{
++				if (!frameStarted)
++					return 0;
++				var count = 0;
++				for (var i = transientStart; i < frameLights.Count; i++)
++					if (frameWeaponMuzzleLights.Contains(frameLights[i]))
++						count++;
++				return count;
++			}
++		}
+ 		public bool DynamicLightsEnabled = true;
+ 		public FogModes FogMode = FogModes.None;
+ 		public float FogDensity = 0f;
+@@ -63,6 +77,7 @@
+             frameCameraPosition = cameraPosition;
+             frameLights.Clear();
+             frameLightPriorities.Clear();
++            frameWeaponMuzzleLights.Clear();
+             for (var i = 0; i < Lights.Count && frameLights.Count < BitArray128.Capacity; i++)
+             {
+                 if (!IsFinite(Lights[i].Light))
+@@ -75,6 +90,14 @@
+         }
+ 
+         public bool AddFrameLight(DynamicLight light) => AddFrameLight(light, false);
++
++        public bool AddWeaponMuzzleLight(DynamicLight light)
++        {
++            var accepted = AddFrameLight(light, true);
++            if (accepted)
++                frameWeaponMuzzleLights.Add(light);
++            return accepted;
++        }
+ 
+         public bool AddFrameLight(DynamicLight light, bool mayIlluminateVisibleObjectsOutsideCameraRange)
+         {
+diff --git a/src/LibreLancer/World/Equipments/AbstractWeapon.cs b/src/LibreLancer/World/Equipments/AbstractWeapon.cs
+--- a/src/LibreLancer/World/Equipments/AbstractWeapon.cs
++++ b/src/LibreLancer/World/Equipments/AbstractWeapon.cs
+@@ -116,7 +116,7 @@
+                 Color = color,
+                 Range = muzzleLightRadius
+             };
+-            sys.SystemLighting.AddFrameLight(light, true);
++            sys.SystemLighting.AddWeaponMuzzleLight(light);
+         }
+     }
+ 
+diff --git a/src/LibreLancer/GameStates/SpaceGameplay.Debug.cs b/src/LibreLancer/GameStates/SpaceGameplay.Debug.cs
+--- a/src/LibreLancer/GameStates/SpaceGameplay.Debug.cs
++++ b/src/LibreLancer/GameStates/SpaceGameplay.Debug.cs
+@@ -58,6 +58,7 @@
+             ImGui.Text(
+                 $"Render Resolution: {Game.RenderContext.CurrentViewport.Width}x{Game.RenderContext.CurrentViewport.Height}");
+             ImGui.Text($"Frame lights accepted: {sysrender.SystemLighting.FrameTransientLightCount}/{sysrender.SystemLighting.MaxFrameLights} (persistent: {sysrender.SystemLighting.Lights.Count})");
++            ImGui.Text($"Weapon muzzle lights accepted: {sysrender.SystemLighting.FrameWeaponMuzzleLightCount}");
+             ImGui.Text($"Active effect lights: {sysrender.ActiveTransientEffectLightCount}/{sysrender.Settings.TransientEffectLightBudget}");
+             ImGui.Text($"Effect light frame candidates: {sysrender.FrameEffectLightCandidates}; accepted: {sysrender.FrameEffectLightsAccepted}; priority rejected: {sysrender.FrameEffectLightsRejectedByPriority}; budget rejected: {sysrender.FrameEffectLightsRejectedByBudget}");
+             ImGui.Text($"Effect light enabled: {sysrender.TransientEffectLightsEnabled}; last distance/range/priority: {sysrender.LastEffectLightDistance:F1}/{sysrender.LastEffectLightRange:F1}/{sysrender.LastEffectLightPriority:F3}");
+diff --git a/src/LibreLancer.Tests/TransientLightTests.cs b/src/LibreLancer.Tests/TransientLightTests.cs
+--- a/src/LibreLancer.Tests/TransientLightTests.cs
++++ b/src/LibreLancer.Tests/TransientLightTests.cs
+@@ -47,6 +47,33 @@
+         Assert.Equal(lighting.MaxFrameLights, lighting.FrameLights.Count);
+         Assert.Contains(lighting.FrameLights, x => x.Light.Position.X == 9 && x.Light.Color.R == 2);
+         Assert.DoesNotContain(lighting.FrameLights, x => x.Light.Position.X == lighting.MaxFrameLights);
++    }
++
++    [Fact]
++    public void WeaponMuzzleLightCountTracksAcceptedLightsAfterPriorityEviction()
++    {
++        var lighting = new SystemLighting { MaxFrameLights = 1 };
++        lighting.BeginFrame(Vector3.Zero);
++        var muzzle = CreateLight(5);
++
++        Assert.True(lighting.AddWeaponMuzzleLight(muzzle));
++        Assert.Equal(1, lighting.FrameWeaponMuzzleLightCount);
++
++        Assert.True(lighting.AddFrameLight(CreateLight(4, intensity: 2)));
++        Assert.Equal(0, lighting.FrameWeaponMuzzleLightCount);
++    }
++
++    [Fact]
++    public void WeaponMuzzleLightCountResetsAtFrameBoundary()
++    {
++        var lighting = new SystemLighting();
++        lighting.BeginFrame(Vector3.Zero);
++        Assert.True(lighting.AddWeaponMuzzleLight(CreateLight(1)));
++        Assert.Equal(1, lighting.FrameWeaponMuzzleLightCount);
++
++        lighting.BeginFrame(Vector3.Zero);
++
++        Assert.Equal(0, lighting.FrameWeaponMuzzleLightCount);
+     }
+ 
+     [Fact]
+diff --git a/docs/dynamic-lighting-audit.md b/docs/dynamic-lighting-audit.md
+--- a/docs/dynamic-lighting-audit.md
++++ b/docs/dynamic-lighting-audit.md
+@@ -244,5 +244,17 @@
+ Laufzeitcode löst
+ `Gun.light_anim` in `GameItemDb` auf und registriert beim Schuss pro
+ `hpfire`-Hardpoint eine Lichtquelle. Damit ist die Retail-Datenabdeckung für den
+-großen Teil der Waffen bestätigt; eine sichtbare Ingame-ON/OFF-Abnahme für
+-Waffenfeuer bleibt offen.
++großen Teil der Waffen bestätigt. Ein aktueller Release-ON/OFF-Lauf in Hi02
++zeigt im Debug-Overlay 0 akzeptierte Quellen bei deaktiviertem Schalter und 3
++bei aktiviertem Schalter. Die Aufnahmen liegen unter
++`Data/docs/evidence/renderer/weapon-muzzle-lights-20261020/`. Wegen der bewegten
++Szene, leicht abweichender Kamera und llvmpipe-Software-Rendering ist der
++Lichtbeitrag noch nicht pixelgenau kalibriert; eine Abnahme in der festen
++FP7-Testszene auf Hardware bleibt offen.
++
++Das Debug-Overlay weist jetzt zusätzlich die im aktuellen Frame noch im
++Transient-Budget enthaltenen Waffen-Mündungslichter aus. Der Zähler wird nach
++Prioritätsverdrängung berechnet; er zählt daher weder abgelehnte noch später
++verdrängte Quellen als akzeptiert. So lässt sich ein zukünftiger gleicher
++ON/OFF-Lauf von einer Szene unterscheiden, in der kein Mündungslicht das
++Lichtbudget erreicht.
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -486,3 +486,4 @@
+ client 2492-pbr-transparent-alpha-and-material-opacity.patch
+ client 2493-retail-transient-effect-light-runtime-evidence.patch
+ client 2494-retail-weapon-muzzle-light-asset-audit.patch
++client 2495-weapon-muzzle-light-budget-diagnostics.patch

@@ -1,0 +1,93 @@
+--- a/src/LibreLancer/Fx/ParticleEffectInstance.cs
++++ b/src/LibreLancer/Fx/ParticleEffectInstance.cs
+@@ -246,18 +246,46 @@
+                 for (var particleIndex = 0; particleIndex < count; particleIndex++)
+                 {
+                     ref var particle = ref Buffer[appearanceIndex, particleIndex];
+-                    var particleDistance = particle.Position.Length();
+-                    var particleExtent = extent;
+-                    if (appearance is FxBasicAppearance { MotionBlur: true })
+-                    {
+-                        var velocity = Vector3.TransformNormal(particle.Velocity, nodeTransform).Length();
+-                        if (!float.IsFinite(velocity))
++                    var particleDistanceSquared = particle.Position.LengthSquared();
++                    if (!float.IsFinite(particleDistanceSquared))
++                        return false;
++
++                    var distanceLimit = radius - nodeOffset - extent;
++                    var motionBlur = appearance is FxBasicAppearance { MotionBlur: true };
++                    var velocityLengthSquared = 0f;
++                    if (motionBlur)
++                    {
++                        var velocity = Vector3.TransformNormal(particle.Velocity, nodeTransform);
++                        velocityLengthSquared = velocity.LengthSquared();
++                        if (!IsFinite(velocity) || !float.IsFinite(velocityLengthSquared))
+                             return false;
+-                        particleExtent += velocity * 0.03f;
+-                    }
+-
+-                    if (!float.IsFinite(particleDistance) || !float.IsFinite(particleExtent))
+-                        return false;
++                    }
++
++                    // Most particles cannot extend the current maximum radius. Reject them
++                    // using squared distances before doing any square roots. For motion blur,
++                    // Cauchy-Schwarz gives a conservative upper bound for
++                    // |position| + 0.03 * |velocity|; overflow simply disables this shortcut.
++                    if (distanceLimit >= 0)
++                    {
++                        var limitSquared = distanceLimit * distanceLimit;
++                        if (!motionBlur && particleDistanceSquared <= limitSquared)
++                            continue;
++
++                        if (motionBlur)
++                        {
++                            const float motionBlurDistanceScale = 0.03f;
++                            var combinedSquared = (1f + motionBlurDistanceScale * motionBlurDistanceScale) *
++                                                  (particleDistanceSquared + velocityLengthSquared);
++                            if (float.IsFinite(combinedSquared) && combinedSquared <= limitSquared)
++                                continue;
++                        }
++                    }
++
++                    var particleDistance = MathF.Sqrt(particleDistanceSquared);
++                    var particleExtent = extent + (motionBlur
++                        ? MathF.Sqrt(velocityLengthSquared) * 0.03f
++                        : 0f);
++                    if (!float.IsFinite(particleExtent)) return false;
+                     radius = Math.Max(radius, nodeOffset + particleDistance + particleExtent);
+                 }
+             }
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -16,7 +16,7 @@
+ | HDR und Tonemapping | Linearisiertes Scene-Target, ACES-Tonemapping, linearisierte PBR-Albedo-/Licht-/Emissionswerte und exakte sRGB-Ausgabe im PBR-LDR-Pfad. System- und Nebel-Clearfarben werden ebenfalls vor dem HDR-Clear linearisiert; LDR bleibt unverändert. Ein Source-Audit hat alle 19 Ingame-Fragmentshader und den Postprocess-Ausgang geprüft; 2 Farbraum- und 21 Ambientlicht-Regressionstests bestehen. | Retail-Farbannahmen, visuelle Gleichheit zwischen Legacy/PBR, transparente Effekte, Fog und zusammengesetzte Ingame-Szenen brauchen weiterhin feste Bildvergleiche, Original-Client-Referenz und Hardware-GPU-Abnahme. HDR/LDR-Vergleiche: `docs/evidence/renderer/postprocess-four-mode-ab-20261017/` und der same-session-Hi02-Lauf `docs/evidence/renderer/hdr-ldr-hi02-live-ab-20261018/`; letzterer zeigt in dieser Legacy-Szene nur geringe Pixelabweichung und ersetzt keine Material-/Emissions-Referenz. Shaderaudit: `docs/evidence/renderer/hdr-shader-color-contract-audit-20261018.md`; Clear-Farbvertrag: `docs/evidence/renderer/hdr-clear-color-contract-20261018.md`. |
+ | Bloom | HDR-Extraktion mittelt jetzt ein vollständiges 4×4-Quellfenster in Viertelauflösung; aufrundende Zielmaße behalten Randpixel bei ungeraden Fenstergrößen. Basis-, mittlere und breite Blur-Stufen sowie Schwelle, Radius, Auflösung und Kernel sind konfigurierbar. | Die Extraktion beseitigt das bisherige Unterabtasten der zentralen vier Texel. Der Code führt alle drei Stufen aus. NAP-only M01A-Läufe am 19.10. vergleichen Bloom ein/aus und schalten in einem dritten Lauf zusätzlich Partikeleffekte aus. Der große Ring verschwindet mit den Explosionspartikeln; NAP-Fuse- und ALE-Daten verknüpfen ihn mit dem `planetflare`-Flashbang der Freeport-7-Explosion und grenzen ihn von Bloom ab. Die bewegten Frames sind nicht pixelgenau, die einzelne Flashbang-Instanz bleibt offen. Siehe [`NAP M01A Bloom-/Partikelmatrix`](evidence/renderer/nap-full-runtime-20261019/README.md). GPU-Kosten bleiben offen. |
+ | Partikelpuffer | `ParticleBuffer.RemoveAt` verschiebt beim Entfernen die kürzere Seite des Ringpuffers und bewahrt dabei die Reihenfolge. | Der maximale Verschiebeaufwand sinkt von der gesamten Restlänge auf `min(prefix, suffix)`; tatsächliche FPS-/GPU-Wirkung muss in festen Partikelszenen gemessen werden. |
+-| Projektil-Effekt-Culling | `ProjectileRenderer` prüft den Partikeleffekt nach der Simulation gegen die aktuelle Kamerafrustum und lässt Simulation, Beams und Effektlichter weiterlaufen. Für Effekte ohne statischen Radius berechnet `ParticleEffectInstance` einen konservativen Radius aus den aktuell lebenden Billboards, Rechtecken, Beam-Punkten und verschachtelten Partikeleffekten. Profil-CSV-Zähler unterscheiden geprüfte Effekte, verfügbare Bounds und verworfene Draws. | Ein NAP-only-Hi02-Capture belegt 5.954 verfügbare Bounds und 977 übersprungene Effektinstanzen in 300 Frames; ohne dynamische Bounds waren es null. Drawcall- und GPU-Zeit-p50 sanken im zweiten Lauf, aber bewegte Szene und Projektilverlauf waren nicht fixiert und FPS-p50 änderte sich nicht. Daraus folgt kein Performancegewinn. Unbekannte Appearance-Typen, ungültige Werte und mehr als 16 Verschachtelungsebenen deaktivieren das Culling sicher. Eine visuelle Prüfung mit fester Kamera und eine kontrollierte Vorher-/Nachher-Leistungsmessung bleiben offen. Siehe [Projectile-effect culling live profile](evidence/renderer/projectile-effect-culling-live-20261020/README.md). |
++| Projektil-Effekt-Culling | `ProjectileRenderer` prüft den Partikeleffekt nach der Simulation gegen die aktuelle Kamerafrustum und lässt Simulation, Beams und Effektlichter weiterlaufen. Für Effekte ohne statischen Radius berechnet `ParticleEffectInstance` einen konservativen Radius aus den aktuell lebenden Billboards, Rechtecken, Beam-Punkten und verschachtelten Partikeleffekten. Quadratische Distanzschranken überspringen Partikel, die den bisherigen Maximalradius sicher nicht erweitern; Motion-Blur-Partikel verwenden dafür eine konservative Cauchy-Schwarz-Schranke. Profil-CSV-Zähler unterscheiden geprüfte Effekte, verfügbare Bounds und verworfene Draws. | Ein NAP-only-Hi02-Capture belegt 5.954 verfügbare Bounds und 977 übersprungene Effektinstanzen in 300 Frames; ohne dynamische Bounds waren es null. Drawcall- und GPU-Zeit-p50 sanken im zweiten Lauf, aber bewegte Szene und Projektilverlauf waren nicht fixiert und FPS-p50 änderte sich nicht. Daraus folgt kein Performancegewinn. Die CPU-Arithmetik wurde reduziert, der Laufzeitgewinn ist noch nicht kontrolliert gemessen. Unbekannte Appearance-Typen, ungültige Werte und mehr als 16 Verschachtelungsebenen deaktivieren das Culling sicher. Eine visuelle Prüfung mit fester Kamera und eine kontrollierte Vorher-/Nachher-Leistungsmessung bleiben offen. Siehe [Projectile-effect culling live profile](evidence/renderer/projectile-effect-culling-live-20261020/README.md). |
+ | Transparente Draw-Commands | Transparent-Commands und Sortierindizes wachsen bei Bedarf geometrisch über die bisherige 16.384-Grenze hinaus; beide Arrays behalten dieselbe Kapazität. Der Sortiervergleich wird pro CommandBuffer wiederverwendet und nach einer Puffervergrößerung auf das neue Array umgestellt. Leere Queues werden ohne Sortieraufruf übersprungen. | Unit-Tests prüfen geometrisches Wachstum und fügen 16.385 Commands ein; derselbe Test sortiert die leere und anschließend vergrößerte Queue. Dichte Ingame-Szenen müssen die höhere Kapazität, ihren Speicherbedarf und die FPS-Wirkung der geringeren Allokationen noch prüfen. |
+ | Objektlicht-Bindung | `RenderHelpers.ApplyLights` übergibt die nach Priorität ausgewählten Quellindizes kompakt. `RenderMaterial.SetLights` verarbeitet so direkt höchstens acht Lichtindizes pro Materialdraw statt bis zu 128 Frame-Einträge erneut zu durchsuchen; manuell gebaute Lighting-Werte behalten den Bitset-Fallback. | Auswahl-/Bitset-Übereinstimmung ist im `TransientLightTests`-Pfad geprüft. Der CPU- und FPS-Gewinn muss mit derselben festen Szene vor/nach der Änderung gemessen werden. |
+ | LOD-/Modell-Culling | Die größte Archetyp- oder Mesh-LOD-Distanz wird ohne LINQ-Iteratoren ermittelt und pro Renderer gecacht, bis sich Modell oder Override-Array ändern. Leere Modelldistanzen blenden das Modell nicht mehr fälschlich aus; Mesh-eigene LOD-Distanzen aktivieren den frühen Distanz-Cull auch ohne Archetypwerte. | Vermeidet wiederholte Scans aller Modellteile im frühen Draw-Cull und erhält gültige Mesh-LODs. Der tatsächliche CPU-/FPS-Gewinn muss in festen Schiff-, Stations- und Asteroiden-Szenen gemessen werden. |
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 389 Client patches and two native patches. Each
++The active series contains 476 Client patches and two native patches. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -418,3 +418,4 @@
+ | 2482 | Profile projectile effect culling candidates, finite bounds and skipped draws |
+ | 2483 | Compute conservative bounds for live particles in unbounded effects |
+ | 2484 | Record live projectile-effect culling bounds and profile evidence |
++| 2485 | Skip redundant square-root work while measuring conservative projectile-effect bounds |
+--- a/patches/series
++++ b/patches/series
+@@ -476,3 +476,4 @@
+ client 2482-profile-projectile-effect-culling.patch
+ client 2483-dynamic-particle-effect-cull-bounds.patch
+ client 2484-projectile-effect-culling-live-evidence.patch
++client 2485-render-particle-cull-bound-math.patch

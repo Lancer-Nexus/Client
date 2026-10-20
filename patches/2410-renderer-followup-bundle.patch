@@ -1,0 +1,236 @@
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -15,7 +15,8 @@
+ | Legacy-Environment-Maps | Bestehende Freelancer-Cubemap-Reflexionen lassen sich unabhängig vom PBR-IBL per Einstellung oder `--render-legacy-environment-maps=on|off` umschalten. Der Standard bleibt `on`, damit ältere Materialien ihr bisheriges Verhalten behalten. | Beide Startwerte laden bis ins Intro. Der gleiche Kamera-A/B-Bildvergleich fehlt noch; externe Bildschirmaufnahmen waren in der letzten Sitzung schwarz. |
+ | HDR und Tonemapping | Linearisiertes Scene-Target, ACES-Tonemapping, linearisierte PBR-Albedo-/Licht-/Emissionswerte und exakte sRGB-Ausgabe im PBR-LDR-Pfad. System- und Nebel-Clearfarben werden ebenfalls vor dem HDR-Clear linearisiert; LDR bleibt unverändert. Ein Source-Audit hat alle 19 Ingame-Fragmentshader und den Postprocess-Ausgang geprüft; 2 Farbraum- und 21 Ambientlicht-Regressionstests bestehen. | Retail-Farbannahmen, visuelle Gleichheit zwischen Legacy/PBR, transparente Effekte, Fog und zusammengesetzte Ingame-Szenen brauchen weiterhin feste Bildvergleiche, Original-Client-Referenz und Hardware-GPU-Abnahme. HDR/LDR-Vergleiche: `docs/evidence/renderer/postprocess-four-mode-ab-20261017/` und der same-session-Hi02-Lauf `docs/evidence/renderer/hdr-ldr-hi02-live-ab-20261018/`; letzterer zeigt in dieser Legacy-Szene nur geringe Pixelabweichung und ersetzt keine Material-/Emissions-Referenz. Shaderaudit: `docs/evidence/renderer/hdr-shader-color-contract-audit-20261018.md`; Clear-Farbvertrag: `docs/evidence/renderer/hdr-clear-color-contract-20261018.md`. |
+ | Bloom | HDR-Extraktion mittelt jetzt ein vollständiges 4×4-Quellfenster in Viertelauflösung; aufrundende Zielmaße behalten Randpixel bei ungeraden Fenstergrößen. Basis-, mittlere und breite Blur-Stufen sowie Schwelle, Radius, Auflösung und Kernel sind konfigurierbar. | Die Extraktion beseitigt das bisherige Unterabtasten der zentralen vier Texel. Der Code führt alle drei Stufen aus. NAP-only M01A-Läufe am 19.10. vergleichen Bloom ein/aus und schalten in einem dritten Lauf zusätzlich Partikeleffekte aus. Der große Ring verschwindet mit den Explosionspartikeln; NAP-Fuse- und ALE-Daten verknüpfen ihn mit dem `planetflare`-Flashbang der Freeport-7-Explosion und grenzen ihn von Bloom ab. Die bewegten Frames sind nicht pixelgenau, die einzelne Flashbang-Instanz bleibt offen. Siehe [`NAP M01A Bloom-/Partikelmatrix`](evidence/renderer/nap-full-runtime-20261019/README.md). GPU-Kosten bleiben offen. |
+-| Temporäre Effekte | `SystemRenderer.SpawnTempFx` reiht keine fehlenden ParticleEffects ein; `ParticleEffectRenderer(null)` gilt sofort als beendet und bleibt auch nach `Restart()` beendet. Der Partikel-Cull verwendet die vorhandene vorberechnete Distanzkonstante statt `Math.Pow` pro Effekt und Frame. | Ein Regressionstest deckt den Null-Effekt-Lebenszyklus ab. Fehlende oder nicht auflösbare ALE-Effekte bleiben als mögliche Ursache unsichtbarer Einzel-Explosionen gesondert zu diagnostizieren. |
++| Partikelpuffer | `ParticleBuffer.RemoveAt` verschiebt beim Entfernen die kürzere Seite des Ringpuffers und bewahrt dabei die Reihenfolge. | Der maximale Verschiebeaufwand sinkt von der gesamten Restlänge auf `min(prefix, suffix)`; tatsächliche FPS-/GPU-Wirkung muss in festen Partikelszenen gemessen werden. |
++| Temporäre Effekte | `SystemRenderer.SpawnTempFx` reiht keine fehlenden ParticleEffects ein; `ParticleEffectRenderer(null)` gilt sofort als beendet und bleibt auch nach `Restart()` beendet. Der Partikel-Cull verwendet die vorhandene vorberechnete Distanzkonstante statt `Math.Pow` pro Effekt und Frame. Kurzlebige Effektlichter akkumulieren nur endliche Framezeiten und sättigen ihr Animationsalter, bevor es nicht-endlich werden kann. Über `SpawnTempFx` erzeugte Partikeleffekte simulieren außerhalb der Distanzgrenze weiter und können regulär auslaufen; dauerhafte Effekte bleiben gecullt. | Ein Regressionstest deckt den Null-Effekt-Lebenszyklus ab. Fehlende oder nicht auflösbare ALE-Effekte bleiben als mögliche Ursache unsichtbarer Einzel-Explosionen gesondert zu diagnostizieren. |
+ | Antialiasing | SMAA-Pässe und MSAA-Auflösung; HDR/LDR-Kombinationen sowie Resize und Minimize/Restore wurden auf OpenGL/Mesa geprüft. | Andere Backends/Treiber, wiederholte Lifecycle-Zyklen und Fehler-Injektion stehen aus. |
+ | GPU-Subpass-Abbruch | Postprocess-, Bloom-, SMAA-, SSAO- und MSAA-Subpasses melden `Begin`, `End` oder `Abort`. Nur ein erfolgreich beendeter Subpass veröffentlicht seine geschriebenen Ressourcen für nachfolgende Pässe. | Zwei Regressionstests prüfen, dass abgebrochene Ausgaben nicht verfügbar werden und erfolgreiche Ausgaben weitergereicht werden. Fehler-Injektion im nativen Backend bleibt offen. Siehe Patch `2407-render-subpass-abort-contract.patch`. |
+ | Nomad-Gradient | Der HLSL-Shader begrenzt den View-/Normal-Dot-Product nun wie der frühere LibreLancer-Shader auf `[0, 1]`, anstatt den gesamten signierten Bereich auf `[0, 1]` umzurechnen. | Produktionsshader-Build und gezielter Nomad-Schiff-A/B mit Retail-NAP-Daten stehen aus. Quellvergleich: `docs/evidence/renderer/nomad-gradient-legacy-parity-20261018.md`. |
+@@ -25,7 +26,7 @@
+ | RenderContext-Lifecycle | SDL2/SDL3 geben den RenderContext vor dem nativen Kontextabbau frei. Nach Abschluss der GPU-Fences werden Shader, SMAA-Texturen, Fullscreen- und Renderer2D-Puffer, Font-Texturen sowie der unmanaged 2D-Pool auch bei Einzel-Fehlern bereinigt. | Headless-Regression prüft Fence-Drain, Wiederholbarkeit und bekannte Kontext-Ressourcen. GL-native Fehlerpfade und Kontextverlust bleiben offen. Siehe `docs/evidence/renderer/render-context-shutdown-20261018/`. |
+ | Shader-Cache über Context-Wechsel | Built-in-Shaderbündel werden je `RenderContext` neu bezogen; `AsteroidBandMaterial` hält keinen globalen Shaderverweis mehr. | Headless-Regression prüft den Wechsel nach dem Schließen des ersten Shader-Scopes. Native GL-Kontextverlust- und Gerätewechselabnahme bleiben offen. Siehe `docs/evidence/renderer/render-context-shader-cache-20261018.md`. |
+ | Shader-Kompilierung | Alle 25 Shader-Bundles und die definierten Feature-Permutationen kompilieren mit dem im Repository enthaltenen DXC. | Belegt den HLSL-/SPIR-V-Compilerpfad, nicht die Pipeline-Erstellung oder das Zeichnen auf realen Treibern. Siehe `docs/evidence/renderer/shader-bundle-dxc-audit-20261018.md`. |
+-| Dynamische Lichter und Schatten | Persistente und kurzlebige Lichter werden priorisiert; `lgt_effect`-Lichter von fliegenden Projektilen folgen nun dem Projektilalter und seiner Position. Ein ausgewähltes Richtungslicht läuft durch Shadow-Map-Pass und 3×3-PCF. Alpha-Test-Texturen werden auch in PBR-Depth-/Shadow-Pässen anhand eines Material-Uniforms ausgeschnitten; blendtransparente Materialien werfen keine Schatten. Lichtprojektion ist im Licht-XY-Raum verankert und texelgesnappt; Mesh-Cullingradien berücksichtigen `RenderScale`. | Unit-Tests decken Lichtkurvenzeit, Position, Gruppe und ungültige Radien für Projektil-Lichter ab. Hi02 belegt Pass, Lichtauswahl und Live-Schaltung auf einer OpenGL-GPU. Kamera-Fit-/Stabilitäts- und RenderScale-Radiustests bestehen. Ein NAP-only-Hi02-A/B auf Intel HD 4600 bestätigt den aktiven Pass bei Bias 0 und 0,02; der Hull-Unterschied ist subtil und kalibriert keinen empfohlenen Wert. Eine Ingame-Abnahme von Waffenfeuer-/Projektillichtern, Offscreen-Castern, weiteren Materialien/Szenen und GPU-Kosten bleibt offen. Siehe `docs/evidence/renderer/shadow-map-hi02-live-toggle-20261017/`, `docs/evidence/renderer/shadow-camera-stability-20261018.md` und `docs/evidence/renderer/scaled-model-culling-20261018.md`. |
++| Dynamische Lichter und Schatten | Persistente und kurzlebige Lichter werden priorisiert; `lgt_effect`-Lichter von fliegenden Projektilen folgen nun dem Projektilalter und seiner Position. Ein ausgewähltes Richtungslicht läuft durch Shadow-Map-Pass und 3×3-PCF. Alpha-Test-Texturen werden auch in PBR-Depth-/Shadow-Pässen anhand eines Material-Uniforms ausgeschnitten; blendtransparente Materialien werfen keine Schatten. Lichtprojektion ist im Licht-XY-Raum verankert und texelgesnappt; Mesh-Cullingradien berücksichtigen `RenderScale`. Der Shadow-Frustum-Fit hält seine acht Ecken in einem Stack-Puffer statt pro Frame ein Array zu allozieren. | Unit-Tests decken Lichtkurvenzeit, Position, Gruppe und ungültige Radien für Projektil-Lichter ab. Hi02 belegt Pass, Lichtauswahl und Live-Schaltung auf einer OpenGL-GPU. Kamera-Fit-/Stabilitäts- und RenderScale-Radiustests bestehen. Ein NAP-only-Hi02-A/B auf Intel HD 4600 bestätigt den aktiven Pass bei Bias 0 und 0,02; der Hull-Unterschied ist subtil und kalibriert keinen empfohlenen Wert. Eine Ingame-Abnahme von Waffenfeuer-/Projektillichtern, Offscreen-Castern, weiteren Materialien/Szenen und GPU-Kosten bleibt offen. Siehe `docs/evidence/renderer/shadow-map-hi02-live-toggle-20261017/`, `docs/evidence/renderer/shadow-camera-stability-20261018.md` und `docs/evidence/renderer/scaled-model-culling-20261018.md`. |
+ | Diagnose | CPU-Framezeitprofile, asynchrone OpenGL-GPU-Passzeiten, Bloom-/Shadow-Passzeiten, Ziel-/Speicherschätzungen und CSV-Ausgabe. Environment-Cubemaps mit mehreren Catalog-Aliasen werden im geschätzten GPU-Texturspeicher nur einmal gezählt und bei Bereinigung auch nur einmal freigegeben. | Langzeitprofile und plattformübergreifende Vergleichsbaselines fehlen. Einzelne asynchrone Samples sind keine FPS-Baseline. |
+ 
+ ## Neueste Ingame-Beobachtung
+@@ -47,7 +48,7 @@
+ Seite mit Materialname `none`; der `SphFile`-Pfad erzeugt dafür keine
+ Cubemap-Sphere-Geometrie. Der sichtbare Stern und Lens Glow werden separat über
+ `StarArch.ini` und `SunRenderer` gezeichnet. Ein früherer NAP-only A/B zeigte
+-eine sichtbare Lens-Glow-Schalterwirkung. Der `sun.sph`-Hinweis belegt daher
++eine sichtbare Lens-Glow-Schalterwirkung. Der Fade-Cull berücksichtigt jetzt den konfigurierten Lens-Glow-Radius statt nur den Sonnenscheibenradius. Der `sun.sph`-Hinweis belegt daher
+ keine fehlende sichtbare Sonne oder Lens-Glow-Funktion; Details stehen unter
+ [`Sun sphere asset and renderer path`](evidence/renderer/sun-sph-placeholder-20261018.md).
+ 
+@@ -224,7 +225,9 @@
+    [`Soft-particle M01A A/B`](evidence/renderer/soft-particle-m01a-explosion-ab-20261018/README.md).
+    Sonnen-/Planetenatmosphären, Lens Glow, Jump-Gates,
+    Tradelanes, Laser, Explosionen und Partikel ebenfalls in repräsentativen
+-   Szenen abnehmen.
++   Szenen abnehmen. Die konfigurierte Glow-Ring-Sequenz wird nun auch beim
++   Eintreffen am Zieltor gestartet, sofern `render_jump_gate_effects` aktiv ist;
++   Laufzeitbild und Retail-Zeitabgleich bleiben offen.
+ 5. **Render-Graph backendneutralisieren.** Der Systemrenderer und Postprocessing
+    führen ihre Pässe bereits über den Graph-Scheduler aus und validieren
+    Attachment-Verträge. Die Attachment-Formate in den Contracts tragen nun keine
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -407,3 +407,4 @@
+ client 2407-render-subpass-abort-contract.patch
+ client 2408-sdl-gpu-dfm-readback-validation.patch
+ client 2409-temporary-effect-null-lifecycle.patch
++client 2410-renderer-followup-bundle.patch
+diff --git a/src/LibreLancer/Fx/ParticleBuffer.cs b/src/LibreLancer/Fx/ParticleBuffer.cs
+--- a/src/LibreLancer/Fx/ParticleBuffer.cs
++++ b/src/LibreLancer/Fx/ParticleBuffer.cs
+@@ -56,17 +56,31 @@
+ 
+     public void RemoveAt(int segment, int index)
+     {
++        ref var b = ref segments[segment];
++        if (index < 0 || index >= b.Count)
++            throw new ArgumentOutOfRangeException("index");
+         if (index == 0) {
+             Dequeue(segment);
+             return;
+         }
+-        ref var b = ref segments[segment];
+-        if (index < 0 || index >= b.Count)
+-            throw new ArgumentOutOfRangeException("index");
+-        for (int i = index; i < b.Count - 1; i++)
+-            this[segment, i] = this[segment, i + 1];
+-        this[segment, b.Count - 1] = default;
+-        b.Head = b.Head - 1 < 0 ? (b.Capacity - 1) : b.Head - 1;
++
++        var suffixCount = b.Count - index - 1;
++        if (index < suffixCount)
++        {
++            // Preserve queue order while shifting the shorter prefix toward the removed slot.
++            for (int i = index; i > 0; i--)
++                this[segment, i] = this[segment, i - 1];
++            this[segment, 0] = default;
++            b.Tail = (b.Tail + 1) % b.Capacity;
++        }
++        else
++        {
++            // Preserve queue order while shifting the shorter suffix toward the removed slot.
++            for (int i = index; i < b.Count - 1; i++)
++                this[segment, i] = this[segment, i + 1];
++            this[segment, b.Count - 1] = default;
++            b.Head = b.Head - 1 < 0 ? (b.Capacity - 1) : b.Head - 1;
++        }
+         b.Count--;
+     }
+ 
+diff --git a/src/LibreLancer/GameStates/SpaceGameplay.cs b/src/LibreLancer/GameStates/SpaceGameplay.cs
+--- a/src/LibreLancer/GameStates/SpaceGameplay.cs
++++ b/src/LibreLancer/GameStates/SpaceGameplay.cs
+@@ -852,6 +852,8 @@
+                 return;
+ 
+             jumpSequenceElapsed = 0;
++            if (arrivalGate != null && Game.Config.Settings.RenderJumpGateEffects)
++                ScheduleJumpRingEffects(arrivalGate, profile);
+             StartGateTunnelRenderer(tunnel, profile, outbound: false);
+             if (profile.JumpTunnelEffect is { } effectName &&
+                 Game.GameData.Items.Effects.Get(effectName) is { } effect)
+diff --git a/src/LibreLancer/Render/Cameras/DirectionalShadowCamera.cs b/src/LibreLancer/Render/Cameras/DirectionalShadowCamera.cs
+--- a/src/LibreLancer/Render/Cameras/DirectionalShadowCamera.cs
++++ b/src/LibreLancer/Render/Cameras/DirectionalShadowCamera.cs
+@@ -48,7 +48,7 @@
+             return false;
+         }
+ 
+-        var corners = new Vector3[8];
++        Span<Vector3> corners = stackalloc Vector3[8];
+         var cornerIndex = 0;
+         for (var y = -1; y <= 1; y += 2)
+         for (var x = -1; x <= 1; x += 2)
+diff --git a/src/LibreLancer/Render/ParticleEffectRenderer.cs b/src/LibreLancer/Render/ParticleEffectRenderer.cs
+--- a/src/LibreLancer/Render/ParticleEffectRenderer.cs
++++ b/src/LibreLancer/Render/ParticleEffectRenderer.cs
+@@ -15,6 +15,7 @@
+ 	{
+ 		public float SParam = 0f;
+ 		public bool Active = true;
++        public bool SimulateWhenCulled { get; set; }
+         private SystemRenderer sys = null!;
+         private ParticleEffectInstance? fx;
+         public bool Finished = false;
+@@ -80,16 +81,16 @@
+             cameraPos = camera.Position;
+             dist = Vector3.DistanceSquared(pos, camera.Position);
+             fx.Resources = sys.ResourceManager;
+-            if (Active && dist < CULL && !forceCull)
++            var withinDistance = dist < CULL;
++            fx.Pool = Active && (withinDistance || SimulateWhenCulled) ? sys.FxPool : null!;
++            if (Active && withinDistance && !forceCull)
+             {
+                 sys.AddObject(this);
+-                fx.Pool = sys.FxPool;
+                 fx.UpdateCull(camera);
+                 PrepareEffectLight(sys);
+                 return true;
+             }
+ 
+-            fx.Pool = null!;
+             return false;
+         }
+ 
+@@ -106,7 +107,7 @@
+ 			pos = transform.Position;
+             dist = Vector3.DistanceSquared(pos, cameraPos);
+ 
+-            if (!Active || !(dist < CULL))
++            if (!Active || (!(dist < CULL) && !SimulateWhenCulled))
+             {
+                 return;
+             }
+diff --git a/src/LibreLancer/Render/SunRenderer.cs b/src/LibreLancer/Render/SunRenderer.cs
+--- a/src/LibreLancer/Render/SunRenderer.cs
++++ b/src/LibreLancer/Render/SunRenderer.cs
+@@ -136,8 +136,13 @@
+ 
+         public override bool PrepareRender(ICamera camera, NebulaRenderer nr, SystemRenderer sys, bool forceCull)
+         {
++            var sunRadius = float.IsFinite(Sun.Radius) ? Math.Max(Sun.Radius, 0) : 0;
++            var glowRadius = float.IsFinite(Sun.LensGlowRadiusScale)
++                ? Math.Abs(sunRadius * Sun.LensGlowRadiusScale)
++                : sunRadius;
++            var lensGlowBounds = Math.Max(sunRadius, glowRadius);
+             lensGlowTargetAlpha = Sun.LensGlowSprite != null &&
+-                                 camera.FrustumCheck(new BoundingSphere(pos, Math.Max(Sun.Radius, 0)))
++                                 camera.FrustumCheck(new BoundingSphere(pos, lensGlowBounds))
+                 ? 1f
+                 : 0f;
+ 
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -297,10 +297,13 @@
+                 }
+             }
+ 
++            var effectAgeDelta = double.IsFinite(elapsed) && elapsed > 0
++                ? (float)Math.Min(elapsed, float.MaxValue)
++                : 0f;
+             for (var i = transientEffectLights.Count - 1; i >= 0; i--)
+             {
+                 var effectLight = transientEffectLights[i];
+-                effectLight.Age += (float)Math.Max(0, elapsed);
++                effectLight.Age = Math.Min(float.MaxValue, effectLight.Age + effectAgeDelta);
+                 if (effectLight.Animation.IsPlaybackComplete(effectLight.Age, effectLight.TimeScale))
+                     transientEffectLights.RemoveAt(i);
+             }
+@@ -468,7 +471,8 @@
+                 var ren = new ParticleEffectRenderer(fx)
+                 {
+                     SParam = 0,
+-                    Active = true
++                    Active = true,
++                    SimulateWhenCulled = true
+                 };
+ 
+                 tempFx.Add(new TemporaryFx(ren, position));
+--- a/src/LibreLancer/World/Equipments/AbstractWeapon.cs
++++ b/src/LibreLancer/World/Equipments/AbstractWeapon.cs
+@@ -40,7 +40,8 @@
+         LightAnim? lightAnimation = null,
+         float lightRadius = 0) : base(parent, attachment, equipment, type, resources, true)
+     {
+-        muzzleLightAnimation = lightAnimation is { Duration: > 0 } && lightRadius > 0
++        muzzleLightAnimation = lightAnimation is { Duration: > 0 } &&
++            float.IsFinite(lightAnimation.Duration) && float.IsFinite(lightRadius) && lightRadius > 0
+             ? lightAnimation
+             : null;
+         muzzleLightRadius = muzzleLightAnimation == null ? 0 : lightRadius;
+@@ -124,12 +125,18 @@
+         base.RenderUpdate(delta);
+         if (muzzleLightAge >= 0 && muzzleLightAnimation != null)
+         {
+-            muzzleLightAge += (float)delta;
+-            if (muzzleLightAge >= muzzleLightAnimation.Duration)
++            if (!double.IsFinite(delta) || delta <= 0 ||
++                delta >= muzzleLightAnimation.Duration - muzzleLightAge)
++            {
+                 muzzleLightAge = -1;
++            }
++            else
++            {
++                muzzleLightAge += (float)delta;
++            }
+         }
+ 
+-        if (flashFx.Count > 0)
++        if (flashFx.Count > 0 && double.IsFinite(delta) && delta > 0)
+         {
+             var tr = GetTransform();
+             foreach (var fx in flashFx)

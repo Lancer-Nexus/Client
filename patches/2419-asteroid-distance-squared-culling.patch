@@ -1,0 +1,69 @@
+--- a/src/LibreLancer/Render/AsteroidFieldRenderer.cs
++++ b/src/LibreLancer/Render/AsteroidFieldRenderer.cs
+@@ -163,6 +163,7 @@
+             var position = camera.Position;
+             var close = AsteroidFieldShared.GetCloseCube(position, (int) (field.FillDist * 2));
+             var checkRad = field.FillDist + field.BillboardSize.Y;
++            var centerCullDistance = field.FillDist + checkRad;
+             var checkCount = 0;
+ 
+             for (var x = -1; x <= 1; x++)
+@@ -174,7 +175,8 @@
+                         var center = close + new Vector3(x, y, z) * (field.FillDist * 2);
+ 
+                         // early bail for billboards too far
+-                        if (Vector3.Distance(position, center) - checkRad > field.FillDist)
++                        if (centerCullDistance < 0 ||
++                            Vector3.DistanceSquared(position, center) > centerCullDistance * centerCullDistance)
+                         {
+                             continue;
+                         }
+@@ -195,7 +197,8 @@
+                             var spritepos = center + Vector3.Transform(billboardCube[i].Position, rotation);
+ 
+                             // cull individual billboards too far
+-                            if (Vector3.Distance(position, spritepos) > field.FillDist)
++                            if (field.FillDist < 0 ||
++                                Vector3.DistanceSquared(position, spritepos) > field.FillDist * field.FillDist)
+                             {
+                                 continue;
+                             }
+@@ -259,6 +262,9 @@
+             var close = AsteroidFieldShared.GetCloseCube(cameraPos, field.CubeSize);
+             var amountCubes = (int) Math.Floor((field.FillDist / field.CubeSize)) + 1;
+ 
++            var maximumCubeDistance = Math.Min(field.FillDist, lastFog) + cubeMesh.Radius;
++            var maximumCubeDistanceSquared = maximumCubeDistance * maximumCubeDistance;
++
+             for (var x = -amountCubes; x <= amountCubes; x++)
+             {
+                 for (var y = -amountCubes; y <= amountCubes; y++)
+@@ -266,9 +272,8 @@
+                     for (var z = -amountCubes; z <= amountCubes; z++)
+                     {
+                         var center = close + new Vector3(x, y, z) * field.CubeSize;
+-                        var closestDistance = (Vector3.Distance(center, position) - cubeMesh.Radius);
+-
+-                        if (closestDistance >= field.FillDist || closestDistance >= lastFog)
++                        if (maximumCubeDistance <= 0 ||
++                            Vector3.DistanceSquared(center, position) >= maximumCubeDistanceSquared)
+                         {
+                             continue;
+                         }
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -17,6 +17,7 @@
+ | Bloom | HDR-Extraktion mittelt jetzt ein vollständiges 4×4-Quellfenster in Viertelauflösung; aufrundende Zielmaße behalten Randpixel bei ungeraden Fenstergrößen. Basis-, mittlere und breite Blur-Stufen sowie Schwelle, Radius, Auflösung und Kernel sind konfigurierbar. | Die Extraktion beseitigt das bisherige Unterabtasten der zentralen vier Texel. Der Code führt alle drei Stufen aus. NAP-only M01A-Läufe am 19.10. vergleichen Bloom ein/aus und schalten in einem dritten Lauf zusätzlich Partikeleffekte aus. Der große Ring verschwindet mit den Explosionspartikeln; NAP-Fuse- und ALE-Daten verknüpfen ihn mit dem `planetflare`-Flashbang der Freeport-7-Explosion und grenzen ihn von Bloom ab. Die bewegten Frames sind nicht pixelgenau, die einzelne Flashbang-Instanz bleibt offen. Siehe [`NAP M01A Bloom-/Partikelmatrix`](evidence/renderer/nap-full-runtime-20261019/README.md). GPU-Kosten bleiben offen. |
+ | Partikelpuffer | `ParticleBuffer.RemoveAt` verschiebt beim Entfernen die kürzere Seite des Ringpuffers und bewahrt dabei die Reihenfolge. | Der maximale Verschiebeaufwand sinkt von der gesamten Restlänge auf `min(prefix, suffix)`; tatsächliche FPS-/GPU-Wirkung muss in festen Partikelszenen gemessen werden. |
+ | LOD-/Modell-Culling | Das frühe Modell-Culling ermittelt die größte Archetyp- oder Mesh-LOD-Distanz ohne LINQ-Iteratoren pro Objekt und Frame. Leere Modelldistanzen blenden das Modell nicht mehr fälschlich aus; Mesh-eigene LOD-Distanzen aktivieren den frühen Distanz-Cull auch ohne Archetypwerte. | Reduziert verwaltete Iterator-Allokationen im Draw-Vorbereitungspfad und erhält gültige Mesh-LODs. Der tatsächliche CPU-/FPS-Gewinn muss in festen Schiff-, Stations- und Asteroiden-Szenen gemessen werden. |
++| Asteroidenfeld-Culling | Asteroidenwürfel und Billboards vergleichen ihre quadrierten Distanzen gegen die jeweiligen Reichweiten; die innere Kandidatenprüfung vermeidet damit wiederholte Quadratwurzeln. | Der Cull-Grenzwert bleibt mathematisch äquivalent für endliche, nichtnegative Reichweiten. Der CPU-Gewinn und Sichtbarkeit an Grenzfällen müssen in dichten NAP-Asteroidenfeldern gemessen werden. |
+ | Temporäre Effekte | `SystemRenderer.SpawnTempFx` reiht keine fehlenden ParticleEffects ein; `ParticleEffectRenderer(null)` gilt sofort als beendet und bleibt auch nach `Restart()` beendet. Der Partikel-Cull verwendet die vorhandene vorberechnete Distanzkonstante statt `Math.Pow` pro Effekt und Frame. Kurzlebige Effektlichter akkumulieren nur endliche Framezeiten und sättigen ihr Animationsalter, bevor es nicht-endlich werden kann. Über `SpawnTempFx` erzeugte Partikeleffekte simulieren außerhalb der Distanzgrenze weiter und können regulär auslaufen; dauerhafte Effekte bleiben gecullt. | Ein Regressionstest deckt den Null-Effekt-Lebenszyklus ab. Fehlende oder nicht auflösbare ALE-Effekte bleiben als mögliche Ursache unsichtbarer Einzel-Explosionen gesondert zu diagnostizieren. |
+ | Antialiasing | SMAA-Pässe und MSAA-Auflösung; HDR/LDR-Kombinationen sowie Resize und Minimize/Restore wurden auf OpenGL/Mesa geprüft. | Andere Backends/Treiber, wiederholte Lifecycle-Zyklen und Fehler-Injektion stehen aus. |
+ | GPU-Subpass-Abbruch | Postprocess-, Bloom-, SMAA-, SSAO- und MSAA-Subpasses melden `Begin`, `End` oder `Abort`. Nur ein erfolgreich beendeter Subpass veröffentlicht seine geschriebenen Ressourcen für nachfolgende Pässe. | Zwei Regressionstests prüfen, dass abgebrochene Ausgaben nicht verfügbar werden und erfolgreiche Ausgaben weitergereicht werden. Fehler-Injektion im nativen Backend bleibt offen. Siehe Patch `2407-render-subpass-abort-contract.patch`. |
+--- a/patches/series
++++ b/patches/series
+@@ -411,3 +411,4 @@
+ client 2416-dfm-detailmap-normal-tangents.patch
+ client 2417-reject-nonfinite-frame-lights.patch
+ client 2418-model-lod-cull-no-linq.patch
++client 2419-asteroid-distance-squared-culling.patch

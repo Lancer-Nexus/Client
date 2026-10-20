@@ -1,0 +1,450 @@
+diff --git a/src/LibreLancer.Base/Graphics/SystemRenderPass.cs b/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
+--- a/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
++++ b/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
+@@ -674,6 +674,13 @@
+     ScreenSpaceAmbientOcclusion
+ }
+ 
++public enum SystemRenderSubpassEvent
++{
++    Begin,
++    End,
++    Abort
++}
++
+ public readonly record struct SystemRenderSubpassDescriptor(
+     SystemRenderSubpass Pass,
+     string Name,
+@@ -724,8 +731,10 @@
+ 
+     public void Abort(SystemRenderSubpass pass)
+     {
+-        if (activePass == pass)
+-            activePass = null;
++        if (activePass != pass)
++            throw new InvalidOperationException(
++                $"Render subpass '{SystemRenderPasses.GetSubpass(pass).Name}' aborted without a matching begin.");
++        activePass = null;
+     }
+ 
+     public void CompleteFrame()
+diff --git a/src/LibreLancer.Base/Graphics/PostProcessPipeline.cs b/src/LibreLancer.Base/Graphics/PostProcessPipeline.cs
+--- a/src/LibreLancer.Base/Graphics/PostProcessPipeline.cs
++++ b/src/LibreLancer.Base/Graphics/PostProcessPipeline.cs
+@@ -33,7 +33,7 @@
+     public float SsaoRadius;
+     public float SsaoStrength;
+     public float SsaoBias;
+-    public Action<SystemRenderSubpass, bool>? GpuSubpassMarker;
++    public Action<SystemRenderSubpass, SystemRenderSubpassEvent>? GpuSubpassMarker;
+ }
+ 
+ /// <summary>A stage in the executable post-process chain.</summary>
+@@ -140,7 +140,8 @@
+ 
+     public void Execute(ref PostProcessContext context)
+     {
+-        context.GpuSubpassMarker?.Invoke(SystemRenderSubpass.ToneMap, true);
++        context.GpuSubpassMarker?.Invoke(SystemRenderSubpass.ToneMap, SystemRenderSubpassEvent.Begin);
++        var succeeded = false;
+         try
+         {
+             var target = context.ToneMapIntermediateTarget ?? context.Target;
+@@ -152,10 +153,12 @@
+                 context.BloomMediumWeight, context.BloomWideWeight);
+             if (context.ToneMapIntermediateTarget != null)
+                 context.Source = context.ToneMapIntermediateTarget.Texture;
++            succeeded = true;
+         }
+         finally
+         {
+-            context.GpuSubpassMarker?.Invoke(SystemRenderSubpass.ToneMap, false);
++            context.GpuSubpassMarker?.Invoke(SystemRenderSubpass.ToneMap,
++                succeeded ? SystemRenderSubpassEvent.End : SystemRenderSubpassEvent.Abort);
+         }
+     }
+ 
+diff --git a/src/LibreLancer.Base/Graphics/AntialiasTarget.cs b/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
+--- a/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
++++ b/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
+@@ -28,7 +28,7 @@
+     public float BloomRadius { get; set; } = 1f;
+     public float BloomResolutionScale { get; set; } = 1f;
+     public int BloomKernelPairs { get; set; } = 2;
+-    public Action<SystemRenderSubpass, bool>? GpuSubpassMarker { get; set; }
++    public Action<SystemRenderSubpass, SystemRenderSubpassEvent>? GpuSubpassMarker { get; set; }
+     public int Samples => msaa?.Samples ?? 1;
+     public SystemRenderAttachmentFormat MultisampleStorageFormat => msaa?.RequestedColorFormat switch
+     {
+@@ -217,8 +217,10 @@
+         Target is { HasColor: true, HasDepth: true } activeTarget &&
+         (activeTarget.ColorFormat == null || activeTarget.ColorFormat == expectedColorFormat);
+ 
+-    private void BeginGpuSubpass(SystemRenderSubpass pass) => GpuSubpassMarker?.Invoke(pass, true);
+-    private void EndGpuSubpass(SystemRenderSubpass pass) => GpuSubpassMarker?.Invoke(pass, false);
++    private void BeginGpuSubpass(SystemRenderSubpass pass) =>
++        GpuSubpassMarker?.Invoke(pass, SystemRenderSubpassEvent.Begin);
++    private void EndGpuSubpass(SystemRenderSubpass pass, bool succeeded) =>
++        GpuSubpassMarker?.Invoke(pass, succeeded ? SystemRenderSubpassEvent.End : SystemRenderSubpassEvent.Abort);
+ 
+     public void BlitToScreen(Point offset)
+     {
+@@ -235,6 +237,7 @@
+         if (msaa != null)
+         {
+             BeginGpuSubpass(SystemRenderSubpass.MsaaColorResolve);
++            var succeeded = false;
+             try
+             {
+                 if (HdrOutputEnabled)
+@@ -243,8 +246,9 @@
+                     msaa.BlitToRenderTarget(ldrResolve!.Backing);
+                 else
+                     msaa.BlitToScreen(offset);
+-            }
+-            finally { EndGpuSubpass(SystemRenderSubpass.MsaaColorResolve); }
++                succeeded = true;
++            }
++            finally { EndGpuSubpass(SystemRenderSubpass.MsaaColorResolve, succeeded); }
+             if (HdrOutputEnabled)
+                 RunPostProcess(hdrResolve!.Texture, null, Width, Height, offset);
+             else if (SsaoEnabled)
+@@ -271,6 +275,7 @@
+         if (msaa != null)
+         {
+             BeginGpuSubpass(SystemRenderSubpass.MsaaColorResolve);
++            var succeeded = false;
+             try
+             {
+                 if (HdrOutputEnabled)
+@@ -279,8 +284,9 @@
+                     msaa.BlitToRenderTarget(ldrResolve!.Backing);
+                 else
+                     msaa.BlitToRenderTarget(rTarget.Backing);
+-            }
+-            finally { EndGpuSubpass(SystemRenderSubpass.MsaaColorResolve); }
++                succeeded = true;
++            }
++            finally { EndGpuSubpass(SystemRenderSubpass.MsaaColorResolve, succeeded); }
+             if (HdrOutputEnabled)
+                 RunPostProcess(hdrResolve!.Texture, rTarget, Width, Height, Point.Zero);
+             else if (SsaoEnabled)
+diff --git a/src/LibreLancer.Base/Graphics/SmaaPostProcessPass.cs b/src/LibreLancer.Base/Graphics/SmaaPostProcessPass.cs
+--- a/src/LibreLancer.Base/Graphics/SmaaPostProcessPass.cs
++++ b/src/LibreLancer.Base/Graphics/SmaaPostProcessPass.cs
+@@ -71,7 +71,9 @@
+             renderContext.Samplers[0] = new(TextureFiltering.Linear, WrapMode.ClampToEdge, WrapMode.ClampToEdge);
+             renderContext.Samplers[1] = new (TextureFiltering.Nearest, WrapMode.ClampToEdge, WrapMode.ClampToEdge);
+             // Edge detection pass
+-            context.GpuSubpassMarker?.Invoke(SystemRenderSubpass.SmaaEdgeDetection, true);
++            context.GpuSubpassMarker?.Invoke(SystemRenderSubpass.SmaaEdgeDetection,
++                SystemRenderSubpassEvent.Begin);
++            var edgeDetectionSucceeded = false;
+             try
+             {
+                 BindSubpassTarget(SystemRenderSubpass.SmaaEdgeDetection, smaaEdges);
+@@ -85,10 +87,17 @@
+                 renderContext.DepthWrite = true;
+                 renderContext.ClearDepth(); // clear depth and stencil
+                 renderContext.FullScreenTriangle.Draw(PrimitiveTypes.TriangleList, 1);
+-            }
+-            finally { context.GpuSubpassMarker?.Invoke(SystemRenderSubpass.SmaaEdgeDetection, false); }
++                edgeDetectionSucceeded = true;
++            }
++            finally
++            {
++                context.GpuSubpassMarker?.Invoke(SystemRenderSubpass.SmaaEdgeDetection,
++                    edgeDetectionSucceeded ? SystemRenderSubpassEvent.End : SystemRenderSubpassEvent.Abort);
++            }
+             // Blending weight pass
+-            context.GpuSubpassMarker?.Invoke(SystemRenderSubpass.SmaaBlendWeights, true);
++            context.GpuSubpassMarker?.Invoke(SystemRenderSubpass.SmaaBlendWeights,
++                SystemRenderSubpassEvent.Begin);
++            var blendWeightsSucceeded = false;
+             try
+             {
+                 BindSubpassTarget(SystemRenderSubpass.SmaaBlendWeights, smaaBlend);
+@@ -104,10 +113,17 @@
+                     StencilOperation.Keep, 1, 0xFFFFFFFF);
+                 renderContext.Shader = blendingWeightCalculation;
+                 renderContext.FullScreenTriangle.Draw(PrimitiveTypes.TriangleList, 1);
+-            }
+-            finally { context.GpuSubpassMarker?.Invoke(SystemRenderSubpass.SmaaBlendWeights, false); }
++                blendWeightsSucceeded = true;
++            }
++            finally
++            {
++                context.GpuSubpassMarker?.Invoke(SystemRenderSubpass.SmaaBlendWeights,
++                    blendWeightsSucceeded ? SystemRenderSubpassEvent.End : SystemRenderSubpassEvent.Abort);
++            }
+             //Neighborhood blending pass
+-            context.GpuSubpassMarker?.Invoke(SystemRenderSubpass.SmaaNeighborhoodBlend, true);
++            context.GpuSubpassMarker?.Invoke(SystemRenderSubpass.SmaaNeighborhoodBlend,
++                SystemRenderSubpassEvent.Begin);
++            var neighborhoodBlendSucceeded = false;
+             try
+             {
+                 renderContext.StencilEnabled = false;
+@@ -129,8 +145,13 @@
+                     offsetViewportPushed = false;
+                     renderContext.PopViewport();
+                 }
+-            }
+-            finally { context.GpuSubpassMarker?.Invoke(SystemRenderSubpass.SmaaNeighborhoodBlend, false); }
++                neighborhoodBlendSucceeded = true;
++            }
++            finally
++            {
++                context.GpuSubpassMarker?.Invoke(SystemRenderSubpass.SmaaNeighborhoodBlend,
++                    neighborhoodBlendSucceeded ? SystemRenderSubpassEvent.End : SystemRenderSubpassEvent.Abort);
++            }
+         }
+         finally
+         {
+diff --git a/src/LibreLancer.Base/Graphics/SeparableGaussianBlurPass.cs b/src/LibreLancer.Base/Graphics/SeparableGaussianBlurPass.cs
+--- a/src/LibreLancer.Base/Graphics/SeparableGaussianBlurPass.cs
++++ b/src/LibreLancer.Base/Graphics/SeparableGaussianBlurPass.cs
+@@ -24,7 +24,7 @@
+     public SeparableGaussianBlurPass(RenderContext context) => this.context = context;
+ 
+     public Texture2D? Process(Texture2D source, float radius, SurfaceFormat targetFormat,
+-        Action<SystemRenderSubpass, bool>? marker = null, float resolutionScale = 1f,
++        Action<SystemRenderSubpass, SystemRenderSubpassEvent>? marker = null, float resolutionScale = 1f,
+         int kernelPairs = 2,
+         SystemRenderSubpass horizontalPass = SystemRenderSubpass.BloomHorizontalBlur,
+         SystemRenderSubpass verticalPass = SystemRenderSubpass.BloomVerticalBlur)
+@@ -84,7 +84,7 @@
+     }
+ 
+     private void Draw(Texture2D source, RenderTarget2D target, Vector4 parameters,
+-        SystemRenderSubpass pass, Action<SystemRenderSubpass, bool>? marker)
++        SystemRenderSubpass pass, Action<SystemRenderSubpass, SystemRenderSubpassEvent>? marker)
+     {
+         var previousTarget = context.RenderTarget;
+         var previousTexture = context.Textures[0];
+@@ -99,7 +99,8 @@
+         var previousStencilEnabled = context.StencilEnabled;
+         var viewportPushed = false;
+         var scissorPushed = false;
+-        marker?.Invoke(pass, true);
++        marker?.Invoke(pass, SystemRenderSubpassEvent.Begin);
++        var succeeded = false;
+         try
+         {
+             context.RenderTarget = target;
+@@ -117,6 +118,7 @@
+             context.BloomBlurShader.SetUniformBlock(3, ref parameters);
+             context.Shader = context.BloomBlurShader;
+             context.FullScreenTriangle.Draw(PrimitiveTypes.TriangleList, 1);
++            succeeded = true;
+         }
+         finally
+         {
+@@ -138,7 +140,8 @@
+             }
+             finally
+             {
+-                marker?.Invoke(pass, false);
++                marker?.Invoke(pass,
++                    succeeded ? SystemRenderSubpassEvent.End : SystemRenderSubpassEvent.Abort);
+             }
+         }
+     }
+diff --git a/src/LibreLancer.Base/Graphics/BloomPass.cs b/src/LibreLancer.Base/Graphics/BloomPass.cs
+--- a/src/LibreLancer.Base/Graphics/BloomPass.cs
++++ b/src/LibreLancer.Base/Graphics/BloomPass.cs
+@@ -13,7 +13,7 @@
+     private int width;
+     private int height;
+     private bool failed;
+-    public Action<SystemRenderSubpass, bool>? GpuSubpassMarker { get; set; }
++    public Action<SystemRenderSubpass, SystemRenderSubpassEvent>? GpuSubpassMarker { get; set; }
+     public long EstimatedMemoryBytes => (extracted?.EstimatedMemoryBytes ?? 0) +
+         blur.EstimatedMemoryBytes + mediumBlur.EstimatedMemoryBytes + wideBlur.EstimatedMemoryBytes;
+ 
+@@ -72,15 +72,18 @@
+ 
+         try
+         {
+-            GpuSubpassMarker?.Invoke(SystemRenderSubpass.BloomExtract, true);
++            GpuSubpassMarker?.Invoke(SystemRenderSubpass.BloomExtract, SystemRenderSubpassEvent.Begin);
++            var extractionSucceeded = false;
+             try
+             {
+                 Draw(context.BloomExtractShader, source, extracted!, new Vector4(
+                     1f / source.Width, 1f / source.Height, threshold, 0.5f));
++                extractionSucceeded = true;
+             }
+             finally
+             {
+-                GpuSubpassMarker?.Invoke(SystemRenderSubpass.BloomExtract, false);
++                GpuSubpassMarker?.Invoke(SystemRenderSubpass.BloomExtract,
++                    extractionSucceeded ? SystemRenderSubpassEvent.End : SystemRenderSubpassEvent.Abort);
+             }
+         }
+         catch (System.Exception ex) when (ex is System.InvalidOperationException or System.NotSupportedException)
+diff --git a/src/LibreLancer.Base/Graphics/ScreenSpaceAmbientOcclusionPass.cs b/src/LibreLancer.Base/Graphics/ScreenSpaceAmbientOcclusionPass.cs
+--- a/src/LibreLancer.Base/Graphics/ScreenSpaceAmbientOcclusionPass.cs
++++ b/src/LibreLancer.Base/Graphics/ScreenSpaceAmbientOcclusionPass.cs
+@@ -89,9 +89,19 @@
+             parameters.Settings.W = Math.Clamp(context.SsaoProjectionY, 0.01f, 100f);
+             graphics.SsaoShader.SetUniformBlock(3, ref parameters);
+             graphics.Shader = graphics.SsaoShader;
+-            context.GpuSubpassMarker?.Invoke(SystemRenderSubpass.ScreenSpaceAmbientOcclusion, true);
+-            try { graphics.FullScreenTriangle.Draw(PrimitiveTypes.TriangleList, 1); }
+-            finally { context.GpuSubpassMarker?.Invoke(SystemRenderSubpass.ScreenSpaceAmbientOcclusion, false); }
++            context.GpuSubpassMarker?.Invoke(SystemRenderSubpass.ScreenSpaceAmbientOcclusion,
++                SystemRenderSubpassEvent.Begin);
++            var succeeded = false;
++            try
++            {
++                graphics.FullScreenTriangle.Draw(PrimitiveTypes.TriangleList, 1);
++                succeeded = true;
++            }
++            finally
++            {
++                context.GpuSubpassMarker?.Invoke(SystemRenderSubpass.ScreenSpaceAmbientOcclusion,
++                    succeeded ? SystemRenderSubpassEvent.End : SystemRenderSubpassEvent.Abort);
++            }
+             if (hasFollowingPass)
+                 context.Source = intermediate.Texture;
+         }
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -1477,10 +1477,10 @@
+             }
+         }
+ 
+-        private void MarkGpuSubpass(SystemRenderSubpass pass, bool begin)
++        private void MarkGpuSubpass(SystemRenderSubpass pass, SystemRenderSubpassEvent subpassEvent)
+         {
+             var index = GpuPassProfile.GetQueryIndex(pass);
+-            if (begin)
++            if (subpassEvent == SystemRenderSubpassEvent.Begin)
+             {
+                 if (!subpassResourcesInitialized)
+                 {
+@@ -1494,7 +1494,8 @@
+                 {
+                     rstate.PushRenderDocMaterialMarker(SystemRenderPasses.GetSubpass(pass).Name);
+                     markerPushed = true;
+-                    gpuPassQueries?[index]?.Begin(currentGpuProfileFrame);
++                    if (index >= 0)
++                        gpuPassQueries?[index]?.Begin(currentGpuProfileFrame);
+                 }
+                 catch
+                 {
+@@ -1509,23 +1510,30 @@
+                     }
+                     throw;
+                 }
+-            }
+-            else
++                return;
++            }
++
++            if (subpassEvent is not (SystemRenderSubpassEvent.End or SystemRenderSubpassEvent.Abort))
++                throw new ArgumentOutOfRangeException(nameof(subpassEvent), subpassEvent,
++                    "Unknown render subpass event.");
++
++            try
++            {
++                if (index >= 0)
++                    gpuPassQueries?[index]?.End();
++            }
++            finally
+             {
+                 try
+                 {
+-                    gpuPassQueries?[index]?.End();
++                    if (subpassEvent == SystemRenderSubpassEvent.End)
++                        activeFrameSubpasses.End(pass);
++                    else
++                        activeFrameSubpasses.Abort(pass);
+                 }
+                 finally
+                 {
+-                    try
+-                    {
+-                        activeFrameSubpasses.End(pass);
+-                    }
+-                    finally
+-                    {
+-                        rstate.PopRenderDocMaterialMarker();
+-                    }
++                    rstate.PopRenderDocMaterialMarker();
+                 }
+             }
+         }
+diff --git a/src/LibreLancer.Tests/SystemRenderPassGraphTests.cs b/src/LibreLancer.Tests/SystemRenderPassGraphTests.cs
+--- a/src/LibreLancer.Tests/SystemRenderPassGraphTests.cs
++++ b/src/LibreLancer.Tests/SystemRenderPassGraphTests.cs
+@@ -47,3 +47,48 @@
+         Assert.Equal(SystemRenderResource.SceneColor, execution.AvailableResources);
+     }
+ }
++
++public class SystemRenderSubpassExecutionTests
++{
++    [Fact]
++    public void AbortedSubpassDoesNotPublishItsOutputs()
++    {
++        var execution = new SystemRenderSubpassExecution();
++        execution.Reset(SystemRenderResource.SceneColor);
++        execution.Begin(SystemRenderSubpass.BloomExtract);
++
++        execution.Abort(SystemRenderSubpass.BloomExtract);
++
++        var error = Assert.Throws<InvalidOperationException>(() =>
++            execution.Begin(SystemRenderSubpass.BloomHorizontalBlur));
++        Assert.Contains("BloomExtractColor", error.Message);
++    }
++
++    [Fact]
++    public void CompletedSubpassPublishesItsOutputToFollowingPass()
++    {
++        var execution = new SystemRenderSubpassExecution();
++        execution.Reset(SystemRenderResource.SceneColor);
++        execution.Begin(SystemRenderSubpass.BloomExtract);
++        execution.End(SystemRenderSubpass.BloomExtract);
++
++        execution.Begin(SystemRenderSubpass.BloomHorizontalBlur);
++        execution.Abort(SystemRenderSubpass.BloomHorizontalBlur);
++    }
++
++    [Fact]
++    public void MismatchedAbortDoesNotCloseActiveSubpass()
++    {
++        var execution = new SystemRenderSubpassExecution();
++        execution.Reset(SystemRenderResource.SceneColor);
++        execution.Begin(SystemRenderSubpass.BloomExtract);
++
++        var error = Assert.Throws<InvalidOperationException>(() =>
++            execution.Abort(SystemRenderSubpass.BloomHorizontalBlur));
++
++        Assert.Contains("aborted without a matching begin", error.Message);
++        Assert.Throws<InvalidOperationException>(() =>
++            execution.Begin(SystemRenderSubpass.BloomHorizontalBlur));
++        execution.Abort(SystemRenderSubpass.BloomExtract);
++    }
++}
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -16,6 +16,7 @@
+ | HDR und Tonemapping | Linearisiertes Scene-Target, ACES-Tonemapping, linearisierte PBR-Albedo-/Licht-/Emissionswerte und exakte sRGB-Ausgabe im PBR-LDR-Pfad. System- und Nebel-Clearfarben werden ebenfalls vor dem HDR-Clear linearisiert; LDR bleibt unverändert. Ein Source-Audit hat alle 19 Ingame-Fragmentshader und den Postprocess-Ausgang geprüft; 2 Farbraum- und 21 Ambientlicht-Regressionstests bestehen. | Retail-Farbannahmen, visuelle Gleichheit zwischen Legacy/PBR, transparente Effekte, Fog und zusammengesetzte Ingame-Szenen brauchen weiterhin feste Bildvergleiche, Original-Client-Referenz und Hardware-GPU-Abnahme. HDR/LDR-Vergleiche: `docs/evidence/renderer/postprocess-four-mode-ab-20261017/` und der same-session-Hi02-Lauf `docs/evidence/renderer/hdr-ldr-hi02-live-ab-20261018/`; letzterer zeigt in dieser Legacy-Szene nur geringe Pixelabweichung und ersetzt keine Material-/Emissions-Referenz. Shaderaudit: `docs/evidence/renderer/hdr-shader-color-contract-audit-20261018.md`; Clear-Farbvertrag: `docs/evidence/renderer/hdr-clear-color-contract-20261018.md`. |
+ | Bloom | HDR-Extraktion mittelt jetzt ein vollständiges 4×4-Quellfenster in Viertelauflösung; aufrundende Zielmaße behalten Randpixel bei ungeraden Fenstergrößen. Basis-, mittlere und breite Blur-Stufen sowie Schwelle, Radius, Auflösung und Kernel sind konfigurierbar. | Die Extraktion beseitigt das bisherige Unterabtasten der zentralen vier Texel. Der Code führt alle drei Stufen aus. NAP-only M01A-Läufe am 19.10. vergleichen Bloom ein/aus und schalten in einem dritten Lauf zusätzlich Partikeleffekte aus. Der große Ring verschwindet mit den Explosionspartikeln; NAP-Fuse- und ALE-Daten verknüpfen ihn mit dem `planetflare`-Flashbang der Freeport-7-Explosion und grenzen ihn von Bloom ab. Die bewegten Frames sind nicht pixelgenau, die einzelne Flashbang-Instanz bleibt offen. Siehe [`NAP M01A Bloom-/Partikelmatrix`](evidence/renderer/nap-full-runtime-20261019/README.md). GPU-Kosten bleiben offen. |
+ | Antialiasing | SMAA-Pässe und MSAA-Auflösung; HDR/LDR-Kombinationen sowie Resize und Minimize/Restore wurden auf OpenGL/Mesa geprüft. | Andere Backends/Treiber, wiederholte Lifecycle-Zyklen und Fehler-Injektion stehen aus. |
++| GPU-Subpass-Abbruch | Postprocess-, Bloom-, SMAA-, SSAO- und MSAA-Subpasses melden `Begin`, `End` oder `Abort`. Nur ein erfolgreich beendeter Subpass veröffentlicht seine geschriebenen Ressourcen für nachfolgende Pässe. | Zwei Regressionstests prüfen, dass abgebrochene Ausgaben nicht verfügbar werden und erfolgreiche Ausgaben weitergereicht werden. Fehler-Injektion im nativen Backend bleibt offen. Siehe Patch `2407-render-subpass-abort-contract.patch`. |
+ | Nomad-Gradient | Der HLSL-Shader begrenzt den View-/Normal-Dot-Product nun wie der frühere LibreLancer-Shader auf `[0, 1]`, anstatt den gesamten signierten Bereich auf `[0, 1]` umzurechnen. | Produktionsshader-Build und gezielter Nomad-Schiff-A/B mit Retail-NAP-Daten stehen aus. Quellvergleich: `docs/evidence/renderer/nomad-gradient-legacy-parity-20261018.md`. |
+ | GPU-Readback | Asynchrones OpenGL-Textur-Readback verwendet PBO und Fence. Synchron liest Desktop-GL die angeforderte Mip-Ebene mit `glGetTexImage` und kopiert die Region in den Zielbereich; GLES verwendet ein temporäres FBO und `ReadPixels`. Pack-Alignment und PBO-Bindung werden wiederhergestellt. | Ein Release-Runtime-Probe mit Mip 1, Teilrechteck und Zieloffset besteht auf Mesa/OpenGL mit Intel HD 4600. Komprimierte Formate werden ausdrücklich abgelehnt. GLES-Lauf, Fehler-Injektion und Editor-Export bleiben offen. Siehe `docs/evidence/renderer/gl-texture-readback-smoke-20261018.md` und `docs/evidence/renderer/gl-texture-async-readback-lifecycle-20261018/`. |
+ | Postprocess-Lifecycle | Postprocess-Pässe werden in umgekehrter Ausführungsreihenfolge entsorgt; bei einem Fehler läuft die Freigabe aller übrigen Pässe weiter. Der Plan ist idempotent entsorgbar und meldet Fehler gebündelt. | Regressionstests decken Reihenfolge, Fehlerfortsetzung und wiederholtes Dispose ab. Fehler im eigentlichen Backend-Ressourcenfreigabepfad und Kontextverlust sind weiter offen. |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -404,3 +404,4 @@
+ client 2404-cmp-part-transform-runtime-evidence.patch
+ client 2405-atmosphere-fade-property-table-evidence.patch
+ client 2406-sdl-gpu-cmp-material-submeshes.patch
++client 2407-render-subpass-abort-contract.patch

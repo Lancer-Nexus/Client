@@ -1,0 +1,85 @@
+--- a/src/Nexus.Packaging.Cli/Program.cs
++++ b/src/Nexus.Packaging.Cli/Program.cs
+@@ -4,7 +4,7 @@
+ 
+ static int Usage()
+ {
+-    Console.Error.WriteLine("Usage:\n  nexus-pack pack <source-dir> <output.nap> [--version N] [--chunk-size BYTES] [--compression-level N]\n  nexus-pack inspect <file.nap>\n  nexus-pack verify <file.nap>\n  nexus-pack diff <base.nap> <target.nap> <patch.nap> <base-package-id>\n  nexus-pack compact <application-dir> <output.nap> [--version N] [--workspace <directory>]");
++    Console.Error.WriteLine("Usage:\n  nexus-pack pack <source-dir> <output.nap> [--version N] [--chunk-size BYTES] [--compression-level N]\n  nexus-pack inspect <file.nap>\n  nexus-pack verify <file.nap>\n  nexus-pack verify-active <application-dir>\n  nexus-pack diff <base.nap> <target.nap> <patch.nap> <base-package-id>\n  nexus-pack compact <application-dir> <output.nap> [--version N] [--workspace <directory>]");
+     return 2;
+ }
+ 
+@@ -48,6 +48,14 @@
+                 Console.WriteLine($"Verified {archive.Entries.Count} entries in {Path.GetFullPath(args[1])}");
+                 return 0;
+             }
++        case "verify-active" when args.Length == 2:
++            {
++                var applicationDirectory = Path.GetFullPath(args[1]);
++                _ = NexusPackageFileProvider.LoadActive(applicationDirectory)
++                    ?? throw new InvalidDataException("Application directory has no active NAP package snapshot.");
++                Console.WriteLine($"Verified active NAP snapshot in {applicationDirectory}");
++                return 0;
++            }
+         case "diff" when args.Length == 5:
+             {
+                 var basePath = Path.GetFullPath(args[1]);
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -420,3 +420,4 @@
+ | 2484 | Record live projectile-effect culling bounds and profile evidence |
+ | 2485 | Skip redundant square-root work while measuring conservative projectile-effect bounds |
+ | 2486 | Skip CPU work for fully transparent particles before GPU submission |
++| 2487 | Preflight active NAP snapshots before runtime launch |
+--- a/patches/series
++++ b/patches/series
+@@ -478,3 +478,4 @@
+ client 2484-projectile-effect-culling-live-evidence.patch
+ client 2485-render-particle-cull-bound-math.patch
+ client 2486-skip-zero-alpha-particle-work.patch
++client 2487-preflight-active-nap-snapshot.patch
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -855,15 +855,33 @@
+ Paketpfad; daraus allein lässt sich der konkrete alte Archivsatz nicht
+ rekonstruieren.
+ 
+-Beim aktuellen Wiederholungslauf waren
+-`src/lancer/bin/Release/net10.0/packages/active.json` und das Manifest unter
+-`Data/NAP/.runtime-test-stage/illum-detail-hdr-20261019/application/packages/`
+-bytegleich. Beide führten 14 Pakete und `planet-hdr-profile` Version 5;
+-`asteroid-profile` war darin nicht mehr enthalten. Der mit diesem Release-Ordner
+-gestartete Client lud Spieldaten und Oberfläche und betrat Hi02. Damit ist der
+-aktuelle Paketbestand vom gemeldeten veralteten `asteroid-profile`-Snapshot
+-bereinigt. Der ursprüngliche Abbruch ist mit diesem Stand nicht reproduzierbar;
+-der erfolgreiche Start belegt nur Paketprüfung und Datenladung, keine
++Der Provider lädt `packages/active.json` relativ zu
++`AppContext.BaseDirectory` des gestarteten Apphosts. Der im Fehlermeldungspfad
++genannte `xdg-state/Librelancer/logs`-Ordner identifiziert deshalb nicht den
++Paketstamm. Am 2026-10-20 enthielt das konkrete Manifest unter
++`Data/NAP/.runtime-test-stage/illum-detail-hdr-20261019/application/` 14 Pakete
++ohne `asteroid-profile`; auch das Manifest im Release-Apphost-Verzeichnis war
++bytegleich. Drei separat gefundene NAP-Stages mit `asteroid-profile` deklarierten
++Version 4; `nexus-pack inspect` meldete für jedes Archiv ebenfalls Content-Version
++4. Der auf der Festplatte am gemeldeten XDG-Pfad liegende Log wurde am
++2026-10-20 um 01:02 aktualisiert und endet in einem laufenden Hi02-Spiel ohne
++diese Exception. Diese Artefakte reproduzieren den gemeldeten Abbruch daher
++nicht und identifizieren sein Apphost-Verzeichnis nicht.
++
++Patch 2487 ergänzt `nexus-pack verify-active <application-dir>`, das denselben
++Provider wie der Client aufruft und Manifest, Größe, Hash, Archivversion,
++Paketkonflikte und Pfadgrenzen vor einem Start prüft. Damit wurde ein separater
++Fehler im 15-Paket-Snapshot
++`asteroid-profile-current-20261020/application` sichtbar: `asteroid-profile`
++und `planet-hdr-profile` beanspruchen beide `EXE/newplayer.fl`, ohne einander
++zu überschreiben. Beide Pakete sind Version 4 beziehungsweise 5 korrekt
++deklariert; der Start scheitert dort an der Kollisionsregel. Der 14-Paket-
++Snapshot `asteroid-renderer-current-20261020/application` besteht den
++Vorabcheck. Der gemeldete Versionsfehler selbst bleibt mit den vorhandenen
++Artefakten unaufgelöst. Für eine eindeutige Wiederholung werden der vollständige
++Exception-Text mit erwarteter und gelesener Version sowie der Pfad des
++gestarteten Apphosts benötigt. Ein erfolgreicher Start mit einem anderen
++Manifest belegt nur dessen Paketprüfung und Datenladung, keine
+ Renderer-Bildqualität.
+ 
+ ## Hi02 Normalmap-Laufpaar (2026-10-20)
