@@ -1,6 +1,6 @@
 # Client patch groups
 
-The active series contains 389 Client patches and two native patches. Each
+The active series contains 486 Client patches and two native patches. Each
 file belongs to one functional bundle; the combined output preserves the
 integration, upstream compatibility fixes, tests and project documentation.
 
@@ -361,3 +361,73 @@ jump-gate route.
 | 2402 | Report CMP component VMesh formats when an SDL_GPU part draw cannot be selected |
 | 2403 | Allow selected unmapped CMP components in Surface-disabled SDL_GPU runs |
 | 2404 | Record NAP SDL_GPU CMP part transform Surface-map A/B evidence |
+| 2423 | Record repeated full-quality renderer profiles with NAP-only provenance |
+| 2424 | Capture cumulative dropped simulation ticks in renderer profile CSVs |
+| 2425 | Document the local invulnerability option in renderer smoke evidence |
+| 2426 | Resolve diffuse textures from embedded CMP libraries in SDL_GPU diagnostics |
+| 2427 | Cover ambient-only material lighting without a source-light owner |
+| 2428 | Pass selected light indices directly to material shader binding |
+| 2429 | Grow transparent command and sort buffers past the fixed scene limit |
+| 2430 | Capture transparent command and vertex draw-call counts in frame profiles |
+| 2431 | Record an all-render-options NAP runtime profile and performance evidence |
+| 2432 | Arm a renderer profile for paused F9 capture, route F1 around UI keyboard focus, and record NAP-only evidence |
+
+| 2445 | Include expected and archive versions in NAP manifest mismatch errors |
+
+| 2446 | Remove avoidable LINQ allocations from renderer frame and buffer paths |
+
+| 2447 | Record the offscreen SDL_GPU production pipeline audit |
+| 2448 | Route DetailMap materials with metallic/roughness data through the PBR shader while preserving legacy fallback |
+| 2449 | Route Masked2 detail maps through PBR while preserving alpha selection, tile rates and the second sampler |
+| 2450 | Route IllumDetailMap through PBR while preserving its alpha-weighted illumination layer and feature flags |
+| 2451 | Route DetailMap2Dm1Msk2Pass through PBR while preserving its diffuse-alpha detail mask |
+| 2452 | Record current SDL_GPU PBR material pipeline coverage and the OpenGL NAP capture limit |
+| 2453 | Include NAP manifest identity and resolved paths in package version mismatch errors |
+| 2454 | Record NAP stage package verification and distinguish stale app manifests from display startup failures |
+| 2455 | Route DetailMap MAT normal maps through the lit PBR shader and cover the routing gate |
+| 2456 | Remove unsupported Atmosphere Fade behavior speculation and record binary scan limits |
+| 2457 | Cover MAT normal-map PBR routing for all specialized detail-map materials |
+| 2458 | Preserve asteroid LOD fades in PBR draws and reset per-command material fade state |
+| 2459 | Bind the legacy Nomad BT facing-gradient sampler with compatibility fallbacks |
+
+| 2460 | Reject render-graph callback mutation and reentrant execution |
+
+| 2461 | Split renderer CPU profiles into update and draw plus GPU submit time |
+
+| 2462 | Record Hi02 PBR and HDR runtime captures on Mesa llvmpipe with NAP-only provenance |
+| 2463 | Apply linear nebula fog and XYZ view distances to PBR and legacy materials |
+| 2464 | Record NAP-only PBR and legacy nebula render captures with explicit visual limits |
+| 2465 | Record the NAP version mismatch diagnosis and successful current manifest recheck |
+| 2466 | Record paired Hi02 normal-map option captures and visual limits |
+| 2467 | Avoid redundant asteroid exclusion-zone and cube-distance work during rendering |
+| 2468 | Serialize asteroid culling tasks before reusing shared result buffers |
+| 2469 | Record current NAP-only Hi02 runtime and asteroid profile after culling changes |
+
+| 2470 | Record Freelancer main-executable atmosphere registration trace and remaining Fade uncertainty |
+| 2471 | Extract SDL_GPU device lifetime ownership for the renderer backend |
+| 2472 | Reuse checked SDL_GPU device ownership in the production pipeline audit |
+| 2473 | Add sRGB transfer and alpha regression coverage for HDR color handling |
+| 2474 | Record Hi02 opaque and transparent GPU pass hotspots with measurement limits |
+| 2475 | Add opaque and transparent renderer drawcall group counters to profiles |
+| 2476 | Attribute transparent renderer drawcalls to scene, asteroid, nebula, effect, billboard and fallback groups |
+| 2477 | Split transparent object drawcalls by model, renderer type and batched beams |
+| 2478 | Map SDL3-offscreen NVE7 profiles to Quadro K1100M and correct renderer evidence |
+| 2479 | Reuse particle child-effect update scratch collections |
+| 2480 | Record NAP-only particle child-effect runtime and baseline limits |
+| 2481 | Cull projectile particle effects outside the camera frustum |
+| 2482 | Profile projectile effect culling candidates, finite bounds and skipped draws |
+| 2483 | Compute conservative bounds for live particles in unbounded effects |
+| 2484 | Record live projectile-effect culling bounds and profile evidence |
+| 2485 | Skip redundant square-root work while measuring conservative projectile-effect bounds |
+| 2486 | Skip CPU work for fully transparent particles before GPU submission |
+| 2487 | Preflight active NAP snapshots before runtime launch |
+| 2488 | Fix front-facing PBR spotlight attenuation direction |
+| 2489 | Add an SDL_GPU pixel probe for production PBR spotlights |
+| 2490 | Align PBR uniform layout with compiled SPIR-V |
+| 2491 | Record Hi02 live render after PBR uniform alignment |
+| 2492 | Verify PBR alpha blending and legacy material opacity routing |
+| 2493 | Record M01A retail explosion transient-light runtime evidence |
+| 2494 | Audit retail weapon muzzle-light configuration and hpfire coverage |
+| 2495 | Add weapon muzzle-light budget diagnostics |
+| 2496 | Expose renderer options in freelancer.ini |
+| 2497 | Cover renderer freelancer.ini option completeness |
