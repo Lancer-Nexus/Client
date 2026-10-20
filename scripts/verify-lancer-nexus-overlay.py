@@ -15,17 +15,23 @@ def run(*args, cwd=None):
 def patch_paths(patch):
     paths = set()
     for line in patch.read_text().splitlines():
-        if not line.startswith(("--- ", "+++ ")):
+        if line.startswith("diff --git "):
+            parts = shlex.split(line)
+            candidates = [parts[3]]
+        elif line.startswith(("--- ", "+++ ")):
+            parts = shlex.split(line)
+            candidates = [parts[1]]
+        else:
             continue
-        path = shlex.split(line)[1]
-        if path == "/dev/null":
-            continue
-        if not path.startswith(("a/", "b/")):
-            raise ValueError(f"Unsupported patch path in {patch.name}")
-        path = PurePosixPath(path[2:])
-        if path.is_absolute() or ".." in path.parts or not path.parts:
-            raise ValueError(f"Unsafe patch path in {patch.name}")
-        paths.add(path.as_posix())
+        for path in candidates:
+            if path == "/dev/null":
+                continue
+            if not path.startswith(("a/", "b/")):
+                raise ValueError(f"Unsupported patch path in {patch.name}")
+            path = PurePosixPath(path[2:])
+            if path.is_absolute() or ".." in path.parts or not path.parts:
+                raise ValueError(f"Unsafe patch path in {patch.name}")
+            paths.add(path.as_posix())
     return paths
 
 
@@ -33,7 +39,12 @@ def verify(root):
     def base_ref(target):
         configured = root / "patches" / f"base-{target}-commit"
         reference = configured.read_text().strip() if configured.is_file() else "HEAD"
-        repo = root if target == "client" else root / "Protocol"
+        repo = {
+            "client": root,
+            "protocol": root / "Protocol",
+            "lancerdecode": root / "extern" / "lancerdecode",
+            "blurgtext": root / "extern" / "blurgtext",
+        }[target]
         resolved = run("git", "-C", str(repo), "rev-parse", "--verify", "--quiet", f"{reference}^{{commit}}")
         if resolved.returncode:
             raise ValueError(f"Patch baseline for {target} is unavailable: {reference}")
@@ -44,7 +55,7 @@ def verify(root):
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         target, filename = line.split()
-        if target not in ("client", "protocol"):
+        if target not in ("client", "protocol", "lancerdecode", "blurgtext"):
             raise ValueError(f"Unknown patch target: {target}")
         patch = root / "patches" / filename
         targets.setdefault(target, []).append((patch, patch_paths(patch)))
@@ -52,7 +63,12 @@ def verify(root):
     mismatches = []
     checked = 0
     for target, patches in targets.items():
-        repo = root if target == "client" else root / "Protocol"
+        repo = {
+            "client": root,
+            "protocol": root / "Protocol",
+            "lancerdecode": root / "extern" / "lancerdecode",
+            "blurgtext": root / "extern" / "blurgtext",
+        }[target]
         reference = base_ref(target)
         paths = set().union(*(paths for _, paths in patches))
         with tempfile.TemporaryDirectory(prefix="nexus-overlay-check-") as temporary:

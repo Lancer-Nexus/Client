@@ -1,0 +1,212 @@
+--- a/src/LibreLancer/Render/RenderHelpers.cs
++++ b/src/LibreLancer/Render/RenderHelpers.cs
+@@ -159,6 +159,9 @@
+         private static Color3f ApplySunAmbient(SystemLighting source, int lightGroup,
+             Vector3 center, float radius, Color3f ambient)
+         {
++            var originalAmbient = ambient;
++            var hdrLinear = source.SunAmbientHdr;
++
+             var sunTintBlend = float.IsFinite(source.SunAmbientStrength)
+                 ? Math.Clamp(source.SunAmbientStrength, 0f, 1f)
+                 : 0.25f;
+@@ -176,8 +179,10 @@
+                     !float.IsFinite(light.Color.B))
+                     continue;
+ 
+-                colorSum += new Color3f(Math.Max(0, light.Color.R), Math.Max(0, light.Color.G),
+-                    Math.Max(0, light.Color.B)) * weight;
++                var lightColor = new Color3f(Math.Max(0, light.Color.R), Math.Max(0, light.Color.G),
++                    Math.Max(0, light.Color.B));
++                if (hdrLinear) lightColor = DecodeSrgb(lightColor);
++                colorSum += lightColor * weight;
+                 weightSum += weight;
+             }
+ 
+@@ -188,6 +193,9 @@
+             if (sunColor.R <= 0 && sunColor.G <= 0 && sunColor.B <= 0)
+                 return ambient;
+ 
++            if (hdrLinear)
++                ambient = DecodeSrgb(ambient);
++
+             // Blend toward the weighted sun color, then preserve the authored
+             // ambient's Rec. 709 luminance where the output range allows it.
+             var tintedAmbient = ambient * (1f - sunTintBlend) + sunColor * sunTintBlend;
+@@ -195,17 +203,36 @@
+             var tintedLuminance = GetLuminance(tintedAmbient);
+             if (!float.IsFinite(ambientLuminance) || ambientLuminance <= 0 ||
+                 !float.IsFinite(tintedLuminance) || tintedLuminance <= 0)
+-                return ambient;
++                return originalAmbient;
+ 
+             var luminanceScale = ambientLuminance / tintedLuminance;
+             var maximumChannel = Math.Max(tintedAmbient.R,
+                 Math.Max(tintedAmbient.G, tintedAmbient.B));
+             // Preserve the legacy LDR range when HDR scene rendering is not active.
+             // The HDR target stores scene-linear values above one for later tone mapping.
+-            if (!source.SunAmbientHdr && maximumChannel * luminanceScale > 1f)
++            if (!hdrLinear && maximumChannel * luminanceScale > 1f)
+                 luminanceScale = 1f / maximumChannel;
+ 
+-            return tintedAmbient * luminanceScale;
++            tintedAmbient *= luminanceScale;
++            return hdrLinear ? EncodeSrgb(tintedAmbient) : tintedAmbient;
++        }
++
++        private static Color3f DecodeSrgb(Color3f color) => new(
++            DecodeSrgbChannel(color.R), DecodeSrgbChannel(color.G), DecodeSrgbChannel(color.B));
++
++        private static Color3f EncodeSrgb(Color3f color) => new(
++            EncodeSrgbChannel(color.R), EncodeSrgbChannel(color.G), EncodeSrgbChannel(color.B));
++
++        private static float DecodeSrgbChannel(float value)
++        {
++            value = Math.Max(0f, value);
++            return value <= 0.04045f ? value / 12.92f : MathF.Pow((value + 0.055f) / 1.055f, 2.4f);
++        }
++
++        private static float EncodeSrgbChannel(float value)
++        {
++            value = Math.Max(0f, value);
++            return value <= 0.0031308f ? value * 12.92f : 1.055f * MathF.Pow(value, 1f / 2.4f) - 0.055f;
+         }
+ 
+         private static float GetLuminance(Color3f color) =>
+--- a/src/LibreLancer.Tests/TransientLightTests.cs
++++ b/src/LibreLancer.Tests/TransientLightTests.cs
+@@ -138,7 +138,7 @@
+         {
+             var lighting = new SystemLighting
+             {
+-                Ambient = new Color4(0.8f, 0.8f, 0.8f, 1),
++                Ambient = new Color4(1.5f, 0.8f, 0.8f, 1),
+                 SunAmbientEnabled = true,
+                 SunAmbientHdr = hdr
+             };
+@@ -156,6 +156,51 @@
+         Assert.InRange(ldr.B, 0f, 1f);
+     }
+ 
++    [Theory]
++    [InlineData(1f, 0f, 0f, 0.462298f, 0.209474f, 0.283974f)]
++    [InlineData(0f, 1f, 0f, 0.081838f, 0.334100f, 0.189163f)]
++    [InlineData(1f, 1f, 1f, 0.278084f, 0.292826f, 0.313236f)]
++    public void SunAmbientHdrBlendsAndPreservesLuminanceInLinearSpace(float sunR, float sunG, float sunB,
++        float expectedR, float expectedG, float expectedB)
++    {
++        var lighting = new SystemLighting
++        {
++            Ambient = new Color4(0.2f, 0.3f, 0.4f, 1),
++            SunAmbientEnabled = true,
++            SunAmbientHdr = true
++        };
++        lighting.SunAmbientLights.Add(CreateSunAmbientLight(new Color3f(sunR, sunG, sunB)));
++
++        var result = RenderHelpers.ApplyLights(lighting, 0, Vector3.Zero, 0, null,
++            ldynamic: false);
++
++        Assert.Equal(expectedR, result.Ambient.R, 5);
++        Assert.Equal(expectedG, result.Ambient.G, 5);
++        Assert.Equal(expectedB, result.Ambient.B, 5);
++    }
++
++    [Theory]
++    [InlineData(true, 0f)]
++    [InlineData(false, 0.25f)]
++    public void SunAmbientHdrNoOpPreservesEncodedAmbient(bool hasLight, float strength)
++    {
++        var expected = new Color3f(0.2f, 0.3f, 0.4f);
++        var lighting = new SystemLighting
++        {
++            Ambient = new Color4(expected.R, expected.G, expected.B, 1),
++            SunAmbientEnabled = true,
++            SunAmbientHdr = true,
++            SunAmbientStrength = strength
++        };
++        if (hasLight)
++            lighting.SunAmbientLights.Add(CreateSunAmbientLight(new Color3f(1, 0, 0)));
++
++        var result = RenderHelpers.ApplyLights(lighting, 0, Vector3.Zero, 0, null,
++            ldynamic: false);
++
++        Assert.Equal(expected, result.Ambient);
++    }
++
+     [Fact]
+     public void SunAmbientUsesLocalAttenuationAndIgnoresNonSystemLights()
+     {
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -524,6 +524,13 @@
+   BGRA8/komprimierten UNORM-Texturpfad und der Materialdatenbehandlung abgeleitet,
+   nicht visuell bestätigt. HDR-Farbabnahme und kalibrierte NAP-Vergleichsbilder
+   fehlen weiterhin.
++  - [x] Der Sun-Ambient-Tint mischt HDR-Lichtfarben und Systemambient jetzt
++    linear, berechnet Rec. 709-Luminanz im linearen Raum und kodiert das Ergebnis
++    für den gemeinsamen Shader-Eingang zurück nach sRGB. Die Änderung folgt der
++    bestehenden HDR-Shaderkonvention; sie beweist noch nicht unabhängig, dass
++    sämtliche Retail-INI-Farben sRGB statt linear gemeint sind. Parser- und
++    Retail-Belege mit den offenen Prüfschritten stehen im
++    [HDR-Sun-Ambient-Nachweis](evidence/renderer/hdr-sun-ambient-linear-20261018/README.md).
+ - [x] Erste optionale HDR-Bloom-Stufe mit Helligkeitsschwelle bei 1.0,
+   Viertelauflösung und separablem Gauß-Blur. `render_bloom`,
+   `--render-bloom=on|off` und ein Effekte-Schalter steuern sie unabhängig; sie
+--- /dev/null
++++ b/docs/evidence/renderer/hdr-sun-ambient-linear-20261018/README.md
+@@ -0,0 +1,32 @@
++# HDR sun ambient color handling (2026-10-18)
++
++The INI parser converts `Color4` channel values by dividing each component by
++255 (`src/LibreLancer.Data.Generator/SectionParser.cs`, `SupportedType.Color4`).
++The read-only retail file
++`/home/masterbee/Dokumente/FL/DATA/UNIVERSE/SYSTEMS/EW02/ew02.ini` contains:
++
++- system ambient `10, 15, 12` at lines 85-86;
++- directional system light `100, 150, 100` at lines 88-93;
++- zone fog color `70, 100, 70` at lines 116-120.
++
++This establishes the stored numeric range and shows that those channels enter
++the game as normalized values. It does not by itself establish whether retail
++intended those values as linear RGB or sRGB.
++
++The HDR shader path currently applies the sRGB EOTF to `AmbientColor`, light
++diffuse/ambient values, and fog color through `LinearizeLegacyInput` in
++`src/LibreLancer/Shaders/includes/Lighting.hlsl`. `RenderHelpers.ApplySunAmbient`
++combines source system ambient and system-light colors on the CPU before those
++shader conversions. Patch 2310 makes this HDR-only blend decode each input to
++linear RGB, perform the tint and Rec. 709 luminance preservation there, then
++encode the result back to sRGB for the existing shader contract. LDR output
++keeps its previous arithmetic and range handling.
++
++Regression coverage verifies red, green, and white HDR tint results, preserved
++HDR headroom, unchanged LDR range behavior, and exact no-op results when tint
++strength is zero or no eligible source light exists. The focused
++`TransientLightTests` run passed 21 tests after this change.
++
++Still open: retail color-space intent has not been proven from the original
++renderer, and the HDR color result has not yet been visually calibrated in a
++NAP-only gameplay scene.
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 308 Client bundles and two native bundles. Each
++The active series contains 309 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -265,3 +265,5 @@
+ | 2308 | Add headless HDR RGBA16F DDS cubemap regression tests |
+ 
+ | 2309 | Track aliased environment cubemaps once in GPU texture memory diagnostics |
++
++| 2310 | Blend sun-tinted system ambient in linear space for HDR output |
+--- a/patches/series
++++ b/patches/series
+@@ -309,3 +309,4 @@
+ client 2307-lanceredit-cubemap-lit-preview.patch
+ client 2308-hdr-dds-cubemap-tests.patch
+ client 2309-account-aliased-ibl-cubes.patch
++client 2310-sunambient-linear-hdr-mix.patch

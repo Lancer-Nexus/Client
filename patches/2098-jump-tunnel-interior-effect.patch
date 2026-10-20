@@ -1,0 +1,255 @@
+--- a/src/LibreLancer/Client/CGameSession.cs
++++ b/src/LibreLancer/Client/CGameSession.cs
+@@ -230,6 +230,9 @@
+             FLLog.Warning("Client", "Cluster jump is unavailable for this session");
+             return;
+         }
++        // RPC callbacks run on the session update thread. Start the visual before
++        // transfer packets can replace the current SpaceGameplay and clear its queue.
++        spaceGameplay?.StartJumpTunnel(targetSystem);
+         _ = Task.Run(async () =>
+         {
+             try
+@@ -274,9 +277,11 @@
+         });
+     }
+ 
+-    void IClientPlayer.StartLocalJumpTunnel()
++    void IClientPlayer.StartLocalJumpTunnel(string targetSystem)
+     {
+         inTradelane = false;
++        // Apply directly before the following SpawnPlayer packet changes the scene.
++        spaceGameplay?.StartJumpTunnel(targetSystem);
+     }
+ 
+     void IClientPlayer.TransferSnapshotStaged(string transferIdText, bool succeeded)
+--- a/src/LibreLancer/GameStates/SpaceGameplay.cs
++++ b/src/LibreLancer/GameStates/SpaceGameplay.cs
+@@ -69,6 +69,9 @@
+         private bool loading = true;
+         private LoadingScreen? loader;
+         private readonly List<ParticleEffectRenderer> transientShipEffects = [];
++        private SoundInstance? jumpTunnelSound;
++        private double jumpTunnelSoundRemaining;
++        private bool jumpTunnelStarted;
+         private TradelaneEquipment? activeTradelaneEquipment;
+         private ParticleEffectRenderer? tradelaneTravelRenderer;
+         private SoundInstance? tradelaneTravelSound;
+@@ -700,6 +703,8 @@
+             foreach (var effect in transientShipEffects)
+                 player?.ExtraRenderers.Remove(effect);
+             transientShipEffects.Clear();
++            jumpTunnelSound?.Stop();
++            jumpTunnelSound = null;
+             StopTradelaneEffects(null);
+             sysrender?.Dispose();
+             world?.Dispose();
+@@ -738,6 +743,41 @@
+             var attached = AttachShipEffect(effect);
+             if (attached.Renderer != null)
+                 transientShipEffects.Add(attached.Renderer);
++        }
++
++        public void StartJumpTunnel(string targetSystem)
++        {
++            if (jumpTunnelStarted || player == null || world == null || !Game.Config.Settings.RenderJumpGateEffects)
++                return;
++            jumpTunnelStarted = true;
++
++            var sourceGate = world.Objects
++                .Where(x => x.SystemObject?.Dock is { Kind: DockKinds.Jump, Target: not null } dock &&
++                            dock.Target.Equals(targetSystem, StringComparison.OrdinalIgnoreCase) &&
++                            x.SystemObject.JumpEffectData?.JumpTunnelEffect != null)
++                .OrderBy(x => Vector3.DistanceSquared(x.Transform.Position, player.Transform.Position))
++                .FirstOrDefault();
++            var jumpEffect = sourceGate?.SystemObject?.JumpEffectData;
++            var tunnelEffectName = jumpEffect?.JumpTunnelEffect;
++            if (tunnelEffectName == null)
++            {
++                FLLog.Debug("Jump", $"No configured jump tunnel interior effect for destination {targetSystem}");
++                return;
++            }
++
++            var effect = Game.GameData.Items.Effects.Get(tunnelEffectName);
++            if (effect == null)
++            {
++                FLLog.Warning("Jump", $"Jump tunnel effect '{tunnelEffectName}' was not found");
++                return;
++            }
++
++            var attached = AttachShipEffect(effect, loopSound: true);
++            if (attached.Renderer != null)
++                transientShipEffects.Add(attached.Renderer);
++            jumpTunnelSound = attached.Sound;
++            jumpTunnelSoundRemaining = Math.Max(0.1,
++                jumpEffect!.JumpOutTime + jumpEffect.JumpOutTunnelTime);
+         }
+ 
+         private TradelaneEquipment? GetTradelaneEquipment(ObjNetId ring)
+@@ -769,8 +809,18 @@
+                 AttachTransientShipEffect(endEffect);
+         }
+ 
+-        private void UpdateTransientShipEffects()
+-        {
++        private void UpdateTransientShipEffects(double delta)
++        {
++            if (jumpTunnelSound != null)
++            {
++                jumpTunnelSoundRemaining -= delta;
++                if (jumpTunnelSoundRemaining <= 0)
++                {
++                    jumpTunnelSound.Stop();
++                    jumpTunnelSound = null;
++                }
++            }
++
+             for (var i = transientShipEffects.Count - 1; i >= 0; i--)
+             {
+                 if (!transientShipEffects[i].Finished)
+@@ -901,7 +951,7 @@
+                 double FixedDelta = 1 / 60.0;
+ 
+                 world.Update(paused ? 0 : FixedDelta);
+-                UpdateTransientShipEffects();
++                UpdateTransientShipEffects(FixedDelta);
+ 
+                 if (session.Update())
+                 {
+--- a/src/LibreLancer/Net/Protocol/IClientPlayer.cs
++++ b/src/LibreLancer/Net/Protocol/IClientPlayer.cs
+@@ -44,7 +44,7 @@
+     void DestroyPart(ObjNetId id, uint part);
+     void DestroyEquipment(ObjNetId id, bool explode, string hardpoint);
+     void RunMissionDialog(NetDlgLine[] lines);
+-    void StartLocalJumpTunnel();
++    void StartLocalJumpTunnel(string targetSystem);
+     void StartJumpTunnel(string targetSystem, string target, long characterId);
+     void TransferSnapshotStaged(string transferId, bool succeeded);
+     void StartTradelane(ObjNetId ring, Quaternion orientation);
+--- a/src/LibreLancer/Server/Player.cs
++++ b/src/LibreLancer/Server/Player.cs
+@@ -2912,7 +2912,7 @@
+                 _ = sourceSpace.World.FreezeJumpersAsync(jumpers, MissionRuntime);
+ 
+             jumpPending = true;
+-            rpcClient.StartLocalJumpTunnel();
++            rpcClient.StartLocalJumpTunnel(system);
+             FLLog.Debug("Player", $"Jumping to {system} - {target}");
+ 
+             if (Space != null)
+--- a/src/LibreLancer/GameSettings.cs
++++ b/src/LibreLancer/GameSettings.cs
+@@ -59,6 +59,8 @@
+         public bool RenderProjectileBeams = true;
+         [Entry("render_particle_effects")]
+         public bool RenderParticleEffects = true;
++        [Entry("render_jump_gate_effects")]
++        public bool RenderJumpGateEffects = true;
+         [Entry("render_transient_effect_lights")]
+         public bool RenderTransientEffectLights = true;
+         [Entry("render_weapon_muzzle_lights")]
+@@ -152,6 +154,7 @@
+             writer.WriteLine($"render_sun_lens_glow = {RenderSunLensGlow.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_projectile_beams = {RenderProjectileBeams.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_particle_effects = {RenderParticleEffects.ToString().ToLowerInvariant()}");
++            writer.WriteLine($"render_jump_gate_effects = {RenderJumpGateEffects.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_transient_effect_lights = {RenderTransientEffectLights.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_weapon_muzzle_lights = {RenderWeaponMuzzleLights.ToString().ToLowerInvariant()}");
+         }
+@@ -190,6 +193,7 @@
+                 RenderSunLensGlow = RenderSunLensGlow,
+                 RenderProjectileBeams = RenderProjectileBeams,
+                 RenderParticleEffects = RenderParticleEffects,
++                RenderJumpGateEffects = RenderJumpGateEffects,
+                 RenderTransientEffectLights = RenderTransientEffectLights,
+                 RenderWeaponMuzzleLights = RenderWeaponMuzzleLights
+             };
+@@ -226,6 +230,7 @@
+             RenderSunLensGlow = other.RenderSunLensGlow;
+             RenderProjectileBeams = other.RenderProjectileBeams;
+             RenderParticleEffects = other.RenderParticleEffects;
++            RenderJumpGateEffects = other.RenderJumpGateEffects;
+             RenderTransientEffectLights = other.RenderTransientEffectLights;
+             RenderWeaponMuzzleLights = other.RenderWeaponMuzzleLights;
+         }
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -187,6 +187,7 @@
+         private bool? sunLensGlow;
+         private bool? projectileBeams;
+         private bool? particleEffects;
++        private bool? jumpGateEffects;
+         private bool? transientEffectLights;
+         private bool? weaponMuzzleLights;
+         private AntialiasMode? antialias;
+@@ -276,6 +277,10 @@
+                 case "--render-particle-effects":
+                     if (!ParseToggle(out var drawParticleEffects)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
+                     particleEffects = drawParticleEffects;
++                    return true;
++                case "--render-jump-gate-effects":
++                    if (!ParseToggle(out var drawJumpGateEffects)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
++                    jumpGateEffects = drawJumpGateEffects;
+                     return true;
+                 case "--render-transient-effect-lights":
+                     if (!ParseToggle(out var drawTransientEffectLights)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
+@@ -332,6 +337,7 @@
+             if (sunLensGlow.HasValue) settings.RenderSunLensGlow = sunLensGlow.Value;
+             if (projectileBeams.HasValue) settings.RenderProjectileBeams = projectileBeams.Value;
+             if (particleEffects.HasValue) settings.RenderParticleEffects = particleEffects.Value;
++            if (jumpGateEffects.HasValue) settings.RenderJumpGateEffects = jumpGateEffects.Value;
+             if (transientEffectLights.HasValue) settings.RenderTransientEffectLights = transientEffectLights.Value;
+             if (weaponMuzzleLights.HasValue) settings.RenderWeaponMuzzleLights = weaponMuzzleLights.Value;
+             if (antialias.HasValue) settings.Antialias = (int)antialias.Value;
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -238,6 +238,7 @@
+   - `--render-sun-lens-glow=on|off` → `render_sun_lens_glow`.
+   - `--render-projectile-beams=on|off` → `render_projectile_beams` (only hides `vis_beam`; simulation and projectile particle effects remain active).
+   - `--render-particle-effects=on|off` → `render_particle_effects` (suppresses particle geometry while effect timing and simulation continue).
++  - `--render-jump-gate-effects=on|off` → `render_jump_gate_effects` (controls the configured jump-tunnel effect renderer).
+   - `--render-transient-effect-lights=on|off` → `render_transient_effect_lights` (controls short-lived `lgt_effect` lights independently of other dynamic lights).
+   - `--render-weapon-muzzle-lights=on|off` → `render_weapon_muzzle_lights` (controls weapon `light_anim` muzzle lights independently of transient effect lights).
+   - `--render-antialias=none|smaa-low|smaa-medium|smaa-high|smaa-ultra|msaa-2x|msaa-4x|msaa-8x` → `antialias`.
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -152,7 +152,8 @@
+ 
+ - [ ] Den fehlenden Sprungtor-Übergangseffekt anhand von `Freelancer.ini` (`jump_effect`), `fx/Jumpeffect.ini`, `fx/Effects.ini` und `fx/GateTunnel.ini` im Client-Laufzeitpfad ergänzen: Toranimation, Tunnel/Innenansicht und Ein-/Austrittssequenz datengetreu abbilden, mit reproduzierbaren NAP-Szenen vergleichen und separat abschaltbar halten.
+   - [x] Integrationspfad geprüft: `Universe.SystemObject.jump_effect` wird in `GameData.World.SystemObject.JumpEffect` kopiert, aber im Client nicht konsumiert. `DockAction.Tunnel` wird serialisiert, hat jedoch keinen Renderer-Verbraucher. `IClientPlayer.StartLocalJumpTunnel` und `StartJumpTunnel` schalten derzeit nur den Tradelane-Zustand ab; keiner startet eine sichtbare Übergangssequenz. Der lokale Callback liegt vor dem Systemwechsel, der Cluster-Callback vor dem asynchronen Gateway-Transfer. Die Implementierung muss beide Abläufe und Fehler/Abbruch sauber abdecken.
+-  - [x] Datenfundament: `FreelancerData` lädt die in `Freelancer.ini` konfigurierten `jump_effect`- und `gate_tunnels`-Pfade optional in typisierte Modelle für Gate-/Schiffseffekte, Tunnelparameter und Tunnel-Layer. `GameItemDb` löst `SystemObject.jump_effect` case-insensitiv auf das Gate-Profil auf; das Profil ist über `GameObject.SystemObject` erreichbar. Die Quelldateien liegen in `Data/NAP/Effects/fx/`. Eine Darstellung wird noch nicht erzeugt.
++  - [x] Datenfundament: `FreelancerData` lädt die in `Freelancer.ini` konfigurierten `jump_effect`- und `gate_tunnels`-Pfade optional in typisierte Modelle für Gate-/Schiffseffekte, Tunnelparameter und Tunnel-Layer. `GameItemDb` löst `SystemObject.jump_effect` case-insensitiv auf das Gate-Profil auf; das Profil ist über `GameObject.SystemObject` erreichbar.
++  - [x] Der konfigurierte `jump_tunnel_effect` startet beim lokalen Sprung sowie bei einem zulässigen Cluster-Sprung am Spielerschiff. Der Client startet ihn direkt im RPC-Update, bevor ein `SpawnPlayer`-Paket die aktuelle Szene austauschen kann. Die Quelle wird über das nächstgelegene Sprungtor mit passendem Zielsystem gesucht. Der Effekt ist mit `render_jump_gate_effects` beziehungsweise `--render-jump-gate-effects=on|off` separat schaltbar; die Loop-Sounddauer folgt `jump_out_time + jump_out_tunnel_time`. Ringeffekte, Gate-Tunnelgeometrie und Ankunftssequenz bleiben offen.
+ - [ ] Tradelane-Reiseeffekt gegen das Original vergleichen und die vereinfachte Darstellung korrigieren. Der Client hängt `PlayerTravel` als `ParticleEffectRenderer` an; anhand von `basic_tl_player_travel`/`EFT_LANE_SHIP_TRAVEL` und `tradelaneinship01` prüfen, welche ALE-Geometrie, Partikel, Bewegung, Skalierung oder Schichtung für die originale Tunnelansicht fehlen. Mit NAP-Referenzbildern für Eintritt, Fahrt und Austritt abnehmen.
+ - [ ] Laser-, Projektil- und Explosionseffekte visuell überarbeiten: Beam- und Trefferdarstellung, Trails, Partikel, Farbverläufe, Größen- und Zeitverhalten sowie Zusammenspiel mit dynamischem Licht. Originale Freelancer-Effekte müssen weiter funktionieren; neue Qualitätseinstellungen sollen einzeln abschaltbar bleiben. Mit reproduzierbaren NAP-Kampfszenen, Vergleichsbildern und GPU-/CPU-Messungen abnehmen.
+   - [x] `vis_beam`-Geometrie gegen parallele/degenerierte Richtungen absichern und Schreibzugriffe auf den 500-Beam-Streamingpuffer begrenzen; vier Geometrietests bestehen.
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -521,7 +521,8 @@
+   - [x] Waffen-Mündungslichter aus `Gun.light_anim` unabhängig per `render_weapon_muzzle_lights` / `--render-weapon-muzzle-lights=on|off` schaltbar machen.
+   - [ ] Sichtprüfung der Beam-/Explosiondarstellung, Timing-/Partikelabstimmung und einzeln schaltbare Qualitätsoptionen anhand von NAP-Referenzszenen.
+ - [x] Die in `Freelancer.ini` konfigurierten `jump_effect`- und `gate_tunnels`-Dateien in `FreelancerData` optional in typisierte Modelle laden und `SystemObject.jump_effect` case-insensitiv zum Gate-Profil auflösen. Das Profil ist vom zugehörigen `GameObject` erreichbar.
+-- [ ] Sprungtor-Effekt im Laufzeitpfad umsetzen; lokale/Cluster-Jump-Callbacks starten noch keine Tunnelanimation. Der Übergang muss die asynchrone Transferbestätigung und Fehlerpfade berücksichtigen; Quellcodebefund siehe [Renderer-Roadmap](renderer-roadmap.md).
++- [x] Den konfigurierten `jump_tunnel_effect` beim lokalen Sprung sowie beim zugelassenen Cluster-Sprung am Spielerschiff starten. Der Client startet ihn vor einem möglichen Szenenwechsel; der Loop-Sound endet nach `jump_out_time + jump_out_tunnel_time`. Die Auflösung nutzt das nächstgelegene Sprungtor mit passendem Zielsystem.
++- [ ] Ringeffekte, Gate-Tunnelgeometrie und Ankunftssequenz implementieren. Der Abflug-Innenraumeffekt besitzt bereits den unabhängigen Startparameter `--render-jump-gate-effects=on|off`; der Übergang muss Transferbestätigung und Fehlerpfade berücksichtigen. Quellcodebefund siehe [Renderer-Roadmap](renderer-roadmap.md).
+ - [ ] SSAO mit Geometrie-/Nebelmasken und Forward+ mit vielen Lichtquellen
+   implementieren; die feste Lichtgrenze erst nach Messung ersetzen.
+ - [ ] Instancing/Batching für Asteroiden, Partikel und wiederholte Objekte
+--- a/patches/series
++++ b/patches/series
+@@ -97,3 +97,4 @@
+ client 2095-render-target-exception-restoration.patch
+ client 2096-system-renderer-exception-state.patch
+ client 2097-jump-effect-data-models.patch
++client 2098-jump-tunnel-interior-effect.patch
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -71,6 +71,7 @@
+ | 2095 | Restore render targets and state stacks after draw exceptions |
+ | 2096 | Restore SystemRenderer graphics state after exceptions |
+ | 2097 | Load typed jump gate and gate tunnel effect data |
++| 2098 | Start the configured jump tunnel interior effect |
+ | 2011 (`lancerdecode`) | Native Vorbis EOF/reset handling |
+ | 2012 (`blurgtext`) | System FreeType without OT-SVG hooks |
+ 

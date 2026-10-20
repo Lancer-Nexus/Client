@@ -1,0 +1,120 @@
+--- a/src/LibreLancer/Shaders/PBR.frag.hlsl
++++ b/src/LibreLancer/Shaders/PBR.frag.hlsl
+@@ -212,7 +212,8 @@
+     float4 baseTexture = SRGBToLinearOutput(DtTexture.Sample(DtSampler, GetTexCoord(0, input)));
+     if (PBRPadding.x > 0.5 && baseTexture.a < 0.5)
+         discard;
+-    float4 baseColor = baseTexture * SRGBToLinearOutput(Dc);
++    float4 vertexColor = SRGBToLinearOutput(input.color);
++    float4 baseColor = baseTexture * SRGBToLinearOutput(Dc) * vertexColor;
+ 
+     float3 f0 = 0.04;
+     float3 diffuseColor = baseColor.rgb * ((float3)1.0 - f0);
+@@ -345,6 +346,6 @@
+     color += emissiveColor * emissiveTexture;
+     #endif
+ 
+-    return ToDisplayOutput(float4(color, baseColor.a));
+-}
+-#endif
++    return ToDisplayOutput(float4(color, baseColor.a * Oc));
++}
++#endif
+--- a/src/LibreLancer.Tests/NormalMapShaderTests.cs
++++ b/src/LibreLancer.Tests/NormalMapShaderTests.cs
+@@ -23,7 +23,7 @@
+         Assert.Equal(1,material.NormalStrength);
+     }
+     [Theory]
+-    [InlineData("BasicParameters",64,48)] [InlineData("PBRParameters",64,44)]
++    [InlineData("BasicParameters",64,48)] [InlineData("PBRParameters",80,44)]
+     public void UniformLayoutMatchesHlslRegisters(string name,int size,int strengthOffset)
+     {
+         var type=typeof(BasicMaterial).GetNestedType(name,BindingFlags.NonPublic)!;
+@@ -35,7 +35,7 @@
+     public void PbrEnvironmentMipCountMatchesHlslRegister()
+     {
+         var type=typeof(BasicMaterial).GetNestedType("PBRParameters",BindingFlags.NonPublic)!;
+-        Assert.Equal(64,Marshal.SizeOf(type));
++        Assert.Equal(80,Marshal.SizeOf(type));
+         Assert.Equal(48,Marshal.OffsetOf(type,"EnvMipCount").ToInt32());
+         Assert.Equal(52,Marshal.OffsetOf(type,"EnvMapStrength").ToInt32());
+     }
+@@ -46,7 +46,7 @@
+     public void EnvironmentMapStrengthUsesTheFinalMaterialRegister(string name)
+     {
+         var type=typeof(BasicMaterial).GetNestedType(name,BindingFlags.NonPublic)!;
+-        Assert.Equal(64,Marshal.SizeOf(type));
++        Assert.Equal(name == "PBRParameters" ? 80 : 64,Marshal.SizeOf(type));
+         Assert.Equal(52,Marshal.OffsetOf(type,"EnvMapStrength").ToInt32());
+     }
+ }
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -447,6 +447,12 @@
+   Anteil umsetzen. Ohne expliziten Metallic-Faktor gilt 0; bei gebundener
+   Metallic-Karte gilt standardmäßig der Kartenfaktor 1. Diffuse IBL und lokale
+   Ambient-Beiträge folgen dem nichtmetallischen Materialanteil.
++- [x] Den PBR-Shader an die Legacy-Materialmultiplikation angleichen: lineare
++  Vertexfarbe moduliert nun die Materialalbedo und die finale Materialalpha wird
++  mit `Oc` (inklusive OpacityMultiplier) skaliert. Der Shader-Eingang enthielt
++  bereits Vertexfarbe; zuvor wurde sie nicht verwendet und `Oc` war ungenutzt.
++  Der Compiler-/DFM-PBR-Bundle-Test prüft die Shader-Varianten. Eine visuelle
++  Materialabnahme mit getönten bzw. halbtransparenten Retail-Assets bleibt offen.
+ - [ ] Retail-Orientierung, sichtbare Wirkung metallischer/rauer Flächen und
+   GPU-Kosten mit fester Kamera im Spiel abnehmen. Vorhandene Offscreen- und
+   ModelViewer-Bilder ersetzen diesen In-Game-Nachweis nicht.
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -10,7 +10,7 @@
+ |---|---|---|
+ | Freelancer-Forward-Renderer | Vorhandener OpenGL-Renderpfad mit Depth-Prepass, opaken Objekten, Sternen/Nebeln, Transparenz und AA-Auflösung. | `SystemRenderer.Draw()` und `docs/evidence/renderer/forward-pass-order-audit-20261015.md`. Der Render-Graph beschreibt Verträge; er ersetzt noch nicht alle direkten Backend-Aufrufe. |
+ | Normalmaps | MAT-Normalmaps und optionale Surface-Zuordnungen für Meshes und DFM; UV-Auswahl, Tangentenaufbau, Cache und Laufzeitoptionen sind vorhanden. | Viewer-A/B für Schiffe, Basen und DFM liegen unter `docs/evidence/renderer/`. Spielbildqualität und Kosten über weitere Szenen bleiben offen. |
+-| Metallic/Roughness | Ergänzende Karten sind in Materialauflösung und PBR-Shader eingebunden; DFM besitzt einen skinned PBR-Pfad. | Kartenwirkung ist asset- und materialabhängig. Vollständige Asset-Abdeckung und systematische Spielabnahme fehlen. |
++| Metallic/Roughness | Ergänzende Karten sind in Materialauflösung und PBR-Shader eingebunden; DFM besitzt einen skinned PBR-Pfad. PBR berücksichtigt nun auch lineare Vertex-Tints und `Oc`-Materialopazität. | Kartenwirkung ist asset- und materialabhängig. Tinted/transparent PBR-Materialien, vollständige Asset-Abdeckung und systematische Spielabnahme fehlen noch. |
+ | Cubemaps / Reflexion | PBR bindet GGX-vorgefilterte Specular-Cubes und cosine-konvolvierte diffuse Irradiance. DDS-Cubemaps unterstützen zusätzlich lineare DX10-RGBA16F-Daten für HDR-Werte über 1. Die drei erzeugten Umwelt-Cubes und Metadaten liegen in `Data/NAP/Surface/` und `Data/SDK/fx/SurfaceMaps.ini`. | Lancer und LancerEdit bauen. Der NAP-only-Datenstart erreicht `Finished loading game data`; ein sichtbarer HDR-Cube-Lade- und Bildvergleich bleibt offen. Retail-Orientierung, Materialkalibrierung und breite Spielabnahme bleiben offen. Siehe `docs/evidence/renderer/pbr-world-reflection-20261017/` und `docs/evidence/renderer/pbr-environment-20261014/`. |
+ | Legacy-Environment-Maps | Bestehende Freelancer-Cubemap-Reflexionen lassen sich unabhängig vom PBR-IBL per Einstellung oder `--render-legacy-environment-maps=on|off` umschalten. Der Standard bleibt `on`, damit ältere Materialien ihr bisheriges Verhalten behalten. | Beide Startwerte laden bis ins Intro. Der gleiche Kamera-A/B-Bildvergleich fehlt noch; externe Bildschirmaufnahmen waren in der letzten Sitzung schwarz. |
+ | HDR und Tonemapping | Linearisiertes Scene-Target, ACES-Tonemapping, linearisierte PBR-Albedo-/Licht-/Emissionswerte und exakte sRGB-Ausgabe im PBR-LDR-Pfad. System- und Nebel-Clearfarben werden ebenfalls vor dem HDR-Clear linearisiert; LDR bleibt unverändert. | Der sRGB-Vertrag für Retail-INI-Farben ist durch Konvertierungstests, aber noch nicht durch kalibrierte Retail-Bildvergleiche abgenommen. Legacy-Vertexfarben, Transparenz, Fog und zusammengesetzte Effekte benötigen weiterhin eine visuelle Gesamtprüfung. HDR/LDR-Vergleich: `docs/evidence/renderer/postprocess-four-mode-ab-20261017/`; Clear-Farbvertrag: `docs/evidence/renderer/hdr-clear-color-contract-20261018.md`. |
+--- /dev/null
++++ b/docs/evidence/renderer/pbr-legacy-vertex-opacity-contract-20261018.md
+@@ -0,0 +1,17 @@
++# PBR legacy vertex and opacity inputs (2026-10-18)
++
++The PBR fragment input already receives `color` at `TEXCOORD4`, but the
++fragment shader did not use it when building base color. The legacy lighting
++helpers multiply decoded vertex RGB into decoded material diffuse color. PBR
++now applies the same linear-space vertex tint before deriving diffuse and
++metallic specular colors.
++
++`BasicMaterial` uploads `Oc * OpacityMultiplier` into the PBR parameter block.
++The PBR shader declared that field but omitted it from the returned alpha.
++The output alpha now multiplies base texture/material/vertex alpha by `Oc`, so
++the existing material opacity and per-draw opacity reach the blend pipeline.
++
++The PBR and skinned PBR shader bundle is built and exercised by
++`DfmSkinnedPbrShaderTests`. This verifies shader compilation and variant
++selection, not pixel-level alpha blending or the appearance of retail vertex
++tints. Those in-game comparisons remain open.
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 311 Client bundles and two native bundles. Each
++The active series contains 312 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -271,3 +271,5 @@
+ | 2311 | Sample full bloom downsample footprints and retain odd image edges |
+ 
+ | 2312 | Linearize system and nebula frame-clear colors for HDR targets |
++
++| 2313 | Honor legacy vertex tint and material opacity in PBR output |
+--- a/patches/series
++++ b/patches/series
+@@ -312,3 +312,4 @@
+ client 2310-sunambient-linear-hdr-mix.patch
+ client 2311-bloom-extraction-downsample-footprint.patch
+ client 2312-linearize-hdr-frame-clear-colors.patch
++client 2313-pbr-vertex-tint-and-opacity.patch

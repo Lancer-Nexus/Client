@@ -1,0 +1,228 @@
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -46,6 +46,7 @@
+ - [ ] Render-Target-Resize, minimierte Fenster, Scissor-/Viewport-Wechsel und Geräteverlust für zusätzliche Pässe absichern.
+   - [x] `SystemRenderer.Draw()` überspringt Frames mit Breite/Höhe 0. Bei geändertem Rendermaß oder AA-Modus gibt es das vorhandene MSAA-Target frei und erstellt es neu. Das belegt nur diesen System-Renderer-Pfad; Editor-/Offscreen-Targets, Wiederherstellungstests und Geräteverlust bleiben offen.
+   - [x] `SystemRenderer.Draw()` und `AntialiasTarget.SMAABlit()` stellen RenderTarget, Viewport-/Scissor-Stacks und ihre geänderten RenderContext-Zustände in `finally` wieder her. `SystemRenderer` stellt auch `ThnCamera.DefaultZ()` zurück und leert die Frame-Objektliste nach Fehlern. Fehler-Injektion und reguläre Resize-/Minimize-/Restore-Läufe bleiben als Laufzeitprüfung offen. Details im [Fehlerpfad-Audit](evidence/renderer/render-target-exception-path-audit-20261015.md).
++  - [x] OpenGL prüft die Vollständigkeit normaler, multisample- und resolve Framebuffer beim Anlegen. Bei unvollständigen Zielen werden die erzeugten GL-Objekte freigegeben und der Statushexwert in der Exception ausgegeben; Laufzeitprüfung auf mehreren Treibern bleibt offen.
+ - [ ] GPU-Zeit und Speicherverbrauch pro Pass messbar machen; Effekte müssen einzeln abschaltbar und nach Hardwareprofil skalierbar sein.
+   - [x] Bereitschaftsaudit abgeschlossen: Timer-Query-API und Query-Aufruf fehlen in OpenGL-/RenderContext-Abstraktion; die lokale Mesa-Laufzeit meldet `GL_ARB_timer_query`. Passgrenzen und eine nicht blockierende Abfragefolge sind dokumentiert. Speicherwerte sind noch nicht als Messung verfügbar. Siehe [GPU-Timer-Query-Audit](evidence/renderer/gpu-timer-query-readiness-audit-20261015.md).
+   - [x] OpenGL-Timer-Queries für Depth, Opaque, Sterne/Nebel, Transparenz und AA-Resolve eingebaut. Vier Query-Slots pro Pass werden ohne blockierendes Ergebnis-Polling wiederverwendet; das Debug-Overlay zeigt Messwert und Sample-Alter. CSV-Zeilen erfassen den zuletzt verfügbaren GPU-Messwert samt fortlaufend aktualisiertem Alter; nicht verfügbare Samples bleiben leer. Das Alter zählt Aufrufe von `SystemRenderer.Draw()` und hängt nicht von `RenderContext.FrameNumber`/`ClearAll()` ab; ein Regressionstest prüft das Weiterzählen. Die Abfrage läuft nur bei geöffnetem Debug-Overlay. Null und OpenGL ohne Timer-Query melden keine Unterstützung. Der Debug-Overlay-Speicherblock zeigt jetzt geschätzte geladene Texturbytes sowie separat erfasste Surface-Map- und Tangentenbytes. Diese Werte decken nicht den gesamten GPU-Speicher ab und sind keiner Render-Pass-Attribution zugeordnet; Hardwarelauf, Vergleich der GPU-Zeit gegen Treiberprofiling sowie Render-Target-, Buffer- und Treiberallokationen bleiben offen.
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 113 Client bundles and two native bundles. Each
++The active series contains 114 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -116,3 +116,4 @@
+ | 2112 | Count asynchronous GPU sample age by rendered system frame |
+ | 2113 | Advance asynchronous GPU sample age on every rendered system frame |
+ | 2114 | Track cubemap estimates and expose known GPU memory counters in the Debug overlay |
++| 2115 | Validate OpenGL framebuffer completeness and release failed allocations |
+--- a/patches/series
++++ b/patches/series
+@@ -114,3 +114,4 @@
+ client 2112-gpu-profile-render-frame-age.patch
+ client 2113-advance-gpu-profile-sample-age.patch
+ client 2114-renderer-gpu-memory-estimates.patch
++client 2115-validate-opengl-framebuffers.patch
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Constants.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Constants.cs
+@@ -21,6 +21,7 @@
+     public const int GL_COLOR_BUFFER_BIT = 0x00004000;
+     public const int GL_DEPTH_BUFFER_BIT = 0x00000100;
+     public const int GL_STENCIL_BUFFER_BIT = 0x00000400;
++    public const int GL_FRAMEBUFFER_COMPLETE = 0x8CD5;
+     //Shaders
+     public const int GL_FRAGMENT_SHADER = 0x8B30;
+     public const int GL_COMPUTE_SHADER = 0x91B9;
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLMultisampleTarget.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLMultisampleTarget.cs
+@@ -26,24 +26,41 @@
+         this.context = context;
+         Width = width;
+         Height = height;
+-        texID = GL.GenTexture();
+-        GLBind.BindTexture(0, GL.GL_TEXTURE_2D_MULTISAMPLE, texID);
+-        if(GL.GLES)
+-            GL.TexStorage2DMultisample(GL.GL_TEXTURE_2D_MULTISAMPLE, samples, GL.GL_RGBA8, width, height, true);
+-        else
+-            GL.TexImage2DMultisample(GL.GL_TEXTURE_2D_MULTISAMPLE, samples, GL.GL_RGBA, width, height, true);
+-        depthID = GL.GenRenderbuffer();
+-        GL.BindRenderbuffer(GL.GL_RENDERBUFFER, depthID);
+-        GL.RenderbufferStorageMultisample(GL.GL_RENDERBUFFER, samples, GL.GL_DEPTH_COMPONENT24, width, height);
+-        GL.BindRenderbuffer(GL.GL_RENDERBUFFER, 0);
+-        fbo = GL.GenFramebuffer();
+-        GL.BindFramebuffer(GL.GL_FRAMEBUFFER, fbo);
+-        GL.FramebufferTexture2D(GL.GL_FRAMEBUFFER, GL.GL_COLOR_ATTACHMENT0, GL.GL_TEXTURE_2D_MULTISAMPLE, texID, 0);
+-        GL.FramebufferRenderbuffer(GL.GL_FRAMEBUFFER,
+-            GL.GL_DEPTH_ATTACHMENT,
+-            GL.GL_RENDERBUFFER, depthID);
+-        int status = GL.CheckFramebufferStatus(GL.GL_FRAMEBUFFER);
+-        GL.BindFramebuffer(GL.GL_FRAMEBUFFER, 0);
++        try
++        {
++            texID = GL.GenTexture();
++            GLBind.BindTexture(0, GL.GL_TEXTURE_2D_MULTISAMPLE, texID);
++            if(GL.GLES)
++                GL.TexStorage2DMultisample(GL.GL_TEXTURE_2D_MULTISAMPLE, samples, GL.GL_RGBA8, width, height, true);
++            else
++                GL.TexImage2DMultisample(GL.GL_TEXTURE_2D_MULTISAMPLE, samples, GL.GL_RGBA, width, height, true);
++            depthID = GL.GenRenderbuffer();
++            GL.BindRenderbuffer(GL.GL_RENDERBUFFER, depthID);
++            GL.RenderbufferStorageMultisample(GL.GL_RENDERBUFFER, samples, GL.GL_DEPTH_COMPONENT24, width, height);
++            GL.BindRenderbuffer(GL.GL_RENDERBUFFER, 0);
++            fbo = GL.GenFramebuffer();
++            GL.BindFramebuffer(GL.GL_FRAMEBUFFER, fbo);
++            GL.FramebufferTexture2D(GL.GL_FRAMEBUFFER, GL.GL_COLOR_ATTACHMENT0, GL.GL_TEXTURE_2D_MULTISAMPLE, texID, 0);
++            GL.FramebufferRenderbuffer(GL.GL_FRAMEBUFFER,
++                GL.GL_DEPTH_ATTACHMENT,
++                GL.GL_RENDERBUFFER, depthID);
++            var status = GL.CheckFramebufferStatus(GL.GL_FRAMEBUFFER);
++            if (status != GL.GL_FRAMEBUFFER_COMPLETE)
++                throw new InvalidOperationException($"OpenGL multisample framebuffer is incomplete (status 0x{status:X4}).");
++        }
++        catch
++        {
++            if (fbo != 0) GL.DeleteFramebuffer(fbo);
++            if (depthID != 0) GL.DeleteRenderbuffer(depthID);
++            if (texID != 0) GL.DeleteTexture(texID);
++            fbo = depthID = texID = 0;
++            throw;
++        }
++        finally
++        {
++            GL.BindRenderbuffer(GL.GL_RENDERBUFFER, 0);
++            GL.BindFramebuffer(GL.GL_FRAMEBUFFER, 0);
++        }
+     }
+     internal override void BindFramebuffer()
+     {
+@@ -56,18 +73,34 @@
+         if (resolveFboID == 0)
+         {
+             resolveFboID = GL.GenFramebuffer();
+-            GL.BindFramebuffer(GL.GL_FRAMEBUFFER, resolveFboID);
+-            resolveTexID = GL.GenTexture();
+-            GLBind.Trash();
+-            GLBind.BindTextureForModify(0, GL.GL_TEXTURE_2D, resolveTexID);
+-            GL.TexImage2D(GL.GL_TEXTURE_2D, 0,
+-                GL.GL_RGBA,
+-                Width, Height, 0,
+-                GL.GL_BGRA, GL.GL_UNSIGNED_BYTE, IntPtr.Zero);
+-            GL.FramebufferTexture2D (GL.GL_FRAMEBUFFER,
+-                GL.GL_COLOR_ATTACHMENT0,
+-                GL.GL_TEXTURE_2D, resolveTexID, 0);
+-            GL.BindFramebuffer(GL.GL_FRAMEBUFFER, 0);
++            try
++            {
++                GL.BindFramebuffer(GL.GL_FRAMEBUFFER, resolveFboID);
++                resolveTexID = GL.GenTexture();
++                GLBind.Trash();
++                GLBind.BindTextureForModify(0, GL.GL_TEXTURE_2D, resolveTexID);
++                GL.TexImage2D(GL.GL_TEXTURE_2D, 0,
++                    GL.GL_RGBA,
++                    Width, Height, 0,
++                    GL.GL_BGRA, GL.GL_UNSIGNED_BYTE, IntPtr.Zero);
++                GL.FramebufferTexture2D (GL.GL_FRAMEBUFFER,
++                    GL.GL_COLOR_ATTACHMENT0,
++                    GL.GL_TEXTURE_2D, resolveTexID, 0);
++                var status = GL.CheckFramebufferStatus(GL.GL_FRAMEBUFFER);
++                if (status != GL.GL_FRAMEBUFFER_COMPLETE)
++                    throw new InvalidOperationException($"OpenGL multisample resolve framebuffer is incomplete (status 0x{status:X4}).");
++            }
++            catch
++            {
++                if (resolveFboID != 0) GL.DeleteFramebuffer(resolveFboID);
++                if (resolveTexID != 0) GL.DeleteTexture(resolveTexID);
++                resolveFboID = resolveTexID = 0;
++                throw;
++            }
++            finally
++            {
++                GL.BindFramebuffer(GL.GL_FRAMEBUFFER, 0);
++            }
+         }
+     }
+ 
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderTarget2D.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderTarget2D.cs
+@@ -26,21 +26,40 @@
+         this.texture = texture;
+         //generate the FBO
+         FBO = GL.GenFramebuffer ();
+-        GL.BindFramebuffer (GL.GL_FRAMEBUFFER, FBO);
+-        //make the depth buffer
+-        if (depth != null)
++        try
+         {
+-            GL.FramebufferRenderbuffer(GL.GL_FRAMEBUFFER,
+-                depth.HasStencil ? GL.GL_DEPTH_STENCIL_ATTACHMENT : GL.GL_DEPTH_ATTACHMENT,
+-                GL.GL_RENDERBUFFER, depth.ID);
+-            stencil = depth.HasStencil;
++            GL.BindFramebuffer (GL.GL_FRAMEBUFFER, FBO);
++            //make the depth buffer
++            if (depth != null)
++            {
++                GL.FramebufferRenderbuffer(GL.GL_FRAMEBUFFER,
++                    depth.HasStencil ? GL.GL_DEPTH_STENCIL_ATTACHMENT : GL.GL_DEPTH_ATTACHMENT,
++                    GL.GL_RENDERBUFFER, depth.ID);
++                stencil = depth.HasStencil;
++            }
++            //bind the texture
++            GL.FramebufferTexture2D (GL.GL_FRAMEBUFFER,
++                GL.GL_COLOR_ATTACHMENT0,
++                GL.GL_TEXTURE_2D, texture.ID, 0);
++            EnsureFramebufferComplete();
+         }
+-        //bind the texture
+-        GL.FramebufferTexture2D (GL.GL_FRAMEBUFFER,
+-            GL.GL_COLOR_ATTACHMENT0,
+-            GL.GL_TEXTURE_2D, texture.ID, 0);
+-        //unbind the FBO
+-        GL.BindFramebuffer (GL.GL_FRAMEBUFFER, 0);
++        catch
++        {
++            GL.DeleteFramebuffer(FBO);
++            FBO = 0;
++            throw;
++        }
++        finally
++        {
++            GL.BindFramebuffer (GL.GL_FRAMEBUFFER, 0);
++        }
++    }
++
++    private static void EnsureFramebufferComplete()
++    {
++        var status = GL.CheckFramebufferStatus(GL.GL_FRAMEBUFFER);
++        if (status != GL.GL_FRAMEBUFFER_COMPLETE)
++            throw new InvalidOperationException($"OpenGL 2D framebuffer is incomplete (status 0x{status:X4}).");
+     }
+ 
+     public override bool HasStencil => stencil;
+--- a/src/LibreLancer.Base/Graphics/RenderTarget2D.cs
++++ b/src/LibreLancer.Base/Graphics/RenderTarget2D.cs
+@@ -19,7 +19,17 @@
+     {
+         Texture = new Texture2D(context, width, height);
+         DepthBuffer = depth;
+-        Backing = context.Backend.CreateRenderTarget2D(Texture.Backing, DepthBuffer?.Backing);
++        try
++        {
++            Backing = context.Backend.CreateRenderTarget2D(Texture.Backing, DepthBuffer?.Backing);
++        }
++        catch
++        {
++            Texture.Dispose();
++            if (disposeDepth)
++                DepthBuffer?.Dispose();
++            throw;
++        }
+         Target = Backing;
+         this.disposeDepth = disposeDepth;
+     }

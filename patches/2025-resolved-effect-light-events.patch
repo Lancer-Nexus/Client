@@ -1,0 +1,205 @@
+diff --git a/src/LibreLancer.Data/GameData/ResolvedFx.cs b/src/LibreLancer.Data/GameData/ResolvedFx.cs
+--- a/src/LibreLancer.Data/GameData/ResolvedFx.cs
++++ b/src/LibreLancer.Data/GameData/ResolvedFx.cs
+@@ -4,6 +4,7 @@
+ 
+ using LibreLancer.Data.Schema.Audio;
+ using LibreLancer.Data.Schema.Effects;
++using LibreLancer.Data.Schema;
+ 
+ namespace LibreLancer.Data.GameData;
+ 
+@@ -15,4 +16,7 @@
+     public BeamSpear? Spear;
+     public BeamBolt? Bolt;
+     public AudioEntry? Sound;
++    public LightAnim? DynamicLightAnimation;
++    public float LightRangeScale;
++    public float LightRadius;
+ }
+
+diff --git a/src/LibreLancer.Data/GameItemDb.cs b/src/LibreLancer.Data/GameItemDb.cs
+--- a/src/LibreLancer.Data/GameItemDb.cs
++++ b/src/LibreLancer.Data/GameItemDb.cs
+@@ -250,7 +250,10 @@
+                 Bolt = bolt,
+                 CRC = FLHash.CreateID(effect.Nickname),
+                 Nickname = effect.Nickname,
+-                Sound = sound
++                Sound = sound,
++                DynamicLightAnimation = flData.LightAnimations.Find(effect.LgtEffect),
++                LightRangeScale = effect.LgtRangeScale,
++                LightRadius = effect.LgtRadius
+             });
+         }
+     }
+
+diff --git a/src/LibreLancer/World/GameWorld.cs b/src/LibreLancer/World/GameWorld.cs
+--- a/src/LibreLancer/World/GameWorld.cs
++++ b/src/LibreLancer/World/GameWorld.cs
+@@ -92,7 +92,7 @@
+             if (fx == null || Renderer == null || resources == null)
+                 return;
+             var particle = fx.GetEffect(resources);
+-            Renderer.SpawnTempFx(particle, position);
++            Renderer.SpawnTempFx(particle, position, fx.DynamicLightAnimation, fx.LightRadius);
+             if (fx.Sound != null && Sounds != null)
+             {
+                 var snd = Sounds.GetInstance(fx.Sound.Nickname, 0, -1, -1, position);
+
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -7,6 +7,7 @@
+ using System.Numerics;
+ using LibreLancer.Data.GameData;
+ using LibreLancer.Data.GameData.World;
++using LibreLancer.Data.Schema;
+ using LibreLancer.Fx;
+ using LibreLancer.Graphics;
+ using LibreLancer.Graphics.Backends.OpenGL;
+@@ -208,6 +209,14 @@
+                     tempFx.RemoveAt(i);
+                 }
+             }
++
++            for (var i = transientEffectLights.Count - 1; i >= 0; i--)
++            {
++                var effectLight = transientEffectLights[i];
++                effectLight.Age += (float)Math.Max(0, elapsed);
++                if (effectLight.Age >= effectLight.Animation.Duration)
++                    transientEffectLights.RemoveAt(i);
++            }
+         }
+ 
+         public readonly record struct DebugLine(Vector3 Start, Vector3 End, Color4 Color);
+@@ -278,8 +287,20 @@
+         private record TemporaryFx(ParticleEffectRenderer Render, Vector3 Position);
+ 
+         private List<TemporaryFx> tempFx = [];
++        private const int MaxTransientEffectLights = 128;
++        private sealed class TransientEffectLight(LightAnim animation, Vector3 position, float radius)
++        {
++            public readonly LightAnim Animation = animation;
++            public readonly Vector3 Position = position;
++            public readonly float Radius = radius;
++            public readonly DynamicLight Light = new();
++            public float Age;
++        }
+ 
+-        public void SpawnTempFx(ParticleEffect? fx, Vector3 position)
++        private readonly List<TransientEffectLight> transientEffectLights = [];
++
++        public void SpawnTempFx(ParticleEffect? fx, Vector3 position,
++            LightAnim? lightAnimation = null, float lightRadius = 0)
+         {
+             var ren = new ParticleEffectRenderer(fx)
+             {
+@@ -288,6 +309,9 @@
+             };
+ 
+             tempFx.Add(new TemporaryFx(ren, position));
++            if (lightAnimation is { Duration: > 0 } && lightRadius > 0 &&
++                transientEffectLights.Count < MaxTransientEffectLights)
++                transientEffectLights.Add(new TransientEffectLight(lightAnimation, position, lightRadius));
+         }
+ 
+         public bool ZOverride = false; // Stop Thn Camera from changing Z
+@@ -324,6 +348,21 @@
+             var nr = CheckNebulae(); // are we in a nebula?
+             SystemLighting.DynamicLightsEnabled = Settings.DynamicLighting;
+             SystemLighting.BeginFrame(camera.Position);
++            foreach (var effectLight in transientEffectLights)
++            {
++                var sample = effectLight.Animation.Sample(effectLight.Age);
++                effectLight.Light.LightGroup = 0;
++                effectLight.Light.Active = true;
++                effectLight.Light.Light = new RenderLight
++                {
++                    Kind = LightKind.PointAttenCurve,
++                    Position = effectLight.Position,
++                    Attenuation = new Vector3(0, -1, 1),
++                    Color = new Color3f(sample.Color) * sample.Intensity,
++                    Range = effectLight.Radius
++                };
++                SystemLighting.AddFrameLight(effectLight.Light);
++            }
+             rstate.SetCamera(camera);
+             Commands.Camera = camera;
+             var transitioned = false;
+
+diff --git a/docs/dynamic-lighting-audit.md b/docs/dynamic-lighting-audit.md
+--- a/docs/dynamic-lighting-audit.md
++++ b/docs/dynamic-lighting-audit.md
+@@ -1,9 +1,9 @@
+ # Audit: dynamisches Licht für Effekte
+ 
+-Stand: 2026-10-14. Der Renderer besitzt einen Pfad für statische Systemlichter,
+-THN-Lichter und jetzt auch pro Frame registrierte lokale Lichter aus
+-Lichtequipment. Waffenfeuer, Treffer, Explosionen und Feuer erzeugen noch keine
+-Lichtquellen.
++Stand: 2026-10-14. Der Renderer unterstützt statische Systemlichter,
++THN-Lichter, Lichtequipment, animierte Waffen-Mündungslichter und kurzlebige
++Lichter an Effekten, die eine `lgt_effect`-Kurve und `lgt_radius` angeben.
++Effektfeuer ohne solche Daten wird weiterhin nicht künstlich beleuchtet.
+ 
+ ## Verifizierter Bestand
+ 
+@@ -20,8 +20,8 @@
+   `LightEquipRenderer` nun als lokale Frame-Lichtquelle registriert. Der Pool
+   begrenzt diese zusätzlichen Quellen pro Frame auf 32 und behält die dem
+   Kameraort nächsten Kandidaten.
+-- `Effect` enthält bereits `lgt_effect`, `lgt_range_scale` und `lgt_radius`;
+-  `InitEffects()` kopiert diese Werte aber nicht in `ResolvedFx`.
++- `Effect` enthält `lgt_effect`, `lgt_range_scale` und `lgt_radius`; `InitEffects()`
++  übergibt Kurve und beide Zahlenwerte nun an `ResolvedFx`.
+ - `FreelancerData` lädt nun die benannten Kurven aus Retail
+   `FX\\lightanim.ini`; `GameItemDb` löst `Gun.light_anim` auf und übergibt die
+   Kurve samt `flash_radius` an Gun- und Missile-Launcher-Equipment.
+@@ -29,20 +29,25 @@
+   wertet die Farb-/Intensitätskurve über deren Dauer aus und nutzt
+   `flash_radius` als Reichweite.
+ - Waffenfeuer startet weiterhin die vorhandenen
+-  `ParticleEffectRenderer`-Mündungsblitze. Treffer und Explosionen in
+-  `CGameSession.Space` erzeugen weiterhin Partikeleffekte, aber noch keine
+-  dynamische Lichtquelle.
++  `ParticleEffectRenderer`-Mündungsblitze und zusätzlich die aus `light_anim`
++  gespeisten dynamischen Mündungslichter.
++- `GameWorld.SpawnTempFx()` übergibt die aufgelöste `LightAnim`-Kurve und den
++  `lgt_radius` an `SystemRenderer`. Dieser interpretiert `lgt_radius` derzeit
++  als direkte Lichtreichweite; das ist eine Arbeitsannahme. `lgt_range_scale`
++  wird erhalten, aber noch nicht angewendet, bis seine Bedeutung verifiziert ist.
++- Kurzlebige Effektlichter teilen sich ein deterministisches Limit von 128
++  aktiven Ereignissen; der Frame-Lichtpool wählt weiterhin die kameranächsten
++  Kandidaten.
+ - THN-Lichter werden direkt in `SystemLighting.Lights` registriert. Sie nutzen
+   also die bestehende globale Lichtliste, aber keinen kurzlebigen Effektpool.
+ 
+ ## Umsetzung in Arbeitsschritten
+ 
+-1. Für Explosionen `lgt_effect`, `lgt_radius` und `lgt_range_scale` auflösen;
+-   die Bedeutung beider Reichweitenwerte muss vor der Laufzeitumsetzung anhand
+-   einer belastbaren Engine-Referenz bestätigt werden.
+-2. Eine lebensdauerbasierte Registrierung für Ereignislichter ergänzen, sodass
+-   jeder Effekt seine Lichtposition und Abklingzeit über die gesamte Dauer
+-   aktualisieren kann.
++1. Die Bedeutung von `lgt_radius` und `lgt_range_scale` anhand einer belastbaren
++   Engine-Referenz oder einer kontrollierten Retail-Beobachtung verifizieren.
++   Danach `lgt_range_scale` entsprechend anwenden.
++2. Laufzeitlichter auch bei anderen zeitlich begrenzten Treffern und Effekten
++   anbinden, sofern deren Daten Farbe, Reichweite und Dauer liefern.
+ 3. Danach datengetriebene
+    Lichtwerte für weitere Effekte und Feuer definieren. Keine künstlichen
+    Standardlichter für vorhandene Partikeleffekte einführen, bevor Farbe,
+
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -24,3 +24,6 @@
+ client 2022-dynamic-effect-light-audit.patch
+ client 2023-frame-dynamic-light-pool.patch
+ client 2024-lightanim-weapon-light-data.patch
++client 2025-resolved-effect-light-events.patch
++client 2026-document-ship-light-occlusion-repro.patch
++client 2027-document-ship-light-material-audit.patch
+

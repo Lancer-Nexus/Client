@@ -1,0 +1,79 @@
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -11,12 +11,12 @@
+ | Freelancer-Forward-Renderer | Vorhandener OpenGL-Renderpfad mit Depth-Prepass, opaken Objekten, Sternen/Nebeln, Transparenz und AA-Auflösung. | `SystemRenderer.Draw()` und `docs/evidence/renderer/forward-pass-order-audit-20261015.md`. Der Render-Graph beschreibt Verträge; er ersetzt noch nicht alle direkten Backend-Aufrufe. |
+ | Normalmaps | MAT-Normalmaps und optionale Surface-Zuordnungen für Meshes und DFM; UV-Auswahl, Tangentenaufbau, Cache und Laufzeitoptionen sind vorhanden. | Viewer-A/B für Schiffe, Basen und DFM liegen unter `docs/evidence/renderer/`. Spielbildqualität und Kosten über weitere Szenen bleiben offen. |
+ | Metallic/Roughness | Ergänzende Karten sind in Materialauflösung und PBR-Shader eingebunden; DFM besitzt einen skinned PBR-Pfad. | Kartenwirkung ist asset- und materialabhängig. Vollständige Asset-Abdeckung und systematische Spielabnahme fehlen. |
+-| Cubemaps / Reflexion | Bestehende Freelancer-Umgebungscubes können über den Materialpfad gebunden werden; LancerEdit hat Prüf-/Vorschauwerkzeuge. | Eine produktionsreife, diffuse Irradiance- und GGX-prefiltered IBL-Kette ist nicht nachgewiesen. Siehe `surface-maps.md` und `docs/evidence/renderer/pbr-environment-20261014/`. |
+-| HDR und Tonemapping | Linearisiertes Scene-Target, ACES-Tonemapping und Ausgabe nach UI-Komposition sind implementiert. | Legacy-Eingangsfarben werden noch nicht durchgängig vor der Beleuchtungsrechnung linearisiert. Ein kontrollierter Vergleich ist unter `docs/evidence/renderer/postprocess-four-mode-ab-20261017/` dokumentiert. |
+-| Bloom | Optionale HDR-Extraktion, separabler Blur und Composite mit Laufzeitreglern. | Einfache Viertelauflösungs-Stufe, keine mehrstufige Bloom-Pyramide. Farbkalibrierung und GPU-Kosten sind nicht für mehrere GPUs abgenommen. |
++| Cubemaps / Reflexion | PBR bindet GGX-vorgefilterte Specular-Cubes und cosine-konvolvierte diffuse Irradiance; die drei erzeugten Umwelt-Cubes und Metadaten liegen in `Data/NAP/Surface/` und `Data/SDK/fx/SurfaceMaps.ini`. | Laufzeitproben bestätigen Cube-Auswahl und Mip-Sampling. Retail-Orientierung, Materialkalibrierung und breite Spielabnahme bleiben offen. Siehe `docs/evidence/renderer/pbr-world-reflection-20261017/` und `docs/evidence/renderer/pbr-environment-20261014/`. |
++| HDR und Tonemapping | Linearisiertes Scene-Target, ACES-Tonemapping, linearisierte PBR-Albedo-/Licht-/Emissionswerte und exakte sRGB-Ausgabe im PBR-LDR-Pfad. | Der Farbvertrag für Legacy-Vertexfarben, Transparenz, Fog und zusammengesetzte Effekte ist noch nicht für alle Pfade visuell abgenommen. Ein HDR/LDR-Vergleich ist unter `docs/evidence/renderer/postprocess-four-mode-ab-20261017/` dokumentiert. |
++| Bloom | HDR-Extraktion plus Basis-, mittlere und breite Blur-Stufe; Schwelle, Radius, Auflösung und Kernel sind konfigurierbar. | Der Code führt alle drei Stufen aus. Die vorhandene Bloom-Pyramidenaufnahme nennt ein Laufzeitpaket/Manifest vom 18.10. und gilt am Dokumentstand 17.10. nicht als verifizierter NAP-Lauf. Laufzeitabnahme, Halo-Kalibrierung und GPU-Kosten bleiben offen. |
+ | Antialiasing | SMAA-Pässe und MSAA-Auflösung; HDR/LDR-Kombinationen sowie Resize und Minimize/Restore wurden auf OpenGL/Mesa geprüft. | Andere Backends/Treiber, wiederholte Lifecycle-Zyklen und Fehler-Injektion stehen aus. |
+-| Dynamische Lichter | Persistente und kurzlebige Lichtquellen, priorisierte Framebudgets und getrennte Renderoptionen für Effekte/Weapon-Lichter. | Sichtbarkeit und Beleuchtungsbeitrag einzelner Retail-Effekte brauchen kontrollierte Bildabnahmen. Siehe `docs/dynamic-lighting-audit.md`. |
+-| Diagnose | CPU-Framezeitprofile, asynchrone OpenGL-GPU-Passzeiten, Ziel-/Speicherschätzungen und CSV-Ausgabe. | Noch keine langfristigen Szenenprofile oder plattformübergreifenden Vergleichsbaselines. |
++| Dynamische Lichter und Schatten | Persistente und kurzlebige Lichter werden priorisiert; ein ausgewähltes Richtungslicht läuft durch Shadow-Map-Pass und 3×3-PCF. Quelle und Ein/Aus-Schaltung sind konfigurierbar. | Hi02 belegt Pass, Lichtauswahl und Live-Schaltung auf einer OpenGL-GPU. Bias, Caster-Abdeckung und Bildqualität über weitere Materialien/Szenen brauchen kontrollierte Vergleiche. Siehe `docs/evidence/renderer/shadow-map-hi02-live-toggle-20261017/`. |
++| Diagnose | CPU-Framezeitprofile, asynchrone OpenGL-GPU-Passzeiten, Bloom-/Shadow-Passzeiten, Ziel-/Speicherschätzungen und CSV-Ausgabe. | Langzeitprofile und plattformübergreifende Vergleichsbaselines fehlen. Einzelne asynchrone Samples sind keine FPS-Baseline. |
+ 
+ ## Offene Renderer-Arbeiten
+ 
+@@ -25,26 +25,27 @@
+    eindeutig als sRGB-Eingabe oder lineare Größe behandeln. Beleuchtung und
+    Blending im HDR-Ziel müssen konsistent linear erfolgen; LDR muss unverändert
+    als Rückfallprofil erhalten bleiben.
+-2. **PBR/IBL fertigstellen.** Cubemap-Orientierung und Auswahl auf echten
+-   Spielmaterialien prüfen, diffuse Umgebungsbeleuchtung ergänzen und
+-   Roughness-abhängige Reflexionen mit vorgefilterten Cubes oder einem
+-   gleichwertigen messbaren Verfahren umsetzen. Metallic-Energieerhaltung,
+-   Normalstärke und fehlende Texturen in einer Materialmatrix prüfen.
+-3. **Schattenpfad abnehmen.** Einen klar begrenzten dominanten Lichtpfad für
+-   Schiffe und Stationen definieren. Shadow-Target-Erzeugung, Culling,
+-   Bias, Cascades, Resize/Lifecycle, Alpha-Materialien und Kosten getrennt
+-   messen. Bis zur Bildabnahme darf eine vorhandene Implementierung nicht als
+-   fertig gelten.
++2. **PBR/IBL visuell abnehmen.** GGX-Prefilterung und diffuse Irradiance sind
++   in Generator, NAP-Assets, Metadaten und Shaderpfad vorhanden. Cubemap-
++   Orientierung, Roughness-Verlauf, Energieerhaltung, Normalstärke und fehlende
++   Texturen auf Schiff, Basis, Planet und DFM mit festen Kameras vergleichen.
++3. **Schattenqualität abnehmen.** Der dominante Richtungslichtpfad einschließlich
++   Shadow-Target, Frustum-Culling und 3×3-PCF ist integriert. Bias, Caster-Abdeckung,
++   Alphamaterialien, Detailflimmern und GPU-Kosten in festen Schiffs-/Basisszenen
++   vergleichen; Cascades und weitere Schattenlichter bleiben Erweiterungen.
+ 4. **Atmosphären und Effekte vervollständigen.** `AtmosphereMaterial.Fade` wird
+-   derzeit vom MAT-Parser bis zum Shader-Parameter weitergereicht, im Shader
+-   jedoch nicht verwendet. Seine Bedeutung muss gegen Retail-Materialdaten und
+-   `shading.dll` geprüft werden, bevor das Verhalten geändert wird. Danach
++   vom MAT-Parser bis zum Shader-Parameter weitergereicht, im Shader jedoch
++   nicht verwendet. Retail-MATs setzen den Wert typischerweise auf 1,1; ein
++   String-Xref in `shading.dll` fand nur die Materialregistrierung und belegt
++   noch keine genaue Kurve. Vor einer Änderung muss der tatsächliche Winkel-Fade
++   im Retailpfad geklärt werden. Danach
+    Sonnen-/Planetenatmosphären, Lens Glow, Jump-Gates, Tradelanes, Laser,
+    Explosionen und Partikel in repräsentativen Szenen abnehmen.
+-5. **Render-Graph-Vertrag operationalisieren.** Ziel-/Attachment-Abhängigkeiten,
+-   Load/Store, Ressourcennutzung, Fehlerpfade und Aliasing backendneutral
+-   ausführen lassen. Gegenwärtige Graph-Metadaten und OpenGL-Zustandsaufrufe
+-   müssen dieselben Ressourcenverträge tatsächlich erzwingen.
++5. **Render-Graph backendneutralisieren.** Der Systemrenderer und Postprocessing
++   führen ihre Pässe bereits über den Graph-Scheduler aus und validieren
++   Attachment-Verträge. Direkte OpenGL-Zustandsaufrufe, Ressourcennutzung,
++   Aliasing und Fehlerwiederherstellung müssen noch durch eine echte Backend-
++   Ausführungsschicht ersetzt beziehungsweise vollständig erzwungen werden.
+ 6. **Vulkan/SDL_GPU-Spike und Backend.** Zuerst eine echte Pipeline mit
+    Freelancer-FVF, BC4/BC5, Cubemaps, Skinning, Renderzielen und Präsentation
+    kompilieren und auf einer Vulkan-GPU starten. Erst nach erfolgreichem Spike
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -251,3 +251,4 @@
+ | 2287 | Align render-graph tests with validation messages |
+ | 2288 | Blend sun color into authored ambient without the dark-only product mix |
+ | 2296 | Decode PBR albedo texture and diffuse material color separately before multiplication |
++| 2297 | Reconcile renderer roadmap with current IBL, bloom, shadow and color-space implementation |
+--- a/patches/series
++++ b/patches/series
+@@ -296,3 +296,4 @@
+ client 2294-pbr-exact-srgb-ldr-output.patch
+ client 2295-document-exact-pbr-srgb-output.patch
+ client 2296-linearize-pbr-albedo-and-material-color.patch
++client 2297-reconcile-renderer-roadmap-with-runtime-state.patch

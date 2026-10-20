@@ -1,0 +1,237 @@
+diff --git a/src/LibreLancer/Render/RendererTargetResources.cs b/src/LibreLancer/Render/RendererTargetResources.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer/Render/RendererTargetResources.cs
+@@ -0,0 +1,102 @@
++using System;
++using System.Collections.Generic;
++using System.Runtime.ExceptionServices;
++
++namespace LibreLancer.Render;
++
++/// <summary>Owns replaceable render targets by role and disposes them in reverse acquisition order.</summary>
++internal sealed class RendererTargetResources : IDisposable
++{
++    private readonly Dictionary<string, IDisposable> current = new(StringComparer.Ordinal);
++    private readonly List<string> acquisitionOrder = new(4);
++    private readonly List<IDisposable> retired = new(2);
++    private bool disposed;
++
++    public T? Get<T>(string role) where T : class, IDisposable
++    {
++        ObjectDisposedException.ThrowIf(disposed, this);
++        if (!current.TryGetValue(role, out var resource))
++            return null;
++        return resource as T ?? throw new InvalidOperationException(
++            $"Render-target role '{role}' is owned by {resource.GetType().Name}, not {typeof(T).Name}.");
++    }
++
++    public void Set<T>(string role, T? replacement) where T : class, IDisposable
++    {
++        ArgumentException.ThrowIfNullOrWhiteSpace(role);
++        ObjectDisposedException.ThrowIf(disposed, this);
++
++        current.TryGetValue(role, out var previous);
++        if (ReferenceEquals(previous, replacement))
++            return;
++
++        if (replacement == null)
++        {
++            if (previous == null)
++                return;
++            current.Remove(role);
++            acquisitionOrder.Remove(role);
++        }
++        else
++        {
++            if (previous != null)
++                acquisitionOrder.Remove(role);
++            current[role] = replacement;
++            acquisitionOrder.Add(role);
++        }
++
++        if (previous == null)
++            return;
++
++        try
++        {
++            previous.Dispose();
++        }
++        catch
++        {
++            retired.Add(previous);
++            throw;
++        }
++    }
++
++    public void Dispose()
++    {
++        if (disposed)
++            return;
++        disposed = true;
++
++        List<Exception>? errors = null;
++        for (var i = acquisitionOrder.Count - 1; i >= 0; i--)
++        {
++            var role = acquisitionOrder[i];
++            try
++            {
++                current[role].Dispose();
++            }
++            catch (Exception exception)
++            {
++                (errors ??= []).Add(exception);
++            }
++        }
++        current.Clear();
++        acquisitionOrder.Clear();
++
++        for (var i = retired.Count - 1; i >= 0; i--)
++        {
++            try
++            {
++                retired[i].Dispose();
++            }
++            catch (Exception exception)
++            {
++                (errors ??= []).Add(exception);
++            }
++        }
++        retired.Clear();
++
++        if (errors is { Count: 1 })
++            ExceptionDispatchInfo.Capture(errors[0]).Throw();
++        if (errors is { Count: > 1 })
++            throw new AggregateException("One or more renderer targets failed to dispose.", errors);
++    }
++}
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -80,7 +80,12 @@
+         private const float ShadowMaxDistance = 50000f;
+         private const float ShadowDepthPadding = 2048f;
+         private readonly DirectionalShadowCamera shadowCamera = new();
+-        private RenderTarget2D? shadowTarget;
++        private readonly RendererTargetResources rendererTargetResources = new();
++        private RenderTarget2D? shadowTarget
++        {
++            get => rendererTargetResources.Get<RenderTarget2D>(nameof(shadowTarget));
++            set => rendererTargetResources.Set(nameof(shadowTarget), value);
++        }
+         private bool shadowTargetAllocationFailed;
+         public string ShadowMapStatus { get; private set; } = "disabled";
+         public bool TransientEffectLightsEnabled => Settings.RenderTransientEffectLights;
+@@ -300,7 +305,11 @@
+             return null;
+         }
+ 
+-        private AntialiasTarget? msaa;
++        private AntialiasTarget? msaa
++        {
++            get => rendererTargetResources.Get<AntialiasTarget>(nameof(msaa));
++            set => rendererTargetResources.Set(nameof(msaa), value);
++        }
+         public long EstimatedAAMemoryBytes => msaa?.EstimatedMemoryBytes ?? 0;
+         public long EstimatedBloomPassMemoryBytes => msaa?.EstimatedBloomPassMemoryBytes ?? 0;
+         public long EstimatedToneMapOutputMemoryBytes => msaa?.EstimatedToneMapOutputMemoryBytes ?? 0;
+@@ -312,7 +321,11 @@
+         private bool hdrAllocationFailed;
+         private bool ssaoAllocationFailed;
+         private bool softParticleDepthAllocationFailed;
+-        private RenderTarget2D? softParticleDepthTarget;
++        private RenderTarget2D? softParticleDepthTarget
++        {
++            get => rendererTargetResources.Get<RenderTarget2D>(nameof(softParticleDepthTarget));
++            set => rendererTargetResources.Set(nameof(softParticleDepthTarget), value);
++        }
+         public CommandBuffer Commands;
+         private int _twidth = -1, _theight = -1;
+         private int _dwidth = -1, _dheight = -1;
+@@ -480,9 +493,7 @@
+                     hdrAllocationFailed = false;
+                     ssaoAllocationFailed = false;
+                     softParticleDepthAllocationFailed = false;
+-                    softParticleDepthTarget?.Dispose();
+                     softParticleDepthTarget = null;
+-                    msaa?.Dispose();
+                     msaa = null;
+                 }
+                 bool ssaoActive = ssaoRequested && !ssaoAllocationFailed;
+@@ -522,7 +533,6 @@
+                             {
+                                 hdrAllocationFailed = true;
+                                 FLLog.Warning("Graphics", $"HDR render targets are unavailable; using the LDR renderer. {fallbackException.Message}");
+-                                msaa?.Dispose();
+                                 msaa = Settings.SelectedAA == AntialiasMode.None ? null :
+                                     new AntialiasTarget(rstate, renderWidth, renderHeight, Settings.SelectedAA);
+                                 if (msaa != null) msaa.GpuSubpassMarker = MarkGpuSubpass;
+@@ -542,7 +552,6 @@
+                 }
+                 else if (!offscreenRequested && msaa != null)
+                 {
+-                    msaa.Dispose();
+                     msaa = null;
+                 }
+ 
+@@ -1181,7 +1190,6 @@
+             if (!Settings.RenderShadows)
+             {
+                 ShadowMapStatus = "disabled";
+-                shadowTarget?.Dispose();
+                 shadowTarget = null;
+                 shadowTargetAllocationFailed = false;
+                 return false;
+@@ -1397,9 +1405,6 @@
+         public void Dispose()
+         {
+             DisposeGpuPassQueries();
+-            msaa?.Dispose();
+-            softParticleDepthTarget?.Dispose();
+-            shadowTarget?.Dispose();
+             RenderMaterial.ShadowLight = null;
+             RenderMaterial.ShadowDepthTexture = null;
+ 
+@@ -1408,6 +1413,7 @@
+             DebugRenderer.Dispose();
+             QuadBuffer.Dispose();
+             Beams.Dispose();
++            rendererTargetResources.Dispose();
+         }
+     }
+ }
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -72,6 +72,7 @@
+   - [x] Gebundene Backend-Renderziele stellen Farb-/Tiefen-/Stencil-Präsenz und ein bekanntes Farbformat bereit. `SystemRenderer` weist Ziele zurück, denen laut Passvertrag zwingende Anhänge fehlen; GL-MSAA meldet das Farbformat nur für bekannte sized-Formate. Swapchainformat und Desktop-GLs unsized-MSAA-Storage bleiben unbekannt.
+   - [x] `AntialiasTarget` prüft beim Erzeugen die tatsächlichen aktiven Farb-/Tiefenattachments und für SMAA auch Stencil an Kanten- und Gewichtsziel; bekannte Zielformate müssen dem gewählten LDR-/HDR-Pfad entsprechen. Unbekanntes Desktop-MSAA-Format bleibt zulässig und wird nicht geraten.
+ - [ ] Render-Target-Resize, minimierte Fenster, Scissor-/Viewport-Wechsel und Geräteverlust für zusätzliche Pässe absichern.
++  - [x] Die aktiven System-Targets für Antialias/HDR, Soft-Particle-Tiefe und Shadow-Maps werden nach Renderer-Rolle in `RendererTargetResources` ersetzt und freigegeben. Ersetzte Ressourcen bleiben bis zur erfolgreichen Konstruktion des Nachfolgers im Owner registriert; aktive Targets und fehlgeschlagene Retirements werden beim Renderer-Abbau in umgekehrter Erwerbsreihenfolge abgearbeitet. Resize-/Minimize-/Restore-Laufzeitabnahme, Geräteverlust und Editor-/Offscreen-Targets bleiben offen.
+   - [x] `AntialiasTarget` registriert alle während des Aufbaus erzeugten GPU-Ressourcen in einem idempotenten `RenderResourceScope`. Teilaufbauten werden auch bei Konstruktionsfehlern in umgekehrter Erzeugungsreihenfolge abgebaut; die Postprocess-Pässe werden vor den von ihnen geliehenen Szenen-/SMAA-Zielen freigegeben. Fehler beim Freigeben einer Ressource verhindern die Freigabe der übrigen nicht. Der `SystemRenderer`-Pfad wurde mit HDR/Bloom/SSAO/SMAA unter OpenGL auf 960×540 → 1280×720 sowie Minimize/Restore geprüft; siehe [Resize-Laufzeitnachweis](evidence/renderer/postprocess-window-resize-20261017/README.md). Editor-/Offscreen-Targets, Fehler-Injektion, Geräteverlust und Cross-Backend-Wiederherstellung bleiben offen.
+   - [x] `SystemRenderer.Draw()` überspringt Frames mit Breite/Höhe 0. Bei geändertem Rendermaß oder AA-Modus gibt es das vorhandene MSAA-Target frei und erstellt es neu. Das belegt nur diesen System-Renderer-Pfad; Editor-/Offscreen-Targets, Wiederherstellungstests und Geräteverlust bleiben offen.
+   - [x] `SystemRenderer.Draw()` und `AntialiasTarget.SMAABlit()` stellen RenderTarget, Viewport-/Scissor-Stacks und ihre geänderten RenderContext-Zustände in `finally` wieder her. `SystemRenderer` stellt auch `ThnCamera.DefaultZ()` zurück und leert die Frame-Objektliste nach Fehlern. Fehler-Injektion und reguläre Resize-/Minimize-/Restore-Läufe bleiben als Laufzeitprüfung offen. Details im [Fehlerpfad-Audit](evidence/renderer/render-target-exception-path-audit-20261015.md).
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 273 Client bundles and two native bundles. Each
++The active series contains 274 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -236,3 +236,4 @@
+ | 2272 | Schedule and execute main SystemRenderer passes as a reusable dependency graph |
+ | 2273 | Reuse SystemRenderer pass graph nodes across frames |
+ | 2274 | Share the compiled render graph scheduler with post-processing |
++| 2275 | Centralize replaceable SystemRenderer target ownership |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -274,3 +274,4 @@
+ client 2272-execute-main-pass-graph.patch
+ client 2273-reuse-render-graph-nodes.patch
+ client 2274-share-render-graph-with-postprocess.patch
++client 2275-centralize-system-render-target-ownership.patch

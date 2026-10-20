@@ -158,7 +158,6 @@ namespace LibreLancer.Utf.Mat
         private static List<string> basicMaterials =
         [
             "Dc", "DcDt", "DcDtEc", "DcDtOcOt", "DcDtEcOcOt",
-            "DcDtBt", "DcDtBtOcOt", "DcDtEcEt",
             "DcDtTwo", "DcDtEcTwo", "DcDtOcOtTwo", "DcDtEcOcOtTwo",
             "DcDtEt", "DcDtEtTwo", "EcEt", "EcEtTwo",
             "BtDetailMapMaterial", "BtDetailMapTwoMaterial",
@@ -397,7 +396,7 @@ namespace LibreLancer.Utf.Mat
                 bm.OcEnabled = Oc.HasValue;
                 if (Oc.HasValue)
                     bm.Oc = Oc.Value;
-                bm.Ec = Ec ?? (EtName != null ? Color4.White : Color4.Black);
+                bm.Ec = Ec ?? Color4.Black;
                 bm.DtSampler = DtName!;
                 bm.DtFlags = (SamplerFlags) DtFlags;
                 bm.EtSampler = EtName;

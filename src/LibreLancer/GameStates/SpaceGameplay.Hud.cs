@@ -7,7 +7,6 @@ using LibreLancer.Client.Components;
 using LibreLancer.Data;
 using LibreLancer.Data.GameData;
 using LibreLancer.Graphics;
-using LibreLancer.Graphics.Text;
 using LibreLancer.Infocards;
 using LibreLancer.Interface;
 using LibreLancer.Net;
@@ -23,66 +22,13 @@ partial class SpaceGameplay
     private UiContext ui;
     private LuaAPI uiApi;
     private UiRenderable? steerArrow;
-    private float previousTextScale;
-    private BuiltRichText? clusterDebugText;
-    private string? clusterDebugTextValue;
-    private float clusterDebugTextMultiplier;
 
 
     private void CreateHud()
     {
         ui = Game.Ui;
-        previousTextScale = ui.TextScale;
-        ui.TextScale = 0.51f;
         ui.GameApi = uiApi = new LuaAPI(this);
         uiApi.IndicatorLayer.OnRender += IndicatorLayerOnRender;
-    }
-
-    private void DrawClusterDebugHud()
-    {
-        if (!ShowHud || string.IsNullOrWhiteSpace(session.ClusterInstanceId))
-            return;
-
-        var endpoint = session.ClusterEndpoint ?? "unknown";
-        var instance = session.ClusterInstanceId;
-        var system = sys.Nickname;
-        var link = session.NetworkPing < 0 ? "CONNECTING" : "CONNECTED";
-        var ping = session.NetworkPing < 0 ? "--" : $"{session.NetworkPing} ms";
-        var loss = session.NetworkLossPercent < 0 ? "--" : $"{session.NetworkLossPercent}%";
-        var text = $"LANCER NEXUS  |  {link}\n" +
-                   $"INSTANCE  {instance}\n" +
-                   $"SYSTEM    {system}\n" +
-                   $"SERVER    {endpoint}\n" +
-                   $"PING      {ping}   LOSS {loss}\n" +
-                   $"FPS       {Game.RenderFrequency:0}   TICK Δ {session.LastTickOffset}";
-        var multiplier = ui.ViewportHeight / 480f;
-        if (clusterDebugText == null || clusterDebugTextValue != text ||
-            Math.Abs(clusterDebugTextMultiplier - multiplier) > 0.01f)
-        {
-            clusterDebugText?.Dispose();
-            clusterDebugTextValue = text;
-            clusterDebugTextMultiplier = multiplier;
-            clusterDebugText = Game.RenderContext.Renderer2D.RichText.BuildText(
-                [new RichTextTextNode
-                {
-                    Contents = text,
-                    FontName = "Arial",
-                    FontSize = 7,
-                    Color = new Color4(0.72f, 0.92f, 1f, 1f)
-                }],
-                ui.PointsToPixels(250), multiplier);
-        }
-
-        var origin = ui.PointsToPixels(new Vector2(8, 8));
-        var padding = ui.PointsToPixels(5);
-        var drawList = Game.RenderContext.Renderer2D.CreateDrawList();
-        drawList.FillRectangle(
-            new Rectangle((int)origin.X - padding, (int)origin.Y - padding,
-                ui.PointsToPixels(258), (int)clusterDebugText.Height + padding * 2),
-            new Color4(0.015f, 0.035f, 0.075f, 0.78f));
-        Game.RenderContext.Renderer2D.RichText.RenderText(drawList, clusterDebugText,
-            (int)origin.X, (int)origin.Y);
-        drawList.Render();
     }
 
     private UiRenderable SteerArrow()
@@ -216,7 +162,7 @@ partial class SpaceGameplay
 
     private void DrawSteeringArrows(UiContext context, DrawList2D drawList)
     {
-        var steeringActive = (mouseTargeting.MouseFlightFromHold || mouseFlight) &&
+        var steeringActive = ((isLeftDown && leftDownTimer < 0) || mouseFlight) &&
                              control.Active &&
                              !ui.MouseWanted(Game.Mouse.X, Game.Mouse.Y);
         if (!steeringActive || isTurretView)
@@ -320,7 +266,7 @@ partial class SpaceGameplay
                         DrawUnselectedArrow(delta, obj, pos, context, drawList, clientRectangle);
                         break;
                     case true when (obj.Flags & GameObjectFlags.Hidden) == 0:
-                        var distance = Vector3.Distance(player.WorldTransform.Position, obj.WorldTransform.Position);
+                        var distance = Vector3.Distance(player.Transform.Position, obj.Transform.Position);
                         if (distance <= ShipReticleRange)
                         {
                             DrawShipReticle(obj, pos, distance, context, drawList);
@@ -442,7 +388,7 @@ partial class SpaceGameplay
                 return false;
             }
 
-            return g.scanner?.CanScan(g.Selection.Selected) ?? false;
+            return g.player.CoreEquipment.Scanner?.CanScan(g.Selection.Selected) ?? false;
         }
 
         public void ScanSelected() => g.session.SpaceRpc.Scan(g.Selection.Selected!);
@@ -493,7 +439,7 @@ partial class SpaceGameplay
         {
             return g.canTractorAny && g.Selection.Selected != null &&
                    g.Selection.Selected.Kind == GameObjectKind.Loot &&
-                   Vector3.Distance(g.Selection.Selected.WorldTransform.Position, g.tractorOrigin) <
+                   Vector3.Distance(g.Selection.Selected.Transform.Position, g.tractorOrigin) <
                    g.maxTractorDistance;
         }
 
@@ -625,7 +571,7 @@ partial class SpaceGameplay
 
         public string SelectionName()
         {
-            return g.Selection.Selected?.Name?.GetName(g.Game.GameData, g.player.WorldTransform.Position) ??
+            return g.Selection.Selected?.Name?.GetName(g.Game.GameData, g.player.Transform.Position) ??
                    "NULL";
         }
 
@@ -638,8 +584,8 @@ partial class SpaceGameplay
                 return "";
             }
 
-            var playerPosition = g.player.WorldTransform.Position;
-            var targetPosition = g.Selection.Selected.WorldTransform.Position;
+            var playerPosition = g.player.Transform.Position;
+            var targetPosition = g.Selection.Selected.Transform.Position;
             var distance = Vector3.Distance(playerPosition, targetPosition);
             return distance < 2000f
                 ? $"{(int)distance}-M"
@@ -671,17 +617,8 @@ partial class SpaceGameplay
 
         public float SelectionShield()
         {
-            if (g.Selection.Selected == null)
-            {
-                return -1;
-            }
-
-            if (!g.Selection.Selected.TryGetFirstChildComponent<CShieldComponent>(out var shield))
-            {
-                return -1;
-            }
-
-            return shield.ShieldPercent;
+            var sh = g.Selection.Selected?.CoreEquipment.Shield;
+            return sh == null ? -1 : (sh.ShieldHealth / sh.Equipment.Def.MaxCapacity);
         }
 
         public string SelectionReputation()
@@ -726,8 +663,8 @@ partial class SpaceGameplay
             nav.PopulateIcons(g.ui, g.sys);
             nav.SetAddWaypointFunction(g.CreateUserWaypoint);
             nav.SetBestPathFunction(g.ComputeBestPathToSelection);
-            nav.SetPlayerPositionProvider(() => g.player.WorldTransform.Position);
-            nav.SetPlayerOrientationProvider(() => g.player.WorldTransform.Orientation);
+            nav.SetPlayerPositionProvider(() => g.player.Transform.Position);
+            nav.SetPlayerOrientationProvider(() => g.player.Transform.Orientation);
             nav.SetPlayerSystemProvider(() => g.sys.CRC);
             nav.SetUserWaypointProvider(g.session.GetUserWaypointsForNavmap);
         }
@@ -753,16 +690,18 @@ partial class SpaceGameplay
 
         public bool RadiationWarning()
         {
-            var position = g.player.WorldTransform.Position;
+            var position = g.player.Transform.Position;
             return g.world.ZoneDamageAt(position) > 0 && !g.world.InAtmosphere(position);
         }
 
         public float GetPlayerShield()
         {
-            return g.player.GetFirstChildComponent<CShieldComponent>()?.ShieldPercent ?? -1;
+            var sh = g.player.CoreEquipment.Shield;
+            return sh == null ? -1 : (sh.ShieldHealth / sh.MaxHealth);
         }
 
-        public float GetPlayerPower() => g.powerCore.CurrentEnergy / g.powerCore.Equip.Capacity;
+        public float GetPlayerPower() =>
+            g.player.CoreEquipment.Power!.CurrentEnergy / g.player.CoreEquipment.Power!.Equipment.Def.Capacity;
 
         private string activeManeuver = "FreeFlight";
 
@@ -821,7 +760,7 @@ partial class SpaceGameplay
         }
 
         public int ThrustPercent() =>
-            ((int)(g.powerCore.CurrentThrustCapacity / g.powerCore.Equip.ThrustCapacity * 100));
+            ((int)(g.player.CoreEquipment.Power!.CurrentThrustCapacity / g.player.CoreEquipment.Power!.Equipment.Def.ThrustCapacity * 100));
 
         public int Speed() => ((int)g.player.PhysicsComponent!.Body.LinearVelocity.Length());
     }

@@ -5,6 +5,7 @@ using System.Numerics;
 using LibreLancer.Client.Components;
 using LibreLancer.Render;
 using LibreLancer.World;
+using LibreLancer.World.Equipments;
 
 namespace LibreLancer.Thn;
 
@@ -24,7 +25,7 @@ public class ThnSceneObject
     public ThnSound? Sound;
     public bool Animating = false;
     public bool PosFromObject = false;
-    public CEngineComponent? Engine;
+    public Engine? Engine;
     public int MonitorIndex = 0;
 
     public List<ThnAttachment> Attachments = new();
@@ -40,7 +41,7 @@ public class ThnSceneObject
     {
         if (PosFromObject)
         {
-            return Object!.WorldTransform;
+            return Object!.Transform;
         }
 
         Transform3D self = new(Translate, Rotate);
@@ -49,16 +50,12 @@ public class ThnSceneObject
             var parent = t.Parent.GetTransform(t.PathLookAt);
             if (t.Orientation)
             {
-                if (t.ParentChildTransform is { } parentChildTransform)
-                {
-                    self.Orientation = (parentChildTransform * parent).Orientation;
-                }
-                else if (t.OrientationRelative)
+                if (t.OrientationRelative)
                 {
                     var qCurrent = parent.Orientation;
                     var diff = qCurrent * Quaternion.Inverse(t.LastRotate);
                     var qChild = self.Orientation;
-                    self.Orientation = diff * qChild;
+                    self.Orientation = qChild * diff;
                     t.LastRotate = qCurrent;
                 }
                 else
@@ -69,11 +66,7 @@ public class ThnSceneObject
 
             if (t.Position)
             {
-                if (t.ParentChildTransform is { } parentChildTransform)
-                {
-                    self.Position = (parentChildTransform * parent).Position;
-                }
-                else if (t.Offset != Vector3.Zero)
+                if (t.Offset != Vector3.Zero)
                 {
                     var off = t.Offset;
                     if (t.EntityRelative)
@@ -110,16 +103,6 @@ public class ThnSceneObject
         UpdateEngineObjects();
     }
 
-    public void FinishAnimation(string animationName)
-    {
-        Object?.AnimationComponent?.FinishAnimation(animationName);
-        if (Object?.RenderComponent is CharacterRenderer character && character.Skeleton.ApplyRootMotion)
-        {
-            Update();
-            character.Skeleton.ClearRootMotion();
-        }
-    }
-
 
     void UpdateEngineObjects()
     {
@@ -140,11 +123,11 @@ public class ThnSceneObject
 
             if (HpMount == null)
             {
-                Object.SetLocalTransform(new Transform3D(Translate, Rotate));
+                Object.SetTransform(new Transform3D(Translate, Rotate));
             }
             else
             {
-                Object.SetLocalTransform(HpMount.Transform.Inverse() * new Transform3D(Translate, Rotate));
+                Object.SetTransform(HpMount.Transform.Inverse() * new Transform3D(Translate, Rotate));
             }
         }
 
@@ -166,12 +149,8 @@ public class ThnAttachment(ThnAttachParent parent)
     public bool EntityRelative;
     public bool LookAt;
     public bool PathLookAt;
-    public Transform3D? ParentChildTransform;
 
     public ThnAttachParent Parent = parent;
-
-    public static Transform3D CaptureParentChildTransform(Transform3D child, Transform3D parent) =>
-        child * parent.Inverse();
 }
 
 public abstract class ThnAttachParent
@@ -205,32 +184,20 @@ public class ThnPathParent(ThnSceneObject Path)
     }
 }
 
-public class ThnObjectParent(ThnSceneObject obj, IRenderHardpoint? hardpoint, RigidModelPart? part,
-    bool characterRoot = false, string? characterBoneName = null)
+public class ThnObjectParent(ThnSceneObject obj, IRenderHardpoint? hardpoint, RigidModelPart? part)
     : ThnAttachParent
 {
-    public static bool IsRootTarget(ThnSceneObject obj, string? targetPart) =>
-        string.Equals(targetPart, "Root", StringComparison.OrdinalIgnoreCase) &&
-        (obj.Object?.RenderComponent is CharacterRenderer || obj.Object?.Model?.RigidModel.Parts == null);
-
+    public Transform3D ChildOffset = Transform3D.Identity;
     public override Transform3D GetTransform(bool pathLookAt)
     {
-        if (characterBoneName != null && obj.Object?.RenderComponent is CharacterRenderer character &&
-            character.Skeleton.TryGetBoneTransform(characterBoneName, obj.Object.WorldTransform, out var boneTransform))
-            return boneTransform;
-
-        var useCharacterWorldTransform =
-            obj.Object?.RenderComponent is CharacterRenderer && (characterRoot || hardpoint != null);
-        var tr = useCharacterWorldTransform
-            ? obj.Object!.WorldTransform
-            : obj.GetTransform();
+        var tr = obj.GetTransform();
         if (part != null)
         {
             if (obj.HpMount != null)
             {
                 tr = obj.HpMount.Transform.Inverse() * tr;
             }
-            return part.LocalTransform * tr;
+            return ChildOffset * part.LocalTransform * tr;
         }
 
         if (hardpoint != null)
@@ -239,9 +206,9 @@ public class ThnObjectParent(ThnSceneObject obj, IRenderHardpoint? hardpoint, Ri
             {
                 tr = obj.HpMount.Transform.Inverse() * tr;
             }
-            return hardpoint.Transform * tr;
+            return ChildOffset * hardpoint.Transform * tr;
         }
 
-        return tr;
+        return ChildOffset * tr;
     }
 }

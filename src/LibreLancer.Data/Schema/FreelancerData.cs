@@ -432,11 +432,8 @@ public class FreelancerData
         Run(() =>
         {
             ContentDll = new ContentDll();
-            var contentDllPath = VFS.FileExists("content.dll")
-                ? "content.dll"
-                : "DLLS\\BIN\\content.dll";
-            if (VFS.FileExists(contentDllPath))
-                ContentDll.Load(VFS.ReadAllBytes(contentDllPath));
+            if (VFS.FileExists("DLLS\\BIN\\content.dll"))
+                ContentDll.Load(VFS.ReadAllBytes("DLLS\\BIN\\content.dll"));
             if (!string.IsNullOrEmpty(Freelancer.DataVersion))
                 DataVersion = Freelancer.DataVersion;
             else

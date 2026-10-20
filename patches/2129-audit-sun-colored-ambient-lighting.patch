@@ -1,0 +1,97 @@
+From: Lancer Nexus Client overlay
+Subject: [PATCH] Audit sun-colored ambient lighting
+
+---
+
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -162,6 +162,8 @@
+   - [ ] Renderer-A/B-Bilder bei sichtbarer und verdeckter Sonne aufnehmen und Radius, Farbe, Blendmodus sowie Fade-Verhalten gegen das Original abstimmen.
+ - [ ] Image-Based Lighting und konsistente Umgebungsreflexionen für den PBR-Pfad prüfen.
+ - [ ] Systemweite Umgebungsbeleuchtung an Farbe und Intensität der jeweiligen Sonne koppeln. Unterschiedliche Sonnenfarben (z. B. grün, rot oder weiß) sollen die diffuse Grundbeleuchtung aller passenden Szenenobjekte konsistent beeinflussen; Datenquelle, Legacy-Fallback und Zusammenspiel mit PBR/IBL anhand reproduzierbarer NAP-Szenen prüfen.
++  - [x] Datenpfad-Audit: Systemambient, persistente `LightSource`-Farben und sichtbare `StarGlow`-Sprites sind getrennt; ein einzelner Farbmittelwert scheitert bei Mehrfachsonnen. Anforderungen und Retail-Gegenproben: [Sonnen-Ambient-Audit](evidence/renderer/sun-colored-ambient-audit-20261015.md).
++  - [ ] Per Objekt aus persistenten Systemlichtquellen einen farbigen diffusen Sonnenbeitrag bestimmen. `[Ambient]`-Helligkeit, Nebel-/Feld-Ambient und die unveränderte Legacy-Ausgabe bei ausgeschaltetem Schalter erhalten; Blendregel und Intensität vorab anhand weißer, roter, grüner und mehrfacher Sonnen festlegen.
+ - [ ] Screen-Space Ambient Occlusion als optionale Ergänzung bewerten; Geometrie- und Nebelartefakte gegen Vanilla-Szenen abgleichen.
+ - [ ] Echtzeit-Schatten (zunächst gerichtete Lichter, Kaskaden und PCF) anhand vorhandener Freelancer-Lichtdaten und der GPU-Kosten bewerten.
+ - [ ] Screen-Space-Reflections als optionale Ergänzung prüfen; fehlende Bildinformation an Bildschirmrändern und bei verdeckten Objekten muss über den bestehenden PBR-Fallback abgefangen werden.
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -128,3 +128,4 @@
+ client 2126-record-m01a-frame-profile-baseline.patch
+ client 2127-verify-m01a-cubemap-fix-runtime.patch
+ client 2128-server-slow-update-stage-timing.patch
++client 2129-audit-sun-colored-ambient-lighting.patch
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -130,3 +130,4 @@
+ | 2126 | Record initial 300-frame M01A CPU/GPU profile and conditions |
+ | 2127 | Verify M01A cubemap fix in a fresh NAP-only Release run and update renderer evidence |
+ | 2128 | Add timing breakdowns to slow server update diagnostics |
++| 2129 | Audit sun-colored ambient lighting data paths and acceptance requirements |
+diff --git a/docs/evidence/renderer/sun-colored-ambient-audit-20261015.md b/docs/evidence/renderer/sun-colored-ambient-audit-20261015.md
+new file mode 100644
+--- /dev/null
++++ b/docs/evidence/renderer/sun-colored-ambient-audit-20261015.md
+@@ -0,0 +1,59 @@
++# Sonnenfarbene Umgebungsbeleuchtung: Datenpfad-Audit (2026-10-15)
++
++## Befund
++
++Die aktuelle Weltraumbeleuchtung führt drei getrennte Farbwerte:
++
++1. `[Ambient] color` aus der jeweiligen System-INI wird in
++   `GameItemDb.InitSystems()` nach `StarSystem.AmbientColor` geladen. `SystemRenderer.LoadLights()`
++   kopiert diesen Wert unverändert in `SystemLighting.Ambient`; `RenderHelpers.ApplyLights()`
++   reicht ihn als Ambient-Anteil an die Objektmaterialien weiter.
++2. Jede `[LightSource] color` wird als `RenderLight.Color` geladen. Die bestehenden dynamischen
++   Lichtpfade verwenden diesen Wert für direktes, gerichtetes/entferntes Licht.
++3. `StarArch.ini`-Profile wie `star_glow`/`star_center` werden in `Sun` übernommen und von
++   `SunRenderer` für die sichtbaren Sprites benutzt. Sie speisen `SystemLighting.Ambient` nicht.
++
++Damit kann eine farbige Sonne sichtbar und als direktes Licht farbig sein, während der diffuse
++Grundanteil unabhängig davon in der System-INI festgelegt bleibt. Der geplante Effekt ist im
++Renderer nicht implementiert.
++
++## Gegenproben in der lokalen Retail-Datenreferenz
++
++Die Daten sind hier nur lesend verglichen worden; es wurden keine Retail-Dateien kopiert.
++
++- `DATA/UNIVERSE/SYSTEMS/HI02/hi02.ini`: Systemambient `40, 80, 50`, Sonnenobjekt
++  `star = sm_red_sun`, Systemlicht `232, 80, 0`. Das rote Sonnenprofil, das orange direkte
++  Licht und das grünliche Ambient sind drei unterschiedliche Vorgaben.
++- `DATA/UNIVERSE/SYSTEMS/EW06/ew06.ini`: ein rotes Sonnenobjekt am Ursprung und ein weiteres
++  Sonnenobjekt bei `(145000, 0, -130000)`; die beiden Systemlichter haben `255, 50, 0` und
++  `0, 174, 50`. Ein einziger globaler Farbmittelwert würde beide lokalen Lichtumgebungen
++  zusammenwerfen.
++- `DATA/UNIVERSE/SYSTEMS/BR02/br02.ini`: weißes `med_white_sun` und weißes direktes Licht,
++  aber Ambient `35, 30, 40`. Der bestehende Ambientwert trägt also auch unabhängig
++  eingestellte Szenenstimmung.
++
++`DATA/SOLAR/stararch.ini` definiert unter anderem `med_white_sun` und `sm_red_sun` mit
++unterschiedlichen Glow-/Center-Profilen. Diese Sprites sind kein belastbarer Ersatz für
++`LightSource`-Beleuchtungsdaten, da ein System mehrere Sterne und mehrere lokale Lichtquellen
++haben kann.
++
++## Implementierungsanforderungen
++
++- Die Lichtfarbe muss pro Objekt beziehungsweise nach lokalem Beitrag ausgewertet werden. Ein
++  pauschaler Systemmittelwert ist für EW06 nachweislich ungeeignet.
++- Nur persistente Systemlichter dürfen den diffusen Sonnenanteil speisen. Kurzlebige Waffen-,
++  Explosions- und Effektlichter dürfen die komplette Szene nicht global einfärben.
++- Den vorhandenen `[Ambient]`-Wert als authored Helligkeits-/Stimmungsbasis erhalten; der
++  Sonnenfarbanteil braucht eine explizite Intensität/Blendregel und einen separaten Renderer-Schalter.
++- Nebel-Ambient und Feld-Ambient haben eigene Datenpfade. Ihre bisherigen Overrides dürfen nicht
++  versehentlich durch die neue Systemfarbe ersetzt werden.
++- Legacy-Verhalten muss bei ausgeschaltetem Feature bitgleich bleiben. Weiße Sonne dient als
++  Kontrollfall; rote und grüne Quellen sowie EW06 mit mehreren Sonnen sind A/B-Fälle.
++- Der passende Quellpfad ist `GameItemDb.InitSystems()` → `SystemRenderer.LoadLights()` →
++  `RenderHelpers.ApplyLights()`. `StarGlow` bleibt für die Sprite-Darstellung zuständig.
++
++## Beleggrenzen
++
++Dies ist ein statischer Code- und Retail-INI-Abgleich. Es wurden keine neuen NAP-Laufzeitbilder,
++GPU-Renderproben oder Retail-Pixelvergleiche für Ambientlicht erstellt. Die Helligkeits-/Blendregel
++ist bewusst noch nicht festgelegt und muss vor Implementierung samt Legacy-Referenz bestimmt werden.

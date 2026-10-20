@@ -1,0 +1,407 @@
+diff --git a/docs/evidence/renderer/sdl-gpu-production-pbr-draw-20261018.md b/docs/evidence/renderer/sdl-gpu-production-pbr-draw-20261018.md
+new file mode 100644
+index 0000000..ac1ee4c
+--- /dev/null
++++ b/docs/evidence/renderer/sdl-gpu-production-pbr-draw-20261018.md
+@@ -0,0 +1,38 @@
++# SDL_GPU Production PBR Draw
++
++Stand: 2026-10-18. Der SDL_GPU-Diagnosepfad lädt eine echte Shaderpermutation
++aus `LibreLancer` `PBR.bin`, erzeugt daraus Shader und Pipeline, bindet
++Uniforms/Texturen und prüft einen tatsächlich gezeichneten Pixel. Geometrie,
++Materialwerte und Texturen sind synthetisch; es wird kein Freelancer-Datenpaket
++geladen.
++
++## Lauf
++
++Gebaut wurde der Release-Client mit .NET 10:
++
++```sh
++DOTNET_ROOT=/opt/dotnet-10 DOTNET_ROOT_X64=/opt/dotnet-10 \
++  dotnet build -c Release --no-restore -m:1 -p:UseSharedCompilation=false \
++  src/lancer/lancer.csproj -v:minimal
++```
++
++Der Lauf auf Mesa/Vulkan Intel Haswell:
++
++```sh
++DOTNET_ROOT=/opt/dotnet-10 DOTNET_ROOT_X64=/opt/dotnet-10 \
++SDL_VIDEODRIVER=x11 src/lancer/bin/Release/net10.0/lancer --sdl-gpu-smoke
++```
++
++Ergebnis: Release-Build mit 22 Projekten und 0 Fehlern. SDL_GPU lud PBR-Variante
++512 mit 3 Vertex- und 3 Fragment-Uniformblöcken sowie 2 Fragment-Samplern.
++Die Pipeline wurde angelegt; ein FVF3-Dreieck verwendete die eingebettete PBR-
++Vertex-/Fragmentshaderpermutation, zwei kompaktiert gebundene Sampler und
++synthetische Uniformdaten. Der aus der Swapchain gelesene Produktions-PBR-Pixel
++war `(148, 78, 0, 255)` und bestand den Materialfarbvergleich. Der unabhängige
++BC5-/HDR-/Depth-Smoke bestand ebenfalls mit Mittelpunktpixel
++`(226, 214, 230, 255)`.
++
++Der Lauf belegt die SDL_GPU-Kompatibilität und tatsächliche Fragmentausgabe
++dieser PBR-Variante. Noch offen sind echte Mesh- und Materialassets, PBR mit
++Schatten und DFM-Skinning sowie die Einbindung der GPU-Ressourcen- und
++Rendercommandpfade in `SystemRenderer` und `RenderContext`.
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+index d040d00..0165a99 100644
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -419,12 +419,16 @@ Bindungsnummern und zusätzlich die Zuordnung von den bisherigen Slots. Der
+ Compilerlauf über alle 41 in Projektdateien registrierten Shaderbeschreibungen
+ und ihre Varianten war erfolgreich. Im PBR-Bundle wurden 512 Permutationen
+ erzeugt; die SPIR-V-Bindungen und serialisierten Slotmaps stimmen überein.
+-Der vorhandene Vulkan-Smoke liest das neue Format und besteht mit dem bekannten
+-RGBA16F-/Depth-/BC5-Readback. Der PBR-Pfad verwendet jetzt einen interpolierten
++Der Vulkan-Smoke liest das neue Format und besteht mit dem bekannten
++RGBA16F-/Depth-/BC5-Readback. Er lädt außerdem die vom Client gewählte Variante
++des eingebetteten Freelancer-PBR-Bundles, erstellt daraus eine SDL_GPU-Pipeline,
++zeichnet ein FVF3-Dreieck und prüft einen ausgelesenen PBR-Pixel gegen die
++erwartete lineare Materialfarbe. Der PBR-Pfad verwendet jetzt einen interpolierten
+ View-Vektor und bündelt UV-Selektoren im PBR-Parameterblock. Damit benötigen
+ seine Fragmentvarianten drei Uniformblöcke ohne Schatten und vier mit Schatten,
+ innerhalb des SDL_GPU-Limits. Das belegt weiterhin keine Ausführung der echten
+-Spielshader oder einen Renderer-Bindungspfad im SDL_GPU-Renderer.
++Freelancer-Meshes oder -Materialdaten und keinen Renderer-Bindungspfad im
++SDL_GPU-Spielrenderer. Details: [`SDL_GPU production PBR draw`](evidence/renderer/sdl-gpu-production-pbr-draw-20261018.md).
+ 
+ ## Backend-Grenzen
+ 
+diff --git a/docs/vulkan-backend-untersuchung.md b/docs/vulkan-backend-untersuchung.md
+index a0b8a03..224d578 100644
+--- a/docs/vulkan-backend-untersuchung.md
++++ b/docs/vulkan-backend-untersuchung.md
+@@ -538,6 +538,8 @@ Die Reflexion im `LLShaderCompiler` zählt die Ressourcen und prüft nur die **S
+ 
+ Patch 2370 beseitigt für den ausgewählten PBR-Pfad die Uniformblock-Überzahl: Der View-Vektor wird als Vertexausgabe interpoliert, und UV-Selektoren liegen nun im PBR-Parameterblock. Die PBR-Fragmentshader benötigen damit drei Uniformblöcke ohne Schatten und höchstens vier mit Schatten. Die Slotmap ist jedoch weiterhin nicht an einen Spielshader- oder Renderer-Bindungspfad angeschlossen; feste Clientindizes müssen dort auf SDL-Slots abgebildet werden. Die DFM-Storage-Pufferbereiche (`BindTo(9, start, count)`) brauchen zusätzlich weiterhin einen Basisindex im Shader.
+ 
++Der SDL_GPU-Smoke lädt nun auch die Featurevariante `PBR_VIEW_VECTOR` aus dem eingebetteten Spielbundle und erstellt damit eine Pipeline auf dem Vulkan-Treiber. Der Pass pusht die drei Vertex- und Fragmentuniformblöcke, bindet beide kompaktierten Fragment-Sampler, zeichnet ein FVF3-Dreieck und liest die Swapchain-Pixel aus. Ein NAP-unabhängiger synthetischer Materiallauf ergab für den PBR-Pixel `(148, 78, 0, 255)`; damit sind Shadererstellung, Pipelinekompatibilität, Uniform-/Samplerbindung und tatsächliche Fragmentausgabe auf Mesa/Vulkan Intel Haswell belegt. Der Probe fehlen echte Freelancer-Meshes, Materialtexturen, DFM-Skinning und der Game-Renderer-Kommandopfad. Nachweis: `docs/evidence/renderer/sdl-gpu-production-pbr-draw-20261018.md`.
++
+ **Weitere Einschränkung der Bindung:** `SDL_BindGPUVertexStorageBuffers` bindet **ganze Puffer** ohne Offset und Länge. Der Client bindet Bereiche (`BindTo(9, start, count)` für Partikel, Strahlen und Bones mit `BufferOffset`, `200` Matrizen). Bei SDL_GPU muss der Anfangsindex als Uniform in den Shader gegeben werden (neuer Uniform-Block oder im Material-Block). Das betrifft `Particle`, `ParticleBeam`, `Basic_Skinned`.
+ 
+ **`SV_VertexID` und `first_vertex`:** Die Dokumentation von `SDL_DrawGPUPrimitives` und `SDL_DrawGPUIndexedPrimitives` warnt ausdrücklich: `first_vertex` und `first_instance` sind **nicht** mit eingebauten Variablen wie `SV_VertexID` kompatibel. Die Partikel- und Strahlen-Shader nutzen `SV_VertexID`; die Draw-Aufrufe sollten mit `first_vertex = 0` erfolgen und den Anfang über das Uniform übergeben.
+diff --git a/patches/README.md b/patches/README.md
+index 4a8b890..ebbdc47 100644
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 367 Client patches and two native patches. Each
++The active series contains 368 Client patches and two native patches. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -316,3 +316,4 @@ jump-gate route.
+ | 2368 | Remove stale OpenGL imports and refresh the backend boundary audit |
+ | 2369 | Compact SDL_GPU SPIR-V bindings and serialize original-to-SDL slot maps |
+ | 2370 | Keep selected PBR shader variants within SDL_GPU's uniform-buffer limit |
++| 2371 | Execute the embedded production PBR shader in SDL_GPU and read back its pixel |
+diff --git a/patches/series b/patches/series
+index c9e112c..9d45a66 100644
+--- a/patches/series
++++ b/patches/series
+@@ -368,3 +368,4 @@ client 2367-soft-particle-m01a-visual-ab.patch
+ client 2368-audit-renderer-gl-boundaries.patch
+ client 2369-compact-sdl-gpu-production-shader-bindings.patch
+ client 2370-pbr-sdl-gpu-uniform-budget.patch
++client 2371-sdl-gpu-production-pbr-draw.patch
+diff --git a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+index 009a080..d505c54 100644
+--- a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
++++ b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+@@ -3,6 +3,8 @@ using System.Buffers.Binary;
+ using System.Text;
+ using System.IO;
+ using System.Linq;
++using System.Reflection;
++using System.Numerics;
+ using System.Runtime.InteropServices;
+ using System.Threading;
+ using LibreLancer.Graphics;
+@@ -11,9 +13,9 @@ using LibreLancer;
+ namespace LibreLancer.Platforms;
+ 
+ /// <summary>
+-/// Small standalone SDL_GPU device and swapchain check. This deliberately lives
+-/// outside the game renderer so the GPU API and native driver can be exercised
+-/// before porting the renderer's resource and command contracts.
++/// SDL_GPU device, swapchain, resource and draw probe. It exercises one embedded
++/// production Freelancer PBR variant with synthetic FVF3 geometry and material
++/// data; the complete game renderer remains a separate integration task.
+ /// </summary>
+ public static class SDL3GpuSmoke
+ {
+@@ -45,8 +47,11 @@ public static class SDL3GpuSmoke
+         IntPtr fragmentShader = IntPtr.Zero;
+         IntPtr copyVertexShader = IntPtr.Zero;
+         IntPtr copyFragmentShader = IntPtr.Zero;
++        IntPtr pbrVertexShader = IntPtr.Zero;
++        IntPtr pbrFragmentShader = IntPtr.Zero;
+         IntPtr pipeline = IntPtr.Zero;
+         IntPtr copyPipeline = IntPtr.Zero;
++        IntPtr pbrPipeline = IntPtr.Zero;
+         IntPtr vertexBuffer = IntPtr.Zero;
+         IntPtr transferBuffer = IntPtr.Zero;
+         IntPtr indexBuffer = IntPtr.Zero;
+@@ -83,6 +88,7 @@ public static class SDL3GpuSmoke
+ 
+             (vertexShader, fragmentShader) = CreateShaders(device);
+             (copyVertexShader, copyFragmentShader) = CreateShaders(device, CopyShaderBundleResource);
++            (pbrVertexShader, pbrFragmentShader) = CreateProductionPbrShaders(device);
+ 
+             if (!SDL3.SDL_ClaimWindowForGPUDevice(device, window))
+                 throw Failure("Claiming the window for SDL_GPU failed");
+@@ -124,12 +130,16 @@ public static class SDL3GpuSmoke
+             copyPipeline = CreatePipeline(device, copyVertexShader, copyFragmentShader, swapchainFormat, false);
+             if (copyPipeline == IntPtr.Zero)
+                 throw Failure("Creating the SDL_GPU scene-copy graphics pipeline failed");
++            pbrPipeline = CreatePipeline(device, pbrVertexShader, pbrFragmentShader, swapchainFormat,
++                false, freelancerFvf: true);
++            if (pbrPipeline == IntPtr.Zero)
++                throw Failure("Creating an SDL_GPU pipeline for the embedded Freelancer PBR shader failed");
+             if (SDL3.SDL_GPUTextureFormatTexelBlockSize(swapchainFormat) != 4)
+                 throw new InvalidOperationException($"SDL_GPU smoke readback expects a 4-byte SDR format, got {swapchainFormat}.");
+             readbackBuffer = SDL3.SDL_CreateGPUTransferBuffer(device, new SDL3.SDL_GPUTransferBufferCreateInfo
+             {
+                 usage = SDL3.SDL_GPUTransferBufferUsage.SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD,
+-                size = 4
++                size = 8
+             });
+             if (readbackBuffer == IntPtr.Zero)
+                 throw Failure("Creating the SDL_GPU pixel readback buffer failed");
+@@ -207,6 +217,9 @@ public static class SDL3GpuSmoke
+             SDL3.SDL_EndGPURenderPass(renderPass);
+             renderPass = IntPtr.Zero;
+ 
++            ExecuteProductionPbrDraw(commandBuffer, pbrPipeline, vertexBuffer, diffuseTexture, normalSampler,
++                colorTargets, width, height);
++
+             copyPass = SDL3.SDL_BeginGPUCopyPass(commandBuffer);
+             if (copyPass == IntPtr.Zero)
+                 throw Failure("Beginning the SDL_GPU pixel readback pass failed");
+@@ -230,6 +243,11 @@ public static class SDL3GpuSmoke
+                 rows_per_layer = 0
+             };
+             SDL3.SDL_DownloadFromGPUTexture(copyPass, centerPixel, pixelDestination);
++            var pbrPixel = centerPixel;
++            pbrPixel.x = (uint)(width * 0.165f);
++            pbrPixel.y = (uint)(height * 0.165f);
++            pixelDestination.offset = 4;
++            SDL3.SDL_DownloadFromGPUTexture(copyPass, pbrPixel, pixelDestination);
+             SDL3.SDL_EndGPUCopyPass(copyPass);
+             copyPass = IntPtr.Zero;
+ 
+@@ -248,7 +266,6 @@ public static class SDL3GpuSmoke
+             var green = Marshal.ReadByte(mappedPixel, 1);
+             var channel2 = Marshal.ReadByte(mappedPixel, 2);
+             var alpha = Marshal.ReadByte(mappedPixel, 3);
+-            SDL3.SDL_UnmapGPUTransferBuffer(device, readbackBuffer);
+             var isBgra = swapchainFormat is SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM or
+                 SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM_SRGB;
+             var isSrgb = swapchainFormat is SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB or
+@@ -265,8 +282,25 @@ public static class SDL3GpuSmoke
+                     $"({red}, {green}, {blue}, {alpha}); expected approximately " +
+                     $"({expectedRed}, {expectedGreen}, {expectedBlue}, 255).");
+ 
++            var pbrChannel0 = Marshal.ReadByte(mappedPixel, 4);
++            var pbrGreen = Marshal.ReadByte(mappedPixel, 5);
++            var pbrChannel2 = Marshal.ReadByte(mappedPixel, 6);
++            var pbrAlpha = Marshal.ReadByte(mappedPixel, 7);
++            var pbrRed = isBgra ? pbrChannel2 : pbrChannel0;
++            var pbrBlue = isBgra ? pbrChannel0 : pbrChannel2;
++            var expectedPbrRed = ToOutputByte(0.58f, isSrgb);
++            var expectedPbrGreen = ToOutputByte(0.306f, isSrgb);
++            if (pbrAlpha < 240 || Math.Abs(pbrRed - expectedPbrRed) > 32 ||
++                Math.Abs(pbrGreen - expectedPbrGreen) > 32 || pbrBlue > 24)
++                throw new InvalidOperationException(
++                    $"SDL_GPU production PBR pixel mismatch for {swapchainFormat}: " +
++                    $"({pbrRed}, {pbrGreen}, {pbrBlue}, {pbrAlpha}); expected approximately " +
++                    $"({expectedPbrRed}, {expectedPbrGreen}, 0, 255).");
++            SDL3.SDL_UnmapGPUTransferBuffer(device, readbackBuffer);
++
+             Console.WriteLine($"Presented SDL_GPU BC5 normal-mapped scene through an RGBA16F target and depth-tested pass at {width}x{height}; " +
+-                              $"center pixel ({red}, {green}, {blue}, {alpha}) passed; 16-bit indices, first-index offset and vertex offset were used.");
++                              $"center pixel ({red}, {green}, {blue}, {alpha}) and production PBR pixel " +
++                              $"({pbrRed}, {pbrGreen}, {pbrBlue}, {pbrAlpha}) passed; 16-bit indices, first-index offset and vertex offset were used.");
+             Thread.Sleep(750);
+             return 0;
+         }
+@@ -306,6 +340,12 @@ public static class SDL3GpuSmoke
+                     SDL3.SDL_ReleaseGPUGraphicsPipeline(device, pipeline);
+                 if (copyPipeline != IntPtr.Zero)
+                     SDL3.SDL_ReleaseGPUGraphicsPipeline(device, copyPipeline);
++                if (pbrPipeline != IntPtr.Zero)
++                    SDL3.SDL_ReleaseGPUGraphicsPipeline(device, pbrPipeline);
++                if (pbrVertexShader != IntPtr.Zero)
++                    SDL3.SDL_ReleaseGPUShader(device, pbrVertexShader);
++                if (pbrFragmentShader != IntPtr.Zero)
++                    SDL3.SDL_ReleaseGPUShader(device, pbrFragmentShader);
+                 if (hdrSceneTexture != IntPtr.Zero)
+                     SDL3.SDL_ReleaseGPUTexture(device, hdrSceneTexture);
+                 if (vertexBuffer != IntPtr.Zero)
+@@ -338,6 +378,139 @@ public static class SDL3GpuSmoke
+         uint UniformBuffers, SdlGpuBindingRemap[] BindingRemaps, string Entrypoint, byte[] Code);
+     private readonly record struct SdlGpuBindingRemap(uint DescriptorSet, uint OriginalBinding, uint SdlBinding);
+ 
++    private static unsafe (IntPtr Vertex, IntPtr Fragment) CreateProductionPbrShaders(IntPtr device)
++    {
++        const uint pbrViewVectorFeature = 1 << 9;
++        var gameAssembly = Assembly.Load("LibreLancer");
++        using var stream = gameAssembly.GetManifestResourceStream("PBR.bin")
++                           ?? throw new FileNotFoundException("Missing embedded production PBR shader bundle.");
++        var bundle = BytecodesBundle.FromStream(stream);
++        var index = Enumerable.Range(0, bundle.ShaderCount)
++            .FirstOrDefault(i => bundle.GetFeatures(i) == pbrViewVectorFeature, -1);
++        if (index < 0)
++            throw new InvalidDataException("The production PBR bundle has no PBR_VIEW_VECTOR variant.");
++
++        var shaderBytes = bundle.GetShader(index);
++        var program = ShaderBytecodes.GetSPIRV(shaderBytes);
++        var offset = 0;
++        var vertex = ReadStage(program, ref offset, true);
++        var fragment = ReadStage(program, ref offset, true);
++        if (offset != program.Length)
++            throw new InvalidDataException("Unexpected trailing production PBR SPIR-V data.");
++        ValidateBindingRemaps(vertex, [0, 1]);
++        ValidateBindingRemaps(fragment, [2, 3]);
++        if (vertex.UniformBuffers > 4 || fragment.UniformBuffers > 4 || fragment.Samplers != 2)
++            throw new InvalidDataException("Production PBR shader resources exceed the SDL_GPU probe contract.");
++
++        var vertexHandle = CreateSpirvShader(device, vertex, SDL3.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_VERTEX);
++        try
++        {
++            var fragmentHandle = CreateSpirvShader(device, fragment, SDL3.SDL_GPUShaderStage.SDL_GPU_SHADERSTAGE_FRAGMENT);
++            Console.WriteLine($"Loaded production PBR variant {pbrViewVectorFeature}: vertex UBOs={vertex.UniformBuffers}, " +
++                              $"fragment UBOs={fragment.UniformBuffers}, fragment samplers={fragment.Samplers}.");
++            return (vertexHandle, fragmentHandle);
++        }
++        catch
++        {
++            SDL3.SDL_ReleaseGPUShader(device, vertexHandle);
++            throw;
++        }
++    }
++
++    private static unsafe void ExecuteProductionPbrDraw(IntPtr commandBuffer, IntPtr pipeline,
++        IntPtr vertexBuffer, IntPtr texture, IntPtr sampler, Span<SDL3.SDL_GPUColorTargetInfo> colorTargets,
++        uint width, uint height)
++    {
++        Span<byte> transforms = stackalloc byte[128];
++        transforms.Clear();
++        var identity = Matrix4x4.Identity;
++        MemoryMarshal.Write(transforms, in identity);
++        MemoryMarshal.Write(transforms[64..], in identity);
++
++        Span<byte> camera = stackalloc byte[208];
++        camera.Clear();
++        MemoryMarshal.Write(camera, in identity);
++        MemoryMarshal.Write(camera[64..], in identity);
++        MemoryMarshal.Write(camera[128..], in identity);
++        WriteFloat(camera, 192, 0.0f);
++        WriteFloat(camera, 196, 0.0f);
++        WriteFloat(camera, 200, 2.0f);
++
++        Span<byte> materialAnimation = stackalloc byte[16];
++        materialAnimation.Clear();
++        WriteFloat(materialAnimation, 8, 1.0f);
++        WriteFloat(materialAnimation, 12, 1.0f);
++
++        Span<byte> lighting = stackalloc byte[912];
++        lighting.Clear();
++        WriteFloat(lighting, 8, 1.0f);
++        WriteFloat(lighting, 16, 1.0f);
++        WriteFloat(lighting, 20, 1.0f);
++        WriteFloat(lighting, 24, 1.0f);
++
++        Span<byte> pbrParameters = stackalloc byte[112];
++        pbrParameters.Clear();
++        for (var i = 0; i < 8; i++)
++            WriteFloat(pbrParameters, i * sizeof(float), 1.0f);
++        WriteFloat(pbrParameters, 32, 1.0f);
++        WriteFloat(pbrParameters, 36, 0.55f);
++        WriteFloat(pbrParameters, 44, 1.0f);
++
++        Span<byte> colorSpace = stackalloc byte[16];
++        colorSpace.Clear();
++        WriteFloat(colorSpace, 0, 1.0f);
++
++        fixed (byte* ptr = transforms)
++            SDL3.SDL_PushGPUVertexUniformData(commandBuffer, 0, (IntPtr)ptr, (uint)transforms.Length);
++        fixed (byte* ptr = camera)
++            SDL3.SDL_PushGPUVertexUniformData(commandBuffer, 1, (IntPtr)ptr, (uint)camera.Length);
++        fixed (byte* ptr = materialAnimation)
++            SDL3.SDL_PushGPUVertexUniformData(commandBuffer, 2, (IntPtr)ptr, (uint)materialAnimation.Length);
++        fixed (byte* ptr = lighting)
++            SDL3.SDL_PushGPUFragmentUniformData(commandBuffer, 0, (IntPtr)ptr, (uint)lighting.Length);
++        fixed (byte* ptr = pbrParameters)
++            SDL3.SDL_PushGPUFragmentUniformData(commandBuffer, 1, (IntPtr)ptr, (uint)pbrParameters.Length);
++        fixed (byte* ptr = colorSpace)
++            SDL3.SDL_PushGPUFragmentUniformData(commandBuffer, 2, (IntPtr)ptr, (uint)colorSpace.Length);
++
++        colorTargets[0].load_op = SDL3.SDL_GPULoadOp.SDL_GPU_LOADOP_LOAD;
++        colorTargets[0].store_op = SDL3.SDL_GPUStoreOp.SDL_GPU_STOREOP_STORE;
++        var renderPass = SDL3.SDL_BeginGPURenderPass(commandBuffer, colorTargets, 1, IntPtr.Zero);
++        if (renderPass == IntPtr.Zero)
++            throw Failure("Beginning the production PBR pass failed");
++        try
++        {
++            SDL3.SDL_BindGPUGraphicsPipeline(renderPass, pipeline);
++            var viewport = new SDL3.SDL_GPUViewport
++            {
++                x = width * 0.04f,
++                y = height * 0.04f,
++                w = width * 0.25f,
++                h = height * 0.25f,
++                min_depth = 0.0f,
++                max_depth = 1.0f
++            };
++            SDL3.SDL_SetGPUViewport(renderPass, viewport);
++            Span<SDL3.SDL_GPUBufferBinding> vertices = stackalloc SDL3.SDL_GPUBufferBinding[1];
++            vertices[0] = new SDL3.SDL_GPUBufferBinding { buffer = vertexBuffer, offset = 0 };
++            SDL3.SDL_BindGPUVertexBuffers(renderPass, 0, vertices, 1);
++            Span<SDL3.SDL_GPUTextureSamplerBinding> textures = stackalloc SDL3.SDL_GPUTextureSamplerBinding[2];
++            textures[0] = new SDL3.SDL_GPUTextureSamplerBinding { texture = texture, sampler = sampler };
++            textures[1] = textures[0];
++            SDL3.SDL_BindGPUFragmentSamplers(renderPass, 0, textures, 2);
++            SDL3.SDL_DrawGPUPrimitives(renderPass, 3, 1, 3, 0);
++        }
++        finally
++        {
++            SDL3.SDL_EndGPURenderPass(renderPass);
++        }
++        Console.WriteLine("Executed the embedded Freelancer PBR shader in an SDL_GPU production-variant pass.");
++    }
++
++    private static void WriteFloat(Span<byte> destination, int offset, float value) =>
++        BinaryPrimitives.WriteInt32LittleEndian(destination.Slice(offset, sizeof(float)),
++            BitConverter.SingleToInt32Bits(value));
++
+     private static (IntPtr Vertex, IntPtr Fragment) CreateShaders(IntPtr device,
+         string shaderBundleResource = ShaderBundleResource)
+     {
+@@ -805,7 +978,7 @@ public static class SDL3GpuSmoke
+     }
+ 
+     private static unsafe IntPtr CreatePipeline(IntPtr device, IntPtr vertexShader, IntPtr fragmentShader,
+-        SDL3.SDL_GPUTextureFormat colorFormat, bool depthTest)
++        SDL3.SDL_GPUTextureFormat colorFormat, bool depthTest, bool freelancerFvf = false)
+     {
+         var vertexBuffer = new SDL3.SDL_GPUVertexBufferDescription
+         {
+@@ -824,14 +997,14 @@ public static class SDL3GpuSmoke
+         };
+         attributes[1] = new SDL3.SDL_GPUVertexAttribute
+         {
+-            location = 1,
++            location = freelancerFvf ? 2u : 1u,
+             buffer_slot = 0,
+             format = SDL3.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3,
+             offset = 3 * sizeof(float)
+         };
+         attributes[2] = new SDL3.SDL_GPUVertexAttribute
+         {
+-            location = 2,
++            location = freelancerFvf ? 3u : 2u,
+             buffer_slot = 0,
+             format = SDL3.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2,
+             offset = 6 * sizeof(float)

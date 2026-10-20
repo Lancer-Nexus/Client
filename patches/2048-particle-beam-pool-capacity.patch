@@ -1,0 +1,142 @@
+--- a/src/LibreLancer/Fx/ParticleEffectPool.cs
++++ b/src/LibreLancer/Fx/ParticleEffectPool.cs
+@@ -96,7 +96,7 @@
+         {
+             if (color.A <= 0.0001f) //won't render
+                 return;
+-            if (nextParticle == MaxParticles)
++            if (!TryReserveParticle(ref nextParticle, MaxParticles, out var particleIndex))
+                 return;
+             var frameNo = (int) Math.Floor((texture.FrameCount - 1) * frame);
+             var texCoords = texture.GetCoordinates(frameNo);
+@@ -104,7 +104,7 @@
+             float bottom = flipV ? texCoords.Y : texCoords.Y + texCoords.W;
+             float left = flipU ? texCoords.X + texCoords.Z : texCoords.X;
+             float right = flipU ? texCoords.X : texCoords.X + texCoords.Z;
+-            sbo.Data<ParticleData>(nextParticle++) = new()
++            sbo.Data<ParticleData>(particleIndex) = new()
+             {
+                 Position = pos,
+                 Color = (VertexDiffuse)color,
+@@ -116,6 +116,18 @@
+             };
+         }
+ 
++        internal static bool TryReserveParticle(ref int nextParticle, int capacity, out int index)
++        {
++            if (nextParticle < 0 || nextParticle >= capacity)
++            {
++                index = -1;
++                return false;
++            }
++
++            index = nextParticle++;
++            return true;
++        }
++
+         ref BeamData Beam(int index) => ref Unsafe.As<ParticleData, BeamData>(ref sbo.Data<ParticleData>(index));
+ 
+         public void AddBeamPoint(
+@@ -126,7 +138,9 @@
+             Color4 color
+         )
+         {
+-            Beam(nextParticle++) = new()
++            if (!TryReserveParticle(ref nextParticle, MaxParticles, out var particleIndex))
++                return;
++            Beam(particleIndex) = new()
+             {
+                 Position = position,
+                 Normal = forward,
+@@ -141,21 +155,20 @@
+             int start = lastDrawCommand;
+             int count = nextParticle - lastDrawCommand;
+ 
++            if (count < 2)
++            {
++                if (nextParticle != MaxParticles)
++                    nextParticle = sbo.GetAlignedIndex(nextParticle);
++                lastDrawCommand = nextParticle;
++                return;
++            }
++
+             if (count > 256)
+             {
+                 throw new InvalidOperationException("256-limit for FLBeamAppearance exceeded (should never happen)");
+             }
+ 
+             var triCount = (count - 1) * 2;
+-            if (triCount == 0)
+-            {
+-                if (nextParticle != MaxParticles)
+-                {
+-                    nextParticle = sbo.GetAlignedIndex(nextParticle);
+-                }
+-                lastDrawCommand = nextParticle;
+-                return;
+-            }
+             // Section one
+             cmd.AddCommand(
+                 beamMaterial, null,
+--- a/src/LibreLancer.Tests/ParticlePoolCapacityTests.cs
++++ b/src/LibreLancer.Tests/ParticlePoolCapacityTests.cs
+@@ -0,0 +1,32 @@
++using LibreLancer.Fx;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class ParticlePoolCapacityTests
++{
++    [Fact]
++    public void ReserveAcceptsLastAvailableIndex()
++    {
++        var next = 2;
++
++        Assert.True(ParticleEffectPool.TryReserveParticle(ref next, 3, out var index));
++
++        Assert.Equal(2, index);
++        Assert.Equal(3, next);
++    }
++
++    [Theory]
++    [InlineData(3, 3)]
++    [InlineData(4, 3)]
++    [InlineData(-1, 3)]
++    public void ReserveRejectsIndicesOutsideCapacity(int nextParticle, int capacity)
++    {
++        var next = nextParticle;
++
++        Assert.False(ParticleEffectPool.TryReserveParticle(ref next, capacity, out var index));
++
++        Assert.Equal(-1, index);
++        Assert.Equal(nextParticle, next);
++    }
++}
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -137,6 +137,7 @@
+ 
+ - [ ] Laser-, Projektil- und Explosionseffekte visuell überarbeiten: Beam- und Trefferdarstellung, Trails, Partikel, Farbverläufe, Größen- und Zeitverhalten sowie Zusammenspiel mit dynamischem Licht. Originale Freelancer-Effekte müssen weiter funktionieren; neue Qualitätseinstellungen sollen einzeln abschaltbar bleiben. Mit reproduzierbaren NAP-Kampfszenen, Vergleichsbildern und GPU-/CPU-Messungen abnehmen.
+   - [x] `vis_beam`-Geometrie gegen parallele/degenerierte Richtungen absichern und Schreibzugriffe auf den 500-Beam-Streamingpuffer begrenzen; vier Geometrietests bestehen.
++  - [x] Partikel- und Beam-Punkte gegen den 30.000-Einträge-Pool begrenzen und leere Beam-Chunks ohne ungültigen Draw überspringen; vier Grenztests bestehen.
+   - [ ] Beam-/Explosiondarstellung, Timing, Partikel und Licht in NAP-Referenzszenen visuell vergleichen und die getrennten Qualitätsoptionen ergänzen.
+ 
+ ### 6. Weitere Oberflächeneffekte und Renderer-Betrieb
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -442,6 +442,7 @@
+ - [ ] Kurzlebige Effektlichter vervollständigen und messen: Mündungslichter aus `Gun.light_anim` sowie Explosionslichter aus `lgt_effect`/`lgt_radius` und `lgt_time_scale` sind vorhanden. Die per-Objekt-Auswahl priorisiert nach geschätzter Lichtwirkung; der Frame-Pool priorisiert weiter nach Kameradistanz. Offen sind `lgt_range_scale`, explizite Lichtdaten und hardpointgebundene Lebenszyklen für persistentes Feuer, allgemeine Sichtbarkeits-/Occlusion-Priorisierung, Qualitätsbudgets und reproduzierbare NAP-Szenenmessungen. Der Effektpool begrenzt aktive Ereignisse auf 128, der Frame-Pool lokale Lichtquellen auf 32. Siehe [Feuerinventar](evidence/effect-fire-light-input-inventory-20261014.json).
+ - [ ] Danach Laser-, Projektil- und Explosionseffekte überarbeiten: Beam- und Trefferdarstellung, Trails, Partikel, Farbverläufe sowie Größen-/Zeitverhalten aufeinander abstimmen und mit dynamischer Beleuchtung integrieren. Originaleffekte und einzeln abschaltbare Qualitätsoptionen erhalten; NAP-Referenzszenen mit Vergleichsbildern und CPU-/GPU-Zeit abnehmen.
+   - [x] `vis_beam`-Querschnittsbasis bleibt bei vertikaler oder ungültiger Richtung endlich und orthonormal; Zugriffe auf den Beam-Puffer sind auf seine Kapazität begrenzt. Vier fokussierte Tests bestehen.
++  - [x] Partikel-/Beam-Schreibzugriffe bleiben im 30.000-Einträge-GPU-Pool; leere Beam-Chunks erzeugen keinen ungültigen Draw. Vier Grenztests bestehen.
+   - [ ] Sichtprüfung der Beam-/Explosiondarstellung, Timing-/Partikelabstimmung und einzeln schaltbare Qualitätsoptionen anhand von NAP-Referenzszenen.
+ - [ ] SSAO mit Geometrie-/Nebelmasken und Forward+ mit vielen Lichtquellen
+   implementieren; die feste Lichtgrenze erst nach Messung ersetzen.
+--- a/patches/series
++++ b/patches/series
+@@ -47,3 +47,4 @@
+ client 2045-fire-effect-light-input-audit.patch
+ client 2046-light-contribution-priority-and-effects-todo.patch
+ client 2047-beam-effect-safety.patch
++client 2048-particle-beam-pool-capacity.patch

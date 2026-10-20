@@ -1,0 +1,616 @@
+diff --git a/src/LibreLancer.Data/Schema/Effects/GateTunnelsIni.cs b/src/LibreLancer.Data/Schema/Effects/GateTunnelsIni.cs
+--- a/src/LibreLancer.Data/Schema/Effects/GateTunnelsIni.cs
++++ b/src/LibreLancer.Data/Schema/Effects/GateTunnelsIni.cs
+@@ -3,6 +3,7 @@
+ // LICENSE, which is part of this source code package
+ 
+ using System.Collections.Generic;
++using System.Linq;
+ using LibreLancer.Data.Ini;
+ using LibreLancer.Data.IO;
+ 
+@@ -16,4 +17,8 @@
+     public List<GateTunnel> Tunnels = [];
+ 
+     public void Load(string path, FileSystem vfs, IniStringPool? stringPool = null) => ParseIni(path, vfs, stringPool);
++
++    public GateTunnel? GetGateTunnel(string? nickname) =>
++        nickname == null ? null : Tunnels.FirstOrDefault(x =>
++            x.Nickname.Equals(nickname, System.StringComparison.OrdinalIgnoreCase));
+ }
+
+diff --git a/src/LibreLancer.Data/GameData/World/SystemObject.cs b/src/LibreLancer.Data/GameData/World/SystemObject.cs
+--- a/src/LibreLancer.Data/GameData/World/SystemObject.cs
++++ b/src/LibreLancer.Data/GameData/World/SystemObject.cs
+@@ -41,6 +41,7 @@
+     public string[]? SpaceCostume;
+     public string? JumpEffect;
+     public JumpGateEffect? JumpEffectData;
++    public GateTunnel? GateTunnelData;
+     public string? RingZone;
+     public string? RingFile;
+ 
+
+diff --git a/src/LibreLancer.Data/GameItemDb.cs b/src/LibreLancer.Data/GameItemDb.cs
+--- a/src/LibreLancer.Data/GameItemDb.cs
++++ b/src/LibreLancer.Data/GameItemDb.cs
+@@ -2675,6 +2675,7 @@
+         obj.SpaceCostume = o.SpaceCostume;
+         obj.JumpEffect = o.JumpEffect;
+         obj.JumpEffectData = flData.JumpEffects.GetJumpGateEffect(o.JumpEffect);
++        obj.GateTunnelData = flData.GateTunnels.GetGateTunnel(obj.JumpEffectData?.JumpTunnel);
+         obj.RingZone = o.RingZone;
+         obj.RingFile = o.RingFile;
+         obj.Comment = o.Comment is not null ? CommentEscaping.Unescape(o.Comment) : null;
+
+diff --git a/src/LibreLancer/Render/GateTunnelRenderer.cs b/src/LibreLancer/Render/GateTunnelRenderer.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer/Render/GateTunnelRenderer.cs
+@@ -0,0 +1,286 @@
++// MIT License - Copyright (c) Callum McGing
++// This file is subject to the terms and conditions defined in
++// LICENSE, which is part of this source code package
++
++using System;
++using System.Collections.Generic;
++using System.Numerics;
++using LibreLancer.Data.Schema.Effects;
++using LibreLancer.Graphics;
++using LibreLancer.Graphics.Vertices;
++using LibreLancer.Resources;
++using LibreLancer.Shaders;
++using LibreLancer.Utf.Mat;
++
++namespace LibreLancer.Render;
++
++/// <summary>Draws the layered, camera-centered tunnel used during a jump-gate transition.</summary>
++public sealed unsafe class GateTunnelRenderer : ObjectRenderer, IDisposable
++{
++    private const int MaxTSteps = 256;
++    private const int MaxSSteps = 64;
++    private const int MaxLayers = 8;
++    private readonly GateTunnel profile;
++    private readonly double duration;
++    private readonly double fadeIn;
++    private readonly double fadeOut;
++    private readonly float totalTimeToMaxSpeed;
++    private readonly int tSteps;
++    private readonly int sSteps;
++    private readonly Vector2[] controlPoints;
++    private readonly List<(GateTunnelLayer Layer, Texture2D Texture, TunnelMaterial Material)> layers = [];
++    private readonly List<(TunnelMaterial Material, int Start, int Count)> drawRanges = [];
++    private readonly Vector3[] ringA;
++    private readonly Vector3[] ringB;
++    private readonly VertexBuffer vertices;
++    private double elapsed;
++    private bool disposed;
++
++    public bool Finished => elapsed >= duration;
++
++    public GateTunnelRenderer(RenderContext context, ResourceManager resources, GateTunnel profile,
++        double duration, double fadeIn, double fadeOut)
++    {
++        this.profile = profile;
++        this.duration = Math.Max(0.1, Finite(duration, 0.1));
++        this.fadeIn = Math.Clamp(Finite(fadeIn, 0.25), 0, this.duration);
++        this.fadeOut = Math.Clamp(Finite(fadeOut, 0.25), 0, this.duration);
++        totalTimeToMaxSpeed = Math.Max(0.01f, Finite(profile.TimeToMaxSpeed, 1));
++        tSteps = Math.Clamp(profile.TSteps, 8, MaxTSteps);
++        sSteps = Math.Clamp(profile.SSteps, 6, MaxSSteps);
++        controlPoints = BuildControlPoints(profile, Math.Clamp(profile.SplineControlPoints, 2, 32));
++        ringA = new Vector3[sSteps + 1];
++        ringB = new Vector3[sSteps + 1];
++
++        foreach (var layer in profile.Layers)
++        {
++            if (layers.Count == MaxLayers)
++                break;
++            if (string.IsNullOrWhiteSpace(layer.Texture) ||
++                resources.FindTexture(layer.Texture) is not Texture2D texture)
++                continue;
++            layers.Add((layer, texture, new TunnelMaterial(texture, BlendMode.Additive,
++                profile.WriteDepthBuffer != 0)));
++        }
++
++        vertices = new VertexBuffer(context, typeof(VertexPositionColorTexture),
++            tSteps * sSteps * Math.Max(1, layers.Count) * 6, true);
++        LitAmbient = false;
++        LitDynamic = false;
++        NoFog = true;
++        InheritCull = false;
++    }
++
++    public override void Update(double time, Transform3D transform)
++    {
++        if (double.IsFinite(time) && time > 0)
++            elapsed = Math.Min(duration, elapsed + time);
++    }
++
++    public override bool PrepareRender(ICamera camera, NebulaRenderer? nr, SystemRenderer sys, bool forceCull)
++    {
++        if (disposed || Finished || layers.Count == 0)
++            return false;
++        sys.AddObject(this);
++        return true;
++    }
++
++    public override void Draw(ICamera camera, CommandBuffer commands, SystemLighting lights, NebulaRenderer nr)
++    {
++        if (disposed || Finished || layers.Count == 0 || !Matrix4x4.Invert(camera.View, out var cameraWorld))
++            return;
++
++        var right = Vector3.TransformNormal(Vector3.UnitX, cameraWorld);
++        var up = Vector3.TransformNormal(Vector3.UnitY, cameraWorld);
++        var forward = Vector3.TransformNormal(-Vector3.UnitZ, cameraWorld);
++        right = SafeNormal(right, Vector3.UnitX);
++        up = SafeNormal(up, Vector3.UnitY);
++        forward = SafeNormal(forward, -Vector3.UnitZ);
++        var cameraPosition = camera.Position;
++        var distance = Math.Max(100, Finite(profile.ZRange, 20000));
++        var flow = MathHelper.Clamp(elapsed / totalTimeToMaxSpeed, 0, 1);
++        var speed = Lerp(Finite(profile.MinSpeed, 0), Finite(profile.MaxSpeed, 0.08f), (float)flow);
++        var rotation = MathF.PI / 180f * Lerp(Finite(profile.MinRotation, 0), Finite(profile.MaxRotation, 0),
++            (float)MathHelper.Clamp(elapsed / duration, 0, 1));
++        var alpha = Envelope();
++        var pointer = (VertexPositionColorTexture*)vertices.BeginStreaming();
++        var vertexCount = 0;
++        drawRanges.Clear();
++        try
++        {
++            foreach (var (layer, _, material) in layers)
++            {
++                var start = vertexCount;
++                var radiusFactor = Math.Max(0, Finite(layer.RadiusFactor, 1));
++                var ringCurrent = ringA;
++                var ringNext = ringB;
++                FillRing(ringCurrent, 0, cameraPosition, right, up, forward, distance, radiusFactor, rotation);
++                for (var ti = 0; ti < tSteps; ti++)
++                {
++                    var t0 = ti / (float)tSteps;
++                    var t1 = (ti + 1) / (float)tSteps;
++                    FillRing(ringNext, t1, cameraPosition, right, up, forward, distance, radiusFactor, rotation);
++                    var fade0 = EndFade(t0);
++                    var fade1 = EndFade(t1);
++                    for (var si = 0; si < sSteps; si++)
++                    {
++                        var s0 = si / (float)sSteps;
++                        var s1 = (si + 1) / (float)sSteps;
++                        var uv00 = new Vector2(layer.UOffset + s0 + (float)(elapsed * speed * layer.DU),
++                            layer.VOffset + t0 * layer.VScale + (float)(elapsed * speed * layer.DV));
++                        var uv10 = new Vector2(layer.UOffset + s1 + (float)(elapsed * speed * layer.DU), uv00.Y);
++                        var uv01 = new Vector2(uv00.X, layer.VOffset + t1 * layer.VScale + (float)(elapsed * speed * layer.DV));
++                        var uv11 = new Vector2(uv10.X, uv01.Y);
++                        var c0 = TunnelColor(layer, t0, alpha * fade0);
++                        var c1 = TunnelColor(layer, t1, alpha * fade1);
++                        var p00 = ringCurrent[si];
++                        var p10 = ringCurrent[si + 1];
++                        var p01 = ringNext[si];
++                        var p11 = ringNext[si + 1];
++                        pointer[vertexCount++] = new VertexPositionColorTexture(p00, c0, uv00);
++                        pointer[vertexCount++] = new VertexPositionColorTexture(p10, c0, uv10);
++                        pointer[vertexCount++] = new VertexPositionColorTexture(p11, c1, uv11);
++                        pointer[vertexCount++] = new VertexPositionColorTexture(p00, c0, uv00);
++                        pointer[vertexCount++] = new VertexPositionColorTexture(p11, c1, uv11);
++                        pointer[vertexCount++] = new VertexPositionColorTexture(p01, c1, uv01);
++                    }
++                    (ringCurrent, ringNext) = (ringNext, ringCurrent);
++                }
++                drawRanges.Add((material, start, vertexCount - start));
++            }
++        }
++        finally
++        {
++            vertices.EndStreaming(vertexCount);
++        }
++
++        var depth = cameraPosition + forward * (float)(distance * 0.5);
++        var z = RenderHelpers.GetZ(cameraPosition, depth);
++        foreach (var range in drawRanges)
++        {
++            if (range.Count == 0)
++                continue;
++            commands.AddCommand(range.Material, null, commands.WorldBuffer.Identity, Lighting.Empty,
++                vertices, 1, PrimitiveTypes.TriangleList, -1, range.Start, range.Count / 3,
++                SortLayers.OBJECT, z);
++        }
++    }
++
++    private void FillRing(Vector3[] points, float t, Vector3 camera, Vector3 right, Vector3 up, Vector3 forward,
++        double depth, float radiusFactor, float rotation)
++    {
++        var curve = SampleCenterline(t);
++        var center = camera + forward * (float)(3 + depth * t) + right * curve.X + up * curve.Y;
++        var radius = Lerp(Finite(profile.MinRadius, 50), Finite(profile.MaxRadius, 100), t);
++        radius *= Math.Max(0, Lerp(1, Finite(profile.FarRadiusFactor, 1), t)) * radiusFactor;
++        for (var i = 0; i <= sSteps; i++)
++        {
++            var angle = MathF.Tau * i / sSteps + rotation * t + (float)elapsed * 0.12f;
++            points[i] = center + right * (MathF.Cos(angle) * radius) + up * (MathF.Sin(angle) * radius);
++        }
++    }
++
++    private static Vector2[] BuildControlPoints(GateTunnel profile, int count)
++    {
++        uint hash = 2166136261;
++        foreach (var character in profile.Nickname)
++            hash = (hash ^ char.ToUpperInvariant(character)) * 16777619;
++        var random = new Random(unchecked((int)hash));
++        var xRange = Math.Abs(Finite(profile.XRange, 0)) * 0.5f;
++        var yRange = Math.Abs(Finite(profile.YRange, 0)) * 0.5f;
++        var points = new Vector2[count];
++        for (var i = 0; i < count; i++)
++            points[i] = new Vector2(((float)random.NextDouble() * 2 - 1) * xRange,
++                ((float)random.NextDouble() * 2 - 1) * yRange);
++        points[0] = Vector2.Zero;
++        points[^1] = Vector2.Zero;
++        return points;
++    }
++
++    private Vector2 SampleCenterline(float t)
++    {
++        var scaled = MathHelper.Clamp(t, 0, 1) * (controlPoints.Length - 1);
++        var segment = Math.Min((int)scaled, controlPoints.Length - 2);
++        var amount = scaled - segment;
++        var p0 = controlPoints[Math.Max(0, segment - 1)];
++        var p1 = controlPoints[segment];
++        var p2 = controlPoints[segment + 1];
++        var p3 = controlPoints[Math.Min(controlPoints.Length - 1, segment + 2)];
++        var t2 = amount * amount;
++        var t3 = t2 * amount;
++        return 0.5f * ((2 * p1) + (-p0 + p2) * amount +
++                       (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 +
++                       (-p0 + 3 * p1 - 3 * p2 + p3) * t3);
++    }
++
++    private float EndFade(float t)
++    {
++        var fade = Math.Clamp(MathF.Abs(Finite(profile.FadeDistance, 0.1f)), 0, 0.5f);
++        if (fade <= 0)
++            return 1;
++        return Math.Min(MathHelper.Clamp(t / fade, 0, 1), MathHelper.Clamp((1 - t) / fade, 0, 1));
++    }
++
++    private Color4 TunnelColor(GateTunnelLayer layer, float t, float fade)
++    {
++        var profileColor = Vector3.Lerp(profile.MinRgb, profile.MaxRgb, t) / 255f;
++        var layerColor = layer.Color / 255f;
++        var alpha = Lerp(Finite(profile.NearAlpha, 1) * Finite(layer.NearAlphaFactor, 1),
++            Finite(profile.FarAlpha, 1) * Finite(layer.FarAlphaFactor, 1), t) * fade;
++        return new Color4(profileColor.X * layerColor.X, profileColor.Y * layerColor.Y,
++            profileColor.Z * layerColor.Z, MathHelper.Clamp(alpha, 0, 1));
++    }
++
++    private float Envelope()
++    {
++        var inAlpha = fadeIn <= 0 ? 1 : (float)MathHelper.Clamp(elapsed / fadeIn, 0, 1);
++        var outAlpha = fadeOut <= 0 ? 1 : (float)MathHelper.Clamp((duration - elapsed) / fadeOut, 0, 1);
++        return Math.Min(inAlpha, outAlpha);
++    }
++
++    private static float Finite(float value, float fallback) => float.IsFinite(value) ? value : fallback;
++    private static double Finite(double value, double fallback) => double.IsFinite(value) ? value : fallback;
++    private static float Lerp(float a, float b, float t) => a + (b - a) * t;
++    private static Vector3 SafeNormal(Vector3 value, Vector3 fallback) =>
++        value.LengthSquared() > 0.0001f ? Vector3.Normalize(value) : fallback;
++
++    public void Dispose()
++    {
++        if (disposed)
++            return;
++        disposed = true;
++        vertices.Dispose();
++        layers.Clear();
++    }
++
++    private sealed class TunnelMaterial : RenderMaterial
++    {
++        private readonly Texture2D texture;
++        private readonly ushort blend;
++        private readonly bool writeDepth;
++        private bool previousDepthWrite;
++
++        public TunnelMaterial(Texture2D texture, ushort blend, bool writeDepth) : base(null)
++        {
++            this.texture = texture;
++            this.blend = blend;
++            this.writeDepth = writeDepth;
++            DoubleSided = true;
++        }
++
++        public override void Use(RenderContext rstate, IVertexType vertextype, ref Lighting lights, int userData)
++        {
++            previousDepthWrite = rstate.DepthWrite;
++            rstate.DepthWrite = writeDepth;
++            rstate.Textures[0] = texture;
++            rstate.Samplers[0] = new SamplerState(rstate.PreferredFilterLevel, WrapMode.Repeat, WrapMode.Repeat);
++            rstate.BlendMode = blend;
++            rstate.Shader = AllShaders.Sprite.Get(0);
++        }
++
++        public override void AfterDraw(RenderContext rstate) => rstate.DepthWrite = previousDepthWrite;
++
++        public override bool IsTransparent => true;
++        public override bool DisableCull => true;
++    }
++}
+
+diff --git a/src/LibreLancer/GameStates/SpaceGameplay.cs b/src/LibreLancer/GameStates/SpaceGameplay.cs
+--- a/src/LibreLancer/GameStates/SpaceGameplay.cs
++++ b/src/LibreLancer/GameStates/SpaceGameplay.cs
+@@ -78,6 +78,7 @@
+         private SoundInstance? jumpTunnelSound;
+         private double jumpTunnelSoundRemaining;
+         private bool jumpTunnelStarted;
++        private GateTunnelRenderer? gateTunnelRenderer;
+         private double jumpSequenceElapsed;
+         private readonly List<PendingJumpRingEffect> pendingJumpRingEffects = [];
+         private readonly List<(GameObject Gate, ParticleEffectRenderer Renderer)> activeJumpRingEffects = [];
+@@ -266,6 +267,7 @@
+             world.AddObject(player);
+             player.Register(world);
+             world.Projectiles.Player = player; // For sending projectile spawns over the network
++            StartJumpArrival();
+             RefreshActiveUserWaypoint(false);
+             UpdateObjectiveRoute();
+             cur_arrow = Game.ResourceManager.GetCursor("arrow")!;
+@@ -712,6 +714,12 @@
+             foreach (var effect in transientShipEffects)
+                 player?.ExtraRenderers.Remove(effect);
+             transientShipEffects.Clear();
++            if (gateTunnelRenderer != null)
++            {
++                player?.ExtraRenderers.Remove(gateTunnelRenderer);
++                gateTunnelRenderer.Dispose();
++                gateTunnelRenderer = null;
++            }
+             jumpTunnelSound?.Stop();
+             jumpTunnelSound = null;
+             foreach (var (gate, renderer) in activeJumpRingEffects)
+@@ -777,8 +785,11 @@
+                 return;
+             }
+ 
++            session.SetPendingJumpArrival(session.PlayerSystem, targetSystem, jumpEffect,
++                sourceGate.SystemObject.GateTunnelData);
+             jumpSequenceElapsed = 0;
+             ScheduleJumpRingEffects(sourceGate, jumpEffect);
++            StartGateTunnelRenderer(sourceGate.SystemObject.GateTunnelData, jumpEffect, outbound: true);
+             var tunnelEffectName = jumpEffect?.JumpTunnelEffect;
+             if (tunnelEffectName == null)
+             {
+@@ -799,6 +810,56 @@
+             jumpTunnelSound = attached.Sound;
+             jumpTunnelSoundRemaining = Math.Max(0.1,
+                 jumpEffect!.JumpOutTime + jumpEffect.JumpOutTunnelTime);
++        }
++
++        private void StartGateTunnelRenderer(LibreLancer.Data.Schema.Effects.GateTunnel? tunnel,
++            LibreLancer.Data.Schema.Effects.JumpGateEffect profile, bool outbound)
++        {
++            if (tunnel == null || player == null || !Game.Config.Settings.RenderJumpGateEffects)
++                return;
++            if (gateTunnelRenderer != null)
++            {
++                player.ExtraRenderers.Remove(gateTunnelRenderer);
++                gateTunnelRenderer.Dispose();
++            }
++            var fadeIn = outbound ? profile.JumpOutTime : 0.25;
++            var fadeOut = outbound ? 0.5 : profile.JumpInTime;
++            var duration = outbound
++                ? profile.JumpOutTime + profile.JumpOutTunnelTime
++                : profile.JumpInTunnelTime + profile.JumpInTime;
++            gateTunnelRenderer = new GateTunnelRenderer(Game.RenderContext, Game.ResourceManager,
++                tunnel, duration, fadeIn, fadeOut);
++            player.ExtraRenderers.Add(gateTunnelRenderer);
++        }
++
++        private void StartJumpArrival()
++        {
++            if (!session.TryConsumeJumpArrival(session.PlayerSystem, out var sourceSystem,
++                    out var storedProfile, out var storedTunnel))
++                return;
++
++            var arrivalGate = world.Objects
++                .Where(x => x.SystemObject?.Dock is { Kind: DockKinds.Jump, Target: not null } dock &&
++                            dock.Target.Equals(sourceSystem, StringComparison.OrdinalIgnoreCase) &&
++                            x.SystemObject.JumpEffectData != null)
++                .OrderBy(x => Vector3.DistanceSquared(x.Transform.Position, player.Transform.Position))
++                .FirstOrDefault();
++            var profile = arrivalGate?.SystemObject?.JumpEffectData ?? storedProfile;
++            var tunnel = arrivalGate?.SystemObject?.GateTunnelData ?? storedTunnel;
++            if (profile == null)
++                return;
++
++            jumpSequenceElapsed = 0;
++            StartGateTunnelRenderer(tunnel, profile, outbound: false);
++            if (profile.JumpTunnelEffect is { } effectName &&
++                Game.GameData.Items.Effects.Get(effectName) is { } effect)
++            {
++                var attached = AttachShipEffect(effect, loopSound: true);
++                if (attached.Renderer != null)
++                    transientShipEffects.Add(attached.Renderer);
++                jumpTunnelSound = attached.Sound;
++                jumpTunnelSoundRemaining = Math.Max(0.1, profile.JumpInTunnelTime + profile.JumpInTime);
++            }
+         }
+ 
+         private void ScheduleJumpRingEffects(GameObject gate, LibreLancer.Data.Schema.Effects.JumpGateEffect profile)
+@@ -891,6 +952,14 @@
+ 
+         private void UpdateTransientShipEffects(double delta)
+         {
++            if (gateTunnelRenderer != null &&
++                (!Game.Config.Settings.RenderJumpGateEffects || gateTunnelRenderer.Finished))
++            {
++                player?.ExtraRenderers.Remove(gateTunnelRenderer);
++                gateTunnelRenderer.Dispose();
++                gateTunnelRenderer = null;
++            }
++
+             StartPendingJumpRingEffects(delta);
+             if (jumpTunnelSound != null)
+             {
+
+diff --git a/src/LibreLancer/Client/CGameSession.cs b/src/LibreLancer/Client/CGameSession.cs
+--- a/src/LibreLancer/Client/CGameSession.cs
++++ b/src/LibreLancer/Client/CGameSession.cs
+@@ -12,6 +12,7 @@
+ using LibreLancer.Data;
+ using LibreLancer.Data.GameData;
+ using LibreLancer.Data.GameData.World;
++using LibreLancer.Data.Schema.Effects;
+ using LibreLancer.Data.Schema.Missions;
+ using LibreLancer.Interface;
+ using LibreLancer.Missions;
+@@ -27,6 +28,11 @@
+ public partial class CGameSession : IClientPlayer
+ {
+     private readonly ConcurrentDictionary<Guid, (string Endpoint, string Ticket, string InstanceId, string SystemId)> pendingTransfers = new();
++    private readonly object jumpTransitionLock = new();
++    private string? pendingJumpSourceSystem;
++    private string? pendingJumpTargetSystem;
++    private JumpGateEffect? pendingJumpProfile;
++    private GateTunnel? pendingJumpTunnel;
+     private static readonly int NewPlayerIds = 393298;
+     private static readonly int DepartingPlayerIds = 393299;
+ 
+@@ -55,6 +61,64 @@
+ 
+     private bool inTradelane;
+     public bool InTradelane => inTradelane;
++
++    internal void SetPendingJumpArrival(string sourceSystem, string targetSystem,
++        JumpGateEffect profile, GateTunnel? tunnel)
++    {
++        lock (jumpTransitionLock)
++        {
++            pendingJumpSourceSystem = sourceSystem;
++            pendingJumpTargetSystem = targetSystem;
++            pendingJumpProfile = profile;
++            pendingJumpTunnel = tunnel;
++        }
++    }
++
++    internal bool TryConsumeJumpArrival(string system, out string sourceSystem,
++        out JumpGateEffect? profile, out GateTunnel? tunnel)
++    {
++        lock (jumpTransitionLock)
++        {
++            if (pendingJumpTargetSystem == null ||
++                !pendingJumpTargetSystem.Equals(system, StringComparison.OrdinalIgnoreCase))
++            {
++                sourceSystem = string.Empty;
++                profile = null;
++                tunnel = null;
++                return false;
++            }
++
++            sourceSystem = pendingJumpSourceSystem ?? string.Empty;
++            profile = pendingJumpProfile;
++            tunnel = pendingJumpTunnel;
++            ClearPendingJumpArrival();
++            return true;
++        }
++    }
++
++    internal void CancelPendingJumpArrival()
++    {
++        lock (jumpTransitionLock)
++            ClearPendingJumpArrival();
++    }
++
++    private void CancelPendingJumpArrivalForOtherSystem(string system)
++    {
++        lock (jumpTransitionLock)
++        {
++            if (pendingJumpTargetSystem != null &&
++                !pendingJumpTargetSystem.Equals(system, StringComparison.OrdinalIgnoreCase))
++                ClearPendingJumpArrival();
++        }
++    }
++
++    private void ClearPendingJumpArrival()
++    {
++        pendingJumpSourceSystem = null;
++        pendingJumpTargetSystem = null;
++        pendingJumpProfile = null;
++        pendingJumpTunnel = null;
++    }
+     public List<NetCargo> Items = [];
+     private bool maneuversLocked;
+     private readonly HashSet<ManeuverType> disabledManeuvers = [];
+@@ -258,6 +322,7 @@
+             }
+             catch (Exception error)
+             {
++                CancelPendingJumpArrival();
+                 FLLog.Error("Client", $"Unable to prepare cluster jump: {error.Message}");
+                 uiActions.Enqueue(() =>
+                 {
+@@ -292,6 +357,7 @@
+             return;
+         if (!succeeded)
+         {
++            CancelPendingJumpArrival();
+             FLLog.Error("Client", "Source could not stage the transfer snapshot");
+             uiActions.Enqueue(() =>
+             {
+
+diff --git a/src/LibreLancer/Client/CGameSession.Space.cs b/src/LibreLancer/Client/CGameSession.Space.cs
+--- a/src/LibreLancer/Client/CGameSession.Space.cs
++++ b/src/LibreLancer/Client/CGameSession.Space.cs
+@@ -1395,6 +1395,7 @@
+     void IClientPlayer.SpawnPlayer(int ID, string system, CrcIdMap[] crcMap, NetObjective objective,
+         Vector3 position, Quaternion orientation, uint[] destroyedParts, uint tick)
+     {
++        CancelPendingJumpArrivalForOtherSystem(system);
+         enterCount++;
+         PlayerNetID = ID;
+         var previousSystem = PlayerSystem;
+
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -150,11 +150,14 @@
+ 
+ ### 5. Effektüberarbeitung nach Renderer und dynamischer Beleuchtung
+ 
+-- [ ] Den fehlenden Sprungtor-Übergangseffekt anhand von `Freelancer.ini` (`jump_effect`), `fx/Jumpeffect.ini`, `fx/Effects.ini` und `fx/GateTunnel.ini` im Client-Laufzeitpfad ergänzen: Toranimation, Tunnel/Innenansicht und Ein-/Austrittssequenz datengetreu abbilden, mit reproduzierbaren NAP-Szenen vergleichen und separat abschaltbar halten.
+-  - [x] Integrationspfad geprüft: `Universe.SystemObject.jump_effect` wird in `GameData.World.SystemObject.JumpEffect` kopiert, aber im Client nicht konsumiert. `DockAction.Tunnel` wird serialisiert, hat jedoch keinen Renderer-Verbraucher. `IClientPlayer.StartLocalJumpTunnel` und `StartJumpTunnel` schalten derzeit nur den Tradelane-Zustand ab; keiner startet eine sichtbare Übergangssequenz. Der lokale Callback liegt vor dem Systemwechsel, der Cluster-Callback vor dem asynchronen Gateway-Transfer. Die Implementierung muss beide Abläufe und Fehler/Abbruch sauber abdecken.
+-  - [x] Datenfundament: `FreelancerData` lädt die in `Freelancer.ini` konfigurierten `jump_effect`- und `gate_tunnels`-Pfade optional in typisierte Modelle für Gate-/Schiffseffekte, Tunnelparameter und Tunnel-Layer. `GameItemDb` löst `SystemObject.jump_effect` case-insensitiv auf das Gate-Profil auf; das Profil ist über `GameObject.SystemObject` erreichbar.
+-  - [x] Der konfigurierte `jump_tunnel_effect` startet beim lokalen Sprung sowie bei einem zulässigen Cluster-Sprung am Spielerschiff. Der Client startet ihn direkt im RPC-Update, bevor ein `SpawnPlayer`-Paket die aktuelle Szene austauschen kann. Die Quelle wird über das nächstgelegene Sprungtor mit passendem Zielsystem gesucht. Der Effekt ist mit `render_jump_gate_effects` beziehungsweise `--render-jump-gate-effects=on|off` separat schaltbar; die Loop-Sounddauer folgt `jump_out_time + jump_out_tunnel_time`. Ringeffekte, Gate-Tunnelgeometrie und Ankunftssequenz bleiben offen.
+-  - [x] `glow_ring_effect`, `glow_ring_hp` und `glow_create_time` werden aus den INIs geladen. Die konfigurierten FX starten jetzt zu ihren Zeitpunkten an den Gate-Hardpoints und werden nach Ende wieder vom Objekt entfernt. Der Quellen- und Ankunftszeitpunkt ist noch nicht visuell im Spiel abgenommen.
++- [ ] Den Sprungtor-Übergangseffekt anhand von `Freelancer.ini` (`jump_effect`), `fx/Jumpeffect.ini`, `fx/Effects.ini` und `fx/GateTunnel.ini` vollständig abnehmen. Toranimation, Tunnel/Innenansicht sowie Ein- und Austritt sind implementiert; reproduzierbare NAP-Szenen, Bildvergleich und visuelle Bestätigung fehlen noch. Die Funktion bleibt separat abschaltbar.
++  - [x] Integrationsaudit: `Universe.SystemObject.jump_effect` wurde vor der Implementierung nur ins Laufzeitmodell kopiert und `DockAction.Tunnel` nur serialisiert. Der lokale Callback liegt vor dem Systemwechsel, der Cluster-Callback vor dem asynchronen Gateway-Transfer. Diese Reihenfolge bestimmt den Übergabepunkt der Implementierung.
++  - [x] Datenfundament: `FreelancerData` lädt die in `Freelancer.ini` konfigurierten `jump_effect`- und `gate_tunnels`-Pfade optional in typisierte Modelle für Gate-/Schiffseffekte, Tunnelparameter und Tunnel-Layer. `GameItemDb` löst `SystemObject.jump_effect` und dessen `jump_tunnel` case-insensitiv auf; beide Profile sind über `GameObject.SystemObject` erreichbar.
++  - [x] Der konfigurierte `jump_tunnel_effect` startet beim lokalen Sprung sowie bei einem zulässigen Cluster-Sprung am Spielerschiff. Der Client startet ihn direkt im RPC-Update, bevor ein `SpawnPlayer`-Paket die aktuelle Szene austauschen kann. Die Quelle wird über das nächstgelegene Sprungtor mit passendem Zielsystem gesucht. Der Effekt ist mit `render_jump_gate_effects` beziehungsweise `--render-jump-gate-effects=on|off` separat schaltbar; die Loop-Sounddauer folgt den INI-Zeiten.
++  - [x] `glow_ring_effect`, `glow_ring_hp` und `glow_create_time` werden aus den INIs geladen. Die konfigurierten FX starten zu ihren Zeitpunkten an den Gate-Hardpoints und werden nach Ende vom Objekt entfernt.
++  - [x] `jump_tunnel` wird gegen das geladene `GateTunnel.ini` aufgelöst. Der Renderer erzeugt profilgesteuerte Tunnel-Layer mit den NAP-Parametern für Kontrollpunkte, Mesh-Auflösung, Radius, Farbe, Alpha, UV-Bewegung und Geschwindigkeit. `write_depth_buffer` wird unterstützt; die verwendeten NAP-Profile schreiben keine Tiefe.
++  - [x] Der Übergang trägt Quell- und Zielsystem über den Szenenwechsel. Nach erfolgreichem Eintritt startet die Ankunftssequenz mit dem Gegentorprofil, falls vorhanden, sonst mit dem gespeicherten Abflugprofil. Stagingfehler und ein Spawn in einem anderen System verwerfen den ausstehenden Zustand.
++  - [ ] Tunnel und Ringe mit einer NAP-Laufzeitaufnahme für Eintritt, Fahrt und Austritt visuell gegen das Original abnehmen. Die aktuellen Belege umfassen Datenpfadprüfung und erfolgreichen Client-Build, noch keine Laufzeitbilder.
+ - [ ] Tradelane-Reiseeffekt gegen das Original vergleichen und die vereinfachte Darstellung korrigieren. Der Client hängt `PlayerTravel` als `ParticleEffectRenderer` an; anhand von `basic_tl_player_travel`/`EFT_LANE_SHIP_TRAVEL` und `tradelaneinship01` prüfen, welche ALE-Geometrie, Partikel, Bewegung, Skalierung oder Schichtung für die originale Tunnelansicht fehlen. Mit NAP-Referenzbildern für Eintritt, Fahrt und Austritt abnehmen.
+ - [ ] Laser-, Projektil- und Explosionseffekte visuell überarbeiten: Beam- und Trefferdarstellung, Trails, Partikel, Farbverläufe, Größen- und Zeitverhalten sowie Zusammenspiel mit dynamischem Licht. Originale Freelancer-Effekte müssen weiter funktionieren; neue Qualitätseinstellungen sollen einzeln abschaltbar bleiben. Mit reproduzierbaren NAP-Kampfszenen, Vergleichsbildern und GPU-/CPU-Messungen abnehmen.
+   - [x] `vis_beam`-Geometrie gegen parallele/degenerierte Richtungen absichern und Schreibzugriffe auf den 500-Beam-Streamingpuffer begrenzen; vier Geometrietests bestehen.
+
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -73,6 +73,7 @@
+ | 2097 | Load typed jump gate and gate tunnel effect data |
+ | 2098 | Start the configured jump tunnel interior effect |
+ | 2099 | Parse and render timed jump gate ring effects |
++| 2100 | Render profile-driven gate tunnel geometry and preserve arrival transitions |
+ | 2011 (`lancerdecode`) | Native Vorbis EOF/reset handling |
+ | 2012 (`blurgtext`) | System FreeType without OT-SVG hooks |
+ 
+
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -99,3 +99,4 @@
+ client 2097-jump-effect-data-models.patch
+ client 2098-jump-tunnel-interior-effect.patch
+ client 2099-jump-gate-ring-effects.patch
++client 2100-jump-gate-tunnel-geometry-and-arrival.patch
+

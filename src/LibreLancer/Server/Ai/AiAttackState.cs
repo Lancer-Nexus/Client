@@ -12,7 +12,6 @@ namespace LibreLancer.Server.Ai
     public class AiAttackState : AiState
     {
         private GameObject target;
-        public GameObject Target => target;
         public AiAttackState(GameObject target)
         {
             this.target = target;
@@ -34,8 +33,12 @@ namespace LibreLancer.Server.Ai
             if (obj.TryGetComponent<WeaponControlComponent>(out var weapons))
             {
                 weapons.AimPoint = ai.GetAimPosition(target, weapons, false); // Regular accuracy
-                if (ai.RunFireTimers((float)time))
-                    ai.FireWeaponGroups(weapons, world);
+                var fireInfo = ai.RunFireTimers((float)time);
+                if (fireInfo.ShouldFireRegular || fireInfo.ShouldFireAutoTurrets)
+                {
+                    // Fire weapon groups based on fire info
+                    ai.FireWeaponGroups(weapons, fireInfo, world);
+                }
                 if (ai.ShouldFireMissiles(time))
                     weapons.FireMissiles(world);
             }

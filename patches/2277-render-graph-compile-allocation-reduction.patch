@@ -1,0 +1,108 @@
+diff --git a/src/LibreLancer.Base/Graphics/SystemRenderPass.cs b/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
+--- a/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
++++ b/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
+@@ -391,36 +391,13 @@
+             writers[i].Clear();
+         }
+ 
+-        void AddEdge(int from, int to)
+-        {
+-            if (from == to || edges[from, to])
+-                return;
+-            edges[from, to] = true;
+-            indegree[to]++;
+-        }
+-
+         for (var i = 0; i < count; i++)
+         {
+             if (nodes[i].After is { } dependency)
+-                AddDependency(i, dependency);
++                AddDependency(count, i, dependency);
+             if (nodes[i].AdditionalAfter is { } dependencies)
+                 foreach (var additionalDependency in dependencies)
+-                    AddDependency(i, additionalDependency);
+-
+-            void AddDependency(int dependent, string dependencyName)
+-            {
+-                var found = -1;
+-                for (var j = 0; j < count; j++)
+-                    if (string.Equals(nodes[j].Name, dependencyName, StringComparison.Ordinal))
+-                    {
+-                        found = j;
+-                        break;
+-                    }
+-                if (found < 0)
+-                    throw new InvalidOperationException(
+-                        $"Render graph node '{nodes[dependent].Name}' depends on missing node '{dependencyName}'.");
+-                AddEdge(found, dependent);
+-            }
++                    AddDependency(count, i, additionalDependency);
+         }
+ 
+         for (var i = 0; i < count; i++)
+@@ -523,6 +500,29 @@
+         return count;
+     }
+ 
++    private void AddDependency(int count, int dependent, string dependencyName)
++    {
++        var found = -1;
++        for (var j = 0; j < count; j++)
++            if (string.Equals(nodes[j].Name, dependencyName, StringComparison.Ordinal))
++            {
++                found = j;
++                break;
++            }
++        if (found < 0)
++            throw new InvalidOperationException(
++                $"Render graph node '{nodes[dependent].Name}' depends on missing node '{dependencyName}'.");
++        AddEdge(found, dependent);
++    }
++
++    private void AddEdge(int from, int to)
++    {
++        if (from == to || edges[from, to])
++            return;
++        edges[from, to] = true;
++        indegree[to]++;
++    }
++
+     internal void ExecuteCompiled(int[] order, int count, int compiledVersion)
+     {
+         if (compiledVersion != topologyVersion || count != nodeCount || order.Length != count)
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -67,7 +67,7 @@
+   - [x] Statische Passvertrag-Prüfung verlangt pro Attachment genau eine Ressource und gleicht Store/Resolve-Verhalten mit den deklarierten Writes ab; Resolve ist nur für Color erlaubt. Source-Attachments bleiben Read-Verträge. Die Metadaten steuern weiterhin nicht selbst die API-Aufrufe.
+   - [x] Die statische Passfolgenprüfung wertet optionale Reads wie die Laufzeitprüfung aus und verlangt sie nicht als zwingende Eingaben; so sind sequenzielle Prüfläufe auch ohne optionalen Schatten- oder Tiefenpuffer gültig.
+   - [x] Die Hauptpass-Ausführungsreihenfolge steht in den typisierten Passdeskriptoren und wird von Laufzeitprüfung sowie Scheduler daraus gelesen; der separate Pass-zu-Order-Switch ist entfernt. Der Graph führt die Passcallbacks aus.
+-  - [x] `SystemRenderPassGraph` topologisch sortiert und führt Hauptpässe, Physics-Hook, Debug-Overlay und optionalen AA-/HDR-Resolve anhand deklarierter Read-/Write-Ressourcen und expliziter Abhängigkeiten aus. Derselbe Scheduler kompiliert und führt den Postprocess-Plan aus. Ressourcenproduzenten dürfen unabhängig von ihrer Registrierungsreihenfolge stehen; Read-after-write, Write-after-read und Write-after-write werden eingeordnet. Pflicht-Reads ohne Producer, fehlende explizite Vorgänger und Zyklen werden vor Ausführung der Callbacks abgewiesen. Knoten und Abhängigkeitspuffer werden zwischen Frames wiederverwendet; Targetwechsel und Attachments bleiben in den Passcallbacks. Callback-/Closure-Allokationen, Laufzeit-/Bildabnahme und Frame-Profiling bleiben offen.
++  - [x] `SystemRenderPassGraph` topologisch sortiert und führt Hauptpässe, Physics-Hook, Debug-Overlay und optionalen AA-/HDR-Resolve anhand deklarierter Read-/Write-Ressourcen und expliziter Abhängigkeiten aus. Derselbe Scheduler kompiliert und führt den Postprocess-Plan aus. Ressourcenproduzenten dürfen unabhängig von ihrer Registrierungsreihenfolge stehen; Read-after-write, Write-after-read und Write-after-write werden eingeordnet. Pflicht-Reads ohne Producer, fehlende explizite Vorgänger und Zyklen werden vor Ausführung der Callbacks abgewiesen. Knoten und Abhängigkeitspuffer werden zwischen Frames wiederverwendet; Targetwechsel und Attachments bleiben in den Passcallbacks. Die Abhängigkeitsauflösung nutzt keine pro Kompilierung erzeugten lokalen Closure-Helfer mehr; die SystemRenderer-Callbacks werden weiterhin pro Frame neu erstellt und können Closure-Allokationen verursachen. Laufzeit-/Bildabnahme und Frame-Profiling bleiben offen.
+   - [x] Der Hauptpass-Tracker veröffentlicht nach erfolgreichem Draw nur deklarierte Writes, deren optionale Attachments am konkreten Target vorhanden sind. Fehlende oder unbekannte optionale Anhänge werden nicht als verfügbare Frame-Ressourcen ausgegeben. Die Passplanung erfolgt im Graphen; Targetwechsel bleiben in den jeweiligen Callbacks.
+   - [x] Gebundene Backend-Renderziele stellen Farb-/Tiefen-/Stencil-Präsenz und ein bekanntes Farbformat bereit. `SystemRenderer` weist Ziele zurück, denen laut Passvertrag zwingende Anhänge fehlen; GL-MSAA meldet das Farbformat nur für bekannte sized-Formate. Swapchainformat und Desktop-GLs unsized-MSAA-Storage bleiben unbekannt.
+   - [x] `AntialiasTarget` prüft beim Erzeugen die tatsächlichen aktiven Farb-/Tiefenattachments und für SMAA auch Stencil an Kanten- und Gewichtsziel; bekannte Zielformate müssen dem gewählten LDR-/HDR-Pfad entsprechen. Unbekanntes Desktop-MSAA-Format bleibt zulässig und wird nicht geraten.
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 275 Client bundles and two native bundles. Each
++The active series contains 276 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -238,3 +238,4 @@
+ | 2274 | Share the compiled render graph scheduler with post-processing |
+ | 2275 | Centralize replaceable SystemRenderer target ownership |
+ | 2276 | Replace SystemRenderer targets transactionally on resize and option changes |
++| 2277 | Remove local closure helpers from per-frame render graph compilation |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -276,3 +276,4 @@
+ client 2274-share-render-graph-with-postprocess.patch
+ client 2275-centralize-system-render-target-ownership.patch
+ client 2276-transactional-render-target-replacement.patch
++client 2277-render-graph-compile-allocation-reduction.patch

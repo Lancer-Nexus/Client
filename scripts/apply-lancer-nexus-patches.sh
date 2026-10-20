@@ -30,6 +30,8 @@ while IFS=' ' read -r target patch_name || [[ -n "${target:-}" ]]; do
     case "$target" in
         client) target_dir="$client_dir" ;;
         protocol) target_dir="$client_dir/Protocol" ;;
+        lancerdecode) target_dir="$client_dir/extern/lancerdecode" ;;
+        blurgtext) target_dir="$client_dir/extern/blurgtext" ;;
         *) printf 'Unknown patch target in %s: %s\n' "$series" "$target" >&2; exit 1 ;;
     esac
     patch_file="$client_dir/patches/$patch_name"
@@ -60,7 +62,8 @@ target_fingerprint() {
             seen["$path"]=1
             paths+=("$path")
         done < <(awk '$1 == "---" && $2 ~ /^a\// { print substr($2, 3) }
-                     $1 == "+++" && $2 ~ /^b\// { print substr($2, 3) }' "${patch_files[index]}")
+                     $1 == "+++" && $2 ~ /^b\// { print substr($2, 3) }
+                     $1 == "diff" && $2 == "--git" && $4 ~ /^b\// { print substr($4, 3) }' "${patch_files[index]}")
     done
 
     {
@@ -88,6 +91,8 @@ for target in "${targets[@]}"; do
     case "$target" in
         client) target_dir="$client_dir" ;;
         protocol) target_dir="$client_dir/Protocol" ;;
+        lancerdecode) target_dir="$client_dir/extern/lancerdecode" ;;
+        blurgtext) target_dir="$client_dir/extern/blurgtext" ;;
     esac
     marker="$(git -C "$target_dir" rev-parse --absolute-git-dir)/lancer-nexus-patches-state"
     fingerprint="$(target_fingerprint "$target" "$target_dir")"
@@ -111,6 +116,8 @@ if [[ "$record_current" == false && ${#pending_targets[@]} -gt 0 ]] &&
         case "$target" in
             client) target_dir="$client_dir" ;;
             protocol) target_dir="$client_dir/Protocol" ;;
+            lancerdecode) target_dir="$client_dir/extern/lancerdecode" ;;
+            blurgtext) target_dir="$client_dir/extern/blurgtext" ;;
         esac
         marker="$(git -C "$target_dir" rev-parse --absolute-git-dir)/lancer-nexus-patches-state"
         target_fingerprint "$target" "$target_dir" > "$marker"
@@ -129,6 +136,8 @@ for ((index = 0; index < ${#patch_files[@]}; index++)); do
     case "$target" in
         client) target_dir="$client_dir" ;;
         protocol) target_dir="$client_dir/Protocol" ;;
+        lancerdecode) target_dir="$client_dir/extern/lancerdecode" ;;
+        blurgtext) target_dir="$client_dir/extern/blurgtext" ;;
     esac
 
     if git -C "$target_dir" apply --check --ignore-whitespace "${patch_files[index]}" 2>/dev/null; then
@@ -146,6 +155,8 @@ for target in "${pending_targets[@]}"; do
     case "$target" in
         client) target_dir="$client_dir" ;;
         protocol) target_dir="$client_dir/Protocol" ;;
+        lancerdecode) target_dir="$client_dir/extern/lancerdecode" ;;
+        blurgtext) target_dir="$client_dir/extern/blurgtext" ;;
     esac
     marker="$(git -C "$target_dir" rev-parse --absolute-git-dir)/lancer-nexus-patches-state"
     target_fingerprint "$target" "$target_dir" > "$marker"

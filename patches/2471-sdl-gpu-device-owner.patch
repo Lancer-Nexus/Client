@@ -1,0 +1,116 @@
+diff --git a/src/LibreLancer.Base/Graphics/Backends/SDL3/SDL3GpuDeviceOwner.cs b/src/LibreLancer.Base/Graphics/Backends/SDL3/SDL3GpuDeviceOwner.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Base/Graphics/Backends/SDL3/SDL3GpuDeviceOwner.cs
+@@ -0,0 +1,49 @@
++using System;
++using LibreLancer.Platforms;
++
++namespace LibreLancer.Graphics.Backends.SDL3Gpu;
++
++/// <summary>
++/// Owns an SDL_GPU device and drains its submitted work before destroying it.
++/// SDL video initialization and windows remain owned by the platform host.
++/// </summary>
++internal sealed class SDL3GpuDeviceOwner : IDisposable
++{
++    private IntPtr device;
++
++    public IntPtr Handle => device != IntPtr.Zero
++        ? device
++        : throw new ObjectDisposedException(nameof(SDL3GpuDeviceOwner));
++
++    private SDL3GpuDeviceOwner(IntPtr device) => this.device = device;
++
++    public static SDL3GpuDeviceOwner Create(SDL3.SDL_GPUShaderFormat formats,
++        bool debugMode = false, string? driver = null)
++    {
++        var created = SDL3.SDL_CreateGPUDevice(formats, debugMode, driver!);
++        if (created == IntPtr.Zero)
++            throw new InvalidOperationException($"SDL_GPU device creation failed: {SDL3.SDL_GetError()}");
++
++        return new SDL3GpuDeviceOwner(created);
++    }
++
++    public string Driver => SDL3.SDL_GetGPUDeviceDriver(Handle) ?? "unknown";
++
++    public void Dispose()
++    {
++        var owned = device;
++        if (owned == IntPtr.Zero)
++            return;
++
++        device = IntPtr.Zero;
++        try
++        {
++            if (!SDL3.SDL_WaitForGPUIdle(owned))
++                throw new InvalidOperationException($"SDL_GPU device idle wait failed: {SDL3.SDL_GetError()}");
++        }
++        finally
++        {
++            SDL3.SDL_DestroyGPUDevice(owned);
++        }
++    }
++}
+diff --git a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+--- a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
++++ b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+@@ -114,7 +114,7 @@
+         }
+ 
+         IntPtr window = IntPtr.Zero;
+-        IntPtr device = IntPtr.Zero;
++        SDL3GpuDeviceOwner? gpu = null;
+         try
+         {
+             window = SDL3.SDL_CreateWindow("Lancer Nexus SDL_GPU shader audit", 64, 64,
+@@ -125,15 +125,11 @@
+             var shaderFormats = SDL3.SDL_GPUShaderFormat.SDL_GPU_SHADERFORMAT_SPIRV |
+                                 SDL3.SDL_GPUShaderFormat.SDL_GPU_SHADERFORMAT_DXIL |
+                                 SDL3.SDL_GPUShaderFormat.SDL_GPU_SHADERFORMAT_MSL;
+-            device = SDL3.SDL_CreateGPUDevice(shaderFormats, false, null!);
+-            if (device == IntPtr.Zero)
+-                throw Failure("SDL_GPU device creation failed");
+-
+-            var supportedFormats = SDL3.SDL_GetGPUShaderFormats(device);
+-            if ((supportedFormats & SDL3.SDL_GPUShaderFormat.SDL_GPU_SHADERFORMAT_SPIRV) == 0)
+-                throw new InvalidOperationException("The selected SDL_GPU driver does not support production SPIR-V shaders.");
+-
+-            Console.WriteLine($"SDL_GPU shader audit driver: {SDL3.SDL_GetGPUDeviceDriver(device)}");
++            gpu = SDL3GpuDeviceOwner.Create(shaderFormats);
++            var device = gpu.Handle;
++            if ((SDL3.SDL_GetGPUShaderFormats(device) & SDL3.SDL_GPUShaderFormat.SDL_GPU_SHADERFORMAT_SPIRV) == 0)
++                throw new NotSupportedException("The selected SDL_GPU driver does not support production SPIR-V shaders.");
++            Console.WriteLine($"SDL_GPU shader audit driver: {gpu.Driver}");
+             var assembly = Assembly.Load("LibreLancer");
+             var shaderCatalog = assembly.GetType("LibreLancer.Shaders.AllShaders", throwOnError: true)!;
+             var bundles = shaderCatalog.GetFields(BindingFlags.Public | BindingFlags.Static)
+@@ -200,11 +196,7 @@
+         }
+         finally
+         {
+-            if (device != IntPtr.Zero)
+-            {
+-                SDL3.SDL_WaitForGPUIdle(device);
+-                SDL3.SDL_DestroyGPUDevice(device);
+-            }
++            gpu?.Dispose();
+             if (window != IntPtr.Zero)
+                 SDL3.SDL_DestroyWindow(window);
+             SDL3.SDL_Quit();
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -404,3 +404,4 @@
+ | 2469 | Record current NAP-only Hi02 runtime and asteroid profile after culling changes |
+ 
+ | 2470 | Record Freelancer main-executable atmosphere registration trace and remaining Fade uncertainty |
++| 2471 | Extract SDL_GPU device lifetime ownership for the renderer backend |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -462,3 +462,4 @@
+ client 2468-serialize-asteroid-culling-tasks.patch
+ client 2469-asteroid-culling-runtime-evidence.patch
+ client 2470-atmosphere-fade-main-executable-trace.patch
++client 2471-sdl-gpu-device-owner.patch

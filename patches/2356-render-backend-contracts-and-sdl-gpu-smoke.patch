@@ -1,0 +1,739 @@
+diff --git a/src/Editor/LibreLancer.ContentEdit/ModelImageRenderer.cs b/src/Editor/LibreLancer.ContentEdit/ModelImageRenderer.cs
+--- a/src/Editor/LibreLancer.ContentEdit/ModelImageRenderer.cs
++++ b/src/Editor/LibreLancer.ContentEdit/ModelImageRenderer.cs
+@@ -47,10 +47,10 @@
+     public static void RenderToPng(GameResourceManager resources, RigidModel model, int width, int height, string outfile, AntialiasMode aaMode = AntialiasMode.None)
+     {
+         //Set up state
+-        var renderContext = resources.GLWindow.RenderContext;
++        var renderContext = resources.RenderWindow.RenderContext;
+         var commandBuffer = new CommandBuffer(renderContext);
+         var restoreTarget = renderContext.RenderTarget;
+-        var renderTarget = new RenderTarget2D(resources.GLWindow.RenderContext, width, height);
++        var renderTarget = new RenderTarget2D(resources.RenderWindow.RenderContext, width, height);
+ 
+         //Set antialiasing if asked
+         AntialiasTarget aaRenderTarget = null;
+diff --git a/src/LibreLancer.Base/Game.cs b/src/LibreLancer.Base/Game.cs
+--- a/src/LibreLancer.Base/Game.cs
++++ b/src/LibreLancer.Base/Game.cs
+@@ -31,7 +31,7 @@
+     None
+ }
+ 
+-public class Game : IUIThread, IGLWindow
++public class Game : IUIThread, IRenderWindow
+ {
+     private readonly IGame impl;
+     public Mouse Mouse => impl.Mouse;
+diff --git a/src/LibreLancer/Resources/GameResourceManager.cs b/src/LibreLancer/Resources/GameResourceManager.cs
+--- a/src/LibreLancer/Resources/GameResourceManager.cs
++++ b/src/LibreLancer/Resources/GameResourceManager.cs
+@@ -21,7 +21,7 @@
+ 
+ public class GameResourceManager : ResourceManager, IDisposable
+ {
+-    public IGLWindow GLWindow;
++    public IRenderWindow RenderWindow;
+     private readonly TextureMemoryLedger textureMemory = new();
+     public long EstimatedTextureMemory => textureMemory.EstimatedBytes;
+ 
+@@ -54,14 +54,14 @@
+ 
+     public override DfmTangentBuffer? TryAllocateDfmTangentVertices(DfmTangentVertex[] vertices)
+     {
+-        if (!GLWindow.IsUiThread()) throw new InvalidOperationException();
++        if (!RenderWindow.IsUiThread()) throw new InvalidOperationException();
+         ObjectDisposedException.ThrowIf(isDisposed, this);
+         var bytes = checked((long)vertices.Length * Marshal.SizeOf<DfmTangentVertex>());
+         if (vertices.Length == 0 || bytes > GeneratedTangentGpuBudgetBytes - GeneratedTangentGpuBytes) return null;
+         VertexBuffer? buffer = null;
+         try
+         {
+-            buffer = new VertexBuffer(GLWindow.RenderContext, typeof(DfmTangentVertex), vertices.Length);
++            buffer = new VertexBuffer(RenderWindow.RenderContext, typeof(DfmTangentVertex), vertices.Length);
+             buffer.SetData<DfmTangentVertex>(vertices);
+             var resource = new DfmTangentBuffer(buffer);
+             dfmTangentAllocations.Add(resource, bytes);
+@@ -83,14 +83,14 @@
+ 
+     public override VertexResource AllocateVertices(FVFVertex format, byte[] vertices, ushort[] indices)
+     {
+-        if (!GLWindow.IsUiThread()) throw new InvalidOperationException();
++        if (!RenderWindow.IsUiThread()) throw new InvalidOperationException();
+         if (isDisposed) throw new ObjectDisposedException(nameof(GameResourceManager));
+         return vertexResourceAllocator.Allocate(format, vertices, indices);
+     }
+ 
+     public override VertexResource? TryAllocateGeneratedTangentVertices(FVFVertex format, byte[] vertices, ushort[] indices)
+     {
+-        if (!GLWindow.IsUiThread()) throw new InvalidOperationException();
++        if (!RenderWindow.IsUiThread()) throw new InvalidOperationException();
+         if (isDisposed) throw new ObjectDisposedException(nameof(GameResourceManager));
+         var requestedBytes = checked((long)vertices.LongLength + (long)indices.LongLength * sizeof(ushort));
+         if (requestedBytes > GeneratedTangentGpuBudgetBytes - GeneratedTangentGpuBytes) return null;
+@@ -103,7 +103,7 @@
+     public override void ReleaseGeneratedTangentVertices(VertexResource resource)
+     {
+         if (isDisposed) return;
+-        if (!GLWindow.IsUiThread()) throw new InvalidOperationException();
++        if (!RenderWindow.IsUiThread()) throw new InvalidOperationException();
+         if (generatedTangentAllocations.Remove(resource, out var releasedBytes))
+             GeneratedTangentGpuBytes -= releasedBytes;
+         resource.Dispose();
+@@ -112,7 +112,7 @@
+     public override void ClearGeneratedTangentResources()
+     {
+         if (isDisposed) return;
+-        if (!GLWindow.IsUiThread()) throw new InvalidOperationException();
++        if (!RenderWindow.IsUiThread()) throw new InvalidOperationException();
+         foreach (var mesh in meshes.Values)
+             mesh?.ClearGeneratedTangentResources();
+         ClearDfmTangentResources();
+@@ -125,7 +125,7 @@
+             return sph;
+         }
+ 
+-        sph = new QuadSphere(GLWindow.RenderContext, slices);
++        sph = new QuadSphere(RenderWindow.RenderContext, slices);
+         quadSpheres.Add(slices, sph);
+ 
+         return sph;
+@@ -138,7 +138,7 @@
+             return cyl;
+         }
+ 
+-        cyl = new OpenCylinder(GLWindow.RenderContext, slices);
++        cyl = new OpenCylinder(RenderWindow.RenderContext, slices);
+         cylinders.Add(slices, cyl);
+ 
+         return cyl;
+@@ -149,9 +149,9 @@
+ 
+     public override Dictionary<string, TexFrameAnimation?> AnimationDictionary => frameanims;
+ 
+-    public GameResourceManager(IGLWindow g, FileSystem vfs) : base(vfs)
++    public GameResourceManager(IRenderWindow g, FileSystem vfs) : base(vfs)
+     {
+-        GLWindow = g;
++        RenderWindow = g;
+         SurfaceGpuTextures = new SurfaceGpuTextureCache(g);
+         vertexResourceAllocator = new VertexResourceAllocator(g.RenderContext);
+         DefaultMaterial = new Material(this)
+@@ -172,7 +172,7 @@
+         ConvexCollection = new ConvexShapeCollection(GetSur);
+     }
+ 
+-    public GameResourceManager(GameResourceManager src) : this(src.GLWindow, src.VFS)
++    public GameResourceManager(GameResourceManager src) : this(src.RenderWindow, src.VFS)
+     {
+         SurfaceMaps = src.SurfaceMaps;
+         SurfaceNormalMapsEnabled = src.SurfaceNormalMapsEnabled;
+@@ -244,7 +244,7 @@
+     public void AddTexture(string name, string filename)
+     {
+         using var stream = VFS.Open(filename);
+-        var dat = ImageLib.Generic.TextureFromStream(GLWindow.RenderContext, stream);
++        var dat = ImageLib.Generic.TextureFromStream(RenderWindow.RenderContext, stream);
+         textures.Add(name, dat);
+         texturefiles.Add(name, filename);
+         textureMemory.AddReference(dat);
+@@ -273,7 +273,7 @@
+ 
+     public void ClearMeshes()
+     {
+-        if (!GLWindow.IsUiThread()) throw new InvalidOperationException();
++        if (!RenderWindow.IsUiThread()) throw new InvalidOperationException();
+         ClearDfmTangentResources();
+         loadedResFiles = [];
+         var keys = new uint[meshes.Count];
+@@ -563,7 +563,7 @@
+                 // Surface cubemap MAT files reuse the internal name `envmapbasic`.
+                 // Initialize each file independently and expose its catalog nickname so
+                 // loading one cube cannot make the other catalog entries alias it.
+-                v.Initialize(GLWindow.RenderContext);
++                v.Initialize(RenderWindow.RenderContext);
+                 if (v.Texture is TextureCube cubeTexture)
+                 {
+                     foreach (var alias in environmentAliases)
+@@ -577,7 +577,7 @@
+ 
+             if (!textures.TryGetValue(tex.Key, out var existing) || existing == null)
+             {
+-                v.Initialize(GLWindow.RenderContext);
++                v.Initialize(RenderWindow.RenderContext);
+ 
+                 if (v.Texture != null)
+                 {
+@@ -724,7 +724,7 @@
+             }
+             case DfmFile dfm:
+             {
+-                dfm.Initialize(this, GLWindow.RenderContext);
++                dfm.Initialize(this, RenderWindow.RenderContext);
+                 if (dfm.MaterialLibrary != null) AddMaterials(dfm.MaterialLibrary, filename);
+                 if (dfm.TextureLibrary != null) AddTextures(dfm.TextureLibrary, filename);
+                 break;
+@@ -749,7 +749,7 @@
+     public void Dispose()
+     {
+         if (isDisposed) return;
+-        if (!GLWindow.IsUiThread()) throw new InvalidOperationException("GPU resource manager disposal requires the render thread");
++        if (!RenderWindow.IsUiThread()) throw new InvalidOperationException("GPU resource manager disposal requires the render thread");
+         isDisposed = true;
+         SurfaceGpuTextures?.Dispose();
+         SurfaceImages.Dispose();
+diff --git a/src/LibreLancer/Resources/SurfaceGpuTexture.cs b/src/LibreLancer/Resources/SurfaceGpuTexture.cs
+--- a/src/LibreLancer/Resources/SurfaceGpuTexture.cs
++++ b/src/LibreLancer/Resources/SurfaceGpuTexture.cs
+@@ -8,7 +8,7 @@
+ /// <summary>One explicitly owned GPU upload. Dispose on the render thread before native context shutdown.</summary>
+ public sealed class SurfaceGpuTexture : IDisposable, ISurfaceGpuTexture
+ {
+-    private readonly IGLWindow window;
++    private readonly IRenderWindow window;
+     private readonly Texture texture;
+     private bool disposed;
+     private bool retired;
+@@ -23,7 +23,7 @@
+             return texture;
+         }
+     }
+-    private SurfaceGpuTexture(IGLWindow window, Texture texture, long bytes)
++    private SurfaceGpuTexture(IRenderWindow window, Texture texture, long bytes)
+     { this.window = window; this.texture = texture; GpuPayloadBytes = bytes; }
+ 
+     /// <summary>Logical GPU payload bytes, including BC blocks and RGB24 expansion; excludes driver overhead.</summary>
+@@ -81,7 +81,7 @@
+     }
+ 
+     /// <summary>Null means insufficient per-upload budget. The caller retains the CPU lease.</summary>
+-    public static SurfaceGpuTexture? TryUpload(IGLWindow window, SurfaceImageLease image, long maxGpuBytes)
++    public static SurfaceGpuTexture? TryUpload(IRenderWindow window, SurfaceImageLease image, long maxGpuBytes)
+     {
+         ArgumentNullException.ThrowIfNull(window);
+         ArgumentNullException.ThrowIfNull(image);
+@@ -100,7 +100,7 @@
+         return new(window, texture, bytes);
+     }
+ 
+-    private static void CheckThread(IGLWindow window)
++    private static void CheckThread(IRenderWindow window)
+     {
+         if (!window.IsUiThread()) throw new InvalidOperationException("Surface GPU uploads and release require the render thread");
+     }
+diff --git a/src/LibreLancer/Resources/SurfaceGpuTextureCache.cs b/src/LibreLancer/Resources/SurfaceGpuTextureCache.cs
+--- a/src/LibreLancer/Resources/SurfaceGpuTextureCache.cs
++++ b/src/LibreLancer/Resources/SurfaceGpuTextureCache.cs
+@@ -29,7 +29,7 @@
+     private long residentBytes;
+     private bool disposed;
+ 
+-    public SurfaceGpuTextureCache(IGLWindow window, long budgetBytes = DefaultBudgetBytes)
++    public SurfaceGpuTextureCache(IRenderWindow window, long budgetBytes = DefaultBudgetBytes)
+     {
+         ArgumentNullException.ThrowIfNull(window);
+         if (budgetBytes < 128) throw new ArgumentOutOfRangeException(nameof(budgetBytes));
+diff --git a/src/LibreLancer.Base/HeadlessContext.cs b/src/LibreLancer.Base/HeadlessContext.cs
+--- a/src/LibreLancer.Base/HeadlessContext.cs
++++ b/src/LibreLancer.Base/HeadlessContext.cs
+@@ -7,7 +7,7 @@
+ 
+ namespace LibreLancer;
+ 
+-public class HeadlessContext : IGLWindow, IUIThread
++public class HeadlessContext : IRenderWindow, IUIThread
+ {
+     internal int UiThreadId;
+     public bool IsUiThread() => UiThreadId == Environment.CurrentManagedThreadId;
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -180,13 +180,13 @@
+             AsteroidFields = [];
+             Nebulae = [];
+             StarSphereModels = [];
+-            rstate = resources.GLWindow.RenderContext;
++            rstate = resources.RenderWindow.RenderContext;
+             resman = resources;
+             Polyline = new PolylineRender(rstate, Commands);
+             QuadBuffer = new QuadBuffer(rstate);
+             dot = (Texture2D) resources.FindTexture(ResourceManager.WhiteTextureName)!;
+             DebugRenderer = new LineRenderer(rstate);
+-            FxPool = new ParticleEffectPool(resources.GLWindow.RenderContext, Commands);
++            FxPool = new ParticleEffectPool(resources.RenderWindow.RenderContext, Commands);
+             FxPool.Debug = DebugRenderer;
+             Beams = new BeamsBuffer(resources, rstate);
+         }
+diff --git a/src/LibreLancer/Interface/UiData.cs b/src/LibreLancer/Interface/UiData.cs
+--- a/src/LibreLancer/Interface/UiData.cs
++++ b/src/LibreLancer/Interface/UiData.cs
+@@ -126,7 +126,7 @@
+                     return textureFile;
+                 }
+ 
+-                var f = ImageLib.Generic.TextureFromStream(ResourceManager.GLWindow.RenderContext,
++                var f = ImageLib.Generic.TextureFromStream(ResourceManager.RenderWindow.RenderContext,
+                     FileSystem.Open(file));
+ 
+                 if (f is Texture2D t2d)
+diff --git a/src/LibreLancer.Tests/SurfaceGpuTextureTests.cs b/src/LibreLancer.Tests/SurfaceGpuTextureTests.cs
+--- a/src/LibreLancer.Tests/SurfaceGpuTextureTests.cs
++++ b/src/LibreLancer.Tests/SurfaceGpuTextureTests.cs
+@@ -40,7 +40,7 @@
+         Assert.Throws<InvalidDataException>(()=>SurfaceGpuTexture.EstimateGpuPayloadBytes(new(ImageType.DDS,Dds().Data[..^1])));
+         data=Dds().Data;Set(data,84,0x30315844);Assert.Throws<InvalidDataException>(()=>SurfaceGpuTexture.EstimateGpuPayloadBytes(new(ImageType.DDS,data)));
+     }
+-    sealed class Window(bool ui) : IGLWindow
++    sealed class Window(bool ui) : IRenderWindow
+     {
+         public RenderContext RenderContext=>throw new Exception("GPU context must not be touched before admission");
+         public bool IsUiThread()=>ui;
+diff --git a/src/LibreLancer.Base/IGLWindow.cs b/src/LibreLancer.Base/IGLWindow.cs
+deleted file mode 100644
+--- a/src/LibreLancer.Base/IGLWindow.cs
++++ /dev/null
+@@ -1,9 +0,0 @@
+-using LibreLancer.Graphics;
+-
+-namespace LibreLancer;
+-
+-public interface IGLWindow
+-{
+-    RenderContext RenderContext { get; }
+-    bool IsUiThread();
+-}
+diff --git a/src/LibreLancer.Base/IRenderWindow.cs b/src/LibreLancer.Base/IRenderWindow.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Base/IRenderWindow.cs
+@@ -0,0 +1,9 @@
++using LibreLancer.Graphics;
++
++namespace LibreLancer;
++
++public interface IRenderWindow
++{
++    RenderContext RenderContext { get; }
++    bool IsUiThread();
++}
+diff --git a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+--- a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
++++ b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+@@ -47,6 +47,8 @@
+         IntPtr copyPipeline = IntPtr.Zero;
+         IntPtr vertexBuffer = IntPtr.Zero;
+         IntPtr transferBuffer = IntPtr.Zero;
++        IntPtr indexBuffer = IntPtr.Zero;
++        IntPtr indexTransferBuffer = IntPtr.Zero;
+         IntPtr diffuseTexture = IntPtr.Zero;
+         IntPtr textureUploadBuffer = IntPtr.Zero;
+         IntPtr occludedTexture = IntPtr.Zero;
+@@ -90,7 +92,8 @@
+                 throw Failure("Setting SDL_GPU swapchain parameters failed");
+ 
+             (vertexBuffer, transferBuffer) = CreateVertexBuffer(device);
+-            Console.WriteLine("Created SDL_GPU vertex buffer.");
++            (indexBuffer, indexTransferBuffer) = CreateIndexBuffer(device);
++            Console.WriteLine("Created SDL_GPU FVF3 vertex and 16-bit VMesh index buffers.");
+             (diffuseTexture, textureUploadBuffer) = CreateNormalTexture(device);
+             Console.WriteLine("Uploaded SDL_GPU BC5 normal texture.");
+             (occludedTexture, occludedTextureUploadBuffer) = CreateNormalTexture(device, 153, 153);
+@@ -154,6 +157,9 @@
+             Span<SDL3.SDL_GPUBufferBinding> vertexBindings = stackalloc SDL3.SDL_GPUBufferBinding[1];
+             vertexBindings[0] = new SDL3.SDL_GPUBufferBinding { buffer = vertexBuffer, offset = 0 };
+             SDL3.SDL_BindGPUVertexBuffers(renderPass, 0, vertexBindings, 1);
++            var indexBinding = new SDL3.SDL_GPUBufferBinding { buffer = indexBuffer, offset = 0 };
++            SDL3.SDL_BindGPUIndexBuffer(renderPass, indexBinding,
++                SDL3.SDL_GPUIndexElementSize.SDL_GPU_INDEXELEMENTSIZE_16BIT);
+             Span<SDL3.SDL_GPUTextureSamplerBinding> textureBindings = stackalloc SDL3.SDL_GPUTextureSamplerBinding[1];
+             textureBindings[0] = new SDL3.SDL_GPUTextureSamplerBinding
+             {
+@@ -161,7 +167,7 @@
+                 sampler = normalSampler
+             };
+             SDL3.SDL_BindGPUFragmentSamplers(renderPass, 0, textureBindings, 1);
+-            SDL3.SDL_DrawGPUPrimitives(renderPass, 3, 1, 0, 0);
++            SDL3.SDL_DrawGPUIndexedPrimitives(renderPass, 3, 1, 1, 3, 0);
+             // Equal depth must fail LESS after the first draw wrote depth. The alternate
+             // BC5 texture would change the center pixel if depth testing or writes failed.
+             textureBindings[0] = new SDL3.SDL_GPUTextureSamplerBinding
+@@ -170,7 +176,7 @@
+                 sampler = normalSampler
+             };
+             SDL3.SDL_BindGPUFragmentSamplers(renderPass, 0, textureBindings, 1);
+-            SDL3.SDL_DrawGPUPrimitives(renderPass, 3, 1, 0, 0);
++            SDL3.SDL_DrawGPUIndexedPrimitives(renderPass, 3, 1, 1, 3, 0);
+             SDL3.SDL_EndGPURenderPass(renderPass);
+             renderPass = IntPtr.Zero;
+ 
+@@ -185,6 +191,9 @@
+             if (renderPass == IntPtr.Zero)
+                 throw Failure("Beginning the SDL_GPU postprocess pass failed");
+             SDL3.SDL_BindGPUGraphicsPipeline(renderPass, copyPipeline);
++            // The first three vertices are deliberately degenerate so a missing
++            // VMesh base-vertex offset cannot accidentally draw the smoke triangle.
++            vertexBindings[0].offset = (uint)(3 * 8 * sizeof(float));
+             SDL3.SDL_BindGPUVertexBuffers(renderPass, 0, vertexBindings, 1);
+             textureBindings[0] = new SDL3.SDL_GPUTextureSamplerBinding
+             {
+@@ -255,7 +264,7 @@
+                     $"({expectedRed}, {expectedGreen}, {expectedBlue}, 255).");
+ 
+             Console.WriteLine($"Presented SDL_GPU BC5 normal-mapped scene through an RGBA16F target and depth-tested pass at {width}x{height}; " +
+-                              $"center pixel ({red}, {green}, {blue}, {alpha}) passed.");
++                              $"center pixel ({red}, {green}, {blue}, {alpha}) passed; 16-bit indices, first-index offset and vertex offset were used.");
+             Thread.Sleep(750);
+             return 0;
+         }
+@@ -301,6 +310,10 @@
+                     SDL3.SDL_ReleaseGPUBuffer(device, vertexBuffer);
+                 if (transferBuffer != IntPtr.Zero)
+                     SDL3.SDL_ReleaseGPUTransferBuffer(device, transferBuffer);
++                if (indexBuffer != IntPtr.Zero)
++                    SDL3.SDL_ReleaseGPUBuffer(device, indexBuffer);
++                if (indexTransferBuffer != IntPtr.Zero)
++                    SDL3.SDL_ReleaseGPUTransferBuffer(device, indexTransferBuffer);
+                 if (vertexShader != IntPtr.Zero)
+                     SDL3.SDL_ReleaseGPUShader(device, vertexShader);
+                 if (fragmentShader != IntPtr.Zero)
+@@ -426,14 +439,17 @@
+ 
+     private static unsafe (IntPtr VertexBuffer, IntPtr TransferBuffer) CreateVertexBuffer(IntPtr device)
+     {
+-        // Interleaved clip-space position, depth and UV exercise a real 3D vertex layout.
++        // Interleaved Freelancer FVF3 layout: position, normal, and UV.
+         ReadOnlySpan<float> vertices =
+         [
+-            -0.7f, -0.65f, 0.5f, 0.0f, 0.0f,
+-             0.7f, -0.65f, 0.5f, 1.0f, 0.0f,
+-             0.0f,  0.75f, 0.5f, 0.5f, 1.0f
++            0.0f, 0.0f, 0.5f, 0.0f, 0.0f, 1.0f, 0.5f, 0.5f,
++            0.0f, 0.0f, 0.5f, 0.0f, 0.0f, 1.0f, 0.5f, 0.5f,
++            0.0f, 0.0f, 0.5f, 0.0f, 0.0f, 1.0f, 0.5f, 0.5f,
++            -0.7f, -0.65f, 0.5f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
++             0.7f, -0.65f, 0.5f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f,
++             0.0f,  0.75f, 0.5f, 0.0f, 0.0f, 1.0f, 0.5f, 1.0f
+         ];
+-        const uint byteSize = (uint)(15 * sizeof(float));
++        const uint byteSize = (uint)(48 * sizeof(float));
+         var vertexBuffer = SDL3.SDL_CreateGPUBuffer(device, new SDL3.SDL_GPUBufferCreateInfo
+         {
+             usage = SDL3.SDL_GPUBufferUsageFlags.SDL_GPU_BUFFERUSAGE_VERTEX,
+@@ -492,6 +508,68 @@
+             throw Failure("Submitting the SDL_GPU vertex upload failed");
+         }
+         return (vertexBuffer, transferBuffer);
++    }
++
++
++    private static unsafe (IntPtr IndexBuffer, IntPtr TransferBuffer) CreateIndexBuffer(IntPtr device)
++    {
++        // The unused leading index exercises firstIndex; vertex_offset selects the FVF3 triangle after three dummy vertices.
++        ReadOnlySpan<ushort> indices = [0, 0, 1, 2];
++        const uint byteSize = (uint)(4 * sizeof(ushort));
++        var indexBuffer = SDL3.SDL_CreateGPUBuffer(device, new SDL3.SDL_GPUBufferCreateInfo
++        {
++            usage = SDL3.SDL_GPUBufferUsageFlags.SDL_GPU_BUFFERUSAGE_INDEX,
++            size = byteSize
++        });
++        if (indexBuffer == IntPtr.Zero)
++            throw Failure("Creating the SDL_GPU index buffer failed");
++        var transferBuffer = SDL3.SDL_CreateGPUTransferBuffer(device, new SDL3.SDL_GPUTransferBufferCreateInfo
++        {
++            usage = SDL3.SDL_GPUTransferBufferUsage.SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
++            size = byteSize
++        });
++        if (transferBuffer == IntPtr.Zero)
++        {
++            SDL3.SDL_ReleaseGPUBuffer(device, indexBuffer);
++            throw Failure("Creating the SDL_GPU index upload buffer failed");
++        }
++        var mapped = SDL3.SDL_MapGPUTransferBuffer(device, transferBuffer, false);
++        if (mapped == IntPtr.Zero)
++        {
++            SDL3.SDL_ReleaseGPUBuffer(device, indexBuffer);
++            SDL3.SDL_ReleaseGPUTransferBuffer(device, transferBuffer);
++            throw Failure("Mapping the SDL_GPU index upload buffer failed");
++        }
++        fixed (ushort* source = indices)
++            Buffer.MemoryCopy(source, (void*)mapped, byteSize, byteSize);
++        SDL3.SDL_UnmapGPUTransferBuffer(device, transferBuffer);
++
++        var commandBuffer = SDL3.SDL_AcquireGPUCommandBuffer(device);
++        if (commandBuffer == IntPtr.Zero)
++        {
++            SDL3.SDL_ReleaseGPUBuffer(device, indexBuffer);
++            SDL3.SDL_ReleaseGPUTransferBuffer(device, transferBuffer);
++            throw Failure("Acquiring a command buffer for index upload failed");
++        }
++        var copyPass = SDL3.SDL_BeginGPUCopyPass(commandBuffer);
++        if (copyPass == IntPtr.Zero)
++        {
++            SDL3.SDL_CancelGPUCommandBuffer(commandBuffer);
++            SDL3.SDL_ReleaseGPUBuffer(device, indexBuffer);
++            SDL3.SDL_ReleaseGPUTransferBuffer(device, transferBuffer);
++            throw Failure("Beginning the SDL_GPU index upload pass failed");
++        }
++        var sourceLocation = new SDL3.SDL_GPUTransferBufferLocation { transfer_buffer = transferBuffer, offset = 0 };
++        var destination = new SDL3.SDL_GPUBufferRegion { buffer = indexBuffer, offset = 0, size = byteSize };
++        SDL3.SDL_UploadToGPUBuffer(copyPass, sourceLocation, destination, false);
++        SDL3.SDL_EndGPUCopyPass(copyPass);
++        if (!SDL3.SDL_SubmitGPUCommandBuffer(commandBuffer))
++        {
++            SDL3.SDL_ReleaseGPUBuffer(device, indexBuffer);
++            SDL3.SDL_ReleaseGPUTransferBuffer(device, transferBuffer);
++            throw Failure("Submitting the SDL_GPU index upload failed");
++        }
++        return (indexBuffer, transferBuffer);
+     }
+ 
+ 
+@@ -657,11 +735,11 @@
+         var vertexBuffer = new SDL3.SDL_GPUVertexBufferDescription
+         {
+             slot = 0,
+-            pitch = 5 * sizeof(float),
++            pitch = 8 * sizeof(float),
+             input_rate = SDL3.SDL_GPUVertexInputRate.SDL_GPU_VERTEXINPUTRATE_VERTEX,
+             instance_step_rate = 0
+         };
+-        SDL3.SDL_GPUVertexAttribute* attributes = stackalloc SDL3.SDL_GPUVertexAttribute[2];
++        SDL3.SDL_GPUVertexAttribute* attributes = stackalloc SDL3.SDL_GPUVertexAttribute[3];
+         attributes[0] = new SDL3.SDL_GPUVertexAttribute
+         {
+             location = 0,
+@@ -673,8 +751,15 @@
+         {
+             location = 1,
+             buffer_slot = 0,
++            format = SDL3.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3,
++            offset = 3 * sizeof(float)
++        };
++        attributes[2] = new SDL3.SDL_GPUVertexAttribute
++        {
++            location = 2,
++            buffer_slot = 0,
+             format = SDL3.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2,
+-            offset = 3 * sizeof(float)
++            offset = 6 * sizeof(float)
+         };
+         var blend = new SDL3.SDL_GPUColorTargetBlendState
+         {
+@@ -698,7 +783,7 @@
+                 vertex_buffer_descriptions = &vertexBuffer,
+                 num_vertex_buffers = 1,
+                 vertex_attributes = attributes,
+-                num_vertex_attributes = 2
++                num_vertex_attributes = 3
+             },
+             primitive_type = SDL3.SDL_GPUPrimitiveType.SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
+             rasterizer_state = new SDL3.SDL_GPURasterizerState
+diff --git a/src/LibreLancer.Base/Shaders/SDLGPUSmoke.vert.hlsl b/src/LibreLancer.Base/Shaders/SDLGPUSmoke.vert.hlsl
+--- a/src/LibreLancer.Base/Shaders/SDLGPUSmoke.vert.hlsl
++++ b/src/LibreLancer.Base/Shaders/SDLGPUSmoke.vert.hlsl
+@@ -1,12 +1,14 @@
+ struct Input
+ {
+     [[vk::location(0)]] float3 position : TEXCOORD0;
+-    [[vk::location(1)]] float2 uv : TEXCOORD1;
++    [[vk::location(1)]] float3 normal : TEXCOORD1;
++    [[vk::location(2)]] float2 uv : TEXCOORD2;
+ };
+ 
+ struct Output
+ {
+     float2 uv : TEXCOORD0;
++    float3 normal : TEXCOORD1;
+     float4 position : SV_Position;
+ };
+ 
+@@ -15,5 +17,6 @@
+     Output output;
+     output.position = float4(input.position, 1.0);
+     output.uv = input.uv;
++    output.normal = normalize(input.normal);
+     return output;
+ }
+diff --git a/src/LibreLancer.Base/Shaders/SDLGPUSmoke.frag.hlsl b/src/LibreLancer.Base/Shaders/SDLGPUSmoke.frag.hlsl
+--- a/src/LibreLancer.Base/Shaders/SDLGPUSmoke.frag.hlsl
++++ b/src/LibreLancer.Base/Shaders/SDLGPUSmoke.frag.hlsl
+@@ -1,9 +1,14 @@
+ Texture2D<float2> NormalTexture : register(t0, TEXTURE_SPACE);
+ SamplerState DiffuseSampler : register(s0, TEXTURE_SPACE);
+ 
+-float4 main(float2 uv : TEXCOORD0) : SV_Target0
++float4 main(float2 uv : TEXCOORD0, float3 baseNormal : TEXCOORD1) : SV_Target0
+ {
+     float2 xy = NormalTexture.Sample(DiffuseSampler, uv).rg * 2.0 - 1.0;
+-    float3 normal = normalize(float3(xy, sqrt(max(1.0 - dot(xy, xy), 0.0))));
++    float3 tangentNormal = normalize(float3(xy, sqrt(max(1.0 - dot(xy, xy), 0.0))));
++    float3 helper = abs(baseNormal.z) < 0.9 ? float3(0.0, 0.0, 1.0) : float3(0.0, 1.0, 0.0);
++    float3 tangent = normalize(cross(helper, baseNormal));
++    float3 bitangent = cross(baseNormal, tangent);
++    float3 normal = normalize(tangent * tangentNormal.x + bitangent * tangentNormal.y +
++                              baseNormal * tangentNormal.z);
+     return float4((normal * 0.5 + 0.5) * 2.0, 1.0);
+ }
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -293,8 +293,8 @@
+ bekannten rekonstruierten Normalfarbe. Damit sind Shader-Pipeline, Vertexbuffer und -layout,
+ BC5-Textur-Upload, Samplerbindung, Fragment-Sampling, Normalrekonstruktion, Pixel-Readback und
+ Präsentation auf SDL_GPU praktisch geprüft. Der Probe enthält weiterhin keine
+-Freelancer-Spielshader, Freelancer-FVF-Layouts, Skinning, Materialauflösung
+-oder Spiel-/Editor-Szenen; er ersetzt die SDL_GPU-Spike-Abnahme aus P5 nicht.
++Freelancer-Spielshader, Skinning, Materialauflösung oder Spiel-/Editor-Szenen;
++er ersetzt die SDL_GPU-Spike-Abnahme aus P5 nicht.
+ 
+ Am 18.10.2026 bestand der Release-Client den Probe auf Mesa/Vulkan mit Intel
+ Haswell sowie auf Lavapipe. Beide Läufe lieferten bei 640×360 den Mittelpunkt
+@@ -319,7 +319,17 @@
+ Mesa/Vulkan Intel Haswell und Lavapipe bei 640×360; beide lieferten den für die
+ ACES-Abbildung erwarteten Mittelpunktpixel `(226, 214, 230, 255)` innerhalb
+ der Format-Toleranz.
+-Auch dieser Probe verwendet keine Produktionsshader oder Freelancer-Meshes.
++Der Vertexbuffer verwendet jetzt den Freelancer-FVF3-Interleave
++Position/Normal/UV (3/3/2 Floats); der Shader bildet daraus eine TBN-Basis und
++wendet die BC5-Normalmap an. Der synthetische Meshdraw nutzt außerdem ein
++16-Bit-Indexbuffer mit `first_index=1` und `vertex_offset=3`; davor liegen
++absichtlich degenerierte Dummy-Vertices, sodass ein fehlender Base-Vertex-Offset
++keine sichtbare Fläche erzeugt. Der 18.10.2026-Release-Lauf auf Mesa/Vulkan mit
++Intel Haswell bestand mit Mittelpunktpixel `(226, 214, 230, 255)`. Das prüft den
++Drawvertrag, aber keine echten VMesh-Assets, Produktionsshader, DFM-Skinning,
++Materialauflösung oder Freelancer-Spiel-/Editor-Szenen. Haswell-Vulkan-
++Unterstützung ist laut Mesa unvollständig. Befehls- und Buildnachweis:
++[`SDL_GPU FVF3 normal-map smoke`](evidence/renderer/sdl-gpu-fvf3-normal-smoke-20261018.md).
+ 
+ ## Backend-Grenzen
+ 
+diff --git a/docs/evidence/renderer/sdl-gpu-fvf3-normal-smoke-20261018.md b/docs/evidence/renderer/sdl-gpu-fvf3-normal-smoke-20261018.md
+new file mode 100644
+--- /dev/null
++++ b/docs/evidence/renderer/sdl-gpu-fvf3-normal-smoke-20261018.md
+@@ -0,0 +1,24 @@
++# SDL_GPU FVF3 normal-map smoke (2026-10-18)
++
++## Lauf
++
++```text
++DOTNET_ROOT=/opt/dotnet-10 /opt/dotnet-10/dotnet build src/lancer/lancer.csproj -c Release --no-restore -p:UseSharedCompilation=false
++DOTNET_ROOT=/opt/dotnet-10 /opt/dotnet-10/dotnet src/lancer/bin/Release/net10.0/lancer.dll --sdl-gpu-smoke
++```
++
++Release-Build: 0 Fehler, 180 Warnungen.
++
++## Laufzeitbefund
++
++- SDL_GPU wählte `vulkan`; SPIR-V wurde unterstützt.
++- Adapter: Intel Haswell über Mesa Vulkan. Mesa gab zweimal `Haswell Vulkan support is incomplete` aus.
++- Synthetische Freelancer-FVF3-Daten wurden mit interleavten Position-/Normal-/UV-Feldern (3/3/2 Floats) hochgeladen. Der Vertexshader gab Position, Normale und UV weiter; der Fragmentshader bildete aus der Normale eine TBN-Basis.
++- Ein 16-Bit-Indexbuffer `[0, 0, 1, 2]` wurde mit `first_index=1`, drei Indizes und `vertex_offset=3` gezeichnet. Drei degenerierte Dummy-Vertices vor dem sichtbaren Dreieck machen einen ignorierten Vertexoffset im Pixel-Readback sichtbar.
++- BC5-Normaltextur, D32-Tiefenziel, `LESS`-Tiefentest, RGBA16F-Szenenziel, Scene-Copy/Tonemapping, Präsentation und Swapchain-Pixelreadback bestanden.
++- Mittelpunktpixel: `(226, 214, 230, 255)`; innerhalb der für Swapchainformat und ACES-Probe gesetzten Toleranz.
++- Prozessende: Exitcode 0.
++
++## Geltungsbereich
++
++Der Probe ist eine synthetische SDL_GPU-API-Prüfung. Er lädt keine Freelancer-Daten und prüft weder echte VMesh-Assets noch Produktionsshader, DFM-Skinning, Materialauflösung, Licht-/Schattenpass oder Spiel-/Editor-Szenen. Der Befund ist daher kein Nachweis für einen portierten Spielrenderer und keine Vulkan-Hardwarefreigabe.
+diff --git a/src/LibreLancer.Base/Graphics/SystemRenderPass.cs b/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
+--- a/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
++++ b/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
+@@ -56,10 +56,10 @@
+     ActiveTarget,
+     CallerDefined,
+     Bgra8,
+-    OpenGlMsaaColor,
+-    OpenGlRgba8,
+-    OpenGlRgba16Float,
+-    OpenGlRgbaImplementationDefined,
++    MultisampleColor,
++    Rgba8,
++    Rgba16Float,
++    RgbaImplementationDefined,
+     Depth24,
+     Depth24Stencil8,
+     DepthTexture,
+@@ -838,7 +838,7 @@
+             SystemRenderResource.PresentationColor,
+             new(SystemRenderResource.PresentationColor, SystemRenderAttachmentFormat.CallerDefined,
+                 SystemRenderLoadOperation.Load, SystemRenderStoreOperation.ResolveColor), null, null,
+-            SourceColor: new(SystemRenderResource.SceneColor, SystemRenderAttachmentFormat.OpenGlMsaaColor,
++            SourceColor: new(SystemRenderResource.SceneColor, SystemRenderAttachmentFormat.MultisampleColor,
+                 SystemRenderLoadOperation.Load, SystemRenderStoreOperation.None,
+                 Samples: SystemRenderSampleCount.ModeSelected)),
+         new(SystemRenderSubpass.BloomExtract, "Bloom extraction",
+diff --git a/src/LibreLancer.Base/Graphics/AntialiasTarget.cs b/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
+--- a/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
++++ b/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
+@@ -32,11 +32,11 @@
+     public int Samples => msaa?.Samples ?? 1;
+     public SystemRenderAttachmentFormat MultisampleStorageFormat => msaa?.RequestedColorFormat switch
+     {
+-        MultisampleColorFormat.Rgba8 => SystemRenderAttachmentFormat.OpenGlRgba8,
+-        MultisampleColorFormat.Rgba16Float => SystemRenderAttachmentFormat.OpenGlRgba16Float,
++        MultisampleColorFormat.Rgba8 => SystemRenderAttachmentFormat.Rgba8,
++        MultisampleColorFormat.Rgba16Float => SystemRenderAttachmentFormat.Rgba16Float,
+         MultisampleColorFormat.RgbaImplementationDefined =>
+-            SystemRenderAttachmentFormat.OpenGlRgbaImplementationDefined,
+-        _ => SystemRenderAttachmentFormat.OpenGlMsaaColor
++            SystemRenderAttachmentFormat.RgbaImplementationDefined,
++        _ => SystemRenderAttachmentFormat.MultisampleColor
+     };
+     public long EstimatedMemoryBytes => (msaa?.EstimatedMemoryBytes ?? 0) +
+         (postProcess?.EstimatedMemoryBytes ?? 0) +
+@@ -169,15 +169,15 @@
+             var sourceColor = resolve.SourceColor;
+             var storageFormat = MultisampleStorageFormat;
+             var supportedStorageFormat = storageFormat is
+-                SystemRenderAttachmentFormat.OpenGlMsaaColor or
+-                SystemRenderAttachmentFormat.OpenGlRgba8 or
+-                SystemRenderAttachmentFormat.OpenGlRgba16Float or
+-                SystemRenderAttachmentFormat.OpenGlRgbaImplementationDefined;
++                SystemRenderAttachmentFormat.MultisampleColor or
++                SystemRenderAttachmentFormat.Rgba8 or
++                SystemRenderAttachmentFormat.Rgba16Float or
++                SystemRenderAttachmentFormat.RgbaImplementationDefined;
+             if (resolve.Color?.Format != SystemRenderAttachmentFormat.CallerDefined ||
+-                sourceColor?.Format != SystemRenderAttachmentFormat.OpenGlMsaaColor ||
++                sourceColor?.Format != SystemRenderAttachmentFormat.MultisampleColor ||
+                 sourceColor?.Samples != SystemRenderSampleCount.ModeSelected ||
+                 resolve.SourceDepth != null || !supportedStorageFormat ||
+-                (HdrOutputEnabled != (storageFormat == SystemRenderAttachmentFormat.OpenGlRgba16Float)) ||
++                (HdrOutputEnabled != (storageFormat == SystemRenderAttachmentFormat.Rgba16Float)) ||
+                 (HdrOutputEnabled && hdrResolve?.Texture.Format != SurfaceFormat.HdrBlendable) ||
+                 (SsaoEnabled && (ssaoDepth?.Texture.Format != SurfaceFormat.Depth ||
+                     (!HdrOutputEnabled && ldrResolve?.Texture.Format != SurfaceFormat.Bgra8))) ||
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -175,9 +175,11 @@
+    Szenen abnehmen.
+ 5. **Render-Graph backendneutralisieren.** Der Systemrenderer und Postprocessing
+    führen ihre Pässe bereits über den Graph-Scheduler aus und validieren
+-   Attachment-Verträge. Direkte OpenGL-Zustandsaufrufe, Ressourcennutzung,
+-   Aliasing und Fehlerwiederherstellung müssen noch durch eine echte Backend-
+-   Ausführungsschicht ersetzt beziehungsweise vollständig erzwungen werden.
++   Attachment-Verträge. Die Attachment-Formate in den Contracts tragen nun keine
++   GL-Backendnamen mehr; die konkreten Speicherformate werden weiterhin vom
++   Backend angefordert. Direkte GL-Zustandsaufrufe, Ressourcennutzung, Aliasing
++   und Fehlerwiederherstellung laufen aber noch nicht durch eine echte
++   Backend-Ausführungsschicht und bleiben offen.
+ 6. **Vulkan/SDL_GPU-Spike und Backend.** Zuerst eine echte Pipeline mit
+    Freelancer-FVF, BC4/BC5, Cubemaps, Skinning, Renderzielen und Präsentation
+    kompilieren und auf einer Vulkan-GPU starten. Erst nach erfolgreichem Spike
+--- a/patches/series
++++ b/patches/series
+@@ -353,3 +353,4 @@
+ client 2352-tint-nebula-ambient-with-system-sun.patch
+ client 2353-fix-sky-sphere-depth-test.patch
+ client 2354-sky-sphere-runtime-evidence.patch
++client 2356-render-backend-contracts-and-sdl-gpu-smoke.patch
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -301,3 +301,4 @@
+ | 2352 | Apply the system sun ambient tint to nebula ambient overrides |
+ | 2353 | Render sky spheres against the frame clear depth |
+ | 2354 | Record the NAP-only sky sphere runtime comparison and verified roadmap result |
++| 2356 | Group backend-neutral render contracts and the SDL_GPU indexed FVF3 normal-map smoke |

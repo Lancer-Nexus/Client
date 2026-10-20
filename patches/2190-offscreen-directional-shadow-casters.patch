@@ -1,0 +1,97 @@
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+index 6a2b05d9d..bd48a79fa 100644
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -297,12 +297,18 @@ namespace LibreLancer.Render
+         private int _dwidth = -1, _dheight = -1;
+ 
+         public List<ObjectRenderer> objects = new(250);
++        private readonly List<ModelRenderer> shadowCasters = new(250);
+ 
+         public void AddObject(ObjectRenderer render)
+         {
+             objects.Add(render);
+         }
+ 
++        public void AddShadowCaster(ModelRenderer render)
++        {
++            shadowCasters.Add(render);
++        }
++
+         private record TemporaryFx(ParticleEffectRenderer Render, Vector3 Position);
+ 
+         private List<TemporaryFx> tempFx = [];
+@@ -786,6 +792,7 @@ namespace LibreLancer.Render
+                     if (aaViewportPushed) rstate.PopViewport();
+                     rstate.RenderTarget = restoreTarget;
+                     objects.Clear();
++                    shadowCasters.Clear();
+                     rstate.DepthEnabled = restoreDepthEnabled;
+                     rstate.DepthWrite = restoreDepthWrite;
+                     rstate.DepthFunction = restoreDepthFunction;
+@@ -942,11 +949,8 @@ namespace LibreLancer.Render
+                 Commands.DepthOnlyPass = true;
+                 BeginGpuPass(SystemRenderPass.ShadowMap);
+                 passStarted = true;
+-                foreach (var obj in objects)
+-                {
+-                    if (obj is ModelRenderer model)
+-                        model.ShadowDepthPrepass(shadowCamera, camera, Commands);
+-                }
++                foreach (var model in shadowCasters)
++                    model.ShadowDepthPrepass(shadowCamera, camera, Commands);
+             }
+             finally
+             {
+diff --git a/src/LibreLancer/Render/ModelRenderer.cs b/src/LibreLancer/Render/ModelRenderer.cs
+index 3246957d6..981225604 100644
+--- a/src/LibreLancer/Render/ModelRenderer.cs
++++ b/src/LibreLancer/Render/ModelRenderer.cs
+@@ -265,6 +265,10 @@ namespace LibreLancer.Render
+ 
+             if (Model != null)
+             {
++                // Shadow casters are tracked separately from camera-visible drawables.
++                // Directional lights can project an off-screen object onto a visible receiver.
++                if (sysr.Settings.RenderShadows)
++                    sysr.AddShadowCaster(this);
+                 visibleParts = new BitArray128();
+ 
+                 for (var i = 0; i < Model.AllParts.Length; i++)
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+index a8222a7cc..4a1168942 100644
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -207,8 +207,8 @@ Diese Liste plant moderne Renderer-Erweiterungen für LibreLancer. Sie ist eine
+   - [x] Sampleable Depth-only-Renderziele im OpenGL-Backend und no-op-Ziele im Null-Backend bereitgestellt; Release-Build sowie OpenGL-4.6/Mesa-NAP-Smoke für FBO, Clear und Depth-Readback bestanden. GLES, Shader-Sampling und PCF bleiben offen; siehe [Depth-only-Smoke](evidence/renderer/depth-only-target-smoke-20261017/README.md).
+   - [x] `DirectionalShadowCamera` kann den aktiven Kamerafrustum bis zu einer begrenzten Sichtweite in einen Lichtfrustum überführen und die orthografische XY-Projektion auf Shadow-Map-Texel rasten. Der Build prüft die Kompilierung; ein Laufzeit- oder Schattenbildnachweis fehlt. Die Kamera wird noch nicht vom `SystemRenderer` verwendet.
+   - [x] Opake, sichtbare Model-Meshes schreiben optional im Main-Camera-Depth-Prepass mit LOD und World-Matrix; transparente Teile bleiben ausgeschlossen. `render_depth_prepass` und `--render-depth-prepass=on|off` steuern den Pass, der standardmäßig aus ist. Basic/PBR-Materialien verwenden Depth-only-Fragmentvarianten; Alpha-Test wird im Basic-Pfad beibehalten, Normal-/Emissive-/Beleuchtungsarbeit entfällt. Nicht unterstützte Materialtypen nutzen ihren vorhandenen Shader-Fallback. Der Pass wirft keine Schatten; Laufzeit- und FPS-Abnahme stehen aus.
+-  - [x] Erste integrierte OpenGL-Stufe: `render_shadows` / `--render-shadows=on|off` wählt eine aktive gerichtete Systemlichtquelle, zeichnet opake aktive Teile der sichtbaren `ModelRenderer` in ein 1024²-Depth-Target und bindet die Lichtmatrix samt 3×3-PCF in Basic- und PBR-Receiver. Shadow-Map-Draws gehen in die GPU-Passzeiten ein; Schatten bleiben standardmäßig aus. Das ist eine einzelne Karte ohne Kaskaden; Caster außerhalb der sichtbaren Objektliste, andere Materialfamilien und Laufzeit-/Bildabnahme sind nicht abgedeckt.
+-  - [ ] NAP-Laufzeitbilder für Schiffe und Basen gegen die Schattenoption aus aufnehmen; Bias, Sichtweite und Filterung kalibrieren, GL/GLES-FBO-Sampling prüfen und anschließend Kaskaden sowie außerhalb der Hauptkamera liegende Caster ergänzen.
++  - [x] Erste integrierte OpenGL-Stufe: `render_shadows` / `--render-shadows=on|off` wählt eine aktive gerichtete Systemlichtquelle, zeichnet opake aktive Teile aller vorbereiteten `ModelRenderer` in ein 1024²-Depth-Target und bindet die Lichtmatrix samt 3×3-PCF in Basic- und PBR-Receiver. Shadow-Map-Draws gehen in die GPU-Passzeiten ein; Schatten bleiben standardmäßig aus. Das ist eine einzelne Karte ohne Kaskaden; Modelle außerhalb des Kamerabildes werden als Caster separat gesammelt und gegen das Lichtfrustum geprüft. Andere Materialfamilien und Laufzeit-/Bildabnahme sind nicht abgedeckt.
++  - [ ] NAP-Laufzeitbilder für Schiffe und Basen gegen die Schattenoption aus aufnehmen; Bias, Sichtweite und Filterung kalibrieren, GL/GLES-FBO-Sampling prüfen und anschließend Kaskaden ergänzen.
+ - [ ] Screen-Space-Reflections als optionale Ergänzung prüfen; fehlende Bildinformation an Bildschirmrändern und bei verdeckten Objekten muss über den bestehenden PBR-Fallback abgefangen werden.
+ - [ ] Volumetrischen Nebel und volumetrische Lichtstrahlen als eigenständige, skalierbare Qualitätstufe evaluieren; vorhandene Freelancer-Nebelparameter und Transparenzreihenfolge als Referenz verwenden.
+ - [ ] Forward+/Clustered Lighting gegen die aktuelle Beleuchtungsarchitektur und typische Freelancer-Szenen mit vielen Lichtern benchmarken, bevor ein Renderer-Umbau geplant wird.
+diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
+index dc565349d..7f72bd015 100644
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -580,7 +580,7 @@ im Shader erhalten werden. Copy- und Render-Pässe folgen den Grenzen von
+ 
+ ### P7/P8 – Weitere Grafikpakete
+ 
+-- [x] Erste integrierte gerichtete Schattenstufe: optionaler `render_shadows`-Pass mit 1024²-Depth-Map, Sichtfrustum-Lichtkamera, opaken aktiven Model-Castern und 3×3-PCF-Receivern in Basic/PBR. CLI: `--render-shadows=on|off`; Standard aus. Der Release-Build umfasst die Shader-Varianten, aber die NAP-Laufzeit-/Bildabnahme, GLES, Kaskaden und Offscreen-Caster fehlen.
++- [x] Erste integrierte gerichtete Schattenstufe: optionaler `render_shadows`-Pass mit 1024²-Depth-Map, Sichtfrustum-Lichtkamera, opaken aktiven Model-Castern und 3×3-PCF-Receivern in Basic/PBR. CLI: `--render-shadows=on|off`; Standard aus. Der Release-Build umfasst die Shader-Varianten und separat erfasste Offscreen-Caster; NAP-Laufzeit-/Bildabnahme, GLES und Kaskaden fehlen weiterhin.
+ - [ ] Soft Particles und volumetrischer Nebel/Lichtstrahlen: lineare Tiefe,
+   Transparenz und bestehende Freelancer-Nebelparameter erhalten.
+ - [ ] Gerichtete Schatten zuerst mit Kaskaden/PCF, anschließend zusätzliche
+diff --git a/patches/series b/patches/series
+index 13c5ec6fd..055ece7de 100644
+--- a/patches/series
++++ b/patches/series
+@@ -189,3 +189,4 @@ client 2186-mark-depth-prepass-conditional.patch
+ client 2187-sync-depth-prepass-pipeline-status.patch
+ client 2188-directional-shadow-camera-fit.patch
+ client 2189-single-directional-shadow-map-receivers.patch
++client 2190-offscreen-directional-shadow-casters.patch

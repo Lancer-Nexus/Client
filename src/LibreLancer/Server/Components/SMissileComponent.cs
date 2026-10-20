@@ -2,7 +2,6 @@ using System.Collections.Generic;
 using System.Numerics;
 using LibreLancer.Data.GameData.Items;
 using LibreLancer.World;
-using LibreLancer.World.Components;
 
 namespace LibreLancer.Server.Components;
 
@@ -29,16 +28,6 @@ public class SMissileComponent : GameComponent
 
     private double totalTime;
 
-    public override void Register(GameWorld world)
-    {
-        if (Parent.PhysicsComponent is { } physics)
-        {
-            physics.Collidable = false;
-            if (physics.Body != null)
-                physics.Body.Collidable = false;
-        }
-    }
-
     public override void Update(double time, GameWorld world)
     {
         totalTime += time;
@@ -48,10 +37,7 @@ public class SMissileComponent : GameComponent
         }
 
         var phys = Parent.PhysicsComponent!;
-        var collidable = !ProjectileLaunchSafety.IsCollisionSafe(totalTime);
-        phys.Collidable = collidable;
-        phys.Body.Collidable = collidable;
-        phys.Body.LinearVelocity = Vector3.Transform(-Vector3.UnitZ, Parent.LocalTransform.Orientation) * Speed;
+        phys.Body.LinearVelocity = Vector3.Transform(-Vector3.UnitZ, Parent.Transform.Orientation) * Speed;
 
         if (Target != null &&
             !Target.Flags.HasFlag(GameObjectFlags.Exists))
@@ -66,7 +52,7 @@ public class SMissileComponent : GameComponent
 
         if (Target != null)
         {
-            TurnTowards(time, Target.LocalTransform.Position);
+            TurnTowards(time, Target.Transform.Position);
         }
 
         if (Missile.Def.MaxAngularVelocity > 0 &&

@@ -1,0 +1,69 @@
+diff --git a/src/LibreLancer/Shaders/Nomad.frag.hlsl b/src/LibreLancer/Shaders/Nomad.frag.hlsl
+--- a/src/LibreLancer/Shaders/Nomad.frag.hlsl
++++ b/src/LibreLancer/Shaders/Nomad.frag.hlsl
+@@ -20,8 +20,9 @@
+ 
+ float4 main(Input input) : SV_Target0
+ {
+-    float ratio = (dot(normalize(input.V), normalize(input.N)) + 1.0) / 2.0;
+-    ratio = clamp(ratio, 0.0, 1.0);
++    // Match the legacy Nomad material: negative facing angles use the first
++    // gradient sample instead of remapping the full signed range.
++    float ratio = clamp(dot(normalize(input.V), normalize(input.N)), 0.0, 1.0);
+ 
+     float4 nt = NtTexture.Sample(NtSampler, float2(ratio, 0.0));
+     float4 dt = DtTexture.Sample(DtSampler, input.texCoord);
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -16,6 +16,7 @@
+ | HDR und Tonemapping | Linearisiertes Scene-Target, ACES-Tonemapping, linearisierte PBR-Albedo-/Licht-/Emissionswerte und exakte sRGB-Ausgabe im PBR-LDR-Pfad. System- und Nebel-Clearfarben werden ebenfalls vor dem HDR-Clear linearisiert; LDR bleibt unverändert. Ein Source-Audit hat alle 19 Ingame-Fragmentshader und den Postprocess-Ausgang geprüft; 2 Farbraum- und 21 Ambientlicht-Regressionstests bestehen. | Retail-Farbannahmen, visuelle Gleichheit zwischen Legacy/PBR, transparente Effekte, Fog und zusammengesetzte Ingame-Szenen brauchen weiterhin feste Bildvergleiche, Original-Client-Referenz und Hardware-GPU-Abnahme. HDR/LDR-Vergleiche: `docs/evidence/renderer/postprocess-four-mode-ab-20261017/` und der same-session-Hi02-Lauf `docs/evidence/renderer/hdr-ldr-hi02-live-ab-20261018/`; letzterer zeigt in dieser Legacy-Szene nur geringe Pixelabweichung und ersetzt keine Material-/Emissions-Referenz. Shaderaudit: `docs/evidence/renderer/hdr-shader-color-contract-audit-20261018.md`; Clear-Farbvertrag: `docs/evidence/renderer/hdr-clear-color-contract-20261018.md`. |
+ | Bloom | HDR-Extraktion mittelt jetzt ein vollständiges 4×4-Quellfenster in Viertelauflösung; aufrundende Zielmaße behalten Randpixel bei ungeraden Fenstergrößen. Basis-, mittlere und breite Blur-Stufen sowie Schwelle, Radius, Auflösung und Kernel sind konfigurierbar. | Die Extraktion beseitigt das bisherige Unterabtasten der zentralen vier Texel. Der Code führt alle drei Stufen aus. Die vorhandene Bloom-Pyramidenaufnahme nennt ein Laufzeitpaket/Manifest vom 18.10. und gilt am Dokumentstand 17.10. nicht als verifizierter NAP-Lauf. Laufzeitabnahme, Halo-Kalibrierung und GPU-Kosten bleiben offen. |
+ | Antialiasing | SMAA-Pässe und MSAA-Auflösung; HDR/LDR-Kombinationen sowie Resize und Minimize/Restore wurden auf OpenGL/Mesa geprüft. | Andere Backends/Treiber, wiederholte Lifecycle-Zyklen und Fehler-Injektion stehen aus. |
++| Nomad-Gradient | Der HLSL-Shader begrenzt den View-/Normal-Dot-Product nun wie der frühere LibreLancer-Shader auf `[0, 1]`, anstatt den gesamten signierten Bereich auf `[0, 1]` umzurechnen. | Produktionsshader-Build und gezielter Nomad-Schiff-A/B mit Retail-NAP-Daten stehen aus. Quellvergleich: `docs/evidence/renderer/nomad-gradient-legacy-parity-20261018.md`. |
+ | GPU-Readback | Asynchrones OpenGL-Textur-Readback verwendet PBO und Fence. Synchron liest Desktop-GL die angeforderte Mip-Ebene mit `glGetTexImage` und kopiert die Region in den Zielbereich; GLES verwendet ein temporäres FBO und `ReadPixels`. Pack-Alignment und PBO-Bindung werden wiederhergestellt. | Ein Release-Runtime-Probe mit Mip 1, Teilrechteck und Zieloffset besteht auf Mesa/OpenGL mit Intel HD 4600. Komprimierte Formate werden ausdrücklich abgelehnt. GLES-Lauf, Fehler-Injektion und Editor-Export bleiben offen. Siehe `docs/evidence/renderer/gl-texture-readback-smoke-20261018.md` und `docs/evidence/renderer/gl-texture-async-readback-lifecycle-20261018/`. |
+ | Postprocess-Lifecycle | Postprocess-Pässe werden in umgekehrter Ausführungsreihenfolge entsorgt; bei einem Fehler läuft die Freigabe aller übrigen Pässe weiter. Der Plan ist idempotent entsorgbar und meldet Fehler gebündelt. | Regressionstests decken Reihenfolge, Fehlerfortsetzung und wiederholtes Dispose ab. Fehler im eigentlichen Backend-Ressourcenfreigabepfad und Kontextverlust sind weiter offen. |
+ | Systemrenderer-Lifecycle | `SystemRenderer.Dispose()` versucht die Freigabe aller Frame-/Effekt-/Target-Ressourcen und GPU-Timerabfragen auch dann, wenn einzelne Freigaben fehlschlagen; Fehler werden gebündelt. Wiederholtes Dispose ist wirkungslos. | Fehlerfortsetzung der allgemeinen Bereinigungsroutine ist unit-getestet. Native GL-Fehlerinjektion und Kontextverlust bleiben offen. Siehe `docs/evidence/renderer/system-renderer-cleanup-20261018/`. |
+diff --git a/docs/evidence/renderer/nomad-gradient-legacy-parity-20261018.md b/docs/evidence/renderer/nomad-gradient-legacy-parity-20261018.md
+new file mode 100644
+--- /dev/null
++++ b/docs/evidence/renderer/nomad-gradient-legacy-parity-20261018.md
+@@ -0,0 +1,19 @@
++# Nomad-Gradient: Legacy-Winkelabbildung
++
++Stand: 2026-10-18
++
++Der aktuelle HLSL-Fragmentshader bildete den normalisierten View-/Normal-
++Dot-Product mit `(dot + 1) / 2` auf den Bereich `[0, 1]` ab. Das verändert
++die Zuordnung der Texturkoordinate gegenüber dem historischen
++LibreLancer-Shader `NomadMaterial.frag` aus Commit `4193dd4bd`: Dort wird
++`dot(normalize(V), normalize(N))` direkt auf `[0, 1]` begrenzt. Der historische
++Vertexshader erzeugt dieselbe Richtung `V = normalize(-View * position)`.
++
++Patch `2388-nomad-gradient-legacy-parity.patch` stellt die HLSL-Abbildung auf
++das belegte Verhalten zurück. Damit wird der Nomad-Gradient im Backface-Bereich
++am ersten Sample begrenzt, statt über den halben Gradient zu laufen.
++
++Die Überprüfung belegt Quellcode-Parität und erfolgreiche Shader-Kompilierung,
++nicht die visuelle Übereinstimmung mit dem Retail-Spiel. Ein fester
++Nomad-Schiff-A/B-Lauf mit verifiziertem Retail-NAP und einer Hardware-GPU bleibt
++offen.
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 384 Client patches and two native patches. Each
++The active series contains 385 Client patches and two native patches. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -385,3 +385,4 @@
+ client 2385-fx-singular-linked-transform-fallback.patch
+ client 2386-render-context-scoped-shader-cache.patch
+ client 2387-render-pass-required-writes.patch
++client 2388-nomad-gradient-legacy-parity.patch

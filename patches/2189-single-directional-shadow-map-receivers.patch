@@ -1,0 +1,708 @@
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -240,6 +240,7 @@
+   - `--render-hdr=on|off` → `render_hdr` (opt-in float scene target and ACES tone mapping; falls back to LDR when the GPU target is unavailable).
+   - `--render-bloom=on|off` → `render_bloom` (opt-in bloom pass; requires `render_hdr`).
+   - `--render-depth-prepass=on|off` → `render_depth_prepass` (opt-in opaque model depth pass; Basic/PBR materials use depth-only fragment variants; off by default pending runtime performance measurements).
++  - `--render-shadows=on|off` → `render_shadows` (opt-in single directional shadow map with opaque model casters and 3×3 PCF receivers in Basic/PBR; off by default).
+   - `--render-bloom-threshold=0..8` → `render_bloom_threshold` (finite invariant-culture float; default 1).
+   - `--render-bloom-strength=0..2` → `render_bloom_strength` (finite invariant-culture float; default 0.18).
+   - `--render-projectile-beams=on|off` → `render_projectile_beams` (only hides `vis_beam`; simulation and projectile particle effects remain active).
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -580,6 +580,7 @@
+ 
+ ### P7/P8 – Weitere Grafikpakete
+ 
++- [x] Erste integrierte gerichtete Schattenstufe: optionaler `render_shadows`-Pass mit 1024²-Depth-Map, Sichtfrustum-Lichtkamera, opaken aktiven Model-Castern und 3×3-PCF-Receivern in Basic/PBR. CLI: `--render-shadows=on|off`; Standard aus. Der Release-Build umfasst die Shader-Varianten, aber die NAP-Laufzeit-/Bildabnahme, GLES, Kaskaden und Offscreen-Caster fehlen.
+ - [ ] Soft Particles und volumetrischer Nebel/Lichtstrahlen: lineare Tiefe,
+   Transparenz und bestehende Freelancer-Nebelparameter erhalten.
+ - [ ] Gerichtete Schatten zuerst mit Kaskaden/PCF, anschließend zusätzliche
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -207,7 +207,8 @@
+   - [x] Sampleable Depth-only-Renderziele im OpenGL-Backend und no-op-Ziele im Null-Backend bereitgestellt; Release-Build sowie OpenGL-4.6/Mesa-NAP-Smoke für FBO, Clear und Depth-Readback bestanden. GLES, Shader-Sampling und PCF bleiben offen; siehe [Depth-only-Smoke](evidence/renderer/depth-only-target-smoke-20261017/README.md).
+   - [x] `DirectionalShadowCamera` kann den aktiven Kamerafrustum bis zu einer begrenzten Sichtweite in einen Lichtfrustum überführen und die orthografische XY-Projektion auf Shadow-Map-Texel rasten. Der Build prüft die Kompilierung; ein Laufzeit- oder Schattenbildnachweis fehlt. Die Kamera wird noch nicht vom `SystemRenderer` verwendet.
+   - [x] Opake, sichtbare Model-Meshes schreiben optional im Main-Camera-Depth-Prepass mit LOD und World-Matrix; transparente Teile bleiben ausgeschlossen. `render_depth_prepass` und `--render-depth-prepass=on|off` steuern den Pass, der standardmäßig aus ist. Basic/PBR-Materialien verwenden Depth-only-Fragmentvarianten; Alpha-Test wird im Basic-Pfad beibehalten, Normal-/Emissive-/Beleuchtungsarbeit entfällt. Nicht unterstützte Materialtypen nutzen ihren vorhandenen Shader-Fallback. Der Pass wirft keine Schatten; Laufzeit- und FPS-Abnahme stehen aus.
+-  - [ ] GL/GLES-FBO-Laufzeit prüfen, danach Caster-Draws, Lichtmatrizen, PCF und Receiver-Shading in den beleuchteten Materialpfaden implementieren.
++  - [x] Erste integrierte OpenGL-Stufe: `render_shadows` / `--render-shadows=on|off` wählt eine aktive gerichtete Systemlichtquelle, zeichnet opake aktive Teile der sichtbaren `ModelRenderer` in ein 1024²-Depth-Target und bindet die Lichtmatrix samt 3×3-PCF in Basic- und PBR-Receiver. Shadow-Map-Draws gehen in die GPU-Passzeiten ein; Schatten bleiben standardmäßig aus. Das ist eine einzelne Karte ohne Kaskaden; Caster außerhalb der sichtbaren Objektliste, andere Materialfamilien und Laufzeit-/Bildabnahme sind nicht abgedeckt.
++  - [ ] NAP-Laufzeitbilder für Schiffe und Basen gegen die Schattenoption aus aufnehmen; Bias, Sichtweite und Filterung kalibrieren, GL/GLES-FBO-Sampling prüfen und anschließend Kaskaden sowie außerhalb der Hauptkamera liegende Caster ergänzen.
+ - [ ] Screen-Space-Reflections als optionale Ergänzung prüfen; fehlende Bildinformation an Bildschirmrändern und bei verdeckten Objekten muss über den bestehenden PBR-Fallback abgefangen werden.
+ - [ ] Volumetrischen Nebel und volumetrische Lichtstrahlen als eigenständige, skalierbare Qualitätstufe evaluieren; vorhandene Freelancer-Nebelparameter und Transparenzreihenfolge als Referenz verwenden.
+ - [ ] Forward+/Clustered Lighting gegen die aktuelle Beleuchtungsarchitektur und typische Freelancer-Szenen mit vielen Lichtern benchmarken, bevor ein Renderer-Umbau geplant wird.
+--- a/patches/series
++++ b/patches/series
+@@ -188,3 +188,4 @@
+ client 2186-mark-depth-prepass-conditional.patch
+ client 2187-sync-depth-prepass-pipeline-status.patch
+ client 2188-directional-shadow-camera-fit.patch
++client 2189-single-directional-shadow-map-receivers.patch
+--- a/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
++++ b/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
+@@ -6,6 +6,7 @@
+ public enum SystemRenderPass
+ {
+     FrameClear,
++    ShadowMap,
+     DepthPrepass,
+     Opaque,
+     StarsAndNebula,
+@@ -25,12 +26,14 @@
+     SmaaStencil = 1 << 5,
+     SmaaLookupTextures = 1 << 6,
+     SmaaDepth = 1 << 7,
+-    SceneStencil = 1 << 8
++    SceneStencil = 1 << 8,
++    ShadowDepth = 1 << 9
+ }
+ 
+ public enum SystemRenderTargetRole
+ {
+     Scene,
++    ShadowMap,
+     Presentation,
+     SmaaEdges,
+     SmaaBlendWeights
+@@ -46,7 +49,8 @@
+     OpenGlRgba16Float,
+     OpenGlRgbaImplementationDefined,
+     Depth24,
+-    Depth24Stencil8
++    Depth24Stencil8,
++    DepthTexture
+ }
+ 
+ public enum SystemRenderLoadOperation { None, Load, Clear, DontCare }
+@@ -112,6 +116,12 @@
+                 SystemRenderLoadOperation.Clear, SystemRenderStoreOperation.Store, Optional: true),
+             new(SystemRenderResource.SceneStencil, SystemRenderAttachmentFormat.ActiveTarget,
+                 SystemRenderLoadOperation.Clear, SystemRenderStoreOperation.Store, Optional: true)),
++        new(SystemRenderPass.ShadowMap, "Shadow map", SystemRenderResource.None,
++            SystemRenderResource.ShadowDepth, SystemRenderTargetRole.ShadowMap,
++            null,
++            new(SystemRenderResource.ShadowDepth, SystemRenderAttachmentFormat.DepthTexture,
++                SystemRenderLoadOperation.Clear, SystemRenderStoreOperation.Store), null,
++            Conditional: true),
+         new(SystemRenderPass.DepthPrepass, "Depth",
+             SystemRenderResource.SceneDepth,
+             SystemRenderResource.SceneDepth, SystemRenderTargetRole.Scene,
+@@ -119,7 +129,7 @@
+                 SystemRenderLoadOperation.Load, SystemRenderStoreOperation.Store, Optional: true), null, null,
+             Conditional: true),
+         new(SystemRenderPass.Opaque, "Opaque",
+-            SystemRenderResource.SceneColor | SystemRenderResource.SceneDepth,
++            SystemRenderResource.SceneColor | SystemRenderResource.SceneDepth | SystemRenderResource.ShadowDepth,
+             SystemRenderResource.SceneColor | SystemRenderResource.SceneDepth,
+             SystemRenderTargetRole.Scene,
+             new(SystemRenderResource.SceneColor, SystemRenderAttachmentFormat.ActiveTarget,
+--- a/src/LibreLancer/GameSettings.cs
++++ b/src/LibreLancer/GameSettings.cs
+@@ -63,6 +63,8 @@
+         public bool RenderBloom = false;
+         [Entry("render_depth_prepass")]
+         public bool RenderDepthPrepass = false;
++        [Entry("render_shadows")]
++        public bool RenderShadows = false;
+         [Entry("render_bloom_threshold")]
+         public float BloomThreshold = 1f;
+         [Entry("render_bloom_strength")]
+@@ -124,6 +126,7 @@
+         bool IRendererSettings.RenderHdr => RenderHdr;
+         bool IRendererSettings.RenderBloom => RenderBloom;
+         bool IRendererSettings.RenderDepthPrepass => RenderDepthPrepass;
++        bool IRendererSettings.RenderShadows => RenderShadows;
+         float IRendererSettings.BloomThreshold => BloomThreshold;
+         float IRendererSettings.BloomStrength => BloomStrength;
+         bool IRendererSettings.RenderProjectileBeams => RenderProjectileBeams;
+@@ -174,6 +177,7 @@
+             writer.WriteLine($"render_hdr = {RenderHdr.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_bloom = {RenderBloom.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_depth_prepass = {RenderDepthPrepass.ToString().ToLowerInvariant()}");
++            writer.WriteLine($"render_shadows = {RenderShadows.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_bloom_threshold = {Fmt(BloomThreshold)}");
+             writer.WriteLine($"render_bloom_strength = {Fmt(BloomStrength)}");
+             writer.WriteLine($"render_projectile_beams = {RenderProjectileBeams.ToString().ToLowerInvariant()}");
+@@ -219,6 +223,7 @@
+                 RenderHdr = RenderHdr,
+                 RenderBloom = RenderBloom,
+                 RenderDepthPrepass = RenderDepthPrepass,
++                RenderShadows = RenderShadows,
+                 BloomThreshold = BloomThreshold,
+                 BloomStrength = BloomStrength,
+                 RenderProjectileBeams = RenderProjectileBeams,
+@@ -262,6 +267,7 @@
+             RenderHdr = other.RenderHdr;
+             RenderBloom = other.RenderBloom;
+             RenderDepthPrepass = other.RenderDepthPrepass;
++            RenderShadows = other.RenderShadows;
+             BloomThreshold = other.BloomThreshold;
+             BloomStrength = other.BloomStrength;
+             RenderProjectileBeams = other.RenderProjectileBeams;
+--- a/src/LibreLancer/Render/GpuPassProfile.cs
++++ b/src/LibreLancer/Render/GpuPassProfile.cs
+@@ -11,6 +11,7 @@
+     private static readonly SystemRenderPass[] TimedPasses =
+     [
+         SystemRenderPass.FrameClear,
++        SystemRenderPass.ShadowMap,
+         SystemRenderPass.DepthPrepass,
+         SystemRenderPass.Opaque,
+         SystemRenderPass.StarsAndNebula,
+--- a/src/LibreLancer/Render/IRendererSettings.cs
++++ b/src/LibreLancer/Render/IRendererSettings.cs
+@@ -19,6 +19,7 @@
+     bool RenderHdr => false;
+     bool RenderBloom => false;
+     bool RenderDepthPrepass => false;
++    bool RenderShadows => false;
+     float BloomThreshold => 1f;
+     float BloomStrength => 0.18f;
+     bool RenderProjectileBeams => true;
+--- a/src/LibreLancer/Render/Materials/BasicMaterial.cs
++++ b/src/LibreLancer/Render/Materials/BasicMaterial.cs
+@@ -45,6 +45,10 @@
+         private bool roughnessTextureBound;
+         private bool metallicTextureBound;
+         private bool debugMarkerActive;
++        private bool shadowLightingEnabled;
++        private Texture? previousShadowTexture;
++        private SamplerState previousShadowSampler;
++        private bool shadowTextureBound;
+         private float activeSurfaceNormalStrength;
+         private volatile bool surfaceNormalLoadFailed;
+         private int surfaceImageLoadState;
+@@ -114,7 +118,8 @@
+             VERTEX_TEXTURE2 = (1 << 4),
+             VERTEX_LIGHTING = (1 << 5),
+             ENVMAP = (1 << 6),
+-            DEPTH_ONLY = (1 << 7)
++            DEPTH_ONLY = (1 << 7),
++            SHADOWMAP = (1 << 8)
+         }
+ 
+         private Shader GetPBRShader(IVertexType vertexType, bool useEnvMapping)
+@@ -135,6 +140,8 @@
+                 caps |= PBRFeatures.ET_ENABLED;
+             if (DepthOnlyPass)
+                 caps |= PBRFeatures.DEPTH_ONLY;
++            if (shadowLightingEnabled)
++                caps |= PBRFeatures.SHADOWMAP;
+             if (VertexLighting)
+                 caps |= PBRFeatures.VERTEX_LIGHTING;
+             if (useEnvMapping)
+@@ -170,6 +177,7 @@
+             VERTEX_TEXTURE2 = (1 << 6),
+             ENVMAP = (1 << 7),
+             DEPTH_ONLY = (1 << 8),
++            SHADOWMAP = (1 << 9),
+         }
+ 
+         private Shader GetRegularShader(IVertexType vertexType, bool useEnvMapping)
+@@ -187,6 +195,8 @@
+                 caps |= ShaderFeatures.ENVMAP;
+             if (DepthOnlyPass)
+                 caps |= ShaderFeatures.DEPTH_ONLY;
++            if (shadowLightingEnabled)
++                caps |= ShaderFeatures.SHADOWMAP;
+             // Shitty way of dealing with alpha_mask
+             // FL has a lot of DXT1 textures that aren't part of alpha_mask
+             // so this brings overall performance down.
+@@ -287,6 +297,8 @@
+ 
+         public override void Use(RenderContext rstate, IVertexType vertextype, ref Lighting lights, int userData)
+         {
++            shadowLightingEnabled = !DepthOnlyPass && ShadowLight != null &&
++                                   ShadowDepthTexture != null && lights.Enabled;
+             if (!DepthOnlyPass)
+             {
+                 TryAcquireSurfaceNormal(vertextype, rstate);
+@@ -320,6 +332,13 @@
+ 
+             var shader = pbr ? GetPBRShader(vertextype, pbrEnvMapping) : GetRegularShader(vertextype, envMapping);
+             SetWorld(shader);
++            if (shadowLightingEnabled)
++            {
++                previousShadowTexture = rstate.Textures[6];
++                previousShadowSampler = rstate.Samplers[6];
++                SetShadowParameters(shader, rstate);
++                shadowTextureBound = true;
++            }
+             // Dt
+             BindTexture(rstate, 0, DtSampler, 0, DtFlags, ResourceManager.WhiteTextureName);
+             // Dc
+@@ -603,12 +622,20 @@
+                 if (roughnessTextureBound) rstate.Textures[4] = previousRoughnessTexture;
+                 if (metallicTextureBound) rstate.Samplers[3] = previousMetallicSampler;
+                 if (roughnessTextureBound) rstate.Samplers[4] = previousRoughnessSampler;
++                if (shadowTextureBound)
++                {
++                    rstate.Textures[6] = previousShadowTexture;
++                    rstate.Samplers[6] = previousShadowSampler;
++                }
+             } finally {
+                 surfaceTextureBound = false;
+                 previousSurfaceTexture = null;
+                 metallicTextureBound = false;
+                 roughnessTextureBound = false;
+                 previousMetallicTexture = previousRoughnessTexture = null;
++                shadowTextureBound = false;
++                shadowLightingEnabled = false;
++                previousShadowTexture = null;
+                 activeSurfaceNormal?.Dispose();
+                 activeSurfaceRoughness?.Dispose();
+                 activeSurfaceMetallic?.Dispose();
+--- a/src/LibreLancer/Render/ModelRenderer.cs
++++ b/src/LibreLancer/Render/ModelRenderer.cs
+@@ -199,6 +199,31 @@
+             }
+         }
+ 
++        public void ShadowDepthPrepass(ICamera shadowCamera, ICamera viewCamera, CommandBuffer commands)
++        {
++            if (Model == null || sysr == null)
++                return;
++
++            Model.Update(sysr.Game.TotalTime);
++            for (var i = 0; i < Model.AllParts.Length; i++)
++            {
++                var part = Model.AllParts[i];
++                if (!part.Active || part.Mesh == null)
++                    continue;
++
++                var world = part.LocalTransform.Matrix() * _worldSph;
++                var center = Vector3.Transform(part.Mesh.Center, world);
++                var level = GetLevel(part, center, viewCamera.Position);
++                if (level == -1 || !shadowCamera.FrustumCheck(new BoundingSphere(center, part.Mesh.Radius)))
++                    continue;
++
++                var lighting = Lighting.Empty;
++                var userData = ColorOverride is { } color ? BasicMaterial.SetDc(color) : 0;
++                part.Mesh.DrawBuffer(level, sysr.ResourceManager, commands, world, ref lighting,
++                    Model.MaterialAnims, userData, null, OpacityMultiplier, EnvMapMaterial, opaqueOnly: true);
++            }
++        }
++
+         private Matrix4x4 _worldSph;
+         private BitArray128 visibleParts;
+ 
+--- a/src/LibreLancer/Render/RenderMaterial.cs
++++ b/src/LibreLancer/Render/RenderMaterial.cs
+@@ -19,6 +19,11 @@
+     public abstract class RenderMaterial
+     {
+         private static int _key = 0;
++
++        public static DynamicLight? ShadowLight;
++        public static Texture2D? ShadowDepthTexture;
++        public static Matrix4x4 ShadowViewProjection;
++        public static float ShadowMapTexelSize;
+ 
+         public int Key { get; private set; }
+ 
+@@ -65,7 +70,7 @@
+             public Vector3 Attentuation;
+             private float _padding1;
+             public Vector3 Direction;
+-            private float _padding2;
++            public float Shadow;
+             public float Spotlight;
+             public float Falloff;
+             public float Theta;
+@@ -150,10 +155,12 @@
+                     continue;
+                 }
+ 
+-                var src = lighting.Lights.SourceLighting.FrameLights[i].Light;
++                var source = lighting.Lights.SourceLighting.FrameLights[i];
++                var src = source.Light;
+                 lights[lt].Position = src.Position;
+                 lights[lt].Attentuation = src.Attenuation;
+                 lights[lt].Direction = src.Direction;
++                lights[lt].Shadow = ReferenceEquals(source, ShadowLight) ? 1f : 0f;
+                 lights[lt].Diffuse = src.Color;
+                 lights[lt].Ambient = src.Ambient;
+                 lights[lt].Range = src.Range;
+@@ -187,6 +194,28 @@
+             var szCount = 3 * sizeof(Vector4) + // header
+                           lt * sizeof(PackedLight); // lights
+             shader.SetUniformBlock<ShaderLighting>(2, ref data, false, szCount);
++        }
++
++        [StructLayout(LayoutKind.Sequential, Pack = 1)]
++        private struct ShadowParameters
++        {
++            public Matrix4x4 ViewProjection;
++            public Vector4 Values;
++        }
++
++        protected static void SetShadowParameters(Shader shader, RenderContext context)
++        {
++            if (ShadowLight == null || ShadowDepthTexture == null)
++                return;
++            var parameters = new ShadowParameters
++            {
++                ViewProjection = ShadowViewProjection,
++                Values = new Vector4(0.0015f, ShadowMapTexelSize, 0, 0)
++            };
++            shader.SetUniformBlock(7, ref parameters);
++            context.Textures[6] = ShadowDepthTexture;
++            context.Samplers[6] = new SamplerState(TextureFiltering.Nearest,
++                WrapMode.ClampToEdge, WrapMode.ClampToEdge);
+         }
+ 
+         protected Texture? GetTexture(int cacheIndex, string? tex, bool bindNull = true)
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -11,6 +11,7 @@
+ using LibreLancer.Fx;
+ using LibreLancer.Graphics;
+ using LibreLancer.Graphics.Backends.OpenGL;
++using LibreLancer.Render.Cameras;
+ using LibreLancer.Render.Materials;
+ using LibreLancer.Resources;
+ using LibreLancer.Thn;
+@@ -71,6 +72,12 @@
+         private IGpuTimerQuery?[]? gpuPassQueries;
+         private long nextGpuProfileFrame;
+         private long currentGpuProfileFrame;
++        private const int ShadowMapResolution = 1024;
++        private const float ShadowMaxDistance = 50000f;
++        private const float ShadowDepthPadding = 2048f;
++        private readonly DirectionalShadowCamera shadowCamera = new();
++        private RenderTarget2D? shadowTarget;
++        private bool shadowTargetAllocationFailed;
+ 
+         public Game Game
+         {
+@@ -428,6 +435,8 @@
+             bool aaViewportPushed = false;
+             bool aaScissorPushed = false;
+             bool thnDefaultZActive = false;
++            RenderMaterial.ShadowLight = null;
++            RenderMaterial.ShadowDepthTexture = null;
+ 
+             try
+             {
+@@ -594,6 +603,8 @@
+                     rstate.DepthFunction = DepthFunction.Less;
+                     rstate.ColorWrite = true;
+                 }
++                var shadowMapReady = DrawShadowMap();
++                RenderMaterial.VertexLighting = !(AllowPerPixelLighting && Settings.PerPixelLighting) && !shadowMapReady;
+                 // Actual Drawing
+ 
+                 BeginGpuPass(SystemRenderPass.Opaque, sceneTarget);
+@@ -781,6 +792,8 @@
+                     rstate.DepthRange = restoreDepthRange;
+                     rstate.ColorWrite = restoreColorWrite;
+                     rstate.ClearColor = restoreClearColor;
++                    RenderMaterial.ShadowLight = null;
++                    RenderMaterial.ShadowDepthTexture = null;
+                 }
+             }
+         }
+@@ -850,6 +863,119 @@
+                 !ReferenceEquals(rstate.RenderTarget, sceneTarget))
+                 throw new InvalidOperationException(
+                     $"Render pass '{descriptor.Name}' is bound to a different target than the scene.");
++            if (descriptor.Target == SystemRenderTargetRole.ShadowMap &&
++                !ReferenceEquals(rstate.RenderTarget, shadowTarget))
++                throw new InvalidOperationException(
++                    $"Render pass '{descriptor.Name}' is bound to a different shadow target.");
++        }
++
++        private bool DrawShadowMap()
++        {
++            RenderMaterial.ShadowLight = null;
++            RenderMaterial.ShadowDepthTexture = null;
++            if (!Settings.RenderShadows)
++            {
++                shadowTarget?.Dispose();
++                shadowTarget = null;
++                shadowTargetAllocationFailed = false;
++                return false;
++            }
++            if (shadowTargetAllocationFailed)
++                return false;
++
++            DynamicLight? selectedLight = null;
++            foreach (var light in SystemLighting.Lights)
++            {
++                if (light.Active && light.Light.Kind == LightKind.Directional &&
++                    float.IsFinite(light.Light.Color.R + light.Light.Color.G + light.Light.Color.B) &&
++                    light.Light.Color.R + light.Light.Color.G + light.Light.Color.B > 0)
++                {
++                    selectedLight = light;
++                    break;
++                }
++            }
++            if (selectedLight == null ||
++                !shadowCamera.Fit(camera, selectedLight.Light.Direction, ShadowMaxDistance,
++                    ShadowMapResolution, 512f, ShadowDepthPadding))
++                return false;
++
++            if (shadowTarget == null)
++            {
++                try
++                {
++                    shadowTarget = new RenderTarget2D(rstate, ShadowMapResolution, ShadowMapResolution,
++                        SurfaceFormat.Depth);
++                }
++                catch (Exception ex) when (ex is InvalidOperationException or NotSupportedException)
++                {
++                    shadowTargetAllocationFailed = true;
++                    FLLog.Warning("Graphics", $"Directional shadow target is unavailable; shadows are disabled. {ex.Message}");
++                    return false;
++                }
++            }
++
++            var previousTarget = rstate.RenderTarget;
++            var previousDepthEnabled = rstate.DepthEnabled;
++            var previousDepthWrite = rstate.DepthWrite;
++            var previousDepthFunction = rstate.DepthFunction;
++            var previousDepthRange = rstate.DepthRange;
++            var previousColorWrite = rstate.ColorWrite;
++            var viewportPushed = false;
++            var scissorPushed = false;
++            var passStarted = false;
++            try
++            {
++                rstate.RenderTarget = shadowTarget;
++                rstate.PushViewport(0, 0, ShadowMapResolution, ShadowMapResolution);
++                viewportPushed = true;
++                scissorPushed = rstate.PushScissor(
++                    new Rectangle(0, 0, ShadowMapResolution, ShadowMapResolution), false);
++                rstate.DepthEnabled = true;
++                rstate.DepthWrite = true;
++                rstate.DepthFunction = DepthFunction.Less;
++                rstate.DepthRange = new Vector2(0, 1);
++                rstate.ColorWrite = false;
++                rstate.ClearDepth();
++                ValidateScenePassTarget(SystemRenderPass.ShadowMap, null);
++                rstate.SetCamera(shadowCamera);
++                Commands.Camera = shadowCamera;
++                Commands.DepthOnlyPass = true;
++                BeginGpuPass(SystemRenderPass.ShadowMap);
++                passStarted = true;
++                foreach (var obj in objects)
++                {
++                    if (obj is ModelRenderer model)
++                        model.ShadowDepthPrepass(shadowCamera, camera, Commands);
++                }
++            }
++            finally
++            {
++                try
++                {
++                    if (passStarted)
++                        EndGpuPass(SystemRenderPass.ShadowMap);
++                }
++                finally
++                {
++                    Commands.DepthOnlyPass = false;
++                    rstate.RenderTarget = previousTarget;
++                    if (scissorPushed) rstate.PopScissor();
++                    if (viewportPushed) rstate.PopViewport();
++                    rstate.DepthEnabled = previousDepthEnabled;
++                    rstate.DepthWrite = previousDepthWrite;
++                    rstate.DepthFunction = previousDepthFunction;
++                    rstate.DepthRange = previousDepthRange;
++                    rstate.ColorWrite = previousColorWrite;
++                    rstate.SetCamera(camera);
++                    Commands.Camera = camera;
++                }
++            }
++
++            RenderMaterial.ShadowLight = selectedLight;
++            RenderMaterial.ShadowDepthTexture = shadowTarget.Texture;
++            RenderMaterial.ShadowViewProjection = shadowCamera.ViewProjection;
++            RenderMaterial.ShadowMapTexelSize = 1f / ShadowMapResolution;
++            return true;
+         }
+         private void EndGpuPass(SystemRenderPass pass)
+         {
+@@ -880,6 +1006,9 @@
+         {
+             DisposeGpuPassQueries();
+             msaa?.Dispose();
++            shadowTarget?.Dispose();
++            RenderMaterial.ShadowLight = null;
++            RenderMaterial.ShadowDepthTexture = null;
+ 
+             Polyline.Dispose();
+             FxPool.Dispose();
+--- a/src/LibreLancer/Shaders/Basic_FVF.txt
++++ b/src/LibreLancer/Shaders/Basic_FVF.txt
+@@ -9,3 +9,4 @@
+ feature VERTEX_TEXTURE2 7
+ feature ENVMAP 8
+ feature DEPTH_ONLY 9
++feature SHADOWMAP 10
+--- a/src/LibreLancer/Shaders/Basic_PositionColor.txt
++++ b/src/LibreLancer/Shaders/Basic_PositionColor.txt
+@@ -1,6 +1,7 @@
+ vertex Basic_PositionColor.vert.hlsl
+ fragment Basic.frag.hlsl
+ feature DEPTH_ONLY 9
++feature SHADOWMAP 10
+ feature VERTEX_LIGHTING 1
+ feature ALPHATEST_ENABLED 2
+ feature TEX2_ENABLED 3
+--- a/src/LibreLancer/Shaders/Basic_PositionTexture.txt
++++ b/src/LibreLancer/Shaders/Basic_PositionTexture.txt
+@@ -1,6 +1,7 @@
+ vertex Basic_PositionTexture.vert.hlsl
+ fragment Basic.frag.hlsl
+ feature DEPTH_ONLY 9
++feature SHADOWMAP 10
+ feature VERTEX_LIGHTING 1
+ feature ALPHATEST_ENABLED 2
+ feature TEX2_ENABLED 3
+--- a/src/LibreLancer/Shaders/Basic_Skinned.txt
++++ b/src/LibreLancer/Shaders/Basic_Skinned.txt
+@@ -7,3 +7,4 @@
+ feature NORMALMAP 5
+ feature ENVMAP 8
+ feature DEPTH_ONLY 9
++feature SHADOWMAP 10
+--- a/src/LibreLancer/Shaders/PBR.frag.hlsl
++++ b/src/LibreLancer/Shaders/PBR.frag.hlsl
+@@ -252,6 +252,13 @@
+         float3 h = normalize(l+v);
+         float NdotL = max(dot(n, l), 0.0);
+         if (NdotL <= 0.0) continue;
++#ifdef SHADOWMAP
++        float shadowVisibility = Lights[i].Shadow > 0.5
++            ? DirectionalShadowVisibility(input.worldPosition)
++            : 1.0;
++#else
++        float shadowVisibility = 1.0;
++#endif
+         float NdotV = clamp(abs(dot(n, v)), 0.001, 1.0);
+         float NdotH = clamp(dot(n, h), 0.0, 1.0);
+         float LdotH = clamp(dot(l, h), 0.0, 1.0);
+@@ -277,9 +284,9 @@
+         // Calculation of analytical lighting contribution
+         float3 diffuseContrib = (1.0 - F) * diffuseLambert(pbrInputs);
+         float3 specContrib = F * G * D / (4.0 * NdotL * NdotV);
+-        color += NdotL * Lights[i].Diffuse * attenuation * specContrib;
++        color += NdotL * Lights[i].Diffuse * attenuation * shadowVisibility * specContrib;
+ #ifndef VERTEX_LIGHTING
+-        color += NdotL * Lights[i].Diffuse * attenuation * diffuseContrib;
++        color += NdotL * Lights[i].Diffuse * attenuation * shadowVisibility * diffuseContrib;
+         color += diffuseColor * Lights[i].Ambient * attenuation;
+ #endif
+     }
+--- a/src/LibreLancer/Shaders/PBR.txt
++++ b/src/LibreLancer/Shaders/PBR.txt
+@@ -8,3 +8,4 @@
+ feature VERTEX_LIGHTING 6
+ feature ENVMAP 7
+ feature DEPTH_ONLY 8
++feature SHADOWMAP 9
+--- a/src/LibreLancer/Shaders/PBR_Skinned.txt
++++ b/src/LibreLancer/Shaders/PBR_Skinned.txt
+@@ -8,3 +8,4 @@
+ feature VERTEX_LIGHTING 6
+ feature ENVMAP 7
+ feature DEPTH_ONLY 8
++feature SHADOWMAP 9
+--- a/src/LibreLancer/Shaders/includes/Lighting.hlsl
++++ b/src/LibreLancer/Shaders/includes/Lighting.hlsl
+@@ -18,7 +18,7 @@
+     float _pad2;
+     //5x float4
+     float3 Direction;
+-    float _pad3;
++    float Shadow;
+     //6x float4
+     float Spotlight;
+     float Falloff;
+@@ -41,6 +41,47 @@
+     //[3]
+     Light Lights[MAX_LIGHTS];
+ }
++
++#ifdef SHADOWMAP
++Texture2D<float> ShadowDepthTexture : register(t6, TEXTURE_SPACE);
++SamplerState ShadowDepthSampler : register(s6, TEXTURE_SPACE);
++
++cbuffer ShadowParameters : register(b7, UNIFORM_SPACE)
++{
++    float4x4 ShadowViewProjection;
++    float ShadowBias;
++    float ShadowTexelSize;
++    float2 ShadowPadding;
++}
++
++float DirectionalShadowVisibility(float3 worldPosition)
++{
++    float4 clip = mul(float4(worldPosition, 1.0), ShadowViewProjection);
++    if (clip.w <= 0.0)
++        return 1.0;
++    float3 ndc = clip.xyz / clip.w;
++    float2 uv = ndc.xy * 0.5 + 0.5;
++    if (any(uv < 0.0) || any(uv > 1.0) || ndc.z < 0.0 || ndc.z > 1.0)
++        return 1.0;
++
++    // System.Numerics projections use a zero-to-one clip depth; OpenGL's
++    // default depth mapping stores that range in the upper half of [0, 1].
++    float receiverDepth = ndc.z * 0.5 + 0.5;
++    float visible = 0.0;
++    [unroll]
++    for (int y = -1; y <= 1; y++)
++    {
++        [unroll]
++        for (int x = -1; x <= 1; x++)
++        {
++            float sampleDepth = ShadowDepthTexture.SampleLevel(
++                ShadowDepthSampler, uv + float2(x, y) * ShadowTexelSize, 0);
++            visible += receiverDepth - ShadowBias <= sampleDepth ? 1.0 : 0.0;
++        }
++    }
++    return visible / 9.0;
++}
++#endif
+ 
+ 
+ float quadratic(float x, float3 params)
+@@ -232,6 +273,10 @@
+         }
+         float diffuseCoefficient = max(dot(n, surfaceToLight), 0.0);
+         float3 diffuse = diffuseCoefficient * LinearizeLegacyInput(Lights[i].Diffuse);
++#ifdef SHADOWMAP
++        if (Lights[i].Shadow > 0.5)
++            diffuse *= DirectionalShadowVisibility(position);
++#endif
+         diffuseTerm += attenuation * diffuse;
+         ambientTerm += attenuation * LinearizeLegacyInput(Lights[i].Ambient);
+     }
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -228,6 +228,7 @@
+         private bool? hdr;
+         private bool? bloom;
+         private bool? depthPrepass;
++        private bool? shadows;
+         private float? bloomThreshold;
+         private float? bloomStrength;
+         private bool? projectileBeams;
+@@ -302,6 +303,10 @@
+                 case "--render-depth-prepass":
+                     if (!ParseToggle(out var depthPrepassEnabled)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
+                     depthPrepass = depthPrepassEnabled;
++                    return true;
++                case "--render-shadows":
++                    if (!ParseToggle(out var shadowsEnabled)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
++                    shadows = shadowsEnabled;
+                     return true;
+                 case "--render-bloom-threshold":
+                     if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var threshold) &&
+@@ -418,6 +423,7 @@
+             if (hdr.HasValue) settings.RenderHdr = hdr.Value;
+             if (bloom.HasValue) settings.RenderBloom = bloom.Value;
+             if (depthPrepass.HasValue) settings.RenderDepthPrepass = depthPrepass.Value;
++            if (shadows.HasValue) settings.RenderShadows = shadows.Value;
+             if (bloomThreshold.HasValue) settings.BloomThreshold = bloomThreshold.Value;
+             if (bloomStrength.HasValue) settings.BloomStrength = bloomStrength.Value;
+             if (projectileBeams.HasValue) settings.RenderProjectileBeams = projectileBeams.Value;

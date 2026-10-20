@@ -1,0 +1,717 @@
+diff --git a/src/BindingsGen/GLBindingsGen/GLBindingsGen/bindings.json b/src/BindingsGen/GLBindingsGen/GLBindingsGen/bindings.json
+--- a/src/BindingsGen/GLBindingsGen/GLBindingsGen/bindings.json
++++ b/src/BindingsGen/GLBindingsGen/GLBindingsGen/bindings.json
+@@ -444,6 +444,30 @@
+     {
+         "function": "void glDebugMessageControl(int source, int type, int severity, int count, IntPtr ids, bool enabled)",
+         "name": "DebugMessageControl"
++    },
++    {
++        "function": "void glGenQueries(int n, uint[] ids)",
++        "name": "GenQueries"
++    },
++    {
++        "function": "void glDeleteQueries(int n, uint[] ids)",
++        "name": "DeleteQueries"
++    },
++    {
++        "function": "void glBeginQuery(int target, uint id)",
++        "name": "BeginQuery"
++    },
++    {
++        "function": "void glEndQuery(int target)",
++        "name": "EndQuery"
++    },
++    {
++        "function": "void glGetQueryObjectiv(uint id, int pname, out int param)",
++        "name": "GetQueryObjectiv"
++    },
++    {
++        "function": "void glGetQueryObjectui64v(uint id, int pname, out ulong param)",
++        "name": "GetQueryObjectui64v"
+     },
+     {
+         "function": "IntPtr glFenceSync(uint condition, uint flags)",
+diff --git a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Generated.cs b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Generated.cs
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Generated.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Generated.cs
+@@ -117,6 +117,12 @@
+         private static delegate* unmanaged<int> _glGetError;
+         private static delegate* unmanaged<IntPtr,IntPtr,void> _glDebugMessageCallback;
+         private static delegate* unmanaged<int,int,int,int,IntPtr,int,void> _glDebugMessageControl;
++        private static delegate* unmanaged<int,uint*,void> _glGenQueries;
++        private static delegate* unmanaged<int,uint*,void> _glDeleteQueries;
++        private static delegate* unmanaged<int,uint,void> _glBeginQuery;
++        private static delegate* unmanaged<int,void> _glEndQuery;
++        private static delegate* unmanaged<uint,int,int*,void> _glGetQueryObjectiv;
++        private static delegate* unmanaged<uint,int,ulong*,void> _glGetQueryObjectui64v;
+         private static delegate* unmanaged<uint,uint,IntPtr> _glFenceSync;
+         private static delegate* unmanaged<IntPtr,void> _glDeleteSync;
+         private static delegate* unmanaged<IntPtr,uint,ulong,uint> _glClientWaitSync;
+@@ -235,6 +241,12 @@
+             _glGetError = (delegate* unmanaged<int>)getProcAddress("glGetError");
+             _glDebugMessageCallback = (delegate* unmanaged<IntPtr,IntPtr,void>)getProcAddress("glDebugMessageCallback");
+             _glDebugMessageControl = (delegate* unmanaged<int,int,int,int,IntPtr,int,void>)getProcAddress("glDebugMessageControl");
++            _glGenQueries = (delegate* unmanaged<int,uint*,void>)getProcAddress("glGenQueries");
++            _glDeleteQueries = (delegate* unmanaged<int,uint*,void>)getProcAddress("glDeleteQueries");
++            _glBeginQuery = (delegate* unmanaged<int,uint,void>)getProcAddress("glBeginQuery");
++            _glEndQuery = (delegate* unmanaged<int,void>)getProcAddress("glEndQuery");
++            _glGetQueryObjectiv = (delegate* unmanaged<uint,int,int*,void>)getProcAddress("glGetQueryObjectiv");
++            _glGetQueryObjectui64v = (delegate* unmanaged<uint,int,ulong*,void>)getProcAddress("glGetQueryObjectui64v");
+             _glFenceSync = (delegate* unmanaged<uint,uint,IntPtr>)getProcAddress("glFenceSync");
+             _glDeleteSync = (delegate* unmanaged<IntPtr,void>)getProcAddress("glDeleteSync");
+             _glClientWaitSync = (delegate* unmanaged<IntPtr,uint,ulong,uint>)getProcAddress("glClientWaitSync");
+@@ -855,6 +867,48 @@
+             _glDebugMessageControl(source, type, severity, count, ids, (enabled ? 1 : 0));
+             ErrorCheck();
+         }
++        public static void GenQueries(int n, uint[] ids)
++        {
++            fixed (uint* _ids_ptr = ids)
++            {
++                _glGenQueries(n, _ids_ptr);
++            }
++            ErrorCheck();
++        }
++        public static void DeleteQueries(int n, uint[] ids)
++        {
++            fixed (uint* _ids_ptr = ids)
++            {
++                _glDeleteQueries(n, _ids_ptr);
++            }
++            ErrorCheck();
++        }
++        public static void BeginQuery(int target, uint id)
++        {
++            _glBeginQuery(target, id);
++            ErrorCheck();
++        }
++        public static void EndQuery(int target)
++        {
++            _glEndQuery(target);
++            ErrorCheck();
++        }
++        public static void GetQueryObjectiv(uint id, int pname, out int param)
++        {
++            fixed (int* _param_ptr = &param)
++            {
++                _glGetQueryObjectiv(id, pname, _param_ptr);
++            }
++            ErrorCheck();
++        }
++        public static void GetQueryObjectui64v(uint id, int pname, out ulong param)
++        {
++            fixed (ulong* _param_ptr = &param)
++            {
++                _glGetQueryObjectui64v(id, pname, _param_ptr);
++            }
++            ErrorCheck();
++        }
+         public static IntPtr FenceSync(uint condition, uint flags)
+         {
+             IntPtr retval;
+diff --git a/src/LibreLancer.Base/Graphics/IGpuTimerQuery.cs b/src/LibreLancer.Base/Graphics/IGpuTimerQuery.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Base/Graphics/IGpuTimerQuery.cs
+@@ -0,0 +1,14 @@
++namespace LibreLancer.Graphics;
++
++/// <summary>A non-blocking GPU elapsed-time query. Results may arrive several frames later.</summary>
++public interface IGpuTimerQuery : System.IDisposable
++{
++    /// <summary>Starts timing the current GPU command range, or returns false if all query slots are pending.</summary>
++    bool Begin(long frameNumber);
++
++    /// <summary>Ends the active range. Does nothing if Begin returned false.</summary>
++    void End();
++
++    /// <summary>Returns the newest completed sample without waiting for the GPU.</summary>
++    bool TryGetResult(out ulong nanoseconds, out long frameNumber);
++}
+diff --git a/src/LibreLancer.Base/Graphics/Backends/IRenderContext.cs b/src/LibreLancer.Base/Graphics/Backends/IRenderContext.cs
+--- a/src/LibreLancer.Base/Graphics/Backends/IRenderContext.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/IRenderContext.cs
+@@ -1,4 +1,5 @@
+ using System;
++using LibreLancer.Graphics;
+ using LibreLancer.Graphics.Vertices;
+ 
+ namespace LibreLancer.Graphics.Backends;
+@@ -43,6 +44,9 @@
+ 
+     IStorageBuffer CreateStorageBuffer(int size, int stride);
+ 
++    bool SupportsGpuTimerQueries { get; }
++    IGpuTimerQuery? CreateGpuTimerQuery();
++
+     void SetCamera(ICamera camera);
+     void SetIdentityCamera();
+ 
+diff --git a/src/LibreLancer.Base/Graphics/Backends/Null/NullRenderContext.cs b/src/LibreLancer.Base/Graphics/Backends/Null/NullRenderContext.cs
+--- a/src/LibreLancer.Base/Graphics/Backends/Null/NullRenderContext.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/Null/NullRenderContext.cs
+@@ -1,5 +1,6 @@
+ using System;
+ using System.Numerics;
++using LibreLancer.Graphics;
+ using LibreLancer.Graphics.Backends.OpenGL;
+ using LibreLancer.Graphics.Vertices;
+ 
+@@ -11,6 +12,8 @@
+     public int MaxAnisotropy => 0;
+     public int AnisotropyLevel { get; set; }
+     public bool SupportsWireframe => false;
++    public bool SupportsGpuTimerQueries => false;
++    public IGpuTimerQuery? CreateGpuTimerQuery() => null;
+     public void Init(ref GraphicsState requested)
+     {
+         FLLog.Info("Graphics", "NULL backend requested");
+diff --git a/src/LibreLancer.Base/Graphics/RenderContext.cs b/src/LibreLancer.Base/Graphics/RenderContext.cs
+--- a/src/LibreLancer.Base/Graphics/RenderContext.cs
++++ b/src/LibreLancer.Base/Graphics/RenderContext.cs
+@@ -78,6 +78,9 @@
+     }
+ 
+     public bool SupportsWireframe => impl.SupportsWireframe;
++    public bool SupportsGpuTimerQueries => impl.SupportsGpuTimerQueries;
++    public IGpuTimerQuery? CreateGpuTimerQuery() => impl.CreateGpuTimerQuery();
++    public bool GpuTimingEnabled { get; set; }
+ 
+     private Point _drawableSize;
+     public Point DrawableSize => _drawableSize;
+diff --git a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Constants.cs b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Constants.cs
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Constants.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Constants.cs
+@@ -14,6 +14,9 @@
+     public const int GL_DEBUG_SEVERITY_LOW = 0x9148;
+     public const int GL_DEBUG_TYPE_PERFORMANCE = 0x8250;
+     public const int GL_DEBUG_TYPE_ERROR = 0x824C;
++    public const int GL_TIME_ELAPSED = 0x88BF;
++    public const int GL_QUERY_RESULT = 0x8866;
++    public const int GL_QUERY_RESULT_AVAILABLE = 0x8867;
+     //clear buffers
+     public const int GL_COLOR_BUFFER_BIT = 0x00004000;
+     public const int GL_DEPTH_BUFFER_BIT = 0x00000100;
+diff --git a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Functions.cs b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Functions.cs
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Functions.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GL.Functions.cs
+@@ -91,6 +91,7 @@
+ 
+     public static bool GLES = false;
+     public static bool DesktopGL4 = false;
++    public static bool DesktopGL33 = false;
+     public static bool GL430 = false;
+ 
+     private static Dictionary<int, string> errors = null!;
+@@ -147,8 +148,11 @@
+         var str = GetString(GL_VERSION);
+         FLLog.Info("GL", "Version String: " + GetString(GL_VERSION));
+         if (checkGles) return str.StartsWith("OpenGL ES 3");
+-        var major = int.Parse(str[0].ToString());
++        var versionParts = str.Split(' ', 2)[0].Split('.', 2);
++        var major = int.Parse(versionParts[0]);
++        var minor = int.Parse(versionParts[1]);
+         DesktopGL4 = major >= 4;
++        DesktopGL33 = major > 3 || major == 3 && minor >= 3;
+         return major >= 3;
+     }
+ 
+diff --git a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLExtensions.cs b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLExtensions.cs
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLExtensions.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLExtensions.cs
+@@ -12,6 +12,20 @@
+     private static bool s3tc;
+     private static bool rgtc;
+     private static bool debugInfo;
++    private static bool? timerQuery;
++    public static bool TimerQuery
++    {
++        get
++        {
++            if (timerQuery == null)
++            {
++                PopulateExtensions();
++                timerQuery = !GL.GLES && (GL.DesktopGL33 || ExtensionList!.Contains("GL_ARB_timer_query"));
++                FLLog.Info("OpenGL", timerQuery.Value ? "GPU timer queries available" : "GPU timer queries unavailable");
++            }
++            return timerQuery.Value;
++        }
++    }
+     public static bool S3TC
+     {
+         get
+diff --git a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderContext.cs b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderContext.cs
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderContext.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderContext.cs
+@@ -2,6 +2,7 @@
+ using System.Collections.Generic;
+ using System.Numerics;
+ using System.Runtime.InteropServices;
++using LibreLancer.Graphics;
+ using LibreLancer.Graphics.Vertices;
+ 
+ namespace LibreLancer.Graphics.Backends.OpenGL;
+@@ -9,6 +10,8 @@
+ internal class GLRenderContext : IRenderContext
+ {
+     public bool SupportsWireframe => !GL.GLES;
++    public bool SupportsGpuTimerQueries => GLExtensions.TimerQuery;
++    public IGpuTimerQuery? CreateGpuTimerQuery() => SupportsGpuTimerQueries ? new GLGpuTimerQuery() : null;
+ 
+     public AntialiasMode MaxAntialias { get; private set; }
+     public int MaxAnisotropy { get; private set; }
+diff --git a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLGpuTimerQuery.cs b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLGpuTimerQuery.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLGpuTimerQuery.cs
+@@ -0,0 +1,96 @@
++using System;
++using LibreLancer.Graphics;
++
++namespace LibreLancer.Graphics.Backends.OpenGL;
++
++internal sealed class GLGpuTimerQuery : IGpuTimerQuery
++{
++    private const int QueryCount = 4;
++    private readonly uint[] queries = new uint[QueryCount];
++    private readonly bool[] pending = new bool[QueryCount];
++    private readonly long[] submittedFrames = new long[QueryCount];
++    private int nextIndex;
++    private int activeIndex = -1;
++    private long latestFrame = long.MinValue;
++    private ulong latestNanoseconds;
++    private bool disposed;
++
++    public GLGpuTimerQuery()
++    {
++        GL.GenQueries(queries.Length, queries);
++    }
++
++    public bool Begin(long frameNumber)
++    {
++        ObjectDisposedException.ThrowIf(disposed, this);
++        if (activeIndex >= 0)
++            throw new InvalidOperationException("GPU timer query is already active");
++
++        PollPending();
++        for (var offset = 0; offset < QueryCount; offset++)
++        {
++            var index = (nextIndex + offset) % QueryCount;
++            if (pending[index])
++                continue;
++
++            activeIndex = index;
++            submittedFrames[index] = frameNumber;
++            GL.BeginQuery(GL.GL_TIME_ELAPSED, queries[index]);
++            return true;
++        }
++
++        return false;
++    }
++
++    public void End()
++    {
++        ObjectDisposedException.ThrowIf(disposed, this);
++        if (activeIndex < 0)
++            return;
++
++        GL.EndQuery(GL.GL_TIME_ELAPSED);
++        pending[activeIndex] = true;
++        nextIndex = (activeIndex + 1) % QueryCount;
++        activeIndex = -1;
++    }
++
++    public bool TryGetResult(out ulong nanoseconds, out long frameNumber)
++    {
++        ObjectDisposedException.ThrowIf(disposed, this);
++        PollPending();
++        nanoseconds = latestNanoseconds;
++        frameNumber = latestFrame;
++        return latestFrame != long.MinValue;
++    }
++
++    private void PollPending()
++    {
++        for (var i = 0; i < QueryCount; i++)
++        {
++            if (!pending[i])
++                continue;
++
++            GL.GetQueryObjectiv(queries[i], GL.GL_QUERY_RESULT_AVAILABLE, out var available);
++            if (available == 0)
++                continue;
++
++            GL.GetQueryObjectui64v(queries[i], GL.GL_QUERY_RESULT, out var elapsedNanoseconds);
++            pending[i] = false;
++            if (submittedFrames[i] >= latestFrame)
++            {
++                latestFrame = submittedFrames[i];
++                latestNanoseconds = elapsedNanoseconds;
++            }
++        }
++    }
++
++    public void Dispose()
++    {
++        if (disposed)
++            return;
++        if (activeIndex >= 0)
++            End();
++        GL.DeleteQueries(queries.Length, queries);
++        disposed = true;
++    }
++}
+diff --git a/src/LibreLancer/FreelancerGame.cs b/src/LibreLancer/FreelancerGame.cs
+--- a/src/LibreLancer/FreelancerGame.cs
++++ b/src/LibreLancer/FreelancerGame.cs
+@@ -210,6 +210,7 @@
+         private int drawCallsPerFrame = 0;
+ 		protected override void Draw (double elapsed)
+ 		{
++			RenderContext.GpuTimingEnabled = Debug.Enabled;
+ 			RenderContext.ReplaceViewport(0, 0, Width, Height);
+ 			fps_updatetimer -= elapsed;
+ 			if (fps_updatetimer <= 0) {
+diff --git a/src/LibreLancer/Interface/DebugView.cs b/src/LibreLancer/Interface/DebugView.cs
+--- a/src/LibreLancer/Interface/DebugView.cs
++++ b/src/LibreLancer/Interface/DebugView.cs
+@@ -159,6 +159,22 @@
+                     ImGui.Text($"Update + draw ms p50/p95/p99 (n={performanceSamplesRecorded}/{PerformanceSampleCount}): {frameWorkPercentiles[0] * 1000:F2} / {frameWorkPercentiles[1] * 1000:F2} / {frameWorkPercentiles[2] * 1000:F2}");
+                     ImGui.Text($"Frame interval ms p50/p95/p99: {frameIntervalPercentiles[0] * 1000:F2} / {frameIntervalPercentiles[1] * 1000:F2} / {frameIntervalPercentiles[2] * 1000:F2}");
+                 }
++                if (!game.RenderContext.SupportsGpuTimerQueries)
++                {
++                    ImGui.Text("GPU pass timings: not supported by this renderer");
++                }
++                else if (game.RenderContext.GpuTimingEnabled)
++                {
++                    ImGui.Separator();
++                    ImGui.Text("GPU pass ms (asynchronous samples):");
++                    for (var i = 0; i < GpuPassProfile.Count; i++)
++                    {
++                        var sample = GpuPassProfile.GetSample(i);
++                        ImGui.Text(sample is { } value
++                            ? $"{value.Name}: {value.Milliseconds:F3} ms ({value.AgeFrames} frames old)"
++                            : $"{GpuPassProfile.GetName(i)}: waiting for GPU");
++                    }
++                }
+                 ImGui.BeginDisabled(performanceSamplesRecorded == 0);
+                 if (ImGui.Button("Export recent frame profile (CSV)"))
+                 {
+diff --git a/src/LibreLancer/Render/GpuPassProfile.cs b/src/LibreLancer/Render/GpuPassProfile.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer/Render/GpuPassProfile.cs
+@@ -0,0 +1,24 @@
++using System;
++
++namespace LibreLancer.Render;
++
++public readonly record struct GpuPassSample(string Name, double Milliseconds, long AgeFrames);
++
++/// <summary>Latest asynchronous GPU pass timings for the current render context.</summary>
++public static class GpuPassProfile
++{
++    private static readonly string[] Names = ["Depth", "Opaque", "Stars / nebula", "Transparent", "AA resolve"];
++    private static readonly GpuPassSample?[] Samples = new GpuPassSample?[Names.Length];
++
++    public static int Count => Names.Length;
++    public static string GetName(int index) => Names[index];
++    public static GpuPassSample? GetSample(int index) => Samples[index];
++
++    internal static void SetSample(int index, double milliseconds, long ageFrames) =>
++        Samples[index] = new GpuPassSample(Names[index], milliseconds, ageFrames);
++
++    internal static void Clear()
++    {
++        Array.Clear(Samples);
++    }
++}
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -68,6 +68,7 @@
+         public IRendererSettings Settings;
+         private Billboards billboards;
+         private ResourceManager resman;
++        private IGpuTimerQuery?[]? gpuPassQueries;
+ 
+         public Game Game
+         {
+@@ -406,6 +407,8 @@
+                 return;
+             }
+ 
++            UpdateGpuPassProfile();
++
+             RenderTarget? restoreTarget = rstate.RenderTarget;
+             bool restoreDepthEnabled = rstate.DepthEnabled;
+             bool restoreDepthWrite = rstate.DepthWrite;
+@@ -512,7 +515,12 @@
+                 // Simple depth pre-pass
+                 rstate.ColorWrite = false;
+                 rstate.DepthFunction = DepthFunction.Less;
+-                foreach (var obj in objects) obj.DepthPrepass(camera, rstate);
++                BeginGpuPass(0);
++                try
++                {
++                    foreach (var obj in objects) obj.DepthPrepass(camera, rstate);
++                }
++                finally { EndGpuPass(0); }
+                 rstate.DepthFunction = DepthFunction.LessEqual;
+                 rstate.ColorWrite = true;
+                 // Actual Drawing
+@@ -548,10 +556,15 @@
+                 Polyline.EndFrame();
+                 // Opaque Pass
+                 rstate.DepthEnabled = true;
+-                Commands.DrawOpaque(rstate);
++                BeginGpuPass(1);
++                try { Commands.DrawOpaque(rstate); }
++                finally { EndGpuPass(1); }
+ 
+                 if ((!transitioned || !DrawNebulae) && DrawStarsphere)
+                 {
++                    BeginGpuPass(2);
++                    try
++                    {
+                     // Starsphere
+                     rstate.DepthRange = new Vector2(1, 1);
+ 
+@@ -613,12 +626,16 @@
+                     }
+ 
+                     rstate.DepthRange = new Vector2(0, 1);
++                    }
++                    finally { EndGpuPass(2); }
+                 }
+ 
+                 OpaqueHook?.Invoke();
+                 // Transparent Pass
+                 rstate.DepthWrite = false;
+-                Commands.DrawTransparent(rstate);
++                BeginGpuPass(3);
++                try { Commands.DrawTransparent(rstate); }
++                finally { EndGpuPass(3); }
+                 rstate.DepthWrite = true;
+                 rstate.DepthEnabled = true;
+                 PhysicsHook?.Invoke();
+@@ -654,11 +671,15 @@
+ 
+                     if (restoreTarget == null)
+                     {
+-                        msaa?.BlitToScreen(new Point(rstate.CurrentViewport.X, rstate.CurrentViewport.Y));
++                        BeginGpuPass(4);
++                        try { msaa?.BlitToScreen(new Point(rstate.CurrentViewport.X, rstate.CurrentViewport.Y)); }
++                        finally { EndGpuPass(4); }
+                     }
+                     else
+                     {
+-                        msaa?.BlitToRenderTarget((restoreTarget as RenderTarget2D)!);
++                        BeginGpuPass(4);
++                        try { msaa?.BlitToRenderTarget((restoreTarget as RenderTarget2D)!); }
++                        finally { EndGpuPass(4); }
+                     }
+ 
+                     rstate.RenderTarget = restoreTarget;
+@@ -692,8 +713,52 @@
+             }
+         }
+ 
++        private void UpdateGpuPassProfile()
++        {
++            if (!rstate.GpuTimingEnabled)
++            {
++                if (gpuPassQueries != null)
++                {
++                    foreach (var query in gpuPassQueries) query?.Dispose();
++                    gpuPassQueries = null;
++                    GpuPassProfile.Clear();
++                }
++                return;
++            }
++
++            if (gpuPassQueries == null && rstate.SupportsGpuTimerQueries)
++            {
++                gpuPassQueries = new IGpuTimerQuery?[GpuPassProfile.Count];
++                for (var i = 0; i < gpuPassQueries.Length; i++)
++                    gpuPassQueries[i] = rstate.CreateGpuTimerQuery();
++            }
++
++            if (gpuPassQueries == null)
++                return;
++
++            for (var i = 0; i < gpuPassQueries.Length; i++)
++            {
++                if (gpuPassQueries[i]!.TryGetResult(out var nanoseconds, out var frameNumber))
++                    GpuPassProfile.SetSample(i, nanoseconds / 1_000_000.0,
++                        Math.Max(0, rstate.FrameNumber - frameNumber));
++            }
++        }
++
++        private void BeginGpuPass(int index) => gpuPassQueries?[index]?.Begin(rstate.FrameNumber);
++        private void EndGpuPass(int index) => gpuPassQueries?[index]?.End();
++
++        private void DisposeGpuPassQueries()
++        {
++            if (gpuPassQueries == null)
++                return;
++            foreach (var query in gpuPassQueries) query?.Dispose();
++            gpuPassQueries = null;
++            GpuPassProfile.Clear();
++        }
++
+         public void Dispose()
+         {
++            DisposeGpuPassQueries();
+             msaa?.Dispose();
+ 
+             Polyline.Dispose();
+diff --git a/docs/evidence/renderer/gpu-timer-query-readiness-audit-20261015.md b/docs/evidence/renderer/gpu-timer-query-readiness-audit-20261015.md
+--- a/docs/evidence/renderer/gpu-timer-query-readiness-audit-20261015.md
++++ b/docs/evidence/renderer/gpu-timer-query-readiness-audit-20261015.md
+@@ -1,25 +1,27 @@
+ # GPU-Timer-Query: Bereitschaftsaudit
+ 
+-Stand: 2026-10-15. Quellcode- und Laufzeitbefund zum offenen Roadmap-Punkt
+-„GPU-Zeit und Speicherverbrauch pro Pass messbar machen“. Dieses Audit führt
+-noch keine GPU-Zeitmessung ein.
++Stand: 2026-10-15. Quellcode- und Laufzeitbefund zum Roadmap-Punkt
++„GPU-Zeit und Speicherverbrauch pro Pass messbar machen“ sowie Ergebnis der
++ersten OpenGL-Timer-Query-Implementierung.
+ 
+ ## Befund
+ 
+-- `IRenderContext` bietet keine GPU-Timer- oder Query-Schnittstelle. Der
+-  OpenGL-Backendcode enthält keine `glGenQueries`, `glBeginQuery`,
+-  `glGetQueryObject*`- oder `GL_TIME_ELAPSED`-Nutzung. Die Bindungsspezifikation
+-  `src/BindingsGen/GLBindingsGen/GLBindingsGen/bindings.json` enthält ebenfalls
+-  keine Timer-Query-Funktionen.
++- Vor der Implementierung bot `IRenderContext` keine GPU-Timer- oder
++  Query-Schnittstelle; die Bindungsspezifikation enthielt keine Timer-Query-
++  Funktionen. Das ist mit Patch 2109 behoben.
+ - Die SDL3/OpenGL-Laufzeitprobe auf Intel HD Graphics 4600 / Mesa 23.2 meldet
+   `GL_ARB_timer_query` und `GL_EXT_timer_query`. Das belegt die Verfügbarkeit auf
+   diesem Gerät, nicht auf allen OpenGL-Zielsystemen. Die Probe und ihr
+   vollständiges Log liegen außerhalb des Repositories unter
+   `/tmp/lancer-nexus-renderer-profile-20261015/offscreen-run.log`.
+-- `NullRenderContext` besitzt keinen GPU-Zeitgeber. Die bestehende CPU-Messung
+-  (`FrameWorkTime`, `FrameInterval`) ist daher weiterhin die gemeinsame
+-  Backenddiagnose. Sie kann Treiberwartezeit enthalten und darf nicht als
+-  GPU-Zeit etikettiert werden.
++- OpenGL stellt `GL_TIME_ELAPSED` über vier Query-Objekte je Pass bereit. Ein
++  Query wird nur nach `GL_QUERY_RESULT_AVAILABLE` ausgelesen; wenn alle vier
++  Slots noch ausstehen, überspringt dieser Pass seine nächste Messung. Das
++  Debug-Overlay zeigt Millisekunden und Sample-Alter. Query-Objekte werden nur
++  bei sichtbarem Debug-Overlay angelegt und beim Ausschalten freigegeben.
++- `NullRenderContext` besitzt keinen GPU-Zeitgeber und meldet die Funktion als
++  nicht unterstützt. Die CPU-Messung (`FrameWorkTime`, `FrameInterval`) bleibt
++  eine getrennte Diagnose und kann Treiberwartezeit enthalten.
+ - Im geprüften Rendererpfad liegen geeignete GPU-Grenzen um den Depth-Prepass,
+   `Commands.DrawOpaque`, den Starsphere-/Nebelübergang, `Commands.DrawTransparent`
+   und den AA-Blit. CPU-seitige Sichtbarkeit, Vorbereitung, Uploads und
+@@ -32,31 +34,44 @@
+   aus Textur-/Buffergrößen wäre Ressourcenbuchhaltung, keine gemessene
+   Treiberbelegung.
+ 
+-## Umsetzungsfolge
++## Erster Umsetzungsschritt
+ 
+-1. Eine optionale `IGpuTimer`-Abstraktion mit benannten Messbereichen ergänzen;
+-   OpenGL verwendet `GL_TIME_ELAPSED`, Null liefert „nicht unterstützt“.
+-2. Query-Ergebnisse nur abfragen, wenn `GL_QUERY_RESULT_AVAILABLE` gesetzt ist.
+-   Einen kleinen Ring aus Query-Paaren verwenden und Ergebnisse aus früheren
+-   Frames lesen, damit der Renderer nicht auf die GPU wartet. Niemals innerhalb
+-   eines aktiven Query-Bereichs einen weiteren Zeitbereich öffnen.
+-3. Messbereiche zunächst an tatsächliche GPU-Drawgrenzen setzen: Depth,
+-   Opaque, Stars/Nebel, Transparent und AA-Resolve. CPU-Vorbereitung und Upload
+-   getrennt als CPU-Zeit ausweisen.
+-4. Backend, unterstützte Query-Fähigkeit und Framealter in Debug-Overlay/CSV
+-   ausweisen. Fehlende oder verspätete Messwerte als nicht verfügbar behandeln;
+-   keine Nullwerte als schnelle GPU-Zeit darstellen.
+-5. Speicher später als getrennte Ressourcenbuchhaltung pro Ressourcentyp
+-   erfassen und als Schätzung kennzeichnen. Driver-native Memory-Budget-APIs
+-   bleiben backend- und plattformspezifische Ergänzungen.
++- Eine optionale `IGpuTimerQuery`-Abstraktion wurde ergänzt. OpenGL verwendet
++  `GL_TIME_ELAPSED`; Null meldet keine Unterstützung.
++- Der Vierer-Ring fragt nur verfügbare Resultate ab und überspringt Messungen,
++  wenn alle Slots noch laufen. Es gibt keinen synchronen Query-Result-Read.
++- Depth-Prepass, Opaque, Stars/Nebel, Transparent und AA-Resolve werden separat
++  gemessen. CPU-Vorbereitung und Upload bleiben außerhalb dieser GPU-Zeiten.
++- Das Debug-Overlay meldet unterstützte/fehlende Query-Fähigkeit sowie
++  Messwert und Sample-Alter. CSV-Erweiterung und eine Laufzeitabnahme auf einer
++  echten Spielsituation stehen noch aus.
++- Speicher bleibt getrennte Ressourcenbuchhaltung pro Ressourcentyp und ist
++  nicht Teil der Timer-Query-Implementierung. Driver-native Memory-Budget-APIs
++  bleiben backend- und plattformspezifische Ergänzungen.
+ 
+ ## Abnahmegrenzen
+ 
+ - Query-Fähigkeit auf dem rendernden Kontext prüfen; GL-Version allein nicht als
+   Beleg verwenden.
+-- Keine synchronen `GL_QUERY_RESULT`-Reads im laufenden Frame.
++- Keine synchronen `GL_QUERY_RESULT`-Reads im laufenden Frame. Im aktuellen
++  Quellpfad erfolgt der Result-Read erst nach erfolgreichem
++  `GL_QUERY_RESULT_AVAILABLE`-Check.
+ - Bei deaktiviertem Debug-Profiling keine Query-Aufrufe und keine dauerhaften
+   zusätzlichen GPU-Ressourcen.
+ - Werte mit bekannten GPU-lastigen und CPU-lastigen Proben plausibilisieren;
+   GPU-Zeit kann die Framezeit wegen Überlappung nicht einfach addiert werden.
+ - Null-Backend und fehlende Timer-Query-Unterstützung müssen fehlerfrei bleiben.
++
++## NAP-Laufzeitwiederholung nach Implementierung
++
++Der Testinstallationsordner enthielt 13 aktive Pakete unter `packages/data/`.
++Alle Paketgrößen und SHA-256-Werte stimmten mit `active.json` überein; alle
++Archive bestanden `nexus-pack verify`. Im Installationsordner lag kein loses
++`DATA`-Verzeichnis. `data/runtime.nap` enthält `EXE/newplayer.fl`.
++
++Der Release-Client wurde mit SDL3-Offscreen, isolierten XDG-Datenverzeichnissen
++und `--new-game` gestartet. Der Prozess lief bis zum 90-Sekunden-Limit, loggte
++aber nur Plattform, SDL3 und Engine-Version. Es gab keine OpenGL-Initialisierung
++und keinen Fehlerstack. Der Lauf belegt daher weder Query-Erzeugung noch
++Pass-Messwerte; die GL-Laufzeitprüfung bleibt offen. Log:
++`/tmp/lancer-nexus-renderer-profile-20261015/gpu-timer-run.log`.
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -48,6 +48,7 @@
+   - [x] `SystemRenderer.Draw()` und `AntialiasTarget.SMAABlit()` stellen RenderTarget, Viewport-/Scissor-Stacks und ihre geänderten RenderContext-Zustände in `finally` wieder her. `SystemRenderer` stellt auch `ThnCamera.DefaultZ()` zurück und leert die Frame-Objektliste nach Fehlern. Fehler-Injektion und reguläre Resize-/Minimize-/Restore-Läufe bleiben als Laufzeitprüfung offen. Details im [Fehlerpfad-Audit](evidence/renderer/render-target-exception-path-audit-20261015.md).
+ - [ ] GPU-Zeit und Speicherverbrauch pro Pass messbar machen; Effekte müssen einzeln abschaltbar und nach Hardwareprofil skalierbar sein.
+   - [x] Bereitschaftsaudit abgeschlossen: Timer-Query-API und Query-Aufruf fehlen in OpenGL-/RenderContext-Abstraktion; die lokale Mesa-Laufzeit meldet `GL_ARB_timer_query`. Passgrenzen und eine nicht blockierende Abfragefolge sind dokumentiert. Speicherwerte sind noch nicht als Messung verfügbar. Siehe [GPU-Timer-Query-Audit](evidence/renderer/gpu-timer-query-readiness-audit-20261015.md).
++  - [x] OpenGL-Timer-Queries für Depth, Opaque, Sterne/Nebel, Transparenz und AA-Resolve eingebaut. Vier Query-Slots pro Pass werden ohne blockierendes Ergebnis-Polling wiederverwendet; das Debug-Overlay zeigt Messwert und Sample-Alter. Die Abfrage läuft nur bei geöffnetem Debug-Overlay. Null und OpenGL ohne Timer-Query melden keine Unterstützung. Hardwarelauf, Vergleich der GPU-Zeit gegen Treiberprofiling sowie Speicherbuchhaltung bleiben offen.
+ - [ ] Referenzszenen und feste Screenshots für Raum, Basis, Sternensystem, Nebel, Partikel und LancerEdit-Vorschau festlegen.
+ 
+ ### 2. Bumpmapping / Normalmaps vervollständigen
+diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -156,7 +156,10 @@
+ aus dem Debugfenster als CSV exportieren. Backend und Fenstermaß werden je Frame
+ aufgezeichnet; das Backend-Feld wird CSV-sicher maskiert. GPU-Zeit und
+ Ressourcenmessung sowie dokumentierte Vorher/Nachher-Baselines für feste Szenen
+-bleiben offen.
++bleiben offen. OpenGL kann bei sichtbarem Debug-Overlay zusätzlich asynchrone
++GPU-Zeiten für Depth-Prepass, Opaque-, Sterne/Nebel-, Transparent- und AA-Resolve-
++Aufrufe anzeigen. Diese Werte sind noch nicht durch einen Hardwarelauf gegen ein
++externes GPU-Profiling-Werkzeug abgeglichen; das Null-Backend meldet sie nicht.
+ 
+ ## Verifizierter Ausgangspunkt
+ 
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -110,3 +110,4 @@
+ | 2106 | Export recent CPU frame-pacing samples from the Debug overlay as CSV |
+ | 2107 | Record renderer and resolution per sample and escape CSV fields |
+ | 2108 | Audit nonblocking GPU timer-query readiness and pass boundaries |
++| 2109 | Add optional asynchronous OpenGL GPU pass timing |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -108,3 +108,4 @@
+ client 2106-export-frame-profile-csv.patch
+ client 2107-frame-profile-csv-sample-metadata.patch
+ client 2108-gpu-timer-query-readiness-audit.patch
++client 2109-async-gpu-pass-timing.patch

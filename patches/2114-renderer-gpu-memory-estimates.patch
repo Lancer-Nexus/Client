@@ -1,0 +1,109 @@
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -48,7 +48,7 @@
+   - [x] `SystemRenderer.Draw()` und `AntialiasTarget.SMAABlit()` stellen RenderTarget, Viewport-/Scissor-Stacks und ihre geänderten RenderContext-Zustände in `finally` wieder her. `SystemRenderer` stellt auch `ThnCamera.DefaultZ()` zurück und leert die Frame-Objektliste nach Fehlern. Fehler-Injektion und reguläre Resize-/Minimize-/Restore-Läufe bleiben als Laufzeitprüfung offen. Details im [Fehlerpfad-Audit](evidence/renderer/render-target-exception-path-audit-20261015.md).
+ - [ ] GPU-Zeit und Speicherverbrauch pro Pass messbar machen; Effekte müssen einzeln abschaltbar und nach Hardwareprofil skalierbar sein.
+   - [x] Bereitschaftsaudit abgeschlossen: Timer-Query-API und Query-Aufruf fehlen in OpenGL-/RenderContext-Abstraktion; die lokale Mesa-Laufzeit meldet `GL_ARB_timer_query`. Passgrenzen und eine nicht blockierende Abfragefolge sind dokumentiert. Speicherwerte sind noch nicht als Messung verfügbar. Siehe [GPU-Timer-Query-Audit](evidence/renderer/gpu-timer-query-readiness-audit-20261015.md).
+-  - [x] OpenGL-Timer-Queries für Depth, Opaque, Sterne/Nebel, Transparenz und AA-Resolve eingebaut. Vier Query-Slots pro Pass werden ohne blockierendes Ergebnis-Polling wiederverwendet; das Debug-Overlay zeigt Messwert und Sample-Alter. CSV-Zeilen erfassen den zuletzt verfügbaren GPU-Messwert samt fortlaufend aktualisiertem Alter; nicht verfügbare Samples bleiben leer. Das Alter zählt Aufrufe von `SystemRenderer.Draw()` und hängt nicht von `RenderContext.FrameNumber`/`ClearAll()` ab; ein Regressionstest prüft das Weiterzählen. Die Abfrage läuft nur bei geöffnetem Debug-Overlay. Null und OpenGL ohne Timer-Query melden keine Unterstützung. Hardwarelauf, Vergleich der GPU-Zeit gegen Treiberprofiling sowie Speicherbuchhaltung bleiben offen.
++  - [x] OpenGL-Timer-Queries für Depth, Opaque, Sterne/Nebel, Transparenz und AA-Resolve eingebaut. Vier Query-Slots pro Pass werden ohne blockierendes Ergebnis-Polling wiederverwendet; das Debug-Overlay zeigt Messwert und Sample-Alter. CSV-Zeilen erfassen den zuletzt verfügbaren GPU-Messwert samt fortlaufend aktualisiertem Alter; nicht verfügbare Samples bleiben leer. Das Alter zählt Aufrufe von `SystemRenderer.Draw()` und hängt nicht von `RenderContext.FrameNumber`/`ClearAll()` ab; ein Regressionstest prüft das Weiterzählen. Die Abfrage läuft nur bei geöffnetem Debug-Overlay. Null und OpenGL ohne Timer-Query melden keine Unterstützung. Der Debug-Overlay-Speicherblock zeigt jetzt geschätzte geladene Texturbytes sowie separat erfasste Surface-Map- und Tangentenbytes. Diese Werte decken nicht den gesamten GPU-Speicher ab und sind keiner Render-Pass-Attribution zugeordnet; Hardwarelauf, Vergleich der GPU-Zeit gegen Treiberprofiling sowie Render-Target-, Buffer- und Treiberallokationen bleiben offen.
+ - [ ] Referenzszenen und feste Screenshots für Raum, Basis, Sternensystem, Nebel, Partikel und LancerEdit-Vorschau festlegen.
+ 
+ ### 2. Bumpmapping / Normalmaps vervollständigen
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 112 Client bundles and two native bundles. Each
++The active series contains 113 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -115,3 +115,4 @@
+ | 2111 | Log built-in shader compilation wall time per bundle and in total |
+ | 2112 | Count asynchronous GPU sample age by rendered system frame |
+ | 2113 | Advance asynchronous GPU sample age on every rendered system frame |
++| 2114 | Track cubemap estimates and expose known GPU memory counters in the Debug overlay |
+--- a/patches/series
++++ b/patches/series
+@@ -113,3 +113,4 @@
+ client 2111-shader-compilation-timing.patch
+ client 2112-gpu-profile-render-frame-age.patch
+ client 2113-advance-gpu-profile-sample-age.patch
++client 2114-renderer-gpu-memory-estimates.patch
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLTextureCube.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLTextureCube.cs
+@@ -25,6 +25,8 @@
+         Format = format;
+         Format.GetGLFormat(out glInternalFormat, out glFormat, out glType);
+         LevelCount = mipMap ? CalculateMipLevels(size, size) : 1;
++        EstimatedTextureMemory = EstimateTextureMemory(size, LevelCount, format,
++            glFormat == GL.GL_NUM_COMPRESSED_TEXTURE_FORMATS && GLExtensions.S3TC);
+ 
+         //Bind the new TextureCube
+         BindForModify(0);
+@@ -79,6 +81,40 @@
+         }
+     }
+ 
++    private static int EstimateTextureMemory(int size, int levels, SurfaceFormat format, bool nativeCompression)
++    {
++        long bytesPerFace = 0;
++        for (var level = 0; level < levels; level++)
++        {
++            var dimension = Math.Max(size >> level, 1);
++            if (nativeCompression)
++            {
++                var blockBytes = format == SurfaceFormat.Dxt1 ? 8 : 16;
++                bytesPerFace += (long)((dimension + 3) / 4) * ((dimension + 3) / 4) * blockBytes;
++            }
++            else
++            {
++                var bytesPerPixel = glFormatBytes(format);
++                bytesPerFace += (long)dimension * dimension * bytesPerPixel;
++            }
++        }
++
++        return (int)Math.Min(bytesPerFace * 6, int.MaxValue);
++
++        static int glFormatBytes(SurfaceFormat value) => value switch
++        {
++            SurfaceFormat.Vector4 => 16,
++            SurfaceFormat.HdrBlendable or SurfaceFormat.HalfVector4 or SurfaceFormat.Vector2 or SurfaceFormat.Rgba64 => 8,
++            SurfaceFormat.HalfVector2 or SurfaceFormat.Single or SurfaceFormat.Rg32 or SurfaceFormat.NormalizedByte4 or
++                SurfaceFormat.Rgba1010102 or SurfaceFormat.Bgra8 or SurfaceFormat.Depth => 4,
++            SurfaceFormat.HalfSingle or SurfaceFormat.NormalizedByte2 or SurfaceFormat.Bgr565 or SurfaceFormat.Bgra4444 or
++                SurfaceFormat.Bgra5551 => 2,
++            SurfaceFormat.R8 => 1,
++            SurfaceFormat.Dxt1 or SurfaceFormat.Dxt3 or SurfaceFormat.Dxt5 => 4,
++            _ => throw new NotSupportedException($"Cannot estimate cubemap memory for {value}")
++        };
++    }
++
+     private int maxLevel = 0;
+     private int currentLevels = 0;
+     public void SetData<T>(CubeMapFace face, int level, Rectangle? rect, T[] data, int start, int count) where T : unmanaged
+--- a/src/LibreLancer/Interface/DebugView.cs
++++ b/src/LibreLancer/Interface/DebugView.cs
+@@ -169,6 +169,11 @@
+                 ImGui.SetNextWindowPos(new Vector2(Math.Max(8, displaySize.X - 620), 8), ImGuiCond.Appearing);
+                 ImGui.Begin("Debug");
+                 ImGui.Text($"FPS: {game.RenderFrequency:F2}");
++                var resources = game.ResourceManager;
++                var surfaceStats = resources.SurfaceGpuTextures?.Stats;
++                ImGui.Text($"Tracked texture estimates: {resources.EstimatedTextureMemory / (1024.0 * 1024.0):F1} MiB");
++                ImGui.Text($"Surface maps GPU: {((surfaceStats?.ResidentBytes ?? 0) / (1024.0 * 1024.0)):F1} MiB resident, {((surfaceStats?.RetiringBytes ?? 0) / (1024.0 * 1024.0)):F1} MiB retiring");
++                ImGui.Text($"Generated tangent buffers: {resources.GeneratedTangentGpuBytes / (1024.0 * 1024.0):F1} MiB");
+                 if (performanceSamplesRecorded > 0)
+                 {
+                     ImGui.Text($"Update + draw ms p50/p95/p99 (n={performanceSamplesRecorded}/{PerformanceSampleCount}): {frameWorkPercentiles[0] * 1000:F2} / {frameWorkPercentiles[1] * 1000:F2} / {frameWorkPercentiles[2] * 1000:F2}");
+--- a/src/LibreLancer/Resources/GameResourceManager.cs
++++ b/src/LibreLancer/Resources/GameResourceManager.cs
+@@ -439,6 +439,7 @@
+         foreach (var tex in textures.Where(tex => texturefiles[tex.Key] == id))
+         {
+             texturefiles.Remove(tex.Key);
++            EstimatedTextureMemory -= tex.Value?.EstimatedTextureMemory ?? 0;
+             tex.Value?.Dispose();
+             removeTex.Add(tex.Key);
+         }

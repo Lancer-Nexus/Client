@@ -1,0 +1,151 @@
+diff --git a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+--- a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
++++ b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+@@ -219,7 +219,7 @@
+         }
+ 
+         IntPtr window = IntPtr.Zero;
+-        IntPtr device = IntPtr.Zero;
++        SDL3GpuDeviceOwner? gpu = null;
+         try
+         {
+             window = SDL3.SDL_CreateWindow("Lancer Nexus SDL_GPU pipeline audit", 64, 64,
+@@ -230,13 +230,12 @@
+             var shaderFormats = SDL3.SDL_GPUShaderFormat.SDL_GPU_SHADERFORMAT_SPIRV |
+                                 SDL3.SDL_GPUShaderFormat.SDL_GPU_SHADERFORMAT_DXIL |
+                                 SDL3.SDL_GPUShaderFormat.SDL_GPU_SHADERFORMAT_MSL;
+-            device = SDL3.SDL_CreateGPUDevice(shaderFormats, false, null!);
+-            if (device == IntPtr.Zero)
+-                throw Failure("SDL_GPU device creation failed");
++            gpu = SDL3GpuDeviceOwner.Create(shaderFormats);
++            var device = gpu.Handle;
+             if ((SDL3.SDL_GetGPUShaderFormats(device) & SDL3.SDL_GPUShaderFormat.SDL_GPU_SHADERFORMAT_SPIRV) == 0)
+                 throw new InvalidOperationException("The selected SDL_GPU driver does not support production SPIR-V shaders.");
+ 
+-            Console.WriteLine($"SDL_GPU production pipeline audit driver: {SDL3.SDL_GetGPUDeviceDriver(device)}");
++            Console.WriteLine($"SDL_GPU production pipeline audit driver: {gpu.Driver}");
+             var assembly = Assembly.Load("LibreLancer");
+             var shaderCatalog = assembly.GetType("LibreLancer.Shaders.AllShaders", throwOnError: true)!;
+             var bundles = shaderCatalog.GetFields(BindingFlags.Public | BindingFlags.Static)
+@@ -311,14 +310,22 @@
+         }
+         finally
+         {
+-            if (device != IntPtr.Zero)
+-            {
+-                SDL3.SDL_WaitForGPUIdle(device);
+-                SDL3.SDL_DestroyGPUDevice(device);
+-            }
+-            if (window != IntPtr.Zero)
+-                SDL3.SDL_DestroyWindow(window);
+-            SDL3.SDL_Quit();
++            try
++            {
++                gpu?.Dispose();
++            }
++            finally
++            {
++                try
++                {
++                    if (window != IntPtr.Zero)
++                        SDL3.SDL_DestroyWindow(window);
++                }
++                finally
++                {
++                    SDL3.SDL_Quit();
++                }
++            }
+         }
+     }
+ 
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -326,6 +326,17 @@
+    unvollständige Dreiecke. Das ist Diagnosepfad-Stabilität, keine DFM-Abnahme.
+    Details:
+    [SDL_GPU FVF/DFM-Pipeline-Audit](evidence/renderer/sdl-gpu-real-fvf-input-pipeline-20261019.md).
++   Patch 2471 kapselt den SDL_GPU-Gerätebesitz und prüft den GPU-Leerlauf vor
++   der Zerstörung. Patch 2472 verwendet denselben Besitzer auch im
++   Produktionspipeline-Audit und garantiert die SDL-Fenster-/Video-Bereinigung
++   bei Fehlern. Ein Release-Build sowie Shader- und Pipeline-Audits unter
++   SDL-Offscreen/Vulkan bestanden am 20.10.; 26 Shader-Bundles kompilierten
++   6.990 Stages, und 3.495 Produktionspipelines wurden erstellt und freigegeben.
++   SDL meldete weiterhin fehlendes `VK_EXT_headless_surface` und
++   unvollständige Haswell-Vulkan-Unterstützung. Der Spielrenderer verwendet
++   weiterhin OpenGL; dies ist kein Nachweis für SDL_GPU-Szenenbild oder
++   Plattformqualität. Details:
++   [SDL_GPU Geräte-Lebenszyklus-Audit](evidence/renderer/sdl-gpu-device-lifecycle-20261020.md).
+ 7. **Stabilität und Performance.** Feste Szenen und Kameras für Intro,
+    Kampf, Nebel, Asteroidenfeld, Basis, Planet und DFM erfassen. CPU/GPU-Zeit,
+    Drawcalls, Uploads, Speicher und Pipeline-Kompilierung mit identischen
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -405,3 +405,4 @@
+ 
+ | 2470 | Record Freelancer main-executable atmosphere registration trace and remaining Fade uncertainty |
+ | 2471 | Extract SDL_GPU device lifetime ownership for the renderer backend |
++| 2472 | Reuse checked SDL_GPU device ownership in the production pipeline audit |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -463,3 +463,4 @@
+ client 2469-asteroid-culling-runtime-evidence.patch
+ client 2470-atmosphere-fade-main-executable-trace.patch
+ client 2471-sdl-gpu-device-owner.patch
++client 2472-unify-sdl-gpu-audit-device-lifecycle.patch
+diff --git a/docs/evidence/renderer/sdl-gpu-device-lifecycle-20261020.md b/docs/evidence/renderer/sdl-gpu-device-lifecycle-20261020.md
+new file mode 100644
+--- /dev/null
++++ b/docs/evidence/renderer/sdl-gpu-device-lifecycle-20261020.md
+@@ -0,0 +1,49 @@
++# SDL_GPU device lifecycle and production audits — 2026-10-20
++
++Patch 2471 introduced `SDL3GpuDeviceOwner` for SDL_GPU ownership. Patch 2472
++also uses it in the production graphics-pipeline audit. Disposal waits for GPU
++idle, reports a failed wait, and destroys the device; nested cleanup still
++releases the hidden window and quits SDL if device disposal fails.
++
++## Build
++
++```text
++DOTNET_ROOT=/opt/dotnet-10 DOTNET_ROOT_X64=/opt/dotnet-10 \
++  /opt/dotnet-10/dotnet build src/lancer/lancer.csproj -c Release \
++  --no-restore -p:UseSharedCompilation=false
++Build succeeded.
++167 Warning(s)
++0 Error(s)
++```
++
++## Shader compilation
++
++```text
++SDL_VIDEODRIVER=offscreen SDL_GPU_DRIVER=vulkan \
++  DOTNET_ROOT=/opt/dotnet-10 DOTNET_ROOT_X64=/opt/dotnet-10 timeout 90s \
++  /opt/dotnet-10/dotnet src/lancer/bin/Release/net10.0/lancer.dll \
++  --sdl-gpu-shader-compile-audit
++Installed Vulkan doesn't implement the VK_EXT_headless_surface extension
++MESA-INTEL: warning: Haswell Vulkan support is incomplete
++SDL_GPU shader audit driver: vulkan
++SDL_GPU production shader compile audit passed: 26 bundles, 3495 variants, 6990 shader stages.
++```
++
++## Production pipeline creation
++
++```text
++SDL_VIDEODRIVER=offscreen SDL_GPU_DRIVER=vulkan \
++  DOTNET_ROOT=/opt/dotnet-10 DOTNET_ROOT_X64=/opt/dotnet-10 timeout 150s \
++  /opt/dotnet-10/dotnet src/lancer/bin/Release/net10.0/lancer.dll \
++  --sdl-gpu-production-pipeline-audit
++Installed Vulkan doesn't implement the VK_EXT_headless_surface extension
++MESA-INTEL: warning: Haswell Vulkan support is incomplete
++SDL_GPU production pipeline audit driver: vulkan
++SDL_GPU production pipeline audit passed: 26 bundles, 3495 pipelines created and released.
++```
++
++The Vulkan driver reports incomplete Haswell support. The audits prove shader
++and pipeline object creation and cleanup on this driver only. They do not draw
++or read back the complete game scene. `SDL3Game` still creates
++`GLRenderContext`; the production game and editor renderers are not running on
++SDL_GPU yet.

@@ -42,7 +42,7 @@ The writer chunks each source file in order, deduplicates identical chunks by SH
 
 With content version 1, chunk size 16, compression level 3, and one file `a.bin` containing byte `7f`, the complete deterministic NAP file SHA-256 is:
 
-```text
+```plaintext
 6b2865ad4e2ed41aada33af2045b331cd85b16e8bda8c40271b3931c63aa0be1
 ```
 

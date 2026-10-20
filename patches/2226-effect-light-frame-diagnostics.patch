@@ -1,0 +1,81 @@
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -79,6 +79,14 @@
+         private RenderTarget2D? shadowTarget;
+         private bool shadowTargetAllocationFailed;
+         public string ShadowMapStatus { get; private set; } = "disabled";
++        public bool TransientEffectLightsEnabled => Settings.RenderTransientEffectLights;
++        public int FrameEffectLightCandidates { get; private set; }
++        public int FrameEffectLightsAccepted { get; private set; }
++        public int FrameEffectLightsRejectedByPriority { get; private set; }
++        public int FrameEffectLightsRejectedByBudget { get; private set; }
++        public float LastEffectLightDistance { get; private set; }
++        public float LastEffectLightRange { get; private set; }
++        public float LastEffectLightPriority { get; private set; }
+ 
+         public Game Game
+         {
+@@ -521,6 +529,13 @@
+                 SystemLighting.DynamicLightsEnabled = Settings.DynamicLighting;
+                 SystemLighting.MaxFrameLights = Settings.DynamicLightBudget;
+                 SystemLighting.BeginFrame(camera.Position);
++                FrameEffectLightCandidates = 0;
++                FrameEffectLightsAccepted = 0;
++                FrameEffectLightsRejectedByPriority = 0;
++                FrameEffectLightsRejectedByBudget = 0;
++                LastEffectLightDistance = 0;
++                LastEffectLightRange = 0;
++                LastEffectLightPriority = 0;
+                 if (Settings.RenderTransientEffectLights)
+                 {
+                     foreach (var effectLight in transientEffectLights)
+@@ -528,7 +543,18 @@
+                         effectLight.Light.LightGroup = 0;
+                         effectLight.Light.Active = true;
+                         effectLight.Light.Light = CreateTransientEffectRenderLight(effectLight);
+-                        SystemLighting.AddFrameLight(effectLight.Light);
++                        var renderLight = effectLight.Light.Light;
++                        FrameEffectLightCandidates++;
++                        LastEffectLightDistance = Vector3.Distance(camera.Position, renderLight.Position);
++                        LastEffectLightRange = renderLight.Range;
++                        LastEffectLightPriority = RenderHelpers.CalculateLightPriority(
++                            renderLight, camera.Position, 0);
++                        if (LastEffectLightPriority <= 0)
++                            FrameEffectLightsRejectedByPriority++;
++                        else if (SystemLighting.AddFrameLight(effectLight.Light))
++                            FrameEffectLightsAccepted++;
++                        else
++                            FrameEffectLightsRejectedByBudget++;
+                     }
+                 }
+                 rstate.SetCamera(camera);
+diff --git a/src/LibreLancer/GameStates/SpaceGameplay.Debug.cs b/src/LibreLancer/GameStates/SpaceGameplay.Debug.cs
+--- a/src/LibreLancer/GameStates/SpaceGameplay.Debug.cs
++++ b/src/LibreLancer/GameStates/SpaceGameplay.Debug.cs
+@@ -59,6 +59,8 @@
+                 $"Render Resolution: {Game.RenderContext.CurrentViewport.Width}x{Game.RenderContext.CurrentViewport.Height}");
+             ImGui.Text($"Frame lights accepted: {sysrender.SystemLighting.FrameTransientLightCount}/{sysrender.SystemLighting.MaxFrameLights} (persistent: {sysrender.SystemLighting.Lights.Count})");
+             ImGui.Text($"Active effect lights: {sysrender.ActiveTransientEffectLightCount}/{sysrender.Settings.TransientEffectLightBudget}");
++            ImGui.Text($"Effect light frame candidates: {sysrender.FrameEffectLightCandidates}; accepted: {sysrender.FrameEffectLightsAccepted}; priority rejected: {sysrender.FrameEffectLightsRejectedByPriority}; budget rejected: {sysrender.FrameEffectLightsRejectedByBudget}");
++            ImGui.Text($"Effect light enabled: {sysrender.TransientEffectLightsEnabled}; last distance/range/priority: {sysrender.LastEffectLightDistance:F1}/{sysrender.LastEffectLightRange:F1}/{sysrender.LastEffectLightPriority:F3}");
+             ImGui.Text($"Shadow map: {sysrender.ShadowMapStatus}");
+             ImGui.Text($"Active scene AA target estimate: {sysrender.EstimatedAAMemoryBytes / (1024.0 * 1024.0):F1} MiB");
+             ImGui.Text($"Bloom pass targets estimate: {sysrender.EstimatedBloomPassMemoryBytes / (1024.0 * 1024.0):F1} MiB");
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -188,3 +188,5 @@
+ | 2179 | Document HDR and default-strength Bloom runtime check |
+ | 2180 | Document Bloom startup controls |
+ | 2181 | Add sampleable depth-only render targets |
++
++| 2226 | Diagnose transient effect-light frame candidates and rejection priorities |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -225,3 +225,4 @@
+ client 2223-material-animation-constant-time-wrap.patch
+ client 2224-smaa-postprocess-pass.patch
+ client 2225-postprocess-four-mode-runtime-evidence.patch
++client 2226-effect-light-frame-diagnostics.patch

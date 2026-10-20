@@ -1,0 +1,115 @@
+diff --git a/src/LibreLancer/Render/Materials/BasicMaterial.cs b/src/LibreLancer/Render/Materials/BasicMaterial.cs
+--- a/src/LibreLancer/Render/Materials/BasicMaterial.cs
++++ b/src/LibreLancer/Render/Materials/BasicMaterial.cs
+@@ -310,7 +310,9 @@
+             public float EnvPrefiltered;
+             public float EnvDiffuseEnabled;
+             public float FeatureFlags;
++            public Vector3 UniformAlignmentPadding0;
+             public Vector3 Padding;
++            public float UniformAlignmentPadding1;
+             public Vector4 DetailMapParameters;
+             public Vector3 AmbientScale;
+             public float AmbientPadding;
+diff --git a/src/LibreLancer.Tests/NormalMapShaderTests.cs b/src/LibreLancer.Tests/NormalMapShaderTests.cs
+--- a/src/LibreLancer.Tests/NormalMapShaderTests.cs
++++ b/src/LibreLancer.Tests/NormalMapShaderTests.cs
+@@ -23,7 +23,7 @@
+         Assert.Equal(1,material.NormalStrength);
+     }
+     [Theory]
+-    [InlineData("BasicParameters",64,48)] [InlineData("PBRParameters",160,44)]
++    [InlineData("BasicParameters",64,48)] [InlineData("PBRParameters",176,44)]
+     public void UniformLayoutMatchesHlslRegisters(string name,int size,int strengthOffset)
+     {
+         var type=typeof(BasicMaterial).GetNestedType(name,BindingFlags.NonPublic)!;
+@@ -35,7 +35,7 @@
+     public void PbrEnvironmentMipCountMatchesHlslRegister()
+     {
+         var type=typeof(BasicMaterial).GetNestedType("PBRParameters",BindingFlags.NonPublic)!;
+-        Assert.Equal(160,Marshal.SizeOf(type));
++        Assert.Equal(176,Marshal.SizeOf(type));
+         Assert.Equal(48,Marshal.OffsetOf(type,"EnvMipCount").ToInt32());
+         Assert.Equal(52,Marshal.OffsetOf(type,"EnvMapStrength").ToInt32());
+     }
+@@ -46,7 +46,7 @@
+     public void EnvironmentMapStrengthUsesTheFinalMaterialRegister(string name)
+     {
+         var type=typeof(BasicMaterial).GetNestedType(name,BindingFlags.NonPublic)!;
+-        Assert.Equal(name == "PBRParameters" ? 160 : 64,Marshal.SizeOf(type));
++        Assert.Equal(name == "PBRParameters" ? 176 : 64,Marshal.SizeOf(type));
+         Assert.Equal(52,Marshal.OffsetOf(type,"EnvMapStrength").ToInt32());
+     }
+ 
+@@ -54,7 +54,19 @@
+     public void PbrFadeRangeMatchesHlslRegister()
+     {
+         var type=typeof(BasicMaterial).GetNestedType("PBRParameters",BindingFlags.NonPublic)!;
+-        Assert.Equal(144,Marshal.OffsetOf(type,"FadeRange").ToInt32());
+-        Assert.Equal(152,Marshal.OffsetOf(type,"FadePadding").ToInt32());
++        Assert.Equal(160,Marshal.OffsetOf(type,"FadeRange").ToInt32());
++        Assert.Equal(168,Marshal.OffsetOf(type,"FadePadding").ToInt32());
++    }
++
++    [Fact]
++    public void PbrParametersMatchSpirvStd430MemberOffsets()
++    {
++        var type=typeof(BasicMaterial).GetNestedType("PBRParameters",BindingFlags.NonPublic)!;
++        Assert.Equal(80,Marshal.OffsetOf(type,"Padding").ToInt32());
++        Assert.Equal(96,Marshal.OffsetOf(type,"DetailMapParameters").ToInt32());
++        Assert.Equal(112,Marshal.OffsetOf(type,"AmbientScale").ToInt32());
++        Assert.Equal(128,Marshal.OffsetOf(type,"TexCoordSelectors1").ToInt32());
++        Assert.Equal(144,Marshal.OffsetOf(type,"TexCoordSelectors2").ToInt32());
++        Assert.Equal(176,Marshal.SizeOf(type));
+     }
+ }
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -863,6 +863,22 @@
+ allein ist kein Nachweis für reale Materialbindung oder die Darstellung einer
+ Freelancer-Szene.
+ 
++## PBR-Uniformlayout an SPIR-V angeglichen (2026-10-20)
++
++Die SPIR-V-Reflection des kompilierten `PBRParameters`-Blocks zeigte
++`PBRPadding` bei Byte 80, `DetailMapParameters` bei 96, `AmbientScale` bei 112,
++die UV-Selektoren bei 128/144 und den Fade-Bereich bei 160; die Blockgröße ist
++176 Byte. `BasicMaterial.PBRParameters` verwendete zuvor `Pack=1`, legte das
++`float3`-Padding aber bereits bei Byte 68 ab. Dadurch lagen alle folgenden
++Felder zu früh; insbesondere las der PBR-Shader den Ambient-Multiplikator als
++Null. Die korrigierte C#-Struktur fügt die expliziten Registerlücken ein und
++eine Layoutprüfung deckt die reflektierten Offsets ab. Der SDL_GPU-Probe nutzt
++dasselbe 176-Byte-Layout. Release-Build und Standard-PBR-/Schattenprobe
++bestanden; der Materialpixel war `(200, 150, 0, 255)`, der verdeckte
++Schattenpixel `(0, 0, 0, 255)`. Das belegt die synthetische Uniform- und
++Shaderstrecke auf Mesa Haswell Vulkan. Reale Materialien, alle Grafik-Backends
++und eine Freelancer-Laufzeitszene bleiben gesondert visuell abzunehmen.
++
+ ## NAP-Nebelvisualisierung in PBR und Legacy (2026-10-20)
+ 
+ Der Release-Client startete unter SDL3-Offscreen mit Mesa OpenGL 4.3
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 480 Client patches and two native patches. Each
++The active series contains 481 Client patches and two native patches. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -423,3 +423,4 @@
+ | 2487 | Preflight active NAP snapshots before runtime launch |
+ | 2488 | Fix front-facing PBR spotlight attenuation direction |
+ | 2489 | Add an SDL_GPU pixel probe for production PBR spotlights |
++| 2490 | Align PBR uniform layout with compiled SPIR-V |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -481,3 +481,4 @@
+ client 2487-preflight-active-nap-snapshot.patch
+ client 2488-fix-pbr-spotlight-normal-gate.patch
+ client 2489-pbr-spotlight-gpu-smoke.patch
++client 2490-align-pbr-uniform-std140-layout.patch

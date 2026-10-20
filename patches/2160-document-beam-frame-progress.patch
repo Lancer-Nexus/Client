@@ -1,0 +1,130 @@
+diff --git a/docs/beam-and-explosion-effects-audit.md b/docs/beam-and-explosion-effects-audit.md
+--- a/docs/beam-and-explosion-effects-audit.md
++++ b/docs/beam-and-explosion-effects-audit.md
+@@ -48,24 +48,36 @@
+   `core_width` gelesenen Wert und fließt in die Berechnung von Beam-Vertex-
+   Positionen ein, unter anderem zusammen mit `head_width` und `tip_length`.
+ - Der Vergleichswert für `param_3` liegt bei `0x005c7474` und ist im Retail-
+-  PE `0.0`. Ein Aufrufer bei `0x004fa258` übergibt explizit `0.0` an
+-  `FUN_004fa270`; der anschließende Zweig bei `0x004fa2a5` prüft zusätzlich
+-  Flag-Bit `8` und ruft `FUN_0054bc80()` auf. Dessen disassemblierter Körper
+-  vergleicht einen globalen Zustand mit `0x00678ba4`; der fachliche Name dieses
+-  Zustands und die Bedeutung des Flags sind nicht belegt. Damit ist die
+-  `flash_size`-Nutzung an einen konkreten Null-Parameter-Aufruf gebunden, aber
+-  einem bekannten First-Person-Kamerazustand zuzuordnen; die Flag-Semantik
+-  selbst bleibt offen.
++  PE `0.0`. Die Aufrufinstruktionen bei `0x004fa258` übergeben zwar explizit
++  `0.0`, aber als zweiten Geometrieparameter (`param_2`); `param_3` bleibt der
++  zuvor berechnete Countdownwert. Der Wrapper verwirft den Nullwert dieses
++  Countdownparameters bereits vor dem Rendereraufruf. Der konkrete
++  `flash_size`-Zweig in `FUN_004fa270` ist damit für diesen Wrapperpfad nicht
++  belegt; ein anderer erreichbarer Pfad mit `param_3 == 0` wurde noch nicht
++  gefunden. Die statischen Aufruferdetails stehen in [Callsite-Fenstern](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/Freelancer-beam-renderer-call-windows.md>) und [Renderer-Referenzen](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/Freelancer-beam-renderer-callees.md>).
+ - Der Wrapper `FUN_004fa0a0` berechnet einen Geometriefaktor aus
+   `this+0x78` und `this+0x80`: solange der erste Wert kleiner ist, wird der
+   Quotient verwendet, danach `1.0`. `FUN_004f9c20` addiert sein Updateargument
+-  auf `this+0x78`. `FUN_004fc8b0` setzt `this+0x80` aus `core_length`,
+-  `tail_length`, dem Konstantwert `7.5` und der Geschwindigkeit des Besitzers.
+-  Der Aufruf auf `param_1[4]` über VTable-Offset `+0x54` ist im `common.dll`-
+-  `CObject`-Vftable als `CObject::get_velocity` identifiziert; die Methode gibt
+-  `PhySys::GetVelocity` zurück. Der Betrag dieser Geschwindigkeit fließt somit
+-  in `this+0x80` ein. Bei Bit `0x02` oder Faktor `0` ruft der Wrapper den
+-  Renderer mit `param_3 = 0` auf. Archetypwert `0` führt zu `FUN_004fa270`,
++  auf `this+0x78`. Dieses Argument kommt aus dem Effect-Frame-Update
++  `FUN_004f7480`: der Framewert wird auf höchstens `0.1` begrenzt und von
++  `FUN_004f7810` an den virtuellen Effect-Update-Slot `+0x18` weitergereicht.
++  Derselbe Wert wird dort für `Position += Velocity * delta` benutzt; das
++  belegt einen Frame-Zeitwert in Sekunden. Das Feld `this+0x7c` wird als
++  Countdown geführt: `FUN_004f9980` begrenzt es auf `DAT_006129cc = 0.3 s`,
++  `FUN_004f9c20` zieht denselben Framewert ab, und `FUN_004fa0a0` leitet bei
++  positiver Restzeit `this+0x7c / 0.3` als dritten Rendererwert weiter; sonst
++  bleibt dieser Wert `1.0`. Der vollständige Callsite-Pfad, der den
++  `flash_size`-Zweig mit drittem Argument null erreicht, ist noch offen.
++- `FUN_004fc8b0` setzt `this+0x80` auf
++  `(core_length + tail_length + 7.5) / speed`; ohne Effektdefinition ist der
++  Zähler `7.5`. `speed` ist der Betrag des Vektors, den der Beam-Kontext über
++  VTable-Offset `+0x54` vom zugeordneten `CObject` abfragt. In `common.dll` ist
++  dieser Slot als `CObject::get_velocity` identifiziert und gibt
++  `PhySys::GetVelocity` zurück. `this+0x80` ist damit eine Dauer für die Beam-
++  Strecke bei dieser Objektgeschwindigkeit, nicht eine Summe aus Länge und
++  Geschwindigkeit. Bei Bit `0x02` oder Fortschrittsfaktor `0` setzt der
++  Wrapper den zweiten Geometrieparameter auf `0`; den dritten Countdownwert
++  übergibt er separat. Archetypwert `0` führt zu `FUN_004fa270`,
+   Wert `1` zu `FUN_004fb1e0`. Exporte: [CObject-Vftable](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/common-CObject-vtable-slots.txt>), [CObject::get_velocity](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/common-CObject-get_velocity.md>) und [CArchGroup::GetVelocity](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/common-CArchGroup-GetVelocity.md>).
+   [Wrapper-Decompilierung und Metadaten](/home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-15-flash-size-trace/Freelancer-beam-wrapper-004fa0a0.md)
+   dokumentieren den erzwungenen Funktionsanfang bei `0x004fa0a0`; Ghidra hatte
+@@ -76,8 +88,10 @@
+   Der zuvor zugeordnete Konstruktor `FUN_004f8d00` gehört laut RTTI zu
+   `CameraParticles : Effect` und setzt dessen separate Vftable `005d9d84`.
+   Die BeamEffect-Methoden prüfen Bits `0x01`/`0x02`; `FUN_004fa270` prüft
+-  zusätzlich `0x08`. `flash_size` greift damit nur, wenn dieser Aufrufpfad
+-  `param_3=0` liefert, Bit `0x08` gesetzt und `FUN_0054bc80()` false ist.
++  zusätzlich `0x08`. `flash_size` greift nur bei `param_3=0`, Bit `0x08` und
++  außerhalb von `first_person`. Der Wrapper setzt bei Flag `0x02` oder
++  Fortschrittsfaktor `0` jedoch `param_2=0`; `param_3` ist der separate
++  Countdownwert und wird vor dem Renderaufruf gegen null geprüft.
+   Der Dispatcher setzt Bit `0x08` für das Spieler-Schiff; der Viewtest schließt
+   den First-Person-Modus aus. Der Writer von Bit `0x02` (`FUN_004fc8f0`) ändert Bits `0x02` und `0x04`,
+   aber Ghidra fand weder direkte Codeaufrufe noch gespeicherte Funktionspointer
+@@ -127,11 +141,14 @@
+   [Umschalter](/home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-15-flash-size-trace/Freelancer-state-switcher-00549bc0.md)
+   und [Sonderinstanz](/home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-15-flash-size-trace/Freelancer-sentinel-00678ba4.md)
+   enthalten die Herkunft.
+-- Damit sind der Besitzer-Geschwindigkeitsvektor, der Spieler-Schiff-Writer für
+-  Bit `0x08` und der First-Person-Viewtest belegt. Offen ist, wie das
+-  Updateargument in `this+0x78` den Retail-Fortschrittsfaktor dimensioniert und
+-  wie dieser Faktor dem Client-Projektilfortschritt entspricht. `flash_size`
+-  pauschal als Mündungsblitz zu interpretieren wäre weiterhin unbelegt.
++- Damit ist der Fortschrittsfaktor `min(1, elapsed / duration)` mit
++  `duration = (core_length + tail_length + 7.5) / speed` belegt. Der Client
++  akkumuliert für Projektile denselben Zeitwert in `Projectile.Time`; die
++  äquivalente Strecke lässt sich aus `Projectile.Normal.Length() * Time`
++  bilden. Die exakte Zuordnung des vom Beam-Kontext gebundenen `CObject` zur
++  Client-Eigenschaft `Projectile.Owner` sowie der dritte Rendererparameter
++  bleiben zu bestätigen. `flash_size` pauschal als Mündungsblitz zu
++  interpretieren wäre weiterhin unbelegt.
+ - Die Parser- und Renderer-Auszüge mit Decompiler-Ausgabe liegen lokal in der
+   [Freelancer-Reverse-Engineering-Ablage](/home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-14-light-range/Freelancer-beam-parser-0042e4a0.md),
+   zusammen mit einem Hash- und Interpretationshinweis. Der Renderpfad steht in
+@@ -182,8 +199,10 @@
+ ## Nächste Arbeit
+ 
+ 1. [x] `FUN_004fa0a0` als Aufrufer verfolgen: Der Geometriefaktor wird aus zwei
+-   Objektwerten berechnet und bei Flagmaske `2` oder Faktor `0` als `param_3=0`
+-   weitergegeben. Der Archetyp verzweigt zu den Spear-/Bolt-Renderern.
++   Objektwerten berechnet und bei Flagmaske `2` oder Faktor `0` als `param_2=0`
++   weitergegeben. `param_3` ist ein eigener Countdownwert; der aufgerufene
++   `flash_size`-Zweig mit `param_3=0` ist auf diesem Pfad nicht nachgewiesen.
++   Der Archetyp verzweigt zu den Spear-/Bolt-Renderern.
+ 2. [x] Speicherart des Zustandsmarkers bestimmen: `DAT_00678ba4` liegt als
+    nullgefüllte statische Kameraadresse im `.data`-Block, keine VTable. Zwei
+    weitere Getter liefern gleichartige Adressen. `00678ba4` ist der benannte
+@@ -199,14 +218,20 @@
+ 5. [x] Den Besitzer-Vektor als physikalische Geschwindigkeit zuordnen und
+    Bit `0x08` auf das Spieler-Schiff zurückführen. Der Retail-Renderer liest
+    diesen Beamzweig nur außerhalb von `first_person`.
+-6. [ ] Das Updateargument von `FUN_004f9c20` und die Zeiteinheiten des
+-   Fortschrittsfaktors nachverfolgen. Diesen Faktor erst danach auf die
+-   vorhandene Client-Projektillänge (`currDist`) abbilden. `IsSpecialCamera()`
+-   ist kein Retail-First-Person-Test; der Client hat derzeit keine
+-   First-Person-Kamera.
+-7. [ ] `flash_size` anhand der Retail-Formeln in die Beam-Spear-Geometrie
++6. [x] Das Updateargument ist Frame-Zeit aus `FUN_004f7480` (maximal `0.1`),
++   und `this+0x80` ist die aus Beam-Länge und Kontextgeschwindigkeit
++   berechnete Dauer. Der Fortschrittsfaktor ist `elapsed / duration`, begrenzt
++   auf `1`. Exporte: [Beam-Update-Aufrufer](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/Freelancer-beam-update-callers.md>), [Frame-Update-Instruktionen](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/Freelancer-beam-frame-update-instructions.md>) und [Kontext-Setter](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/Freelancer-beam-setter-context.md>).
++7. [ ] Den Beam-Kontext-Speed dem Client-`Projectile.Owner` zuordnen und
++   `elapsed / duration` gegen `currDist` prüfen. Außerdem klären, ob der
++   `flash_size`-Zweig mit drittem Argument null über einen anderen Pfad
++   erreichbar ist; der bisherige Wrapperpfad setzt `param_2=0` und führt den
++   Nullwert von `param_3` nicht zum Renderer. Das Countdownverhalten von
++   `this+0x7c` (0,3 s) ist statisch nachvollzogen. `IsSpecialCamera()` ist kein
++   Retail-First-Person-Test und der Client hat derzeit keine First-Person-Kamera.
++8. [ ] `flash_size` anhand der Retail-Formeln in die Beam-Spear-Geometrie
+    übertragen und Null-, Grenz- und typische NAP-Werte abdecken.
+-8. [ ] Beam- und Explosionseffekte mit NAP-only-Containern visuell vergleichen;
++9. [ ] Beam- und Explosionseffekte mit NAP-only-Containern visuell vergleichen;
+    Originalwerte und Timing als Referenz erhalten.
+-9. [ ] Erst nach diesen Vergleichen den übergeordneten Effekt-Todo-Punkt als
++10. [ ] Erst nach diesen Vergleichen den übergeordneten Effekt-Todo-Punkt als
+    abgeschlossen markieren.

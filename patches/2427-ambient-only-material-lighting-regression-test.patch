@@ -1,0 +1,67 @@
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -31,6 +31,8 @@
+ | Shader-Kompilierung | Alle 26 Shader-Bundles und die definierten Feature-Permutationen kompilieren mit dem im Repository enthaltenen DXC; der Release-Build vom 19.10. bindet zusätzlich den skinned DFM-DetailMap-Shader ein. Der SDL_GPU/Vulkan-Pipeline-Audit erstellte alle 3.495 Produktionspipelines. | Shader- und Pipeline-Erstellung sind belegt, nicht das Zeichnen realer Assets auf unterstützten Treibern. Der Haswell-Vulkan-Treiber meldet unvollständige Unterstützung. Siehe [Pipeline-Audit 2026-10-19](evidence/renderer/sdl-gpu-production-pipeline-audit-20261019.md). |
+ | Dynamische Lichter und Schatten | Persistente und kurzlebige Lichter werden priorisiert; `lgt_effect`-Lichter von fliegenden Projektilen folgen nun dem Projektilalter und seiner Position. Ein ausgewähltes Richtungslicht läuft durch Shadow-Map-Pass und 3×3-PCF. Alpha-Test-Texturen werden auch in PBR-Depth-/Shadow-Pässen anhand eines Material-Uniforms ausgeschnitten; blendtransparente Materialien werfen keine Schatten. Lichtprojektion ist im Licht-XY-Raum verankert und texelgesnappt; Mesh-Cullingradien berücksichtigen `RenderScale`. Der Shadow-Frustum-Fit hält seine acht Ecken in einem Stack-Puffer statt pro Frame ein Array zu allozieren. Die Frame-Lichtaufnahme verwirft jetzt zusätzlich nicht-endliche Positionen, Richtungen, Farben, Attenuation- und Projektionsparameter, bevor Priorisierung oder Shaderbindung sie verwenden. | Unit-Tests decken Lichtkurvenzeit, Position, Gruppe und ungültige Radien für Projektil-Lichter ab. Hi02 belegt Pass, Lichtauswahl und Live-Schaltung auf einer OpenGL-GPU. Kamera-Fit-/Stabilitäts- und RenderScale-Radiustests bestehen. Ein NAP-only-Hi02-A/B auf Intel HD 4600 bestätigt den aktiven Pass bei Bias 0 und 0,02; der Hull-Unterschied ist subtil und kalibriert keinen empfohlenen Wert. Eine Ingame-Abnahme von Waffenfeuer-/Projektillichtern, Offscreen-Castern, weiteren Materialien/Szenen und GPU-Kosten bleibt offen. Siehe `docs/evidence/renderer/shadow-map-hi02-live-toggle-20261017/`, `docs/evidence/renderer/shadow-camera-stability-20261018.md` und `docs/evidence/renderer/scaled-model-culling-20261018.md`. |
+ | Diagnose | CPU-Framezeitprofile, asynchrone OpenGL-GPU-Passzeiten, Bloom-/Shadow-Passzeiten, Ziel-/Speicherschätzungen und CSV-Ausgabe. Environment-Cubemaps mit mehreren Catalog-Aliasen werden im geschätzten GPU-Texturspeicher nur einmal gezählt und bei Bereinigung auch nur einmal freigegeben. | Langzeitprofile und plattformübergreifende Vergleichsbaselines fehlen. Einzelne asynchrone Samples sind keine FPS-Baseline. |
++
++Der Null-Lichtpfad ist mit `RenderLightingTests.SetLightsAcceptsAmbientOnlyLightingWithoutSourceOwner` direkt abgesichert: Ambient-Beleuchtung ohne `SourceLighting`-Besitzer muss gültig bleiben. Der NAP-only-Intro-Smoke in [Intro-Licht-Smoke](evidence/renderer/dynamic-lighting-intro-smoke-20261018/README.md) erreichte FP7 mit dynamischer Beleuchtung an und aus ohne Renderer-Ausnahme. Die visuellen Unterschiede zeigen, dass deaktivierte dynamische Beleuchtung das Intro deutlich abdunkelt; abschließende Kalibrierung und Hardware-Performance sind offen.
+ 
+ ## Neueste Ingame-Beobachtung
+ 
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -365,3 +365,4 @@
+ | 2424 | Capture cumulative dropped simulation ticks in renderer profile CSVs |
+ | 2425 | Document the local invulnerability option in renderer smoke evidence |
+ | 2426 | Resolve diffuse textures from embedded CMP libraries in SDL_GPU diagnostics |
++| 2427 | Cover ambient-only material lighting without a source-light owner |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -418,3 +418,4 @@
+ client 2424-render-profile-simulation-overload-counter.patch
+ client 2425-document-local-invulnerability-render-smokes.patch
+ client 2426-sdl-gpu-cmp-embedded-texture-lookup.patch
++client 2427-ambient-only-material-lighting-regression-test.patch
+diff --git a/src/LibreLancer.Tests/RenderLightingTests.cs b/src/LibreLancer.Tests/RenderLightingTests.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Tests/RenderLightingTests.cs
+@@ -0,0 +1,34 @@
++using System;
++using LibreLancer;
++using LibreLancer.Graphics;
++using LibreLancer.Render;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class RenderLightingTests
++{
++    private sealed class HeadlessGame : Game
++    {
++        public HeadlessGame() : base(64, 64, false, GameConfiguration.HeadlessTest()) { }
++    }
++
++    [Fact]
++    public void SetLightsAcceptsAmbientOnlyLightingWithoutSourceOwner()
++    {
++        var context = new HeadlessGame().RenderContext;
++        try
++        {
++            using var shader = new Shader(context, ReadOnlySpan<byte>.Empty);
++            var lighting = Lighting.Create();
++            lighting.Ambient = new Color3f(0.2f, 0.3f, 0.4f);
++
++            Assert.Null(lighting.Lights.SourceLighting);
++            RenderMaterial.SetLights(shader, ref lighting, 1);
++        }
++        finally
++        {
++            context.DisposeShaders();
++        }
++    }
++}

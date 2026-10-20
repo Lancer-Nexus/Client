@@ -1,0 +1,78 @@
+diff --git a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+--- a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
++++ b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+@@ -25,6 +25,14 @@
+ {
+     private const string ShaderBundleResource = "SDLGPUSmoke.bin";
+     private const string CopyShaderBundleResource = "SDLGPUCopy.bin";
++
++    internal static float[] RequireCoverageTriangle(float[]? triangle)
++    {
++        if (triangle is not { Length: >= 6 })
++            throw new ArgumentException("The SDL_GPU geometry coverage triangle must contain three 2D vertices.",
++                nameof(triangle));
++        return triangle;
++    }
+ 
+     public static int AuditProductionShaderBundles()
+     {
+@@ -500,6 +508,8 @@
+     {
+         ArgumentNullException.ThrowIfNull(freelancerFvfDeclarationProvider);
+         var skinnedDfm = skinnedVertexBytes != null;
++        if (realVmeshVertices != null || skinnedDfm)
++            realVmeshCoverageTriangle = RequireCoverageTriangle(realVmeshCoverageTriangle);
+         var vertexDeclaration = freelancerFvfDeclarationProvider();
+         if (skinnedDfm && (realVmeshVertices != null || realVmeshIndices != null || boneMatrixBytes == null ||
+                            vertexDeclaration.Stride != 76 || skinnedVertexCount < 3 ||
+@@ -943,9 +953,7 @@
+                 for (var i = 0; i < weights.Length; i++)
+                 {
+                     var w = weights[i];
+-                    var triangle = realVmeshCoverageTriangle ??
+-                                   [realVmeshVertices[24], realVmeshVertices[25], realVmeshVertices[32],
+-                                       realVmeshVertices[33], realVmeshVertices[40], realVmeshVertices[41]];
++                    var triangle = realVmeshCoverageTriangle!;
+                     var ndcX = triangle[0] * w.X + triangle[2] * w.Y + triangle[4] * w.Z;
+                     var ndcY = triangle[1] * w.X + triangle[3] * w.Y + triangle[5] * w.Z;
+                     var normalizedY = 1.0f - (ndcY * 0.5f + 0.5f);
+diff --git a/src/LibreLancer.Tests/SDL3GpuVertexInputLayoutTests.cs b/src/LibreLancer.Tests/SDL3GpuVertexInputLayoutTests.cs
+--- a/src/LibreLancer.Tests/SDL3GpuVertexInputLayoutTests.cs
++++ b/src/LibreLancer.Tests/SDL3GpuVertexInputLayoutTests.cs
+@@ -51,6 +51,15 @@
+         Assert.Throws<InvalidOperationException>(() => SDL3GpuVertexInputLayout.From(vertexType));
+     }
+ 
++    [Fact]
++    public void RequiresCoverageTriangleForGeometryReadback()
++    {
++        Assert.Throws<ArgumentException>(() => SDL3GpuSmoke.RequireCoverageTriangle(null));
++        Assert.Throws<ArgumentException>(() => SDL3GpuSmoke.RequireCoverageTriangle([0, 0, 1, 1, 2]));
++        Assert.Equal(new float[] { 0, 0, 1, 0, 0, 1 },
++            SDL3GpuSmoke.RequireCoverageTriangle([0, 0, 1, 0, 0, 1]));
++    }
++
+     private static void AssertAttribute(SDL3.SDL_GPUVertexAttribute attribute, int location,
+         SDL3.SDL_GPUVertexElementFormat format, uint offset)
+     {
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -275,6 +275,9 @@
+    Spiel- und Editorpfad portieren; OpenGL bleibt währenddessen die Vergleichs-
+    und Rückfallreferenz. Der Audit auf Mesa/Vulkan Haswell ist wegen der
+    eingeschränkten Treiberunterstützung kein GPU-Kompatibilitätsnachweis.
++   Der SDL_GPU-Skinning-Readback validiert sein Coverage-Dreieck jetzt vor
++   Geräte- und Ressourcenanlage; ein Regressionstest prüft fehlende und
++   unvollständige Dreiecke. Das ist Diagnosepfad-Stabilität, keine DFM-Abnahme.
+    Details:
+    [SDL_GPU FVF/DFM-Pipeline-Audit](evidence/renderer/sdl-gpu-real-fvf-input-pipeline-20261019.md).
+ 7. **Stabilität und Performance.** Feste Szenen und Kameras für Intro,
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -405,3 +405,4 @@
+ client 2405-atmosphere-fade-property-table-evidence.patch
+ client 2406-sdl-gpu-cmp-material-submeshes.patch
+ client 2407-render-subpass-abort-contract.patch
++client 2408-sdl-gpu-dfm-readback-validation.patch

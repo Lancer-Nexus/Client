@@ -4,7 +4,6 @@ using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Net;
 using System.Numerics;
-using LancerNexus.Protocol;
 using LibreLancer.Data.Ini;
 using LibreLancer.Data.Schema.Missions;
 using LibreLancer.Missions.Actions;
@@ -548,14 +547,6 @@ public class Cnd_ProjHit : EventListenerCondition<ProjectileHitEvent>
     private class HitCounter : ConditionStorage
     {
         public int Remaining;
-        public override NpcMissionConditionState CaptureTransferState() => new() { Kind = "int32", NumberValue = Remaining };
-        public override void RestoreTransferState(NpcMissionConditionState state)
-        {
-            if (state.Kind != "int32" || state.NumberValue is < int.MinValue or > int.MaxValue ||
-                Math.Truncate(state.NumberValue) != state.NumberValue)
-                throw new InvalidOperationException("Mission hit-counter state is invalid.");
-            Remaining = (int)state.NumberValue;
-        }
     }
 
     public Cnd_ProjHit(Entry entry)
@@ -1116,7 +1107,7 @@ public class Cnd_DistVecLbl : ScriptedCondition
             {
                 continue;
             }
-            bool isInside = Vector3.Distance(obj.WorldTransform.Position, Position) <= Distance;
+            bool isInside = Vector3.Distance(obj.Transform.Position, Position) <= Distance;
             satisfied = isInside == Inside;
             if (satisfied && Any)
             {
@@ -1183,7 +1174,7 @@ public class Cnd_DistVec : ScriptedCondition
         var obj = space.World.GameWorld.GetObject(SourceShip);
         if (obj == null)
             return false;
-        bool isInside = Vector3.Distance(obj.WorldTransform.Position, Position) <= Distance;
+        bool isInside = Vector3.Distance(obj.Transform.Position, Position) <= Distance;
         if (TickAway.Present)
         {
             var st = (ConditionDouble)self.Storage;
@@ -1260,7 +1251,7 @@ public class Cnd_DistShip : ScriptedCondition
         var obj2 = space.World.GameWorld.GetObject(DestObject);
         if (obj == null || obj2 == null)
             return false;
-        var isInside = Vector3.Distance(obj.WorldTransform.Position, obj2.WorldTransform.Position) <= Distance;
+        var isInside = Vector3.Distance(obj.Transform.Position, obj2.Transform.Position) <= Distance;
         if (TickAway.Present)
         {
             var st = (ConditionDouble)self.Storage;

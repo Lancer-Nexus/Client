@@ -1,0 +1,826 @@
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -23,6 +23,8 @@
+ using LibreLancer.Utf;
+ using LibreLancer.ImageLib;
+ using LibreLancer.Resources;
++using LibreLancer.Render;
++using Nexus.Assets;
+ 
+ namespace lancer;
+ 
+@@ -32,6 +34,184 @@
+         float[] CoverageTriangle, D3DFVF Format, string Description, float[] DiffuseColor, byte[]? DiffuseDds,
+         byte[]? NormalDds, byte[]? RoughnessDds, byte[]? MetallicDds,
+         float NormalStrength, float Roughness, float Metallic);
++
++    private sealed record DfmDraw(byte[] Vertices, uint VertexCount, byte[] BoneMatrices,
++        Matrix4x4 World, Matrix4x4 NormalMatrix, float[] CoverageTriangle,
++        string Description, float[] DiffuseColor, byte[]? DiffuseDds, byte[]? NormalDds,
++        byte[]? RoughnessDds, byte[]? MetallicDds, float NormalStrength, float Roughness, float Metallic);
++
++    private static DfmDraw LoadDfmDraw(string path, string? surfaceRoot = null, bool surfaceEnabled = true)
++    {
++        var surfaceVfs = string.IsNullOrWhiteSpace(surfaceRoot) ? null : FileSystem.FromPath(surfaceRoot);
++        using var stream = File.OpenRead(path);
++        return LoadDfmDraw(stream, path, surfaceVfs, surfaceEnabled);
++    }
++
++    private static DfmDraw LoadDfmDraw(FileSystem vfs, string path, bool surfaceEnabled)
++    {
++        using var stream = vfs.Open(path);
++        return LoadDfmDraw(stream, path, vfs, surfaceEnabled);
++    }
++
++    private static DfmDraw LoadDfmDraw(Stream stream, string path, FileSystem? surfaceVfs, bool surfaceEnabled)
++    {
++        _ = new MaterialMap();
++        if (UtfLoader.LoadDrawable(stream, path, null!) is not DfmFile dfm || !dfm.Levels.TryGetValue(0, out var mesh))
++            throw new InvalidDataException($"DFM has no LOD0 deformable mesh: {path}");
++
++        SurfaceMapsIni? surfaceMaps = null;
++        if (surfaceVfs != null)
++        {
++            surfaceMaps = new SurfaceMapsIni();
++            surfaceMaps.Load([
++                "fx/SurfaceMaps.ini", "fx/SurfaceMapsShips.ini", "fx/SurfaceMapsSolar.ini",
++                "fx/SurfaceMapsBases.ini", "LancerEdit/SurfaceMapsWorkspace.ini"
++            ], surfaceVfs, "", new IniStringPool(), SurfaceMapProfile.Full);
++        }
++
++        var sourceVertices = new DfmVertex[mesh.PointIndices.Length];
++        Span<byte> ids = stackalloc byte[4];
++        Span<float> weights = stackalloc float[4];
++        for (var i = 0; i < sourceVertices.Length; i++)
++        {
++            var pointIndex = mesh.PointIndices[i];
++            if ((uint)pointIndex >= mesh.Points.Length || (uint)pointIndex >= mesh.PointBoneFirst.Length ||
++                (uint)pointIndex >= mesh.PointBoneCount.Length || (uint)i >= mesh.UV0Indices.Length ||
++                (uint)pointIndex >= mesh.VertexNormals.Length || (uint)mesh.UV0Indices[i] >= mesh.UV0.Length)
++                throw new InvalidDataException($"DFM vertex data is incomplete at vertex {i}: {path}");
++            var first = mesh.PointBoneFirst[pointIndex];
++            var count = mesh.PointBoneCount[pointIndex];
++            if (count is < 0 or > 4 || first < 0 || first + count > mesh.BoneIdChain.Length ||
++                first + count > mesh.BoneWeightChain.Length)
++                throw new InvalidDataException($"DFM bone weights are invalid at vertex {i}: {path}");
++            ids.Clear();
++            weights.Clear();
++            weights[0] = 1.0f;
++            for (var j = 0; j < count; j++)
++            {
++                var id = mesh.BoneIdChain[first + j];
++                if ((uint)id > byte.MaxValue) throw new InvalidDataException($"DFM bone index {id} exceeds UBYTE4.");
++                ids[j] = (byte)id;
++                weights[j] = mesh.BoneWeightChain[first + j];
++            }
++            if (count == 0) weights[0] = 1.0f;
++            var uv1 = mesh.UV1Indices != null && mesh.UV1 != null &&
++                      (uint)i < mesh.UV1Indices.Length && (uint)mesh.UV1Indices[i] < mesh.UV1.Length
++                ? mesh.UV1[mesh.UV1Indices[i]] : Vector2.Zero;
++            sourceVertices[i] = new DfmVertex(mesh.Points[pointIndex], mesh.VertexNormals[pointIndex],
++                mesh.UV0[mesh.UV0Indices[i]], uv1,
++                new Vector4(weights[0], weights[1], weights[2], weights[3]), ids[0], ids[1], ids[2], ids[3]);
++        }
++
++        var skeleton = new DfmSkinning(dfm);
++        skeleton.UpdateBones();
++        var boneMatrices = skeleton.Instances.Select(x => x?.BoneMatrix ?? Matrix4x4.Identity).ToArray();
++        if (boneMatrices.Length is 0 or > 200)
++            throw new InvalidDataException($"DFM has {boneMatrices.Length} bone matrices; production skinned materials support 1-200: {path}");
++
++        Material? selectedMaterial = null;
++        FaceGroup? selectedGroup = null;
++        TextureData? diffuseTexture = null;
++        SurfaceMaterialBinding? surface = null;
++        foreach (var group in mesh.FaceGroups.OrderByDescending(x => x.FaceIndices?.Length ?? x.TriangleStripIndices?.Length ?? 0))
++        {
++            if (string.IsNullOrWhiteSpace(group.MaterialName)) continue;
++            var material = dfm.MaterialLibrary?.Materials.Values.FirstOrDefault(x =>
++                string.Equals(x.Name, group.MaterialName, StringComparison.OrdinalIgnoreCase));
++            if (material?.DtName == null) continue;
++            var texture = dfm.TextureLibrary?.Textures.GetValueOrDefault(material.DtName);
++            if (texture?.GetImageResource() is not { Type: ImageType.DDS }) continue;
++            var candidateSurface = surfaceMaps != null ? SurfaceMaterialResolver.Resolve(material, surfaceMaps) : null;
++            // Prefer a real NAP Surface assignment over the largest unmapped group.
++            // DFM bodies often contain several similarly sized material groups.
++            if (selectedGroup != null && (surface != null || candidateSurface == null)) continue;
++            selectedGroup = group;
++            selectedMaterial = material;
++            diffuseTexture = texture;
++            surface = candidateSurface;
++            if (surface != null) break; // Groups are descending by size, so this is the largest mapped group.
++        }
++        if (selectedGroup == null || selectedMaterial == null || diffuseTexture == null)
++            throw new InvalidDataException($"DFM has no LOD0 material with embedded DDS diffuse: {path}");
++
++        var normalStrength = surface?.NormalStrength ?? 1.0f;
++        var tangentVertices = DfmTangentBuilder.Build(sourceVertices, selectedGroup,
++            surface?.NormalUvChannel ?? 0);
++        if (tangentVertices.Length < 3) throw new InvalidDataException($"DFM selected face group is empty: {path}");
++        foreach (var vertex in tangentVertices)
++        {
++            if (vertex.Vertex.BoneId1 >= boneMatrices.Length || vertex.Vertex.BoneId2 >= boneMatrices.Length ||
++                vertex.Vertex.BoneId3 >= boneMatrices.Length || vertex.Vertex.BoneId4 >= boneMatrices.Length)
++                throw new InvalidDataException($"DFM vertex references a missing skinning matrix: {path}");
++        }
++
++        Vector3 SkinPosition(DfmVertex v)
++        {
++            var p = new Vector4(v.Position, 1.0f);
++            var result = Vector4.Transform(p, boneMatrices[v.BoneId1]) * v.BoneWeights.X +
++                         Vector4.Transform(p, boneMatrices[v.BoneId2]) * v.BoneWeights.Y +
++                         Vector4.Transform(p, boneMatrices[v.BoneId3]) * v.BoneWeights.Z +
++                         Vector4.Transform(p, boneMatrices[v.BoneId4]) * v.BoneWeights.W;
++            return new Vector3(result.X, result.Y, result.Z);
++        }
++
++        var maxSkinDelta = 0.0f;
++        foreach (var vertex in tangentVertices)
++            maxSkinDelta = MathF.Max(maxSkinDelta, Vector3.Distance(vertex.Vertex.Position, SkinPosition(vertex.Vertex)));
++
++        var min = new Vector3(float.PositiveInfinity);
++        var max = new Vector3(float.NegativeInfinity);
++        foreach (var vertex in tangentVertices)
++        {
++            var position = SkinPosition(vertex.Vertex);
++            min = Vector3.Min(min, position);
++            max = Vector3.Max(max, position);
++        }
++        var center = (min + max) * 0.5f;
++        var extent = max - min;
++        var scale = 1.55f / MathF.Max(extent.X, MathF.Max(extent.Y, extent.Z));
++        if (!float.IsFinite(scale) || scale <= 0) throw new InvalidDataException($"DFM has invalid posed bounds: {path}");
++        var world = Matrix4x4.CreateScale(scale) * Matrix4x4.CreateTranslation(-center * scale);
++        if (!Matrix4x4.Invert(world, out var inverseWorld)) throw new InvalidDataException($"DFM world matrix is singular: {path}");
++        var normalMatrix = Matrix4x4.Transpose(inverseWorld);
++        var coverage = new float[6];
++        var coverageArea = -1.0f;
++        for (var i = 0; i + 2 < tangentVertices.Length; i += 3)
++        {
++            var a = Vector3.Transform(SkinPosition(tangentVertices[i].Vertex), world);
++            var b = Vector3.Transform(SkinPosition(tangentVertices[i + 1].Vertex), world);
++            var c = Vector3.Transform(SkinPosition(tangentVertices[i + 2].Vertex), world);
++            var area = MathF.Abs((b.X - a.X) * (c.Y - a.Y) - (b.Y - a.Y) * (c.X - a.X));
++            if (area <= coverageArea) continue;
++            coverageArea = area;
++            coverage[0] = a.X;
++            coverage[1] = a.Y;
++            coverage[2] = b.X;
++            coverage[3] = b.Y;
++            coverage[4] = c.X;
++            coverage[5] = c.Y;
++        }
++        if (coverageArea <= 0) throw new InvalidDataException($"DFM has no non-degenerate projected triangle: {path}");
++
++        byte[]? ReadSurface(SurfaceTextureReference? reference) => reference == null || surfaceVfs == null
++            ? null
++            : SurfaceTextureReader.Read(surfaceVfs, reference).Data;
++        var diffuseImage = diffuseTexture.GetImageResource()!;
++        var diffuseColor = selectedMaterial.Dc;
++        return new DfmDraw(MemoryMarshal.AsBytes(tangentVertices.AsSpan()).ToArray(),
++            (uint)tangentVertices.Length, MemoryMarshal.AsBytes(boneMatrices.AsSpan()).ToArray(),
++            world, normalMatrix, coverage,
++            $"{path} DFM LOD0 material={selectedMaterial.Name} diffuse={selectedMaterial.DtName}, " +
++            $"dc=({diffuseColor.R:F3},{diffuseColor.G:F3},{diffuseColor.B:F3},{diffuseColor.A:F3}), " +
++            $"faceGroupCorners={tangentVertices.Length}, bones={boneMatrices.Length}, maxSkinDelta={maxSkinDelta:F6}" +
++            (surface?.Normal == null ? "" : $", surface={surface.Normal.File}:{surface.Normal.Node}"),
++            [diffuseColor.R, diffuseColor.G, diffuseColor.B, diffuseColor.A], diffuseImage.Data,
++            ReadSurface(surfaceEnabled ? surface?.Normal : null),
++            ReadSurface(surfaceEnabled ? surface?.RoughnessMap : null),
++            ReadSurface(surfaceEnabled ? surface?.MetallicMap : null), normalStrength,
++            surface?.Roughness ?? selectedMaterial.RFactor ?? 0.55f,
++            surface?.Metallic ?? selectedMaterial.MFactor ?? 0.0f);
++    }
+ 
+     private static VMeshDraw LoadVmeshDraw(string path, string? materialPath = null, string? surfaceRoot = null,
+         bool surfaceEnabled = true)
+@@ -335,6 +515,76 @@
+             }
+             return;
+         }
++        if (args.Length is >= 2 and <= 4 && args[0] == "--sdl-gpu-dfm-smoke")
++        {
++            try
++            {
++                if (args.Length == 4 && args[3] is not ("on" or "off"))
++                    throw new ArgumentException("Surface map mode must be 'on' or 'off'.");
++                var dfm = LoadDfmDraw(args[1], args.Length >= 3 ? args[2] : null,
++                    args.Length < 4 || args[3] == "on");
++                Console.WriteLine($"Loaded skinned Freelancer DFM draw: {dfm.Description}.");
++                Environment.ExitCode = SDL3GpuSmoke.Run(
++                    () => new DfmTangentVertex().GetVertexDeclaration(),
++                    realVmeshDescription: dfm.Description,
++                    realMaterialDiffuse: dfm.DiffuseColor,
++                    realDiffuseDds: dfm.DiffuseDds,
++                    realVmeshCoverageTriangle: dfm.CoverageTriangle,
++                    realNormalDds: dfm.NormalDds,
++                    realRoughnessDds: dfm.RoughnessDds,
++                    realMetallicDds: dfm.MetallicDds,
++                    realNormalStrength: dfm.NormalStrength,
++                    realRoughness: dfm.Roughness,
++                    realMetallic: dfm.Metallic,
++                    skinnedVertexBytes: dfm.Vertices,
++                    skinnedVertexCount: dfm.VertexCount,
++                    boneMatrixBytes: dfm.BoneMatrices,
++                    skinnedWorld: dfm.World,
++                    skinnedNormalMatrix: dfm.NormalMatrix);
++            }
++            catch (Exception exception)
++            {
++                Console.Error.WriteLine($"SDL_GPU DFM probe failed: {exception.Message}");
++                Environment.ExitCode = 1;
++            }
++            return;
++        }
++        if (args.Length is >= 3 and <= 4 && args[0] == "--sdl-gpu-dfm-nap-smoke")
++        {
++            try
++            {
++                if (args.Length == 4 && args[3] is not ("on" or "off"))
++                    throw new ArgumentException("Surface map mode must be 'on' or 'off'.");
++                var packageProvider = NexusPackageFileProvider.LoadActive(args[1])
++                    ?? throw new InvalidDataException($"No active NAP manifest was found under {args[1]}.");
++                var packageVfs = new FileSystem(packageProvider);
++                var dfm = LoadDfmDraw(packageVfs, args[2], args.Length < 4 || args[3] == "on");
++                Console.WriteLine($"Loaded skinned DFM from active NAP: {dfm.Description}.");
++                Environment.ExitCode = SDL3GpuSmoke.Run(
++                    () => new DfmTangentVertex().GetVertexDeclaration(),
++                    realVmeshDescription: dfm.Description,
++                    realMaterialDiffuse: dfm.DiffuseColor,
++                    realDiffuseDds: dfm.DiffuseDds,
++                    realVmeshCoverageTriangle: dfm.CoverageTriangle,
++                    realNormalDds: dfm.NormalDds,
++                    realRoughnessDds: dfm.RoughnessDds,
++                    realMetallicDds: dfm.MetallicDds,
++                    realNormalStrength: dfm.NormalStrength,
++                    realRoughness: dfm.Roughness,
++                    realMetallic: dfm.Metallic,
++                    skinnedVertexBytes: dfm.Vertices,
++                    skinnedVertexCount: dfm.VertexCount,
++                    boneMatrixBytes: dfm.BoneMatrices,
++                    skinnedWorld: dfm.World,
++                    skinnedNormalMatrix: dfm.NormalMatrix);
++            }
++            catch (Exception exception)
++            {
++                Console.Error.WriteLine($"SDL_GPU NAP DFM probe failed: {exception.Message}");
++                Environment.ExitCode = 1;
++            }
++            return;
++        }
+         if (args.Length == 1 && args[0] == "--sdl-gpu-shader-bundle-audit")
+         {
+             Environment.ExitCode = SDL3GpuSmoke.AuditProductionShaderBundles();
+@@ -361,6 +611,8 @@
+             Console.WriteLine("       Standalone test option: --invulnerable=on|off (local embedded server only)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-smoke (SDL3 GPU shader, pipeline, draw, and swapchain test)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-vmesh-smoke <cmp-path> [mat-path [surface-data-root [on|off]]] (draw a VMesh with MAT diffuse and optional NAP Surface maps)");
++            Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-dfm-smoke <dfm-path> [surface-data-root [on|off]] (draw an embedded DFM material with production GPU skinning)");
++            Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-dfm-nap-smoke <application-dir> <dfm-virtual-path> [on|off] (draw an embedded DFM from the verified active NAP snapshot)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-shader-bundle-audit (parse every built-in shader variant and validate SDL_GPU slot maps)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-shader-compile-audit (create and release every production SDL_GPU shader on the active driver)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-production-pipeline-audit (create and release a reflected SDL_GPU graphics pipeline for every production shader variant)");
+--- a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
++++ b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+@@ -494,9 +494,18 @@
+         ushort[]? realVmeshIndices = null, int realVmeshBaseVertex = 3, uint realVmeshIndexCount = 0,
+         float[]? realVmeshCoverageTriangle = null, byte[]? realNormalDds = null,
+         byte[]? realRoughnessDds = null, byte[]? realMetallicDds = null,
+-        float realNormalStrength = 1.0f, float realRoughness = 0.55f, float realMetallic = 0.0f)
++        float realNormalStrength = 1.0f, float realRoughness = 0.55f, float realMetallic = 0.0f,
++        byte[]? skinnedVertexBytes = null, uint skinnedVertexCount = 0, byte[]? boneMatrixBytes = null,
++        Matrix4x4? skinnedWorld = null, Matrix4x4? skinnedNormalMatrix = null)
+     {
+         ArgumentNullException.ThrowIfNull(freelancerFvfDeclarationProvider);
++        var skinnedDfm = skinnedVertexBytes != null;
++        var vertexDeclaration = freelancerFvfDeclarationProvider();
++        if (skinnedDfm && (realVmeshVertices != null || realVmeshIndices != null || boneMatrixBytes == null ||
++                           vertexDeclaration.Stride != 76 || skinnedVertexCount < 3 ||
++                           skinnedVertexCount != skinnedVertexBytes!.Length / vertexDeclaration.Stride ||
++                           skinnedVertexBytes.Length % vertexDeclaration.Stride != 0))
++            throw new ArgumentException("The SDL_GPU skinned DFM draw data is incomplete or malformed.");
+         if (realVmeshVertices != null)
+         {
+             var vertexStrideFloats = freelancerFvfDeclarationProvider().Stride / sizeof(float);
+@@ -545,12 +554,16 @@
+         IntPtr shadowPbrPipeline = IntPtr.Zero;
+         SDL3GpuBindingRemap[] pbrSamplerBindings = [];
+         SDL3GpuBindingRemap[] shadowPbrSamplerBindings = [];
++        uint pbrBoneStorageSlot = 0;
++        uint shadowPbrBoneStorageSlot = 0;
+         IntPtr vertexBuffer = IntPtr.Zero;
+         IntPtr transferBuffer = IntPtr.Zero;
+         IntPtr copyVertexBuffer = IntPtr.Zero;
+         IntPtr copyTransferBuffer = IntPtr.Zero;
+         IntPtr indexBuffer = IntPtr.Zero;
+         IntPtr indexTransferBuffer = IntPtr.Zero;
++        IntPtr boneStorageBuffer = IntPtr.Zero;
++        IntPtr boneStorageUploadBuffer = IntPtr.Zero;
+         IntPtr diffuseTexture = IntPtr.Zero;
+         IntPtr textureUploadBuffer = IntPtr.Zero;
+         IntPtr realDiffuseTexture = IntPtr.Zero;
+@@ -570,8 +583,8 @@
+         bool windowClaimed = false;
+         try
+         {
+-            var freelancerFvfLayout = SDL3GpuVertexInputLayout.From(freelancerFvfDeclarationProvider());
+-            if (freelancerFvfLayout.Stride is not (8 * sizeof(float) or 12 * sizeof(float)))
++            var freelancerFvfLayout = SDL3GpuVertexInputLayout.From(vertexDeclaration);
++            if (!skinnedDfm && freelancerFvfLayout.Stride is not (8 * sizeof(float) or 12 * sizeof(float)))
+                 throw new InvalidOperationException($"The SDL_GPU PBR smoke does not support FVF stride {freelancerFvfLayout.Stride}.");
+             Console.WriteLine($"Using production Freelancer FVF input declaration: " +
+                               $"stride={freelancerFvfLayout.Stride}, attributes={freelancerFvfLayout.Attributes.Length}.");
+@@ -601,14 +614,16 @@
+             var surfaceFeatures = (realNormalDds != null ? 1u : 0u) |
+                                   (realMetallicDds != null ? 1u << 1 : 0u) |
+                                   (realRoughnessDds != null ? 1u << 2 : 0u);
+-            var pbrShaders = CreateProductionPbrShaders(device, (1u << 9) | surfaceFeatures);
++            var pbrShaders = CreateProductionPbrShaders(device, (1u << 9) | surfaceFeatures, skinnedDfm);
+             pbrVertexShader = pbrShaders.Vertex;
+             pbrFragmentShader = pbrShaders.Fragment;
+             pbrSamplerBindings = pbrShaders.SamplerBindings;
+-            var shadowPbrShaders = CreateProductionPbrShaders(device, (1u << 9) | (1u << 8));
++            pbrBoneStorageSlot = pbrShaders.BoneStorageSlot;
++            var shadowPbrShaders = CreateProductionPbrShaders(device, (1u << 9) | (1u << 8), skinnedDfm);
+             shadowPbrVertexShader = shadowPbrShaders.Vertex;
+             shadowPbrFragmentShader = shadowPbrShaders.Fragment;
+             shadowPbrSamplerBindings = shadowPbrShaders.SamplerBindings;
++            shadowPbrBoneStorageSlot = shadowPbrShaders.BoneStorageSlot;
+ 
+             if (!SDL3.SDL_ClaimWindowForGPUDevice(device, window))
+                 throw Failure("Claiming the window for SDL_GPU failed");
+@@ -619,13 +634,22 @@
+                     SDL3.SDL_GPUPresentMode.SDL_GPU_PRESENTMODE_VSYNC))
+                 throw Failure("Setting SDL_GPU swapchain parameters failed");
+ 
+-            (vertexBuffer, transferBuffer) = realVmeshVertices == null
+-                ? CreateVertexBuffer(device)
+-                : CreateVertexBuffer(device, realVmeshVertices, checked((int)(freelancerFvfLayout.Stride / sizeof(float))));
++            (vertexBuffer, transferBuffer) = skinnedDfm
++                ? CreateVertexBuffer(device, skinnedVertexBytes!, checked((int)freelancerFvfLayout.Stride))
++                : realVmeshVertices == null
++                    ? CreateVertexBuffer(device)
++                    : CreateVertexBuffer(device, realVmeshVertices, checked((int)(freelancerFvfLayout.Stride / sizeof(float))));
+             (indexBuffer, indexTransferBuffer) = CreateIndexBuffer(device, realVmeshIndices);
+-            if (realVmeshVertices != null)
++            if (realVmeshVertices != null || skinnedDfm)
+                 (copyVertexBuffer, copyTransferBuffer) = CreateVertexBuffer(device);
+-            Console.WriteLine(realVmeshVertices == null
++            if (skinnedDfm)
++            {
++                (boneStorageBuffer, boneStorageUploadBuffer) = CreateStorageBuffer(device, boneMatrixBytes!);
++                Console.WriteLine($"Created SDL_GPU skinned DFM draw from {realVmeshDescription}; " +
++                                  $"vertices={skinnedVertexCount}, stride={freelancerFvfLayout.Stride}, " +
++                                  $"boneBytes={boneMatrixBytes!.Length}.");
++            }
++            else Console.WriteLine(realVmeshVertices == null
+                 ? "Created SDL_GPU synthetic FVF3 vertex and 16-bit VMesh index buffers."
+                 : $"Created SDL_GPU complete indexed VMesh draw from {realVmeshDescription}; " +
+                   $"vertices={realVmeshVertices.Length / (freelancerFvfLayout.Stride / sizeof(float)) - 3}, " +
+@@ -666,6 +690,9 @@
+                 throw Failure("Acquiring the SDL_GPU swapchain texture failed");
+             if (swapchainTexture == IntPtr.Zero || width == 0 || height == 0)
+                 throw Failure("SDL_GPU returned an empty swapchain image");
++            var swapchainFormat = SDL3.SDL_GetGPUSwapchainTextureFormat(device, window);
++            var swapchainIsSrgb = swapchainFormat is SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB or
++                SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM_SRGB;
+             depthTexture = CreateDepthTexture(device, width, height);
+             Console.WriteLine($"Created SDL_GPU D32 depth target at {width}x{height}.");
+             shadowDepthTexture = CreateDepthTexture(device, 4, 4, sampleable: true);
+@@ -673,7 +700,6 @@
+             var hdrFormat = SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+             hdrSceneTexture = CreateHdrSceneTexture(device, width, height, hdrFormat);
+             Console.WriteLine($"Created sampleable RGBA16F scene target at {width}x{height}.");
+-            var swapchainFormat = SDL3.SDL_GetGPUSwapchainTextureFormat(device, window);
+             pipeline = CreatePipeline(device, vertexShader, fragmentShader, hdrFormat, true);
+             if (pipeline == IntPtr.Zero)
+                 throw Failure("Creating the SDL_GPU scene graphics pipeline failed");
+@@ -721,7 +747,8 @@
+                 throw Failure("Beginning the SDL_GPU draw pass failed");
+             SDL3.SDL_BindGPUGraphicsPipeline(renderPass, pipeline);
+             Span<SDL3.SDL_GPUBufferBinding> vertexBindings = stackalloc SDL3.SDL_GPUBufferBinding[1];
+-            vertexBindings[0] = new SDL3.SDL_GPUBufferBinding { buffer = vertexBuffer, offset = 0 };
++            vertexBindings[0] = new SDL3.SDL_GPUBufferBinding
++                { buffer = skinnedDfm ? copyVertexBuffer : vertexBuffer, offset = 0 };
+             SDL3.SDL_BindGPUVertexBuffers(renderPass, 0, vertexBindings, 1);
+             var indexBinding = new SDL3.SDL_GPUBufferBinding { buffer = indexBuffer, offset = 0 };
+             SDL3.SDL_BindGPUIndexBuffer(renderPass, indexBinding,
+@@ -733,20 +760,23 @@
+                 sampler = normalSampler
+             };
+             SDL3.SDL_BindGPUFragmentSamplers(renderPass, 0, textureBindings, 1);
+-            SDL3.SDL_DrawGPUIndexedPrimitives(renderPass,
+-                realVmeshVertices == null ? 3u : realVmeshIndexCount, 1, 1,
+-                realVmeshVertices == null ? 3 : realVmeshBaseVertex, 0);
+-            // Equal depth must fail LESS after the first draw wrote depth. The alternate
+-            // BC5 texture would change the center pixel if depth testing or writes failed.
+-            textureBindings[0] = new SDL3.SDL_GPUTextureSamplerBinding
+-            {
+-                texture = occludedTexture,
+-                sampler = normalSampler
+-            };
+-            SDL3.SDL_BindGPUFragmentSamplers(renderPass, 0, textureBindings, 1);
+-            SDL3.SDL_DrawGPUIndexedPrimitives(renderPass,
+-                realVmeshVertices == null ? 3u : realVmeshIndexCount, 1, 1,
+-                realVmeshVertices == null ? 3 : realVmeshBaseVertex, 0);
++            if (!skinnedDfm)
++            {
++                SDL3.SDL_DrawGPUIndexedPrimitives(renderPass,
++                    realVmeshVertices == null ? 3u : realVmeshIndexCount, 1, 1,
++                    realVmeshVertices == null ? 3 : realVmeshBaseVertex, 0);
++                // Equal depth must fail LESS after the first draw wrote depth. The alternate
++                // BC5 texture would change the center pixel if depth testing or writes failed.
++                textureBindings[0] = new SDL3.SDL_GPUTextureSamplerBinding
++                {
++                    texture = occludedTexture,
++                    sampler = normalSampler
++                };
++                SDL3.SDL_BindGPUFragmentSamplers(renderPass, 0, textureBindings, 1);
++                SDL3.SDL_DrawGPUIndexedPrimitives(renderPass,
++                    realVmeshVertices == null ? 3u : realVmeshIndexCount, 1, 1,
++                    realVmeshVertices == null ? 3 : realVmeshBaseVertex, 0);
++            }
+             SDL3.SDL_EndGPURenderPass(renderPass);
+             renderPass = IntPtr.Zero;
+ 
+@@ -784,7 +814,12 @@
+                 roughness: realRoughness, metallic: realMetallic,
+                 samplerBindings: pbrSamplerBindings,
+                 realIndexBuffer: realVmeshVertices == null ? IntPtr.Zero : indexBuffer,
+-                realIndexCount: realVmeshIndexCount, realBaseVertex: realVmeshBaseVertex);
++                realIndexCount: realVmeshIndexCount, realBaseVertex: realVmeshBaseVertex,
++                boneStorageBuffer: boneStorageBuffer, boneStorageSlot: pbrBoneStorageSlot,
++                realVertexCount: skinnedDfm ? skinnedVertexCount : 0,
++                worldMatrix: skinnedDfm ? skinnedWorld : null,
++                normalMatrix: skinnedDfm ? skinnedNormalMatrix : null,
++                outputIsSrgb: swapchainIsSrgb);
+             ClearShadowDepth(commandBuffer, shadowDepthTexture, 0.6f);
+             ExecuteProductionPbrDraw(commandBuffer, shadowPbrPipeline, vertexBuffer, diffuseTexture,
+                 normalSampler, colorTargets, width, height, shadowed: true,
+@@ -792,7 +827,12 @@
+                 materialTexture: realDiffuseTexture,
+                 samplerBindings: shadowPbrSamplerBindings,
+                 realIndexBuffer: realVmeshVertices == null ? IntPtr.Zero : indexBuffer,
+-                realIndexCount: realVmeshIndexCount, realBaseVertex: realVmeshBaseVertex);
++                realIndexCount: realVmeshIndexCount, realBaseVertex: realVmeshBaseVertex,
++                boneStorageBuffer: boneStorageBuffer, boneStorageSlot: shadowPbrBoneStorageSlot,
++                realVertexCount: skinnedDfm ? skinnedVertexCount : 0,
++                worldMatrix: skinnedDfm ? skinnedWorld : null,
++                normalMatrix: skinnedDfm ? skinnedNormalMatrix : null,
++                outputIsSrgb: swapchainIsSrgb);
+             ClearShadowDepth(commandBuffer, shadowDepthTexture, 0.4f);
+             ExecuteProductionPbrDraw(commandBuffer, shadowPbrPipeline, vertexBuffer, diffuseTexture,
+                 normalSampler, colorTargets, width, height, shadowed: true,
+@@ -800,7 +840,12 @@
+                 materialTexture: realDiffuseTexture,
+                 samplerBindings: shadowPbrSamplerBindings,
+                 realIndexBuffer: realVmeshVertices == null ? IntPtr.Zero : indexBuffer,
+-                realIndexCount: realVmeshIndexCount, realBaseVertex: realVmeshBaseVertex);
++                realIndexCount: realVmeshIndexCount, realBaseVertex: realVmeshBaseVertex,
++                boneStorageBuffer: boneStorageBuffer, boneStorageSlot: shadowPbrBoneStorageSlot,
++                realVertexCount: skinnedDfm ? skinnedVertexCount : 0,
++                worldMatrix: skinnedDfm ? skinnedWorld : null,
++                normalMatrix: skinnedDfm ? skinnedNormalMatrix : null,
++                outputIsSrgb: swapchainIsSrgb);
+ 
+             copyPass = SDL3.SDL_BeginGPUCopyPass(commandBuffer);
+             if (copyPass == IntPtr.Zero)
+@@ -853,7 +898,7 @@
+             shadowPixel.x = (uint)(width * (0.70f + viewportLocalX));
+             pixelDestination.offset = 12;
+             SDL3.SDL_DownloadFromGPUTexture(copyPass, shadowPixel, pixelDestination);
+-            if (realVmeshVertices != null)
++            if (realVmeshVertices != null || skinnedDfm)
+             {
+                 // Sample three interior barycentric points as well as the center:
+                 // a real triangle's normal/UV response can legitimately match the
+@@ -873,8 +918,10 @@
+                     var ndcX = triangle[0] * w.X + triangle[2] * w.Y + triangle[4] * w.Z;
+                     var ndcY = triangle[1] * w.X + triangle[3] * w.Y + triangle[5] * w.Z;
+                     var sample = centerPixel;
+-                    sample.x = (uint)Math.Clamp((ndcX * 0.5f + 0.5f) * width, 0, width - 1);
+-                    sample.y = (uint)Math.Clamp((ndcY * 0.5f + 0.5f) * height, 0, height - 1);
++                    sample.x = (uint)Math.Clamp((0.04f + (ndcX * 0.5f + 0.5f) * 0.25f) * width,
++                        0, width - 1);
++                    sample.y = (uint)Math.Clamp((0.04f + (ndcY * 0.5f + 0.5f) * 0.25f) * height,
++                        0, height - 1);
+                     pixelDestination.offset = (uint)(16 + i * 4);
+                     SDL3.SDL_DownloadFromGPUTexture(copyPass, sample, pixelDestination);
+                 }
+@@ -899,14 +946,13 @@
+             var alpha = Marshal.ReadByte(mappedPixel, 3);
+             var isBgra = swapchainFormat is SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM or
+                 SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM_SRGB;
+-            var isSrgb = swapchainFormat is SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB or
+-                SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM_SRGB;
++            var isSrgb = swapchainIsSrgb;
+             var expectedRed = ToOutputByte(AcesFitted(1.6f), isSrgb);
+             var expectedGreen = ToOutputByte(AcesFitted(1.2f), isSrgb);
+             var expectedBlue = ToOutputByte(AcesFitted(2.0f * (0.5f + 0.5f * MathF.Sqrt(0.6f))), isSrgb);
+             var red = isBgra ? channel2 : channel0;
+             var blue = isBgra ? channel0 : channel2;
+-            if (realVmeshVertices == null)
++            if (realVmeshVertices == null && !skinnedDfm)
+             {
+                 if (alpha < 240 || Math.Abs(red - expectedRed) > 24 ||
+                     Math.Abs(green - expectedGreen) > 24 || Math.Abs(blue - expectedBlue) > 24)
+@@ -915,6 +961,18 @@
+                         $"({red}, {green}, {blue}, {alpha}); expected approximately " +
+                         $"({expectedRed}, {expectedGreen}, {expectedBlue}, 255).");
+             }
++            else if (skinnedDfm)
++            {
++                var clearRed = ToOutputByte(AcesFitted(0.08f), isSrgb);
++                var clearGreen = ToOutputByte(AcesFitted(0.32f), isSrgb);
++                var clearBlue = ToOutputByte(AcesFitted(0.62f), isSrgb);
++                if (alpha < 240 || Math.Abs(red - clearRed) + Math.Abs(green - clearGreen) +
++                    Math.Abs(blue - clearBlue) >= 40)
++                    throw new InvalidOperationException(
++                        $"SDL_GPU skinned DFM center pixel changed the isolated scene clear for {swapchainFormat}: " +
++                        $"({red}, {green}, {blue}, {alpha}); expected approximately " +
++                        $"({clearRed}, {clearGreen}, {clearBlue}, 255) outside the DFM viewport.");
++            }
+             else if (alpha < 240)
+                 throw new InvalidOperationException(
+                     $"SDL_GPU real VMesh center pixel was not opaque for {swapchainFormat}: " +
+@@ -926,18 +984,23 @@
+             var pbrAlpha = Marshal.ReadByte(mappedPixel, 7);
+             var pbrRed = isBgra ? pbrChannel2 : pbrChannel0;
+             var pbrBlue = isBgra ? pbrChannel0 : pbrChannel2;
+-            var expectedPbrRed = ToOutputByte(0.58f, isSrgb);
+-            var expectedPbrGreen = ToOutputByte(0.306f, isSrgb);
+-            if (pbrAlpha < 240 || (realVmeshVertices == null &&
++            // PBR output is display-encoded by the shader for UNORM targets and
++            // by the hardware for sRGB targets, so both should match sRGB bytes.
++            var expectedPbrRed = ToOutputByte(0.58f, true);
++            var expectedPbrGreen = ToOutputByte(0.306f, true);
++            if (pbrAlpha < 240 || (skinnedDfm && Math.Abs(pbrRed - ToOutputByte(AcesFitted(0.08f), isSrgb)) +
++                Math.Abs(pbrGreen - ToOutputByte(AcesFitted(0.32f), isSrgb)) +
++                Math.Abs(pbrBlue - ToOutputByte(AcesFitted(0.62f), isSrgb)) < 40) ||
++                (!skinnedDfm && realVmeshVertices == null &&
+                 (Math.Abs(pbrRed - expectedPbrRed) > 32 ||
+                  Math.Abs(pbrGreen - expectedPbrGreen) > 32 || pbrBlue > 24)) ||
+                 (realVmeshVertices != null && pbrRed + pbrGreen + pbrBlue < 24))
+                 throw new InvalidOperationException(
+                     $"SDL_GPU production PBR pixel check failed for {swapchainFormat}: " +
+                     $"({pbrRed}, {pbrGreen}, {pbrBlue}, {pbrAlpha})" +
+-                    (realVmeshVertices == null
++                    (!skinnedDfm && realVmeshVertices == null
+                         ? $"; expected approximately ({expectedPbrRed}, {expectedPbrGreen}, 0, 255)."
+-                        : "; expected an opaque non-black VMesh draw."));
++                        : "; expected an opaque production material draw."));
+             var visibleShadowChannel0 = Marshal.ReadByte(mappedPixel, 8);
+             var visibleShadowGreen = Marshal.ReadByte(mappedPixel, 9);
+             var visibleShadowChannel2 = Marshal.ReadByte(mappedPixel, 10);
+@@ -950,23 +1013,25 @@
+             var shadowAlpha = Marshal.ReadByte(mappedPixel, 15);
+             var shadowRed = isBgra ? shadowChannel2 : shadowChannel0;
+             var shadowBlue = isBgra ? shadowChannel0 : shadowChannel2;
+-            if (realVmeshVertices == null && (visibleShadowAlpha < 240 ||
++            if (realVmeshVertices == null && !skinnedDfm && (visibleShadowAlpha < 240 ||
+                 visibleShadowRed + visibleShadowGreen + visibleShadowBlue < 50))
+                 throw new InvalidOperationException(
+                     $"SDL_GPU production PBR shadow visibility pixel was not lit for {swapchainFormat}: " +
+                     $"({visibleShadowRed}, {visibleShadowGreen}, {visibleShadowBlue}, {visibleShadowAlpha}); " +
+                     "expected a lit pixel when the depth map is clear.");
+-            if (realVmeshVertices == null &&
++            if (realVmeshVertices == null && !skinnedDfm &&
+                 (shadowAlpha < 240 || shadowRed > 40 || shadowGreen > 40 || shadowBlue > 40))
+                 throw new InvalidOperationException(
+                     $"SDL_GPU production PBR shadow pixel was not occluded for {swapchainFormat}: " +
+                     $"({shadowRed}, {shadowGreen}, {shadowBlue}, {shadowAlpha}); expected a near-black pixel.");
+-            if (realVmeshVertices != null)
++            if (realVmeshVertices != null || skinnedDfm)
+             {
+                 var clearRed = ToOutputByte(AcesFitted(0.08f), isSrgb);
+                 var clearGreen = ToOutputByte(AcesFitted(0.32f), isSrgb);
+                 var clearBlue = ToOutputByte(AcesFitted(0.62f), isSrgb);
+                 var coveredSamples = 0;
++                var sampleDescriptions = new string[3];
++                var sampleDescriptionCount = 0;
+                 for (var offset = 0; offset < 28; offset += 4)
+                 {
+                     if (offset is 4 or 8 or 12)
+@@ -978,25 +1043,34 @@
+                     var sampleB = isBgra ? sample0 : sample2;
+                     var distance = Math.Abs(sampleR - clearRed) + Math.Abs(sampleG - clearGreen) +
+                                    Math.Abs(sampleB - clearBlue);
++                    if (offset >= 16 && sampleDescriptionCount < sampleDescriptions.Length)
++                        sampleDescriptions[sampleDescriptionCount++] =
++                            $"({sampleR},{sampleG},{sampleB},{Marshal.ReadByte(mappedPixel, offset + 3)})";
+                     if (Marshal.ReadByte(mappedPixel, offset + 3) >= 240 && distance >= 40)
+                         coveredSamples++;
+                 }
+                 if (coveredSamples == 0)
+                     throw new InvalidOperationException(
+-                        $"SDL_GPU real VMesh triangle did not change any interior sample from the scene clear " +
++                        $"SDL_GPU real {(skinnedDfm ? "DFM" : "VMesh")} triangle did not change any interior sample from the scene clear " +
+                         $"({clearRed}, {clearGreen}, {clearBlue}, 255).");
+-                Console.WriteLine($"Real VMesh coverage readback: {coveredSamples}/4 interior samples differ from clear.");
++                Console.WriteLine($"Real {(skinnedDfm ? "DFM" : "VMesh")} coverage readback: {coveredSamples}/4 interior samples differ from clear.");
++                if (skinnedDfm)
++                    Console.WriteLine($"DFM production PBR interior samples: {string.Join(' ', sampleDescriptions.ToArray())}.");
+             }
+             SDL3.SDL_UnmapGPUTransferBuffer(device, readbackBuffer);
+ 
+-            Console.WriteLine($"Presented SDL_GPU {(realVmeshVertices == null ? "synthetic" : "real complete VMesh draw")} " +
+-                              $"BC5 normal-mapped scene through an RGBA16F target and depth-tested pass at {width}x{height}; " +
+-                              $"center pixel ({red}, {green}, {blue}, {alpha}) and production PBR pixel " +
+-                              $"({pbrRed}, {pbrGreen}, {pbrBlue}, {pbrAlpha}), visible-shadow pixel " +
+-                              $"({visibleShadowRed}, {visibleShadowGreen}, {visibleShadowBlue}, {visibleShadowAlpha}) " +
+-                              "and shadowed PBR pixel " +
+-                              $"({shadowRed}, {shadowGreen}, {shadowBlue}, {shadowAlpha}) passed; " +
+-                              "16-bit indices, first-index offset and vertex offset were used.");
++            var drawDescription = skinnedDfm
++                ? "real skinned DFM"
++                : realVmeshVertices == null ? "synthetic" : "real complete VMesh draw";
++            var surfaceDescription = skinnedDfm || realVmeshVertices != null
++                ? realNormalDds != null ? "with NAP Surface maps" : "without supplemental Surface maps"
++                : "with the synthetic BC5 normal map";
++            Console.WriteLine($"Presented SDL_GPU {drawDescription} {surfaceDescription} through an RGBA16F target " +
++                              $"and depth-tested pass at {width}x{height}; center sample ({red}, {green}, {blue}, {alpha}), " +
++                              $"production PBR sample ({pbrRed}, {pbrGreen}, {pbrBlue}, {pbrAlpha}), " +
++                              $"visible-shadow sample ({visibleShadowRed}, {visibleShadowGreen}, {visibleShadowBlue}, " +
++                              $"{visibleShadowAlpha}) and shadowed PBR sample ({shadowRed}, {shadowGreen}, {shadowBlue}, " +
++                              $"{shadowAlpha}) recorded; 16-bit indices, first-index offset and vertex offset were used.");
+             Thread.Sleep(750);
+             return 0;
+         }
+@@ -1080,6 +1154,10 @@
+                     SDL3.SDL_ReleaseGPUBuffer(device, indexBuffer);
+                 if (indexTransferBuffer != IntPtr.Zero)
+                     SDL3.SDL_ReleaseGPUTransferBuffer(device, indexTransferBuffer);
++                if (boneStorageBuffer != IntPtr.Zero)
++                    SDL3.SDL_ReleaseGPUBuffer(device, boneStorageBuffer);
++                if (boneStorageUploadBuffer != IntPtr.Zero)
++                    SDL3.SDL_ReleaseGPUTransferBuffer(device, boneStorageUploadBuffer);
+                 if (vertexShader != IntPtr.Zero)
+                     SDL3.SDL_ReleaseGPUShader(device, vertexShader);
+                 if (fragmentShader != IntPtr.Zero)
+@@ -1098,12 +1176,13 @@
+         }
+     }
+ 
+-    private static unsafe (IntPtr Vertex, IntPtr Fragment, SDL3GpuBindingRemap[] SamplerBindings) CreateProductionPbrShaders(IntPtr device,
+-        uint features)
++    private static unsafe (IntPtr Vertex, IntPtr Fragment, SDL3GpuBindingRemap[] SamplerBindings,
++        uint BoneStorageSlot) CreateProductionPbrShaders(IntPtr device, uint features, bool skinned = false)
+     {
+         var gameAssembly = Assembly.Load("LibreLancer");
+-        using var stream = gameAssembly.GetManifestResourceStream("PBR.bin")
+-                           ?? throw new FileNotFoundException("Missing embedded production PBR shader bundle.");
++        var bundleName = skinned ? "PBR_Skinned.bin" : "PBR.bin";
++        using var stream = gameAssembly.GetManifestResourceStream(bundleName)
++                           ?? throw new FileNotFoundException($"Missing embedded production PBR shader bundle {bundleName}.");
+         var bundle = BytecodesBundle.FromStream(stream);
+         var index = Enumerable.Range(0, bundle.ShaderCount)
+             .FirstOrDefault(i => bundle.GetFeatures(i) == features, -1);
+@@ -1127,7 +1206,12 @@
+             var samplerBindings = fragment.BindingRemaps.Where(x => x.DescriptorSet == 2).ToArray();
+             if (samplerBindings.Length != fragment.Samplers)
+                 throw new InvalidDataException("Production PBR fragment sampler binding map has an unexpected size.");
+-            return (vertexHandle, fragmentHandle, samplerBindings);
++            var boneSlots = skinned
++                ? vertex.BindingRemaps.Where(x => x.DescriptorSet == 0 && x.OriginalBinding == 9).ToArray()
++                : [];
++            if (skinned && (vertex.StorageBuffers != 1 || boneSlots.Length != 1 || boneSlots[0].SdlBinding != 0))
++                throw new InvalidDataException("Production PBR_Skinned bone storage binding does not match the SDL_GPU slot contract.");
++            return (vertexHandle, fragmentHandle, samplerBindings, boneSlots.Length == 1 ? boneSlots[0].SdlBinding : 0);
+         }
+         catch
+         {
+@@ -1143,13 +1227,17 @@
+         IntPtr normalTexture = default, IntPtr roughnessTexture = default, IntPtr metallicTexture = default,
+         float normalStrength = 1.0f, float roughness = 0.55f, float metallic = 0.0f,
+         SDL3GpuBindingRemap[]? samplerBindings = null,
+-        IntPtr realIndexBuffer = default, uint realIndexCount = 0, int realBaseVertex = 3)
++        IntPtr realIndexBuffer = default, uint realIndexCount = 0, int realBaseVertex = 3,
++        IntPtr boneStorageBuffer = default, uint boneStorageSlot = 0, uint realVertexCount = 0,
++        Matrix4x4? worldMatrix = null, Matrix4x4? normalMatrix = null, bool outputIsSrgb = false)
+     {
+         Span<byte> transforms = stackalloc byte[128];
+         transforms.Clear();
+         var identity = Matrix4x4.Identity;
+-        MemoryMarshal.Write(transforms, in identity);
+-        MemoryMarshal.Write(transforms[64..], in identity);
++        var world = worldMatrix ?? identity;
++        var normal = normalMatrix ?? identity;
++        MemoryMarshal.Write(transforms, in world);
++        MemoryMarshal.Write(transforms[64..], in normal);
+ 
+         Span<byte> camera = stackalloc byte[208];
+         camera.Clear();
+@@ -1200,7 +1288,7 @@
+ 
+         Span<byte> colorSpace = stackalloc byte[16];
+         colorSpace.Clear();
+-        WriteFloat(colorSpace, 0, 1.0f);
++        WriteFloat(colorSpace, 0, outputIsSrgb ? 1.0f : 0.0f);
+ 
+         fixed (byte* ptr = transforms)
+             SDL3.SDL_PushGPUVertexUniformData(commandBuffer, 0, (IntPtr)ptr, (uint)transforms.Length);
+@@ -1248,6 +1336,12 @@
+             Span<SDL3.SDL_GPUBufferBinding> vertices = stackalloc SDL3.SDL_GPUBufferBinding[1];
+             vertices[0] = new SDL3.SDL_GPUBufferBinding { buffer = vertexBuffer, offset = 0 };
+             SDL3.SDL_BindGPUVertexBuffers(renderPass, 0, vertices, 1);
++            if (boneStorageBuffer != IntPtr.Zero)
++            {
++                Span<IntPtr> bones = stackalloc IntPtr[1];
++                bones[0] = boneStorageBuffer;
++                SDL3.SDL_BindGPUVertexStorageBuffers(renderPass, boneStorageSlot, bones, 1);
++            }
+             if (realIndexBuffer != IntPtr.Zero)
+             {
+                 var indexBinding = new SDL3.SDL_GPUBufferBinding { buffer = realIndexBuffer, offset = 0 };
+@@ -1281,6 +1375,8 @@
+             SDL3.SDL_BindGPUFragmentSamplers(renderPass, 0, textures, (uint)samplerBindings.Length);
+             if (realIndexBuffer != IntPtr.Zero)
+                 SDL3.SDL_DrawGPUIndexedPrimitives(renderPass, realIndexCount, 1, 1, realBaseVertex, 0);
++            else if (realVertexCount > 0)
++                SDL3.SDL_DrawGPUPrimitives(renderPass, realVertexCount, 1, 0, 0);
+             else
+                 SDL3.SDL_DrawGPUPrimitives(renderPass, 3, 1, 3, 0);
+         }
+@@ -1439,6 +1535,82 @@
+         return (vertexBuffer, transferBuffer);
+     }
+ 
++    private static (IntPtr Buffer, IntPtr TransferBuffer) CreateVertexBuffer(IntPtr device,
++        byte[] vertices, int strideBytes)
++    {
++        if (strideBytes <= 0 || vertices.Length < strideBytes * 3 || vertices.Length % strideBytes != 0)
++            throw new ArgumentException("The SDL_GPU byte vertex buffer must contain complete vertices.", nameof(vertices));
++        return CreateUploadedBuffer(device, vertices, SDL3.SDL_GPUBufferUsageFlags.SDL_GPU_BUFFERUSAGE_VERTEX,
++            "vertex");
++    }
++
++    private static (IntPtr Buffer, IntPtr TransferBuffer) CreateStorageBuffer(IntPtr device, byte[] data)
++    {
++        if (data.Length == 0 || data.Length % 64 != 0)
++            throw new ArgumentException("The SDL_GPU bone storage buffer must contain complete 64-byte matrices.", nameof(data));
++        return CreateUploadedBuffer(device, data, SDL3.SDL_GPUBufferUsageFlags.SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ,
++            "bone storage");
++    }
++
++    private static unsafe (IntPtr Buffer, IntPtr TransferBuffer) CreateUploadedBuffer(IntPtr device,
++        byte[] bytes, SDL3.SDL_GPUBufferUsageFlags usage, string label)
++    {
++        var byteSize = checked((uint)bytes.Length);
++        var buffer = SDL3.SDL_CreateGPUBuffer(device, new SDL3.SDL_GPUBufferCreateInfo
++        {
++            usage = usage,
++            size = byteSize
++        });
++        if (buffer == IntPtr.Zero) throw Failure($"Creating the SDL_GPU {label} buffer failed");
++        var transfer = SDL3.SDL_CreateGPUTransferBuffer(device, new SDL3.SDL_GPUTransferBufferCreateInfo
++        {
++            usage = SDL3.SDL_GPUTransferBufferUsage.SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
++            size = byteSize
++        });
++        if (transfer == IntPtr.Zero)
++        {
++            SDL3.SDL_ReleaseGPUBuffer(device, buffer);
++            throw Failure($"Creating the SDL_GPU {label} upload buffer failed");
++        }
++        var mapped = SDL3.SDL_MapGPUTransferBuffer(device, transfer, false);
++        if (mapped == IntPtr.Zero)
++        {
++            SDL3.SDL_ReleaseGPUBuffer(device, buffer);
++            SDL3.SDL_ReleaseGPUTransferBuffer(device, transfer);
++            throw Failure($"Mapping the SDL_GPU {label} upload buffer failed");
++        }
++        fixed (byte* source = bytes)
++            Buffer.MemoryCopy(source, (void*)mapped, byteSize, byteSize);
++        SDL3.SDL_UnmapGPUTransferBuffer(device, transfer);
++
++        var commandBuffer = SDL3.SDL_AcquireGPUCommandBuffer(device);
++        if (commandBuffer == IntPtr.Zero)
++        {
++            SDL3.SDL_ReleaseGPUBuffer(device, buffer);
++            SDL3.SDL_ReleaseGPUTransferBuffer(device, transfer);
++            throw Failure($"Acquiring a command buffer for the SDL_GPU {label} upload failed");
++        }
++        var copyPass = SDL3.SDL_BeginGPUCopyPass(commandBuffer);
++        if (copyPass == IntPtr.Zero)
++        {
++            SDL3.SDL_CancelGPUCommandBuffer(commandBuffer);
++            SDL3.SDL_ReleaseGPUBuffer(device, buffer);
++            SDL3.SDL_ReleaseGPUTransferBuffer(device, transfer);
++            throw Failure($"Beginning the SDL_GPU {label} upload pass failed");
++        }
++        var sourceLocation = new SDL3.SDL_GPUTransferBufferLocation { transfer_buffer = transfer, offset = 0 };
++        var destination = new SDL3.SDL_GPUBufferRegion { buffer = buffer, offset = 0, size = byteSize };
++        SDL3.SDL_UploadToGPUBuffer(copyPass, sourceLocation, destination, false);
++        SDL3.SDL_EndGPUCopyPass(copyPass);
++        if (!SDL3.SDL_SubmitGPUCommandBuffer(commandBuffer))
++        {
++            SDL3.SDL_ReleaseGPUBuffer(device, buffer);
++            SDL3.SDL_ReleaseGPUTransferBuffer(device, transfer);
++            throw Failure($"Submitting the SDL_GPU {label} upload failed");
++        }
++        return (buffer, transfer);
++    }
++
+ 
+     private static unsafe (IntPtr IndexBuffer, IntPtr TransferBuffer) CreateIndexBuffer(IntPtr device,
+         ushort[]? realIndices = null)

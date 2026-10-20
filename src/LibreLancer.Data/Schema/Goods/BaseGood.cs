@@ -12,9 +12,7 @@ namespace LibreLancer.Data.Schema.Goods;
 public partial class BaseGood
 {
     [Entry("base", Required = true)]
-    public string? Base = null;
-
-    public string SourceFile = null!;
+    public string? Base = null!;
 
     public List<MarketGood> MarketGoods = [];
 

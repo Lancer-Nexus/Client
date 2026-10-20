@@ -1,0 +1,204 @@
+diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
+index 6f2660e..bebc9fd 100644
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -142,6 +142,17 @@ IBL-Vorberechnung und NAP-Inhalte. Laufzeitassets bleiben lokale Eingaben;
+ synthetische Fixtures und Metadaten dürfen in Git. Engineänderungen bleiben
+ als funktional gebündelte Patches unter `patches/series` erhalten.
+ 
++## Renderer-Performance-Diagnose (2026-10-14)
++
++Das Debugfenster sammelt jetzt bis zu 300 aktuelle Framewerte und zeigt p50,
++p95 und p99 für zwei getrennte Messungen: Update+Draw+EndFrame bis zum Swap
++sowie das gesamte Frame-Intervall einschließlich Swap/VSync. Die Werte werden
++viermal pro Sekunde neu berechnet. SDL2, SDL3 und Null stellen die Messwerte
++bereit. Die erste Messung ist CPU-seitige Wandzeit und kann Treiberwartezeit
++enthalten; sie ist kein GPU-Timer. Das Overlay erfasst außerdem keine
++Speicherstände und schreibt keine Messreihen in Dateien. Vorher/Nachher-Baselines
++für die festen Szenen sowie GPU-Zeit und Ressourcenmessung bleiben offen.
++
+ ## Verifizierter Ausgangspunkt
+ 
+ | Bereich | Aktueller Befund | Konsequenz |
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+index 6add460..948f121 100644
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -36,6 +36,7 @@ Diese Liste plant moderne Renderer-Erweiterungen für LibreLancer. Sie ist eine
+ 
+ ### 1. Render-Pipeline und Profiling
+ 
++- [x] Ersten CPU-/Frame-Pacing-Messpunkt bereitstellen: Das Debugfenster zeigt gleitende p50/p95/p99-Werte über 300 Frames für die Update-/Draw-/EndFrame-Wandzeit und das Frame-Intervall einschließlich Swap/VSync. Die Messung läuft in SDL2, SDL3 und dem Null-Backend. Sie ist nur eine Diagnosegrundlage; GPU-Zeit, Speicher und reproduzierbare Szenenmessungen sind nicht enthalten.
+ - [ ] Systemweite Stabilität und Laufzeitleistung auf Referenzhardware messen und verbessern: FPS sowie CPU-/GPU-Framezeiten (p50/p95/p99), Speicherverbrauch und Frame-Pacing in festen Raum-, Basis-, System-, Kampf- und UI-Szenen erfassen; Langzeitläufe, Szenenwechsel, Resize, Minimieren/Wiederherstellen und Gerätefehler auf Hänger, Abstürze und Ressourcenlecks prüfen. Erst Messungen gegen einen dokumentierten Ausgangswert gelten als Optimierungsnachweis.
+ - [ ] Render-Passes mit klaren Ein-/Ausgaben und expliziter Farb-/Tiefenpufferverwaltung vorbereiten.
+ - [ ] Render-Target-Resize, minimierte Fenster, Scissor-/Viewport-Wechsel und Geräteverlust für zusätzliche Pässe absichern.
+diff --git a/src/LibreLancer.Base/Game.cs b/src/LibreLancer.Base/Game.cs
+index badc193..458ac6b 100644
+--- a/src/LibreLancer.Base/Game.cs
++++ b/src/LibreLancer.Base/Game.cs
+@@ -175,6 +175,8 @@ public class Game : IUIThread, IGLWindow
+ 
+     public double RenderFrequency => impl.RenderFrequency;
+     public double FrameTime => impl.FrameTime;
++    public double FrameWorkTime => impl.FrameWorkTime;
++    public double FrameInterval => impl.FrameInterval;
+ 
+ 
+     public void QueueUIThread(Action work) => impl.QueueUIThread(work);
+diff --git a/src/LibreLancer.Base/Platforms/IGame.cs b/src/LibreLancer.Base/Platforms/IGame.cs
+index 829096c..356fc6d 100644
+--- a/src/LibreLancer.Base/Platforms/IGame.cs
++++ b/src/LibreLancer.Base/Platforms/IGame.cs
+@@ -32,6 +32,8 @@ internal interface IGame : IUIThread
+     double TimerTick { get; }
+     double RenderFrequency { get; }
+     double FrameTime { get; }
++    double FrameWorkTime { get; }
++    double FrameInterval { get; }
+     //Hardware
+     bool RelativeMouseMode { get; set; }
+     string? Renderer { get; }
+diff --git a/src/LibreLancer.Base/Platforms/NullGame.cs b/src/LibreLancer.Base/Platforms/NullGame.cs
+index bf95284..ed18910 100644
+--- a/src/LibreLancer.Base/Platforms/NullGame.cs
++++ b/src/LibreLancer.Base/Platforms/NullGame.cs
+@@ -102,6 +102,8 @@ internal class NullGame : IGame
+     public double TimerTick => TotalTime;
+     public double RenderFrequency => 60.0;
+     public double FrameTime => 1 / 60.0;
++    public double FrameWorkTime => 1 / 60.0;
++    public double FrameInterval => 1 / 60.0;
+     public string? Renderer => "NULL";
+     public RenderContext RenderContext { get; set; } = new(new NullRenderContext());
+     public Mouse Mouse { get; set; } = new Mouse();
+diff --git a/src/LibreLancer.Base/Platforms/SDL2Game.cs b/src/LibreLancer.Base/Platforms/SDL2Game.cs
+index 7ef2c6a..92afdde 100644
+--- a/src/LibreLancer.Base/Platforms/SDL2Game.cs
++++ b/src/LibreLancer.Base/Platforms/SDL2Game.cs
+@@ -184,8 +184,12 @@ internal class SDL2Game : IGame
+     }
+ 
+     public double RenderFrequency => renderFrequency;
++    public double FrameWorkTime => lastFrameWorkTime;
++    public double FrameInterval => lastFrameInterval;
+ 
+     private double frameTime;
++    private double lastFrameWorkTime;
++    private double lastFrameInterval;
+     public double FrameTime => frameTime;
+ 
+ 
+@@ -610,6 +614,7 @@ internal class SDL2Game : IGame
+             RenderContext.EndFrame();
+             //Frame time before, FPS after
+             var tk = timer.Elapsed.TotalSeconds - totalTime;
++            lastFrameWorkTime = tk;
+             frameTime = CalcAverageTime(tk);
+             if (_screenshot)
+             {
+@@ -619,6 +624,7 @@ internal class SDL2Game : IGame
+             RenderContext.Backend.SwapWindow(sdlWin, isVsync, IsFullScreen);
+ 
+             elapsed = timer.Elapsed.TotalSeconds - last;
++            lastFrameInterval = elapsed;
+             renderFrequency = (1.0 / CalcAverageTick(elapsed));
+             last = timer.Elapsed.TotalSeconds;
+             totalTime = timer.Elapsed.TotalSeconds;
+diff --git a/src/LibreLancer.Base/Platforms/SDL3Game.cs b/src/LibreLancer.Base/Platforms/SDL3Game.cs
+index 77dd9e5..1dde19c 100644
+--- a/src/LibreLancer.Base/Platforms/SDL3Game.cs
++++ b/src/LibreLancer.Base/Platforms/SDL3Game.cs
+@@ -227,9 +227,13 @@ internal class SDL3Game : IGame
+     }
+ 
+     public double RenderFrequency => renderFrequency;
++    public double FrameWorkTime => lastFrameWorkTime;
++    public double FrameInterval => lastFrameInterval;
+     public double FrameTime => frameTime;
+ 
+     private double frameTime;
++    private double lastFrameWorkTime;
++    private double lastFrameInterval;
+ 
+     public void QueueUIThread(Action work)
+     {
+@@ -625,6 +629,7 @@ internal class SDL3Game : IGame
+             RenderContext.EndFrame();
+             //Frame time before, FPS after
+             var tk = timer.Elapsed.TotalSeconds - totalTime;
++            lastFrameWorkTime = tk;
+             frameTime = CalcAverageTime(tk);
+             if (_screenshot)
+             {
+@@ -635,6 +640,7 @@ internal class SDL3Game : IGame
+             RenderContext.Backend.SwapWindow(sdlWin, isVsync, IsFullScreen);
+ 
+             elapsed = timer.Elapsed.TotalSeconds - last;
++            lastFrameInterval = elapsed;
+             renderFrequency = (1.0 / CalcAverageTick(elapsed));
+             last = timer.Elapsed.TotalSeconds;
+             totalTime = timer.Elapsed.TotalSeconds;
+diff --git a/src/LibreLancer/Interface/DebugView.cs b/src/LibreLancer/Interface/DebugView.cs
+index 66dc305..783d25d 100644
+--- a/src/LibreLancer/Interface/DebugView.cs
++++ b/src/LibreLancer/Interface/DebugView.cs
+@@ -15,6 +15,14 @@ namespace LibreLancer.Interface
+ {
+     public class DebugView
+     {
++        private const int PerformanceSampleCount = 300;
++        private readonly double[] frameWorkSamples = new double[PerformanceSampleCount];
++        private readonly double[] frameIntervalSamples = new double[PerformanceSampleCount];
++        private int performanceSampleIndex;
++        private int performanceSamplesRecorded;
++        private double nextPerformancePercentileTime;
++        private double[] frameWorkPercentiles = new double[3];
++        private double[] frameIntervalPercentiles = new double[3];
+         private FreelancerGame game;
+         private ImGuiHelper igrender;
+ 
+@@ -118,10 +126,28 @@ namespace LibreLancer.Interface
+         {
+             if (Enabled)
+             {
++                frameWorkSamples[performanceSampleIndex] = game.FrameWorkTime;
++                frameIntervalSamples[performanceSampleIndex] = game.FrameInterval;
++                performanceSampleIndex = (performanceSampleIndex + 1) % PerformanceSampleCount;
++                performanceSamplesRecorded = Math.Min(performanceSamplesRecorded + 1, PerformanceSampleCount);
++                if (performanceSamplesRecorded > 0 && game.TotalTime >= nextPerformancePercentileTime)
++                {
++                    frameWorkPercentiles = Percentiles(frameWorkSamples, performanceSamplesRecorded);
++                    frameIntervalPercentiles = Percentiles(frameIntervalSamples, performanceSamplesRecorded);
++                    nextPerformancePercentileTime = game.TotalTime + 0.25;
++                }
++
+                 igrender.NewFrame(elapsed);
+                 ImGui.PushFont(ImGuiHelper.Roboto, 0);
++                var displaySize = ImGui.GetIO().DisplaySize;
++                ImGui.SetNextWindowPos(new Vector2(Math.Max(8, displaySize.X - 620), 8), ImGuiCond.Appearing);
+                 ImGui.Begin("Debug");
+                 ImGui.Text($"FPS: {game.RenderFrequency:F2}");
++                if (performanceSamplesRecorded > 0)
++                {
++                    ImGui.Text($"Update + draw ms p50/p95/p99 (n={performanceSamplesRecorded}/{PerformanceSampleCount}): {frameWorkPercentiles[0] * 1000:F2} / {frameWorkPercentiles[1] * 1000:F2} / {frameWorkPercentiles[2] * 1000:F2}");
++                    ImGui.Text($"Frame interval ms p50/p95/p99: {frameIntervalPercentiles[0] * 1000:F2} / {frameIntervalPercentiles[1] * 1000:F2} / {frameIntervalPercentiles[2] * 1000:F2}");
++                }
+                 debugWindow?.Invoke();
+                 CaptureMouse = ImGui.IsWindowHovered();
+                 ImGui.End();
+@@ -134,5 +160,15 @@ namespace LibreLancer.Interface
+                 CaptureMouse = false;
+             }
+         }
++
++        private static double[] Percentiles(double[] samples, int count)
++        {
++            var ordered = new double[count];
++            Array.Copy(samples, ordered, count);
++            Array.Sort(ordered);
++            static double At(double[] values, double percentile) =>
++                values[(int)Math.Ceiling((values.Length - 1) * percentile)];
++            return [At(ordered, 0.50), At(ordered, 0.95), At(ordered, 0.99)];
++        }
+     }
+ }

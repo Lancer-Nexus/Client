@@ -1,0 +1,68 @@
+--- a/src/LibreLancer/Render/SystemLighting.cs
++++ b/src/LibreLancer/Render/SystemLighting.cs
+@@ -49,6 +49,15 @@
+             return RenderHelpers.CalculateLightPriority(light, frameCameraPosition, 0);
+         }
+ 
++        private static bool IsFinite(RenderLight light) =>
++            float.IsFinite(light.Position.X) && float.IsFinite(light.Position.Y) && float.IsFinite(light.Position.Z) &&
++            float.IsFinite(light.Direction.X) && float.IsFinite(light.Direction.Y) && float.IsFinite(light.Direction.Z) &&
++            float.IsFinite(light.Attenuation.X) && float.IsFinite(light.Attenuation.Y) && float.IsFinite(light.Attenuation.Z) &&
++            float.IsFinite(light.Color.R) && float.IsFinite(light.Color.G) && float.IsFinite(light.Color.B) &&
++            float.IsFinite(light.Ambient.R) && float.IsFinite(light.Ambient.G) && float.IsFinite(light.Ambient.B) &&
++            float.IsFinite(light.Range) && float.IsFinite(light.Falloff) &&
++            float.IsFinite(light.Theta) && float.IsFinite(light.Phi);
++
+         public void BeginFrame(Vector3 cameraPosition)
+         {
+             frameCameraPosition = cameraPosition;
+@@ -68,7 +77,7 @@
+ 
+         public bool AddFrameLight(DynamicLight light, bool mayIlluminateVisibleObjectsOutsideCameraRange)
+         {
+-            if (!DynamicLightsEnabled || !light.Active)
++            if (!DynamicLightsEnabled || !light.Active || !IsFinite(light.Light))
+                 return false;
+             var maxTransientLights = Math.Clamp(MaxFrameLights, 0, 32);
+             if (maxTransientLights == 0)
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -26,7 +26,7 @@
+ | RenderContext-Lifecycle | SDL2/SDL3 geben den RenderContext vor dem nativen Kontextabbau frei. Nach Abschluss der GPU-Fences werden Shader, SMAA-Texturen, Fullscreen- und Renderer2D-Puffer, Font-Texturen sowie der unmanaged 2D-Pool auch bei Einzel-Fehlern bereinigt. | Headless-Regression prüft Fence-Drain, Wiederholbarkeit und bekannte Kontext-Ressourcen. GL-native Fehlerpfade und Kontextverlust bleiben offen. Siehe `docs/evidence/renderer/render-context-shutdown-20261018/`. |
+ | Shader-Cache über Context-Wechsel | Built-in-Shaderbündel werden je `RenderContext` neu bezogen; `AsteroidBandMaterial` hält keinen globalen Shaderverweis mehr. | Headless-Regression prüft den Wechsel nach dem Schließen des ersten Shader-Scopes. Native GL-Kontextverlust- und Gerätewechselabnahme bleiben offen. Siehe `docs/evidence/renderer/render-context-shader-cache-20261018.md`. |
+ | Shader-Kompilierung | Alle 26 Shader-Bundles und die definierten Feature-Permutationen kompilieren mit dem im Repository enthaltenen DXC; der Release-Build vom 19.10. bindet zusätzlich den skinned DFM-DetailMap-Shader ein. Der SDL_GPU/Vulkan-Pipeline-Audit erstellte alle 3.495 Produktionspipelines. | Shader- und Pipeline-Erstellung sind belegt, nicht das Zeichnen realer Assets auf unterstützten Treibern. Der Haswell-Vulkan-Treiber meldet unvollständige Unterstützung. Siehe [Pipeline-Audit 2026-10-19](evidence/renderer/sdl-gpu-production-pipeline-audit-20261019.md). |
+-| Dynamische Lichter und Schatten | Persistente und kurzlebige Lichter werden priorisiert; `lgt_effect`-Lichter von fliegenden Projektilen folgen nun dem Projektilalter und seiner Position. Ein ausgewähltes Richtungslicht läuft durch Shadow-Map-Pass und 3×3-PCF. Alpha-Test-Texturen werden auch in PBR-Depth-/Shadow-Pässen anhand eines Material-Uniforms ausgeschnitten; blendtransparente Materialien werfen keine Schatten. Lichtprojektion ist im Licht-XY-Raum verankert und texelgesnappt; Mesh-Cullingradien berücksichtigen `RenderScale`. Der Shadow-Frustum-Fit hält seine acht Ecken in einem Stack-Puffer statt pro Frame ein Array zu allozieren. | Unit-Tests decken Lichtkurvenzeit, Position, Gruppe und ungültige Radien für Projektil-Lichter ab. Hi02 belegt Pass, Lichtauswahl und Live-Schaltung auf einer OpenGL-GPU. Kamera-Fit-/Stabilitäts- und RenderScale-Radiustests bestehen. Ein NAP-only-Hi02-A/B auf Intel HD 4600 bestätigt den aktiven Pass bei Bias 0 und 0,02; der Hull-Unterschied ist subtil und kalibriert keinen empfohlenen Wert. Eine Ingame-Abnahme von Waffenfeuer-/Projektillichtern, Offscreen-Castern, weiteren Materialien/Szenen und GPU-Kosten bleibt offen. Siehe `docs/evidence/renderer/shadow-map-hi02-live-toggle-20261017/`, `docs/evidence/renderer/shadow-camera-stability-20261018.md` und `docs/evidence/renderer/scaled-model-culling-20261018.md`. |
++| Dynamische Lichter und Schatten | Persistente und kurzlebige Lichter werden priorisiert; `lgt_effect`-Lichter von fliegenden Projektilen folgen nun dem Projektilalter und seiner Position. Ein ausgewähltes Richtungslicht läuft durch Shadow-Map-Pass und 3×3-PCF. Alpha-Test-Texturen werden auch in PBR-Depth-/Shadow-Pässen anhand eines Material-Uniforms ausgeschnitten; blendtransparente Materialien werfen keine Schatten. Lichtprojektion ist im Licht-XY-Raum verankert und texelgesnappt; Mesh-Cullingradien berücksichtigen `RenderScale`. Der Shadow-Frustum-Fit hält seine acht Ecken in einem Stack-Puffer statt pro Frame ein Array zu allozieren. Die Frame-Lichtaufnahme verwirft jetzt zusätzlich nicht-endliche Positionen, Richtungen, Farben, Attenuation- und Projektionsparameter, bevor Priorisierung oder Shaderbindung sie verwenden. | Unit-Tests decken Lichtkurvenzeit, Position, Gruppe und ungültige Radien für Projektil-Lichter ab. Hi02 belegt Pass, Lichtauswahl und Live-Schaltung auf einer OpenGL-GPU. Kamera-Fit-/Stabilitäts- und RenderScale-Radiustests bestehen. Ein NAP-only-Hi02-A/B auf Intel HD 4600 bestätigt den aktiven Pass bei Bias 0 und 0,02; der Hull-Unterschied ist subtil und kalibriert keinen empfohlenen Wert. Eine Ingame-Abnahme von Waffenfeuer-/Projektillichtern, Offscreen-Castern, weiteren Materialien/Szenen und GPU-Kosten bleibt offen. Siehe `docs/evidence/renderer/shadow-map-hi02-live-toggle-20261017/`, `docs/evidence/renderer/shadow-camera-stability-20261018.md` und `docs/evidence/renderer/scaled-model-culling-20261018.md`. |
+ | Diagnose | CPU-Framezeitprofile, asynchrone OpenGL-GPU-Passzeiten, Bloom-/Shadow-Passzeiten, Ziel-/Speicherschätzungen und CSV-Ausgabe. Environment-Cubemaps mit mehreren Catalog-Aliasen werden im geschätzten GPU-Texturspeicher nur einmal gezählt und bei Bereinigung auch nur einmal freigegeben. | Langzeitprofile und plattformübergreifende Vergleichsbaselines fehlen. Einzelne asynchrone Samples sind keine FPS-Baseline. |
+ 
+ ## Neueste Ingame-Beobachtung
+--- a/patches/series
++++ b/patches/series
+@@ -409,3 +409,4 @@
+ client 2409-temporary-effect-null-lifecycle.patch
+ client 2410-renderer-followup-bundle.patch
+ client 2416-dfm-detailmap-normal-tangents.patch
++client 2417-reject-nonfinite-frame-lights.patch
+--- a/src/LibreLancer/Render/SystemLighting.cs
++++ b/src/LibreLancer/Render/SystemLighting.cs
+@@ -66,6 +66,8 @@
+             var persistentCount = Math.Min(Lights.Count, BitArray128.Capacity);
+             for (var i = 0; i < persistentCount; i++)
+             {
++                if (!IsFinite(Lights[i].Light))
++                    continue;
+                 frameLights.Add(Lights[i]);
+                 frameLightPriorities.Add(0);
+             }
+--- a/src/LibreLancer/Render/SystemLighting.cs
++++ b/src/LibreLancer/Render/SystemLighting.cs
+@@ -63,8 +63,7 @@
+             frameCameraPosition = cameraPosition;
+             frameLights.Clear();
+             frameLightPriorities.Clear();
+-            var persistentCount = Math.Min(Lights.Count, BitArray128.Capacity);
+-            for (var i = 0; i < persistentCount; i++)
++            for (var i = 0; i < Lights.Count && frameLights.Count < BitArray128.Capacity; i++)
+             {
+                 if (!IsFinite(Lights[i].Light))
+                     continue;

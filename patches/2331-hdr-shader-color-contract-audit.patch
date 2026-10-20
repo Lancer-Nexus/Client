@@ -1,0 +1,93 @@
+From: Lancer Nexus
+
+Subject: [PATCH] Audit HDR shader color-space contract
+
+
+diff --git a/docs/evidence/renderer/hdr-shader-color-contract-audit-20261018.md b/docs/evidence/renderer/hdr-shader-color-contract-audit-20261018.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..2cee3c2b79ba531ef74664d2557abf04e5d19806
+--- /dev/null
++++ b/docs/evidence/renderer/hdr-shader-color-contract-audit-20261018.md
+@@ -0,0 +1,60 @@
++# HDR shader color-space source audit (2026-10-18)
++
++This audit traces the scene-color path from parsed legacy values through fragment
++shaders and post-processing. It is a source and regression-test audit, not a
++retail color calibration or whole-game visual acceptance.
++
++## Source findings
++
++- `RenderContext.UpdateRenderColorSpace` exposes whether the active scene target
++  is HDR through the shared `RenderColorSpace` shader block.
++- `includes/OutputColor.hlsl` centralizes piecewise sRGB EOTF/OETF helpers.
++  `LinearizeLegacyInput` decodes only for HDR, preserving the historical LDR
++  input behavior. `ToLinearSceneOutput` leaves linear scene values untouched;
++  `ToDisplayOutput` encodes the PBR LDR output and leaves HDR linear.
++- All 19 in-game fragment shaders under `src/LibreLancer/Shaders/` were checked.
++  Legacy material, particle, sprite, sun, nebula, navmap, atmosphere, zone-volume
++  and asteroid-band paths use the shared color-space helpers. PBR explicitly
++  decodes albedo, vertex tint, lighting and emission, then encodes only the LDR
++  display output. Depth-only variants do not write scene color.
++- `includes/Lighting.hlsl` decodes ambient, diffuse, fog, material and vertex
++  colors in HDR. `SystemRenderer.ClearFrameAttachments` uses the matching CPU
++  sRGB decode for system and nebula clear RGB while preserving alpha. LDR clear
++  values remain unchanged.
++- `Tonemap.frag.hlsl` applies ACES to the linear HDR scene plus bloom and then
++  encodes the display output to sRGB. Bloom and SMAA operate on the scene/resolve
++  data before tone mapping in the configured pass order.
++- No source-level color-space mismatch was found in these paths. The audit does
++  not prove authored retail INI/MAT colors use sRGB, visual equivalence between
++  legacy and PBR material modes, or correct compositing for every real effect.
++
++## Focused verification
++
++With the local .NET 10 runtime selected via `DOTNET_ROOT=/opt/dotnet-10`:
++
++- `RendererColorSpaceTests`: 2 passed, 0 failed. The build compiled the
++  dependent renderer projects and their shader bundle.
++- `TransientLightTests`: 21 passed, 0 failed. This includes HDR sun-ambient
++  tinting and preservation of the legacy LDR range.
++
++Commands:
++
++```sh
++DOTNET_ROOT=/opt/dotnet-10 DOTNET_ROOT_X64=/opt/dotnet-10 PATH=/opt/dotnet-10:$PATH \
++  /opt/dotnet-10/dotnet test src/LibreLancer.Tests/LibreLancer.Tests.csproj \
++  --no-restore -p:UseSharedCompilation=false \
++  --filter FullyQualifiedName~RendererColorSpaceTests
++
++DOTNET_ROOT=/opt/dotnet-10 DOTNET_ROOT_X64=/opt/dotnet-10 PATH=/opt/dotnet-10:$PATH \
++  /opt/dotnet-10/dotnet test src/LibreLancer.Tests/LibreLancer.Tests.csproj \
++  --no-restore -p:UseSharedCompilation=false --no-build \
++  --filter FullyQualifiedName~TransientLightTests
++```
++
++## Still required
++
++Capture fixed-camera LDR/HDR pairs in representative retail scenes covering
++opaque and transparent legacy materials, nebula fog, particle effects, emission
++and PBR. Repeat on a hardware GPU, compare against the original client where
++possible, and record color-space assumptions for each asset source. The current
++unit tests validate conversion arithmetic and CPU lighting behavior only.
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+index 3e257e298aac9805f45f5455c3de9c5930f49969..3e02a26f520892f57bef9e3167dc315141f0e29e 100644
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -13,7 +13,7 @@ allein gilt nicht als Qualitäts- oder Plattformabnahme.
+ | Metallic/Roughness | Ergänzende Karten sind in Materialauflösung und PBR-Shader eingebunden; DFM besitzt einen skinned PBR-Pfad. PBR berücksichtigt nun auch lineare Vertex-Tints und `Oc`-Materialopazität. | Kartenwirkung ist asset- und materialabhängig. Tinted/transparent PBR-Materialien, vollständige Asset-Abdeckung und systematische Spielabnahme fehlen noch. |
+ | Cubemaps / Reflexion | PBR bindet GGX-vorgefilterte Specular-Cubes und cosine-konvolvierte diffuse Irradiance. DDS-Cubemaps unterstützen zusätzlich lineare DX10-RGBA16F-Daten für HDR-Werte über 1. Die drei erzeugten Umwelt-Cubes und Metadaten liegen in `Data/NAP/Surface/` und `Data/SDK/fx/SurfaceMaps.ini`. | Lancer und LancerEdit bauen. Der NAP-only-Datenstart erreicht `Finished loading game data`; ein sichtbarer HDR-Cube-Lade- und Bildvergleich bleibt offen. Retail-Orientierung, Materialkalibrierung und breite Spielabnahme bleiben offen. Siehe `docs/evidence/renderer/pbr-world-reflection-20261017/` und `docs/evidence/renderer/pbr-environment-20261014/`. |
+ | Legacy-Environment-Maps | Bestehende Freelancer-Cubemap-Reflexionen lassen sich unabhängig vom PBR-IBL per Einstellung oder `--render-legacy-environment-maps=on|off` umschalten. Der Standard bleibt `on`, damit ältere Materialien ihr bisheriges Verhalten behalten. | Beide Startwerte laden bis ins Intro. Der gleiche Kamera-A/B-Bildvergleich fehlt noch; externe Bildschirmaufnahmen waren in der letzten Sitzung schwarz. |
+-| HDR und Tonemapping | Linearisiertes Scene-Target, ACES-Tonemapping, linearisierte PBR-Albedo-/Licht-/Emissionswerte und exakte sRGB-Ausgabe im PBR-LDR-Pfad. System- und Nebel-Clearfarben werden ebenfalls vor dem HDR-Clear linearisiert; LDR bleibt unverändert. | Der sRGB-Vertrag für Retail-INI-Farben ist durch Konvertierungstests, aber noch nicht durch kalibrierte Retail-Bildvergleiche abgenommen. Legacy-Vertexfarben, Transparenz, Fog und zusammengesetzte Effekte benötigen weiterhin eine visuelle Gesamtprüfung. HDR/LDR-Vergleich: `docs/evidence/renderer/postprocess-four-mode-ab-20261017/`; Clear-Farbvertrag: `docs/evidence/renderer/hdr-clear-color-contract-20261018.md`. |
++| HDR und Tonemapping | Linearisiertes Scene-Target, ACES-Tonemapping, linearisierte PBR-Albedo-/Licht-/Emissionswerte und exakte sRGB-Ausgabe im PBR-LDR-Pfad. System- und Nebel-Clearfarben werden ebenfalls vor dem HDR-Clear linearisiert; LDR bleibt unverändert. Ein Source-Audit hat alle 19 Ingame-Fragmentshader und den Postprocess-Ausgang geprüft; 2 Farbraum- und 21 Ambientlicht-Regressionstests bestehen. | Retail-Farbannahmen, visuelle Gleichheit zwischen Legacy/PBR, transparente Effekte, Fog und zusammengesetzte Ingame-Szenen brauchen weiterhin feste Bildvergleiche, Original-Client-Referenz und Hardware-GPU-Abnahme. HDR/LDR-Vergleich: `docs/evidence/renderer/postprocess-four-mode-ab-20261017/`; Shaderaudit: `docs/evidence/renderer/hdr-shader-color-contract-audit-20261018.md`; Clear-Farbvertrag: `docs/evidence/renderer/hdr-clear-color-contract-20261018.md`. |
+ | Bloom | HDR-Extraktion mittelt jetzt ein vollständiges 4×4-Quellfenster in Viertelauflösung; aufrundende Zielmaße behalten Randpixel bei ungeraden Fenstergrößen. Basis-, mittlere und breite Blur-Stufen sowie Schwelle, Radius, Auflösung und Kernel sind konfigurierbar. | Die Extraktion beseitigt das bisherige Unterabtasten der zentralen vier Texel. Der Code führt alle drei Stufen aus. Die vorhandene Bloom-Pyramidenaufnahme nennt ein Laufzeitpaket/Manifest vom 18.10. und gilt am Dokumentstand 17.10. nicht als verifizierter NAP-Lauf. Laufzeitabnahme, Halo-Kalibrierung und GPU-Kosten bleiben offen. |
+ | Antialiasing | SMAA-Pässe und MSAA-Auflösung; HDR/LDR-Kombinationen sowie Resize und Minimize/Restore wurden auf OpenGL/Mesa geprüft. | Andere Backends/Treiber, wiederholte Lifecycle-Zyklen und Fehler-Injektion stehen aus. |
+ | GPU-Readback | Asynchrones OpenGL-Textur-Readback verwendet PBO und Fence. Fehler beim Setup räumen PBO/FBO/Fence auf; Mapping- und Unmap-Fehler beenden den Task mit Fehler und geben den PBO frei. | Der Quellpfad baut. GL-Fehler-Injektion und ein Laufzeit-Readback auf unterstützten und Sync-losen Treibern sind noch nicht abgenommen. Siehe `docs/evidence/renderer/gl-texture-async-readback-lifecycle-20261018/`. |
+diff --git a/patches/series b/patches/series
+index 7e11cf1b0799228ebc7b7ea0d354620e9b1731cd..9b769757a5505c3acbc4978a9c7488fd8db58fbd 100644
+--- a/patches/series
++++ b/patches/series
+@@ -330,3 +330,4 @@ client 2327-document-minimize-restore-oom.patch
+ client 2328-hdr-cubemap-lit-runtime-evidence.patch
+ client 2329-bw-pygar-normalmap-runtime-quality-evidence.patch
+ client 2330-bw-pygar-normalmap-visual-calibration.patch
++client 2331-hdr-shader-color-contract-audit.patch

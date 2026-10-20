@@ -1,0 +1,65 @@
+--- a/src/LibreLancer/Render/ProjectileRenderer.cs
++++ b/src/LibreLancer/Render/ProjectileRenderer.cs
+@@ -17,6 +17,7 @@
+         private int renderCount = 0;
+         private BeamsBuffer beams = null!;
+         private bool renderBeams;
++        private ICamera frameCamera = null!;
+ 
+         public ProjectileRenderer(ProjectileManager projs)
+         {
+@@ -26,6 +27,7 @@
+ 
+         public override bool PrepareRender(ICamera camera, NebulaRenderer nr, SystemRenderer sys, bool forceCull)
+         {
++            frameCamera = camera;
+             beams = sys.Beams;
+             renderBeams = sys.Settings.RenderProjectileBeams;
+             renderCount = 0;
+@@ -89,7 +91,11 @@
+             for (var i = 0; i < renderCount; i++)
+             {
+                 var p = toRender[i];
+-                p.Effect?.Update(time, Matrix4x4.CreateTranslation(p.Position), 0);
++                if (p.Effect is { } effect)
++                {
++                    effect.Update(time, Matrix4x4.CreateTranslation(p.Position), 0);
++                    effect.UpdateCull(frameCamera);
++                }
+             }
+         }
+         public override void Draw(ICamera camera, CommandBuffer commands, SystemLighting lights, NebulaRenderer nr)
+@@ -107,7 +113,8 @@
+                         beams.AddBeamBolt(p.Position, p.Normal.Normalized(), p.Data.Munition.ConstEffect_Bolt, currDist);
+                 }
+ 
+-                p.Effect?.Draw(Matrix4x4.CreateTranslation(p.Position), 0);
++                if (p.Effect is { Culled: false } effect)
++                    effect.Draw(Matrix4x4.CreateTranslation(p.Position), 0);
+             }
+         }
+     }
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -16,6 +16,7 @@
+ | HDR und Tonemapping | Linearisiertes Scene-Target, ACES-Tonemapping, linearisierte PBR-Albedo-/Licht-/Emissionswerte und exakte sRGB-Ausgabe im PBR-LDR-Pfad. System- und Nebel-Clearfarben werden ebenfalls vor dem HDR-Clear linearisiert; LDR bleibt unverändert. Ein Source-Audit hat alle 19 Ingame-Fragmentshader und den Postprocess-Ausgang geprüft; 2 Farbraum- und 21 Ambientlicht-Regressionstests bestehen. | Retail-Farbannahmen, visuelle Gleichheit zwischen Legacy/PBR, transparente Effekte, Fog und zusammengesetzte Ingame-Szenen brauchen weiterhin feste Bildvergleiche, Original-Client-Referenz und Hardware-GPU-Abnahme. HDR/LDR-Vergleiche: `docs/evidence/renderer/postprocess-four-mode-ab-20261017/` und der same-session-Hi02-Lauf `docs/evidence/renderer/hdr-ldr-hi02-live-ab-20261018/`; letzterer zeigt in dieser Legacy-Szene nur geringe Pixelabweichung und ersetzt keine Material-/Emissions-Referenz. Shaderaudit: `docs/evidence/renderer/hdr-shader-color-contract-audit-20261018.md`; Clear-Farbvertrag: `docs/evidence/renderer/hdr-clear-color-contract-20261018.md`. |
+ | Bloom | HDR-Extraktion mittelt jetzt ein vollständiges 4×4-Quellfenster in Viertelauflösung; aufrundende Zielmaße behalten Randpixel bei ungeraden Fenstergrößen. Basis-, mittlere und breite Blur-Stufen sowie Schwelle, Radius, Auflösung und Kernel sind konfigurierbar. | Die Extraktion beseitigt das bisherige Unterabtasten der zentralen vier Texel. Der Code führt alle drei Stufen aus. NAP-only M01A-Läufe am 19.10. vergleichen Bloom ein/aus und schalten in einem dritten Lauf zusätzlich Partikeleffekte aus. Der große Ring verschwindet mit den Explosionspartikeln; NAP-Fuse- und ALE-Daten verknüpfen ihn mit dem `planetflare`-Flashbang der Freeport-7-Explosion und grenzen ihn von Bloom ab. Die bewegten Frames sind nicht pixelgenau, die einzelne Flashbang-Instanz bleibt offen. Siehe [`NAP M01A Bloom-/Partikelmatrix`](evidence/renderer/nap-full-runtime-20261019/README.md). GPU-Kosten bleiben offen. |
+ | Partikelpuffer | `ParticleBuffer.RemoveAt` verschiebt beim Entfernen die kürzere Seite des Ringpuffers und bewahrt dabei die Reihenfolge. | Der maximale Verschiebeaufwand sinkt von der gesamten Restlänge auf `min(prefix, suffix)`; tatsächliche FPS-/GPU-Wirkung muss in festen Partikelszenen gemessen werden. |
++| Projektil-Effekt-Culling | Nach dem Simulationsupdate prüft `ProjectileRenderer` den Partikel-Effekt gegen die aktuelle Kamerafrustum und überspringt nur dessen Draw, wenn der Effekt außerhalb liegt. Simulation, Beams und Effektlichter laufen weiter. | Es gilt derselbe Radiusvertrag wie bei anderen Partikeleffekt-Renderern. Effekte mit unendlichem Radius (z. B. nicht an einen Node gebundene Root-Emitter) bleiben sichtbar. Eine feste Szenenmessung der tatsächlich eingesparten Drawcalls steht noch aus. |
+ | Transparente Draw-Commands | Transparent-Commands und Sortierindizes wachsen bei Bedarf geometrisch über die bisherige 16.384-Grenze hinaus; beide Arrays behalten dieselbe Kapazität. Der Sortiervergleich wird pro CommandBuffer wiederverwendet und nach einer Puffervergrößerung auf das neue Array umgestellt. Leere Queues werden ohne Sortieraufruf übersprungen. | Unit-Tests prüfen geometrisches Wachstum und fügen 16.385 Commands ein; derselbe Test sortiert die leere und anschließend vergrößerte Queue. Dichte Ingame-Szenen müssen die höhere Kapazität, ihren Speicherbedarf und die FPS-Wirkung der geringeren Allokationen noch prüfen. |
+ | Objektlicht-Bindung | `RenderHelpers.ApplyLights` übergibt die nach Priorität ausgewählten Quellindizes kompakt. `RenderMaterial.SetLights` verarbeitet so direkt höchstens acht Lichtindizes pro Materialdraw statt bis zu 128 Frame-Einträge erneut zu durchsuchen; manuell gebaute Lighting-Werte behalten den Bitset-Fallback. | Auswahl-/Bitset-Übereinstimmung ist im `TransientLightTests`-Pfad geprüft. Der CPU- und FPS-Gewinn muss mit derselben festen Szene vor/nach der Änderung gemessen werden. |
+ | LOD-/Modell-Culling | Die größte Archetyp- oder Mesh-LOD-Distanz wird ohne LINQ-Iteratoren ermittelt und pro Renderer gecacht, bis sich Modell oder Override-Array ändern. Leere Modelldistanzen blenden das Modell nicht mehr fälschlich aus; Mesh-eigene LOD-Distanzen aktivieren den frühen Distanz-Cull auch ohne Archetypwerte. | Vermeidet wiederholte Scans aller Modellteile im frühen Draw-Cull und erhält gültige Mesh-LODs. Der tatsächliche CPU-/FPS-Gewinn muss in festen Schiff-, Stations- und Asteroiden-Szenen gemessen werden. |
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -414,3 +414,4 @@
+ | 2478 | Map SDL3-offscreen NVE7 profiles to Quadro K1100M and correct renderer evidence |
+ | 2479 | Reuse particle child-effect update scratch collections |
+ | 2480 | Record NAP-only particle child-effect runtime and baseline limits |
++| 2481 | Cull projectile particle effects outside the camera frustum |
+--- a/patches/series
++++ b/patches/series
+@@ -472,3 +472,4 @@
+ client 2478-map-nve7-profile-adapter.patch
+ client 2479-reuse-particle-child-effect-update-scratch.patch
+ client 2480-particle-child-effect-runtime-evidence.patch
++client 2481-cull-offscreen-projectile-effects.patch

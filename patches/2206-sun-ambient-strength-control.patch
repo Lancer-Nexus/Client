@@ -1,0 +1,231 @@
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -236,7 +236,8 @@
+   - `--render-nebulae=on|off` → `render_nebulae`.
+   - `--render-starsphere=on|off` → `render_starsphere`.
+   - `--render-sun-lens-glow=on|off` → `render_sun_lens_glow`.
+-  - `--render-sun-ambient=on|off` → `render_sun_ambient` (opt-in 25% diffuse tint from locally weighted persistent system-light colors; off by default).
++  - `--render-sun-ambient=on|off` → `render_sun_ambient` (opt-in diffuse tint from locally weighted persistent system-light colors; off by default).
++  - `--render-sun-ambient-strength=0..1` → `render_sun_ambient_strength` (finite invariant-culture tint blend; default 0.25; validated in config and adjustable in Effects options).
+   - `--render-hdr=on|off` → `render_hdr` (opt-in float scene target and ACES tone mapping; falls back to LDR when the GPU target is unavailable).
+   - `--render-bloom=on|off` → `render_bloom` (opt-in bloom pass; requires `render_hdr`).
+   - `--render-depth-prepass=on|off` → `render_depth_prepass` (opt-in opaque model depth pass; Basic/PBR materials use depth-only fragment variants; off by default pending runtime performance measurements).
+
+--- a/src/LibreLancer/Render/IRendererSettings.cs
++++ b/src/LibreLancer/Render/IRendererSettings.cs
+@@ -16,6 +16,7 @@
+     bool RenderStarsphere => true;
+     bool RenderSunLensGlow => true;
+     bool RenderSunAmbient => false;
++    float RenderSunAmbientStrength => 0.25f;
+     bool RenderHdr => false;
+     bool RenderBloom => false;
+     bool RenderDepthPrepass => false;
+
+--- a/src/LibreLancer/Render/SystemLighting.cs
++++ b/src/LibreLancer/Render/SystemLighting.cs
+@@ -18,6 +18,7 @@
+ 		public List<DynamicLight> Lights = [];
+ 		public List<DynamicLight> SunAmbientLights = [];
+ 		public bool SunAmbientEnabled;
++        public float SunAmbientStrength = 0.25f;
+ 		private readonly List<DynamicLight> frameLights = new(64);
+         private readonly List<float> frameLightPriorities = new(64);
+ 		private bool frameStarted;
+
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -510,6 +510,7 @@
+                 DrawNebulae = Settings.RenderNebulae;
+                 DrawStarsphere = Settings.RenderStarsphere;
+                 SystemLighting.SunAmbientEnabled = Settings.RenderSunAmbient;
++                SystemLighting.SunAmbientStrength = Settings.RenderSunAmbientStrength;
+                 var nr = CheckNebulae(); // are we in a nebula?
+                 SystemLighting.DynamicLightsEnabled = Settings.DynamicLighting;
+                 SystemLighting.MaxFrameLights = Settings.DynamicLightBudget;
+
+--- a/src/LibreLancer/Render/RenderHelpers.cs
++++ b/src/LibreLancer/Render/RenderHelpers.cs
+@@ -151,7 +151,10 @@
+         private static Color3f ApplySunAmbient(SystemLighting source, int lightGroup,
+             Vector3 center, float radius, Color3f ambient)
+         {
+-            const float sunTintBlend = 0.25f;
++            var sunTintBlend = float.IsFinite(source.SunAmbientStrength)
++                ? Math.Clamp(source.SunAmbientStrength, 0f, 1f)
++                : 0.25f;
++            if (sunTintBlend <= 0f) return ambient;
+             var colorSum = Color3f.Black;
+             var weightSum = 0f;
+             foreach (var dynamicLight in source.SunAmbientLights)
+
+--- a/src/LibreLancer/GameSettings.cs
++++ b/src/LibreLancer/GameSettings.cs
+@@ -57,6 +57,8 @@
+         public bool RenderSunLensGlow = true;
+         [Entry("render_sun_ambient")]
+         public bool RenderSunAmbient = false;
++        [Entry("render_sun_ambient_strength")]
++        public float RenderSunAmbientStrength = 0.25f;
+         [Entry("render_hdr")]
+         public bool RenderHdr = false;
+         [Entry("render_bloom")]
+@@ -125,6 +127,7 @@
+         bool IRendererSettings.RenderStarsphere => RenderStarsphere;
+         bool IRendererSettings.RenderSunLensGlow => RenderSunLensGlow;
+         bool IRendererSettings.RenderSunAmbient => RenderSunAmbient;
++        float IRendererSettings.RenderSunAmbientStrength => RenderSunAmbientStrength;
+         bool IRendererSettings.RenderHdr => RenderHdr;
+         bool IRendererSettings.RenderBloom => RenderBloom;
+         bool IRendererSettings.RenderDepthPrepass => RenderDepthPrepass;
+@@ -177,6 +180,7 @@
+             writer.WriteLine($"render_starsphere = {(RenderStarsphere ? "true" : "false")}");
+             writer.WriteLine($"render_sun_lens_glow = {RenderSunLensGlow.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_sun_ambient = {RenderSunAmbient.ToString().ToLowerInvariant()}");
++            writer.WriteLine($"render_sun_ambient_strength = {Fmt(RenderSunAmbientStrength)}");
+             writer.WriteLine($"render_hdr = {RenderHdr.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_bloom = {RenderBloom.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_depth_prepass = {RenderDepthPrepass.ToString().ToLowerInvariant()}");
+@@ -224,6 +228,7 @@
+                 RenderStarsphere = RenderStarsphere,
+                 RenderSunLensGlow = RenderSunLensGlow,
+                 RenderSunAmbient = RenderSunAmbient,
++                RenderSunAmbientStrength = RenderSunAmbientStrength,
+                 RenderHdr = RenderHdr,
+                 RenderBloom = RenderBloom,
+                 RenderDepthPrepass = RenderDepthPrepass,
+@@ -269,6 +274,7 @@
+             RenderStarsphere = other.RenderStarsphere;
+             RenderSunLensGlow = other.RenderSunLensGlow;
+             RenderSunAmbient = other.RenderSunAmbient;
++            RenderSunAmbientStrength = other.RenderSunAmbientStrength;
+             RenderHdr = other.RenderHdr;
+             RenderBloom = other.RenderBloom;
+             RenderDepthPrepass = other.RenderDepthPrepass;
+@@ -295,6 +301,11 @@
+                 FLLog.Info("Config", $"Transient effect light budget {TransientEffectLightBudget} is unsupported; using 128.");
+                 TransientEffectLightBudget = 128;
+             }
++            if (!float.IsFinite(RenderSunAmbientStrength) || RenderSunAmbientStrength is < 0f or > 1f)
++            {
++                FLLog.Info("Config", $"Sun ambient strength {RenderSunAmbientStrength} is unsupported; using 0.25.");
++                RenderSunAmbientStrength = 0.25f;
++            }
+             if (!float.IsFinite(BloomThreshold) || BloomThreshold is < 0f or > 8f)
+             {
+                 FLLog.Info("Config", $"Bloom threshold {BloomThreshold} is unsupported; using 1.");
+
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -35,6 +35,7 @@
+             Console.WriteLine("         --render-starsphere=on|off");
+             Console.WriteLine("         --render-sun-lens-glow=on|off");
+             Console.WriteLine("         --render-sun-ambient=on|off");
++            Console.WriteLine("         --render-sun-ambient-strength=0..1");
+             Console.WriteLine("         --render-hdr=on|off");
+             Console.WriteLine("         --render-bloom=on|off");
+             Console.WriteLine("         --render-depth-prepass=on|off");
+@@ -226,6 +227,7 @@
+         private bool? starsphere;
+         private bool? sunLensGlow;
+         private bool? sunAmbient;
++        private float? sunAmbientStrength;
+         private bool? hdr;
+         private bool? bloom;
+         private bool? depthPrepass;
+@@ -294,6 +296,15 @@
+                     if (!ParseToggle(out var sunAmbientEnabled)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
+                     sunAmbient = sunAmbientEnabled;
+                     return true;
++                case "--render-sun-ambient-strength":
++                    if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var sunAmbientBlend) &&
++                        float.IsFinite(sunAmbientBlend) && sunAmbientBlend is >= 0f and <= 1f)
++                    {
++                        sunAmbientStrength = sunAmbientBlend;
++                        return true;
++                    }
++                    error = $"{name} accepts a finite number from 0 through 1.";
++                    return false;
+                 case "--render-hdr":
+                     if (!ParseToggle(out var hdrEnabled)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
+                     hdr = hdrEnabled;
+@@ -431,6 +442,7 @@
+             if (starsphere.HasValue) settings.RenderStarsphere = starsphere.Value;
+             if (sunLensGlow.HasValue) settings.RenderSunLensGlow = sunLensGlow.Value;
+             if (sunAmbient.HasValue) settings.RenderSunAmbient = sunAmbient.Value;
++            if (sunAmbientStrength.HasValue) settings.RenderSunAmbientStrength = sunAmbientStrength.Value;
+             if (hdr.HasValue) settings.RenderHdr = hdr.Value;
+             if (bloom.HasValue) settings.RenderBloom = bloom.Value;
+             if (depthPrepass.HasValue) settings.RenderDepthPrepass = depthPrepass.Value;
+
+--- a/uixml/options.xml
++++ b/uixml/options.xml
+@@ -36,15 +36,17 @@
+                 <Checkbox id="sun_lens_glow" X="18" Y="220" Width="350" Text="SUN LENS GLOW"/>
+                 <Checkbox id="nebulae" X="18" Y="248" Width="350" Text="NEBULAE"/>
+                 <Checkbox id="starsphere" X="18" Y="276" Width="350" Text="STARSPHERE"/>
+-                <Checkbox id="sun_ambient" X="18" Y="304" Width="350" Text="SUN-COLORED AMBIENT LIGHT"/>
+-                <Checkbox id="hdr" X="18" Y="332" Width="350" Text="HDR TONE MAPPING"/>
+-                <Checkbox id="bloom" X="18" Y="360" Width="350" Text="HDR BLOOM (REQUIRES HDR)"/>
+-                <TextBlock X="18" Y="388" Width="170" Height="18" Text="BLOOM THRESHOLD" TextColor="text" TextShadow="black" TextSize="10"/>
+-                <HSlider id="bloom_threshold" X="200" Y="390" Width="160" Height="12"/>
+-                <TextBlock X="18" Y="416" Width="170" Height="18" Text="BLOOM STRENGTH" TextColor="text" TextShadow="black" TextSize="10"/>
+-                <HSlider id="bloom_strength" X="200" Y="418" Width="160" Height="12"/>
+-                <TextBlock X="18" Y="444" Width="170" Height="18" Text="BLOOM RADIUS" TextColor="text" TextShadow="black" TextSize="10"/>
+-                <HSlider id="bloom_radius" X="200" Y="446" Width="160" Height="12"/>
++                <Checkbox id="sun_ambient" X="18" Y="304" Width="175" Text="SUN AMBIENT TINT"/>
++                <TextBlock X="200" Y="302" Width="160" Height="18" Text="TINT STRENGTH" TextColor="text" TextShadow="black" TextSize="10"/>
++                <HSlider id="sun_ambient_strength" X="200" Y="316" Width="160" Height="12"/>
++                <Checkbox id="hdr" X="18" Y="344" Width="350" Text="HDR TONE MAPPING"/>
++                <Checkbox id="bloom" X="18" Y="372" Width="350" Text="HDR BLOOM (REQUIRES HDR)"/>
++                <TextBlock X="18" Y="400" Width="170" Height="18" Text="BLOOM THRESHOLD" TextColor="text" TextShadow="black" TextSize="10"/>
++                <HSlider id="bloom_threshold" X="200" Y="402" Width="160" Height="12"/>
++                <TextBlock X="18" Y="428" Width="170" Height="18" Text="BLOOM STRENGTH" TextColor="text" TextShadow="black" TextSize="10"/>
++                <HSlider id="bloom_strength" X="200" Y="430" Width="160" Height="12"/>
++                <TextBlock X="18" Y="456" Width="170" Height="18" Text="BLOOM RADIUS" TextColor="text" TextShadow="black" TextSize="10"/>
++                <HSlider id="bloom_radius" X="200" Y="458" Width="160" Height="12"/>
+             </Panel>
+             <Panel Width="390" Height="380" ID="win_audio" Visible="false">
+                 <TextBlock Text="AUDIO OPTIONS" Strid="1679" Width="390" Height="22" Y="-22"  Anchor="TopCenter" TextColor="text" TextShadow="black" TextSize="13"/>
+
+--- a/uixml/options.lua
++++ b/uixml/options.lua
+@@ -131,6 +131,9 @@
+         e.particle_effects.Selected = this.opts.RenderParticleEffects
+         e.sun_lens_glow.Selected = this.opts.RenderSunLensGlow
+         e.sun_ambient.Selected = this.opts.RenderSunAmbient
++        e.sun_ambient_strength.Min = 0
++        e.sun_ambient_strength.Max = 1
++        e.sun_ambient_strength.Value = this.opts.RenderSunAmbientStrength
+         e.hdr.Selected = this.opts.RenderHdr
+         e.hdr.OnClick(() => {
+             this.opts.RenderHdr = e.hdr.Selected
+@@ -213,6 +216,7 @@
+         this.opts.RenderShadows = Game.GetCurrentSettings().RenderShadows
+         this.opts.RenderHdr = Game.GetCurrentSettings().RenderHdr
+         this.opts.RenderBloom = Game.GetCurrentSettings().RenderBloom
++        this.opts.RenderSunAmbientStrength = e.sun_ambient_strength.Value
+         this.opts.BloomThreshold = e.bloom_threshold.Value
+         this.opts.BloomStrength = e.bloom_strength.Value
+         this.opts.BloomRadius = e.bloom_radius.Value
+
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -197,7 +197,8 @@
+   - [x] 25%-Farbmischung auf luminanzerhaltendes Tönen umgestellt und den normalisierten Wertebereich begrenzt; rote und grüne Regressionen prüfen die erwarteten RGB-Werte. Der Laufzeiteffekt dieser neuen Formel bleibt offen.
+   - [x] Erste NAP-only-Laufzeitbilder für BR02 (weiß), HI02 (rot) und zwei EW06-Lichtbereiche (rot/grün) mit an/aus aufgenommen. Archive und `Data/NAP`-Quellen geprüft; die EW06-Ansichten liegen in der Nebelübersteuerung, die getrennten Starts ändern Pose/Frame. Diese Bilder sind explorativ, nicht zur 25%-Kalibrierung geeignet. Details: [Laufzeitbilder und Grenzen](evidence/renderer/sun-colored-ambient-ab-20261015/README.md).
+   - [x] HI02-Livewechsel im selben Prozess: Checkbox und `client.ini` wechseln zwischen aus/an, die Screenshots zeigen denselben Spielstand. Am Schiff ist kein klarer Farbwechsel sichtbar; kurze Bewegungsabschnitte verhindern eine genaue Pixelkalibrierung. Der Livepfad ist belegt, die sichtbare Wirkung nicht.
+-  - [ ] Den wirksamen Ambient-Beitrag an einem ruhigen, nicht nebelüberschriebenen NAP-Objekt messen und die Mischung so abstimmen, dass rote und grüne Lichtfarben sichtbar, aber nicht übersteuert auf die diffuse Beleuchtung wirken.
++  - [x] Sonnenambient-Mischstärke ist jetzt von 0 bis 1 in `client.ini` (`render_sun_ambient_strength`), über `--render-sun-ambient-strength=0..1` und im Effekte-Tab einstellbar. Der Standard bleibt bei 0,25, bis eine ruhige rote/grüne/weiße Vergleichsszene kalibriert ist.
++  - [ ] Den wirksamen Ambient-Beitrag an einem ruhigen, nicht nebelüberschriebenen NAP-Objekt bei gleicher Kamerapose messen und die Standardmischung so abstimmen, dass rote und grüne Lichtfarben sichtbar, aber nicht übersteuert wirken.
+   - [x] Vorherige Quellformel geprüft: normalisierte NAP-Lichtfarben konnten mit dem damaligen 25%-Produktblend keinen Ambient-Kanal aufhellen. Der Messbefund gilt für die BW04-Bilder vor der luminanzerhaltenden Änderung; Details stehen im [Kanalwirkungs-Audit](evidence/renderer/sun-ambient-channel-math-20261016.md).
+   - [x] Teststart geprüft: `--load-save` lädt den kopierten lokalen Autosave NAP-only bis in FP7/Freeport 7. Der Missionsstand verlangt noch „Look for a job in the bar“ und führt nicht in einen freien Weltraumstart; das Bild dokumentiert nur diesen ungeeigneten Ausgangszustand, keine Ambient-Abnahme. Details: [Save-Start-Audit](evidence/renderer/sun-ambient-save-startup-20261016/README.md).
+   - [x] Freien NAP-only-Start in `Hi02` hergestellt: Der Save muss `Hi02` aus `Universe.ini` verwenden, nicht `HI02_system`. Die World-Callback- und Eintrittslogs sind vorhanden. Getrennte Starts mit Ambient an/aus ergeben wegen anderer Kamera-/Kampfframes keinen gültigen A/B; Bilder und genaue Grenzen: [HI02-Startdiagnose](evidence/renderer/sun-colored-ambient-hi02-diagnostic-20261016/README.md).
+
+--- a/patches/series
++++ b/patches/series
+@@ -205,3 +205,4 @@
+ client 2203-pbr-cubemap-runtime-ab-evidence.patch
+ client 2204-world-space-pbr-reflection-direction.patch
+ client 2205-pbr-world-reflection-runtime-evidence.patch
++client 2206-sun-ambient-strength-control.patch

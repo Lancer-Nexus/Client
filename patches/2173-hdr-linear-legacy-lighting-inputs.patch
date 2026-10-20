@@ -1,0 +1,443 @@
+diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -504,11 +504,19 @@
+   Shader- und RenderContext-Verknüpfung ist in
+   [HDR-Linear-Ausgabe](evidence/renderer/hdr-linear-output-implementation-20261016.md)
+   dokumentiert. Ein visueller NAP-Lauf war mangels NAP-Archiven nicht möglich.
+-- [ ] Legacy-Texturen, Materialfarben, Vertexlicht und Nebel bereits vor der
+-  Beleuchtungsrechnung in lineare Werte überführen; Ein-/Ausgabe-Farbräume aller
+-  Effekte und Übergänge anhand fester NAP-Szenen visuell abnehmen. Die aktuelle
+-  Stufe linearisiert Legacy-Shader-Ausgaben für korrektes Zielblending, nicht
+-  alle vorhergehenden Farbrechnungen.
++- [x] Im opt-in HDR-Pfad diffuse Texturen, MAT-/Materialfarben, Vertexfarben,
++  diffuse/ambient Lichtfarben und Fog-Farbe vor der Beleuchtungs- und
++  Fogberechnung linear behandeln. Der gemeinsame Pfad umfasst Basic,
++  DetailMapMaterial, DetailMap2Dm1Msk2PassMaterial, IllumDetailMapMaterial,
++  Masked2DetailMapMaterial, Atmosphere und AsteroidBand. Diese Shader geben
++  danach ohne zweite EOTF lineare Werte aus. Die Konvertierung ist im LDR-Pfad
++  eine Identität; vorhandene LDR-Clamps und die Alpha-Masken bleiben erhalten.
++- [ ] Prüfen, ob alle NAP-/Retail-INI-Licht-, Systemambient- und Nebelfarben
++  tatsächlich sRGB-encodiert sind; diese Annahme ist derzeit aus dem
++  BGRA8/komprimierten UNORM-Texturpfad und der Materialdatenbehandlung abgeleitet,
++  nicht visuell bestätigt. HDR-Farbabnahme und kalibrierte NAP-Vergleichsbilder
++  fehlen weiterhin. Nicht beleuchtete Effektshader behalten teils ihre bisherige
++  Ausgabekonvertierung und benötigen eine separate Farbpfadprüfung.
+ - [x] Erste optionale HDR-Bloom-Stufe mit Helligkeitsschwelle bei 1.0,
+   Viertelauflösung und separablem Gauß-Blur. `render_bloom`,
+   `--render-bloom=on|off` und ein Effekte-Schalter steuern sie unabhängig; sie
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -170,7 +170,8 @@
+   `BasicMaterial`-Pfad opak; transparente Rumpfteile sind als Ursache nicht
+   belegt. Die THN-Kamera folgt `Path_shot1` 35 Sekunden; Details der offenen
+   Reproduktion stehen in [ship-light-occlusion.md](ship-light-occlusion.md).
+-- [x] Opt-in HDR-Ausgabestufe mit Half-Float-Szenenziel, float MSAA/SMAA-Eingang und ACES-Tonemapping; per `render_hdr`, `--render-hdr=on|off` und Effects-Checkbox schaltbar. Alle 18 aktuellen Client-Fragmentshader schreiben im HDR-Ziel lineare RGB-Werte, PBR bleibt nativ linear, und Clear-Farben werden nach sRGB-EOTF dekodiert. Dadurch erfolgt auch transparentes Blending im linearen Ziel. Die UI folgt im Spielzustand nach `SystemRenderer.Draw()` und damit nach dem Tonemapping. Legacy-Lichtberechnung und Farbmultiplikation arbeiten weiterhin teilweise mit kodierten Textur-/Materialwerten; vollständige lineare Beleuchtungsinputs und visuelle Laufzeitabnahme bleiben offen. Details: [HDR-Linear-Ausgabe](evidence/renderer/hdr-linear-output-implementation-20261016.md).
++- [x] Opt-in HDR-Ausgabestufe mit Half-Float-Szenenziel, float MSAA/SMAA-Eingang und ACES-Tonemapping; per `render_hdr`, `--render-hdr=on|off` und Effects-Checkbox schaltbar. Alle 18 aktuellen Client-Fragmentshader schreiben im HDR-Ziel lineare RGB-Werte, PBR bleibt nativ linear, und Clear-Farben werden nach sRGB-EOTF dekodiert. Dadurch erfolgt auch transparentes Blending im linearen Ziel. Die UI folgt im Spielzustand nach `SystemRenderer.Draw()` und damit nach dem Tonemapping. Beleuchtete Legacy-Materialeingänge sind in der nachfolgenden Stufe ergänzt; nicht beleuchtete Effektshader und die visuelle Laufzeitabnahme bleiben offen. Details: [HDR-Linear-Ausgabe](evidence/renderer/hdr-linear-output-implementation-20261016.md).
++- [x] HDR-Linear-Eingänge in den sieben beleuchteten Legacy-Materialfragmentshadern: diffuse/material/Vertexfarben sowie Licht- und Fogfarben werden vor der Beleuchtungsrechnung decodiert; Detailmaps, Et/Bt und Basic-Envmap werden ebenfalls in linearem RGB verrechnet. Der unveränderte LDR-Pfad bleibt Identität. Die sRGB-Annahme für Licht-/Fogfarbdaten und die sichtbare Wirkung sind noch nicht mit einer NAP-Laufzeitaufnahme bestätigt.
+ - [x] Erste HDR-Bloom-Stufe mit luminanzbasierter Schwelle, Viertelauflösung und horizontalem/vertikalem Gauß-Blur; separat per `render_bloom` und `--render-bloom=on|off` steuerbar, erfordert `render_hdr`.
+ - [x] Schwelle (`render_bloom_threshold`, 0–8, Standard 1) und Stärke (`render_bloom_strength`, 0–2, Standard 0,18) in der Clientkonfiguration und per CLI-Override einstellbar; Werte werden validiert.
+ - [x] Effekte-Tab-Regler für Schwelle und Stärke; Werte werden beim Bestätigen der Optionsseite übernommen und gespeichert.
+diff --git a/docs/evidence/renderer/hdr-legacy-lighting-inputs-20261016.md b/docs/evidence/renderer/hdr-legacy-lighting-inputs-20261016.md
+new file mode 100644
+--- /dev/null
++++ b/docs/evidence/renderer/hdr-legacy-lighting-inputs-20261016.md
+@@ -0,0 +1,35 @@
++# Lineare HDR-Eingänge für Legacy-Beleuchtung (2026-10-16)
++
++## Umsetzung und Abdeckung
++
++- `LinearizeLegacyInput` verwendet den aktiven Render-Farbraumblock und ist
++  außerhalb des HDR-Ziels eine Identität. Die gemeinsamen Funktionen in
++  `Lighting.hlsl` dekodieren Materialdiffuse, Vertexfarbe, Diffusetextur,
++  Materialambient, Lichtdiffuse/-ambient, Systemambient und Fogfarbe vor der
++  Beleuchtungs-/Fogberechnung.
++- `CalculateVertexLighting` linearisiert Lichtfarben vor der Vertexsumme und
++  lässt Summen im HDR-Pfad über 1.0 stehen. Der vorherige Clamp bleibt im LDR-Pfad.
++- Basic behandelt Diffuse- und Vertexfarben getrennt; Emission/Effekttextur,
++  Bt-Detailtextur und Envmap werden vor ihrer HDR-Verrechnung linearisiert.
++  Die DetailMap-, Masked- und Illuminated-Detail-Varianten dekodieren die
++  beteiligten Detail-/Illum-Texturen. Atmosphere- und AsteroidBand-Pfade geben
++  ihre beleuchteten Ergebnisse als bereits linear aus.
++- `ToLinearSceneOutput` verhindert die erneute sRGB-EOTF auf diesen Pfaden.
++  Die Texturzuordnung bleibt unverändert: OpenGL verwendet BGRA8/UNORM- und
++  BC-Formate ohne hardwareseitiges sRGB-Decoding.
++
++## Grenzen und Prüfung
++
++- .NET-10-Releasebuild von `src/LibreLancer/LibreLancer.csproj` erfolgreich:
++  0 Fehler, 131 Warnungen. Shadercompiler-Varianten für Basic, Atmosphere und
++  die gemeinsam beleuchteten Detailmaterialien wurden verarbeitet.
++- Default-LDR-Rechenpfad bleibt durch die bedingte Identitätskonvertierung
++  erhalten; eine Laufzeit-/Bildabnahme erfolgte nicht.
++- Die Annahme, dass Material-, Licht-, Systemambient- und Fogfarben in den
++  Eingabedaten sRGB-encodiert sind, ist noch nicht anhand einer festen
++  NAP-Szene kalibriert. `Data/NAP/` enthält aktuell nur `.gitkeep`-Platzhalter.
++  Die Wirkung auf rote/grüne Lichter, Nebel, Emission und Legacy-Materialien
++  muss mit NAP-only Vergleichsbildern geprüft werden.
++- Nicht beleuchtete Additiv-/Sprite-/Nebula-Effektshader folgen weiterhin ihrem
++  bisherigen Ausgangsfarbpfad. Diese Aufgabe vervollständigt daher nicht den
++  gesamten Renderer oder alle Shader-Farbräume.
+diff --git a/src/LibreLancer/Shaders/includes/OutputColor.hlsl b/src/LibreLancer/Shaders/includes/OutputColor.hlsl
+--- a/src/LibreLancer/Shaders/includes/OutputColor.hlsl
++++ b/src/LibreLancer/Shaders/includes/OutputColor.hlsl
+@@ -1,3 +1,6 @@
++#ifndef LL_OUTPUT_COLOR_INCLUDED
++#define LL_OUTPUT_COLOR_INCLUDED
++
+ cbuffer RenderColorSpace : register(b6, UNIFORM_SPACE)
+ {
+     float4 RenderColorSpaceParameters;
+@@ -24,3 +27,15 @@
+         linearColor.rgb = pow(max(linearColor.rgb, 0.0), 1.0 / 2.2);
+     return linearColor;
+ }
++
++float3 LinearizeLegacyInput(float3 color)
++{
++    return RenderColorSpaceParameters.x > 0.5 ? SRGBToLinearOutput(color) : color;
++}
++
++float4 ToLinearSceneOutput(float4 linearColor)
++{
++    return linearColor;
++}
++
++#endif
+diff --git a/src/LibreLancer/Shaders/includes/Lighting.hlsl b/src/LibreLancer/Shaders/includes/Lighting.hlsl
+--- a/src/LibreLancer/Shaders/includes/Lighting.hlsl
++++ b/src/LibreLancer/Shaders/includes/Lighting.hlsl
+@@ -1,3 +1,5 @@
++#include "OutputColor.hlsl"
++
+ #define MAX_LIGHTS 9
+ 
+ struct Light
+@@ -106,19 +108,21 @@
+         }
+ 
+         float diffuseCoefficient = max(dot(n, surfaceToLight), 0.0);
+-        float3 diffuse = diffuseCoefficient * Lights[i].Diffuse;
++        float3 lightDiffuse = LinearizeLegacyInput(Lights[i].Diffuse);
++        float3 lightAmbient = LinearizeLegacyInput(Lights[i].Ambient);
++        float3 diffuse = diffuseCoefficient * lightDiffuse;
+         diffuseFront += attenuationFront * diffuse;
+-        ambientFront += attenuationFront * Lights[i].Ambient;
++        ambientFront += attenuationFront * lightAmbient;
+ 
+         float diffuseBackCoeff = max(dot(nBack, surfaceToLight), 0.0);
+-        diffuseBack += diffuseBackCoeff * Lights[i].Diffuse;
+-        ambientBack += attenuationBack * Lights[i].Ambient;
++        diffuseBack += diffuseBackCoeff * lightDiffuse;
++        ambientBack += attenuationBack * lightAmbient;
+     }
+     VertexLightTerms result;
+-    result.diffuseTermFront = clamp(diffuseFront, 0.0, 1.0);
+-    result.diffuseTermBack = clamp(diffuseBack, 0.0, 1.0);
+-    result.ambientTermFront = clamp(ambientFront, 0.0, 1.0);
+-    result.ambientTermBack = clamp(ambientBack, 0.0, 1.0);
++    result.diffuseTermFront = RenderColorSpaceParameters.x > 0.5 ? diffuseFront : clamp(diffuseFront, 0.0, 1.0);
++    result.diffuseTermBack = RenderColorSpaceParameters.x > 0.5 ? diffuseBack : clamp(diffuseBack, 0.0, 1.0);
++    result.ambientTermFront = RenderColorSpaceParameters.x > 0.5 ? ambientFront : clamp(ambientFront, 0.0, 1.0);
++    result.ambientTermBack = RenderColorSpaceParameters.x > 0.5 ? ambientBack : clamp(ambientBack, 0.0, 1.0);
+     return result;
+ }
+ 
+@@ -146,17 +150,25 @@
+         fogFactor = (FogRange.y - dist) / (FogRange.y - FogRange.x);
+     }
+     fogFactor = clamp(fogFactor, 0.0, 1.0);
+-    return lerp(FogColor.rgb, objectColor, fogFactor);
++    return lerp(LinearizeLegacyInput(FogColor.rgb), objectColor, fogFactor);
+ }
+ 
+ float4 ApplyVertexLighting(
+-    float4 ac,float4 ec, float4 dc, float4 tex,
++    float4 ac, float4 ec, float4 dc, float4 vertexColor, float4 tex,
+     float4 viewPosition, float3 vertexDiffuseTerm, float3 vertexAmbientTerm)
+ {
++    dc.rgb = LinearizeLegacyInput(dc.rgb);
++    vertexColor.rgb = LinearizeLegacyInput(vertexColor.rgb);
++    tex.rgb = LinearizeLegacyInput(tex.rgb);
++    ac.rgb = LinearizeLegacyInput(ac.rgb);
++    float3 ambientColor = LinearizeLegacyInput(AmbientColor);
++    dc.rgb *= vertexColor.rgb;
++    dc.a *= vertexColor.a;
+     if (UseLighting <= 0)
+         return dc * tex;
+-    float3 color = ac.rgb * (AmbientColor + vertexAmbientTerm) + vertexDiffuseTerm;
+-    color = clamp(color, 0.0f, 1.0f);
++    float3 color = ac.rgb * (ambientColor + vertexAmbientTerm) + vertexDiffuseTerm;
++    if (RenderColorSpaceParameters.x < 0.5)
++        color = clamp(color, 0.0f, 1.0f);
+     float3 objectColor = (ec.rgb * tex.rgb) + (tex.rgb * dc.rgb * color);
+     if (FogMode > 0)
+     {
+@@ -166,11 +178,18 @@
+ }
+ 
+ float4 ApplyPixelLighting(
+-    float4 ac, float4 ec, float4 dc, float4 tex,
++    float4 ac, float4 ec, float4 dc, float4 vertexColor, float4 tex,
+     float3 position, float4 viewPosition, float3 normal,
+     bool frontFacing
+ )
+ {
++    dc.rgb = LinearizeLegacyInput(dc.rgb);
++    vertexColor.rgb = LinearizeLegacyInput(vertexColor.rgb);
++    tex.rgb = LinearizeLegacyInput(tex.rgb);
++    ac.rgb = LinearizeLegacyInput(ac.rgb);
++    float3 ambientColor = LinearizeLegacyInput(AmbientColor);
++    dc.rgb *= vertexColor.rgb;
++    dc.a *= vertexColor.a;
+     if (UseLighting <= 0)
+         return dc * tex;
+     float3 ambientTerm = float3(0.0, 0.0, 0.0);
+@@ -212,11 +231,13 @@
+             }
+         }
+         float diffuseCoefficient = max(dot(n, surfaceToLight), 0.0);
+-        float3 diffuse = diffuseCoefficient  * Lights[i].Diffuse;
++        float3 diffuse = diffuseCoefficient * LinearizeLegacyInput(Lights[i].Diffuse);
+         diffuseTerm += attenuation * diffuse;
+-        ambientTerm += attenuation * Lights[i].Ambient;
+-    }
+-    float3 color = clamp(diffuseTerm + ac.rgb * (AmbientColor + ambientTerm), 0.0f, 1.0f);
++        ambientTerm += attenuation * LinearizeLegacyInput(Lights[i].Ambient);
++    }
++    float3 color = diffuseTerm + ac.rgb * (ambientColor + ambientTerm);
++    if (RenderColorSpaceParameters.x < 0.5)
++        color = clamp(color, 0.0f, 1.0f);
+     float3 objectColor = (ec.rgb * tex.rgb) + (tex.rgb * dc.rgb * color);
+     if (FogMode > 0)
+     {
+diff --git a/src/LibreLancer/Shaders/Basic.frag.hlsl b/src/LibreLancer/Shaders/Basic.frag.hlsl
+--- a/src/LibreLancer/Shaders/Basic.frag.hlsl
++++ b/src/LibreLancer/Shaders/Basic.frag.hlsl
+@@ -88,22 +88,24 @@
+     }
+ #endif
+     float4 ec = Ec;
++    ec.rgb = LinearizeLegacyInput(ec.rgb);
+ #ifdef TEX2_ENABLED
+     if (Tex2Type < 1)
+     {
+-        ec *= EtTexture.Sample(EtSampler, GetTexCoord(1, input));
++        float4 emissionTexture = EtTexture.Sample(EtSampler, GetTexCoord(1, input));
++        emissionTexture.rgb = LinearizeLegacyInput(emissionTexture.rgb);
++        ec *= emissionTexture;
+     }
+ #endif
+     float4 ac = float4(1.0, 1.0, 1.0, 1.0);
+ 
+ #ifdef VERTEX_LIGHTING
+-    float4 color = ApplyVertexLighting(ac, ec, Dc * input.color,
+-        dtSampled,
++    float4 color = ApplyVertexLighting(ac, ec, Dc, input.color, dtSampled,
+         input.viewPosition,
+         input.frontFacing ? input.diffuseTermFront : input.diffuseTermBack,
+         input.frontFacing ? input.ambientTermFront : input.ambientTermBack);
+ #else
+-    float4 color = ApplyPixelLighting(ac, ec, Dc * input.color,
++    float4 color = ApplyPixelLighting(ac, ec, Dc, input.color,
+         dtSampled,
+         input.worldPosition, input.viewPosition,
+         getNormal(input), input.frontFacing);
+@@ -113,12 +115,14 @@
+     if(Tex2Type >= 1)
+     {
+         float4 bt = BtTexture.Sample(BtSampler, GetTexCoord(3, input));
++        bt.rgb = LinearizeLegacyInput(bt.rgb);
+         color.rgb = Mod2x(color.rgb, bt.rgb);
+     }
+ #endif
+ 
+ #ifdef ENVMAP
+     float4 env = EnvTexture.Sample(EnvSampler, input.viewSpaceReflection);
++    env.rgb = LinearizeLegacyInput(env.rgb);
+     float3 envrgb = 2 * env.rgb * color.rgb;
+     color = float4(lerp(color.rgb, envrgb, EnvMapStrength), color.a);
+ #endif
+@@ -130,8 +134,8 @@
+     //FadeRange - x: near, y: far
+     float fadeFactor = (FadeRange.y - dist) / (FadeRange.y - FadeRange.x);
+     fadeFactor = clamp(fadeFactor, 0.0, 1.0);
+-    return ToSceneOutput(float4(acolor.rgb, acolor.a * fadeFactor));
++    return ToLinearSceneOutput(float4(acolor.rgb, acolor.a * fadeFactor));
+ #else
+-    return ToSceneOutput(acolor);
++    return ToLinearSceneOutput(acolor);
+ #endif
+ }
+diff --git a/src/LibreLancer/Shaders/Atmosphere.frag.hlsl b/src/LibreLancer/Shaders/Atmosphere.frag.hlsl
+--- a/src/LibreLancer/Shaders/Atmosphere.frag.hlsl
++++ b/src/LibreLancer/Shaders/Atmosphere.frag.hlsl
+@@ -36,17 +36,18 @@
+ 
+     float4 tex = DtTexture.Sample(DtSampler, float2(facingRatio, 0.0));
+ #ifdef VERTEX_LIGHTING
+-    float4 lit = ApplyVertexLighting(Ac, 0, Dc,
++    float4 lit = ApplyVertexLighting(Ac, 0, Dc, float4(1.0, 1.0, 1.0, 1.0),
+         1,
+         input.viewPosition,
+         input.frontFacing ? input.diffuseTermFront : input.diffuseTermBack,
+         input.frontFacing ? input.ambientTermFront : input.ambientTermBack);
+ #else
+-    float4 lit = ApplyPixelLighting(Ac, 0, Dc,
++    float4 lit = ApplyPixelLighting(Ac, 0, Dc, float4(1.0, 1.0, 1.0, 1.0),
+         1,
+         input.worldPosition, input.viewPosition,
+         input.normal, input.frontFacing);
+ #endif
+ 
+-    return ToSceneOutput(tex * float4(lit.rgb, Oc));
++    tex.rgb = LinearizeLegacyInput(tex.rgb);
++    return ToLinearSceneOutput(tex * float4(lit.rgb, Oc));
+ }
+diff --git a/src/LibreLancer/Shaders/AsteroidBand.frag.hlsl b/src/LibreLancer/Shaders/AsteroidBand.frag.hlsl
+--- a/src/LibreLancer/Shaders/AsteroidBand.frag.hlsl
++++ b/src/LibreLancer/Shaders/AsteroidBand.frag.hlsl
+@@ -30,13 +30,14 @@
+     float delta = max(FADE_DISTANCE - dist, 0.0);
+     float alpha = (FADE_DISTANCE - delta) / FADE_DISTANCE;
+     float4 tex = Texture.Sample(Sampler, input.texCoord * float2(TextureAspect, 1.0));
+-    float4 dc = float4(tex.rgb * ColorShift.rgb, tex.a * alpha);
++    tex.a *= alpha;
+     // These parameters may not be entirely correct
+-    return ToSceneOutput(ApplyPixelLighting(
++    return ToLinearSceneOutput(ApplyPixelLighting(
+         float4(1.0, 1.0, 1.0, 1.0),
+         float4(0.0, 0.0, 0.0, 1.0),
++        ColorShift,
+         float4(1.0, 1.0, 1.0, 1.0),
+-        dc,
++        tex,
+         input.worldPosition,
+         input.viewPosition,
+         input.normal,
+diff --git a/src/LibreLancer/Shaders/DetailMapMaterial.frag.hlsl b/src/LibreLancer/Shaders/DetailMapMaterial.frag.hlsl
+--- a/src/LibreLancer/Shaders/DetailMapMaterial.frag.hlsl
++++ b/src/LibreLancer/Shaders/DetailMapMaterial.frag.hlsl
+@@ -63,6 +63,7 @@
+        FlipV > 0 ? 1 - input.texCoord.y : input.texCoord.y);
+     float4 tex = DtTexture.Sample(DtSampler, uv);
+     float4 detail = DmTexture.Sample(DmSampler, uv * TileRate);
++    detail.rgb = LinearizeLegacyInput(detail.rgb);
+ #ifdef NORMALMAP
+ 	float3 tangentNormal = DecodeBc5Normal(NmTexture.Sample(NmSampler, GetTexCoord(2, input)).xy, NormalStrength);
+ 	float3 normal = TransformNormalMap(tangentNormal, input.tbn);
+@@ -72,12 +73,12 @@
+ 
+     float4 baseColor;
+ #ifdef VERTEX_LIGHTING
+-    baseColor = ApplyVertexLighting(Ac, 0, Dc, tex, input.viewPosition,
++    baseColor = ApplyVertexLighting(Ac, 0, Dc, float4(1,1,1,1), tex, input.viewPosition,
+         input.frontFacing ? input.diffuseTermFront : input.diffuseTermBack,
+         input.frontFacing ? input.ambientTermFront : input.ambientTermBack);
+ #else
+-    baseColor = ApplyPixelLighting(Ac, 0, Dc, tex, input.worldPosition, input.viewPosition, normal, input.frontFacing);
++    baseColor = ApplyPixelLighting(Ac, 0, Dc, float4(1,1,1,1), tex, input.worldPosition, input.viewPosition, normal, input.frontFacing);
+ #endif
+ 
+-    return ToSceneOutput(Mod2x(baseColor, detail));
++    return ToLinearSceneOutput(Mod2x(baseColor, detail));
+ };
+diff --git a/src/LibreLancer/Shaders/DetailMap2Dm1Msk2PassMaterial.frag.hlsl b/src/LibreLancer/Shaders/DetailMap2Dm1Msk2PassMaterial.frag.hlsl
+--- a/src/LibreLancer/Shaders/DetailMap2Dm1Msk2PassMaterial.frag.hlsl
++++ b/src/LibreLancer/Shaders/DetailMap2Dm1Msk2PassMaterial.frag.hlsl
+@@ -41,17 +41,18 @@
+        FlipV > 0 ? 1 - input.texCoord1.y : input.texCoord1.y);
+     float4 tex = DtTexture.Sample(DtSampler, uv);
+     float4 detail = DmTexture.Sample(DmSampler, uv * TileRate);
++    detail.rgb = LinearizeLegacyInput(detail.rgb);
+ 
+     float4 baseColor;
+ #ifdef VERTEX_LIGHTING
+-    baseColor = ApplyVertexLighting(Ac, 0, Dc, tex, input.viewPosition,
++    baseColor = ApplyVertexLighting(Ac, 0, Dc, float4(1,1,1,1), tex, input.viewPosition,
+         input.frontFacing ? input.diffuseTermFront : input.diffuseTermBack,
+         input.frontFacing ? input.ambientTermFront : input.ambientTermBack);
+ #else
+-    baseColor = ApplyPixelLighting(Ac, 0, Dc, tex, input.worldPosition, input.viewPosition, input.normal, input.frontFacing);
++    baseColor = ApplyPixelLighting(Ac, 0, Dc, float4(1,1,1,1), tex, input.worldPosition, input.viewPosition, input.normal, input.frontFacing);
+ #endif
+ 
+     float4 masked = tex.a < 0.99 ? Mod2x(baseColor, detail) : baseColor;
+ 
+-    return ToSceneOutput(float4(masked.rgb, 1.0));
++    return ToLinearSceneOutput(float4(masked.rgb, 1.0));
+ };
+diff --git a/src/LibreLancer/Shaders/IllumDetailMapMaterial.frag.hlsl b/src/LibreLancer/Shaders/IllumDetailMapMaterial.frag.hlsl
+--- a/src/LibreLancer/Shaders/IllumDetailMapMaterial.frag.hlsl
++++ b/src/LibreLancer/Shaders/IllumDetailMapMaterial.frag.hlsl
+@@ -48,19 +48,22 @@
+     float4 tex = DtTexture.Sample(DtSampler, uv);
+     float4 detail0 = Dm0Texture.Sample(Dm0Sampler, uv * TileRate0);
+     float4 detail1 = Dm1Texture.Sample(Dm1Sampler, uv * TileRate1);
++    detail0.rgb = LinearizeLegacyInput(detail0.rgb);
++    detail1.rgb = LinearizeLegacyInput(detail1.rgb);
++    tex.rgb = LinearizeLegacyInput(tex.rgb);
+ 
+     float4 baseColor;
+ #ifdef VERTEX_LIGHTING
+-    baseColor = ApplyVertexLighting(Ac, 0, Dc, tex, input.viewPosition,
++    baseColor = ApplyVertexLighting(Ac, 0, Dc, float4(1,1,1,1), tex, input.viewPosition,
+         input.frontFacing ? input.diffuseTermFront : input.diffuseTermBack,
+         input.frontFacing ? input.ambientTermFront : input.ambientTermBack);
+ #else
+-    baseColor = ApplyPixelLighting(Ac, 0, Dc, tex, input.worldPosition, input.viewPosition, input.normal, input.frontFacing);
++    baseColor = ApplyPixelLighting(Ac, 0, Dc, float4(1,1,1,1), tex, input.worldPosition, input.viewPosition, input.normal, input.frontFacing);
+ #endif
+ 
+     baseColor = Mod2x(detail0, baseColor);
+ 
+     float4 illum = Mod2x(detail1, tex);
+ 
+-    return ToSceneOutput(float4(lerp(baseColor.rgb, illum.rgb, illum.a), 1.0));
++    return ToLinearSceneOutput(float4(lerp(baseColor.rgb, illum.rgb, illum.a), 1.0));
+ }
+diff --git a/src/LibreLancer/Shaders/Masked2DetailMapMaterial.frag.hlsl b/src/LibreLancer/Shaders/Masked2DetailMapMaterial.frag.hlsl
+--- a/src/LibreLancer/Shaders/Masked2DetailMapMaterial.frag.hlsl
++++ b/src/LibreLancer/Shaders/Masked2DetailMapMaterial.frag.hlsl
+@@ -46,19 +46,21 @@
+     float4 tex = DtTexture.Sample(DtSampler, uv);
+     float4 detail0 = Dm0Texture.Sample(Dm0Sampler, uv * TileRate0);
+     float4 detail1 = Dm1Texture.Sample(Dm1Sampler, uv * TileRate1);
++    detail0.rgb = LinearizeLegacyInput(detail0.rgb);
++    detail1.rgb = LinearizeLegacyInput(detail1.rgb);
+ 
+     float4 baseColor;
+ #ifdef VERTEX_LIGHTING
+-    baseColor = ApplyVertexLighting(Ac, 0, Dc, tex, input.viewPosition,
++    baseColor = ApplyVertexLighting(Ac, 0, Dc, float4(1,1,1,1), tex, input.viewPosition,
+         input.frontFacing ? input.diffuseTermFront : input.diffuseTermBack,
+         input.frontFacing ? input.ambientTermFront : input.ambientTermBack);
+ #else
+-    baseColor = ApplyPixelLighting(Ac, 0, Dc, tex, input.worldPosition, input.viewPosition, input.normal, input.frontFacing);
++    baseColor = ApplyPixelLighting(Ac, 0, Dc, float4(1,1,1,1), tex, input.worldPosition, input.viewPosition, input.normal, input.frontFacing);
+ #endif
+ 
+     baseColor.a = 1;
+ 
+     float4 detail = float4(tex.a < 0.99 ? detail0.rgb : detail1.rgb, 1.0);
+ 
+-    return ToSceneOutput(Mod2x(baseColor, detail));
++    return ToLinearSceneOutput(Mod2x(baseColor, detail));
+ };
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -164,3 +164,4 @@
+ | 2170 | Add optional quarter-resolution HDR bloom with separable blur |
+ | 2171 | Configure and validate HDR bloom threshold and strength |
+ | 2172 | Add bloom threshold and strength controls to Effects options |
++| 2173 | Linearize HDR inputs to lit legacy material shaders |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -172,3 +172,4 @@
+ client 2170-hdr-bloom-first-pass.patch
+ client 2171-configurable-bloom-controls.patch
+ client 2172-bloom-quality-options-ui.patch
++client 2173-hdr-linear-legacy-lighting-inputs.patch

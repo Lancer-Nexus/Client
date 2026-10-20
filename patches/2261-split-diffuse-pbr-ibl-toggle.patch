@@ -1,0 +1,330 @@
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -227,6 +227,7 @@
+   - `--render-normal-maps=on|off` → `surface_normal_maps`.
+   - `--render-surface-pbr-maps=on|off` → `surface_pbr_maps`.
+   - `--render-pbr-environment-maps=on|off` → `pbr_environment_maps`.
++  - `--render-pbr-diffuse-ibl=on|off` → `pbr_diffuse_ibl` (diffuse irradiance contribution; enabled by default when the PBR environment path is active).
+   - `--render-generated-tangents=on|off` → `surface_generated_tangents`.
+   - `--render-surface-profile=original|minimal|standard|full` → `surface_profile`.
+   - `--render-per-pixel-lighting=on|off` → `per_pixel_lighting`.
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -888,6 +888,9 @@
+ GGX-vorgefilterte Specular-Mips und separate diffuse Irradiance, wenn der
+ Katalog diese Metadaten bereitstellt. Legacy-Cubes bleiben kompatibel und
+ verwenden Level 0 für Specular sowie den letzten Mip als diffuse Näherung.
++`--render-pbr-diffuse-ibl=on|off` und `pbr_diffuse_ibl` schalten den diffusen
++Irradiance-Beitrag separat von Specular-Reflexionen. Der Schalter ist
++standardmäßig an und wirkt nur, wenn PBR-Umgebungsreflexionen aktiv sind.
+ Dynamische Schatten, HDR und weitere Post-Processing-Pässe sind inzwischen
+ implementiert; deren jeweilige Retail- und Hardwareabnahme ist separat in der
+ [Renderer-Roadmap](renderer-roadmap.md) dokumentiert.
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -209,6 +209,7 @@
+   - [x] Der Data-Generator erzeugt deterministische GGX-vorgefilterte Specular-Mips für die drei NAP-Cubemaps; `[CubeMap] prefiltered=true` wählt ihre Roughness-Stufen im PBR-Shader. Legacy-Cubes ohne Metadatum samplen für Specular weiter Level 0. Diffuse Irradiance, Bildqualität an einem cubemapgebundenen Retail-Modell und GPU-Kosten bleiben offen.
+   - [x] Separate 16×16-Cubemaps liefern cosine-konvolvierte diffuse Irradiance (E/pi); `[CubeMap] irradiance_file` wird im PBR-Shader unabhängig von der GGX-Specular-Kette ausgewertet. Legacy-Kataloge behalten den bisherigen letzten-Mip-Fallback. Visuelle Retail-Abnahme und GPU-Kosten bleiben offen.
+   - [x] Surface-Normalmaps, generierte Tangenten, Roughness/Metallic-Maps und PBR-Cubemap-Reflexionen lassen sich im laufenden Client einzeln umschalten. Änderungen werden sofort auf den aktiven ResourceManager angewendet; beim Abschalten werden nicht mehr benötigte Tangenten-/Surface-Texturressourcen freigegeben. Alle vier Schalter und die sofortige Konfigurationsaktualisierung sind im selben NAP-only-Spielprozess geprüft; siehe [Laufzeitnachweis](evidence/renderer/ibl-live-options-20261018/README.md).
++  - [x] Diffuse Irradiance ist nun getrennt von Specular-Reflexionen steuerbar (`pbr_diffuse_ibl`, `--render-pbr-diffuse-ibl=on|off`, Performance-Option und LancerEdit ModelViewer). Die Aufteilung ermöglicht getrennte Qualitäts-/GPU-Messungen; deren runtime A/B steht noch aus.
+   - [ ] Sichtbare PBR-/IBL-Wirkung mit fester Kamera an einem bekannten, cubemapgebundenen Schiff oder Modell vergleichen. Im pausierten M01A-Lauf änderten sich im sichtbaren Objektcrop außerhalb des Menüs 5.931 Pixel (mittlere RGB-Abweichung 1,44/255), während der Hintergrundcrop pixelgleich blieb. Das belegt eine Same-Pose-Reaktion auf den Live-Schalter, aber weder die MAT-Cubemapbindung des Objekts noch die Reflexionsqualität; Details: [Laufzeitnachweis](evidence/renderer/ibl-live-options-20261018/README.md).
+   - [x] LancerEdit-Vorschau: beim LI_ELITE-Mesh änderte der Environment-Reflection-Schalter im festen Viewport 39.467 Pixel im Objektcrop; der Hintergrund blieb pixelgleich. Das bestätigt eine lokale Cubemap-Reaktion, aber keine Retail-Orientierung, isolierte diffuse Irradiance/GGX-Mipqualität oder GPU-Kosten. [Aufnahmen und Bedingungen](evidence/renderer/ibl-modelviewer-ab-20261017/README.md).
+ - [ ] Systemweite Umgebungsbeleuchtung an Farbe und Intensität der jeweiligen Sonne koppeln. Unterschiedliche Sonnenfarben (z. B. grün, rot oder weiß) sollen die diffuse Grundbeleuchtung aller passenden Szenenobjekte konsistent beeinflussen; Datenquelle, Legacy-Fallback und Zusammenspiel mit PBR/IBL anhand reproduzierbarer NAP-Szenen prüfen.
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 259 Client bundles and two native bundles. Each
++The active series contains 260 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -222,3 +222,4 @@
+ | 2254 | Record the targeted M01A ship-light runtime attempt and remaining evidence gap |
+ 
+ | 2260 | Reconcile the PBR/IBL implementation plan with the active shader and bindings |
++| 2261 | Split diffuse PBR irradiance from specular environment reflections |
+--- a/patches/series
++++ b/patches/series
+@@ -260,3 +260,4 @@
+ client 2258-render-target-attachment-runtime-query.patch
+ client 2259-validate-active-aa-target-attachments.patch
+ client 2260-reconcile-pbr-ibl-implementation-plan.patch
++client 2261-split-diffuse-pbr-ibl-toggle.patch
+--- a/src/Editor/LancerEdit/Model/ModelViewer.cs
++++ b/src/Editor/LancerEdit/Model/ModelViewer.cs
+@@ -1438,6 +1438,9 @@
+             bool pbrEnvironmentMapsEnabled = res.PbrEnvironmentMapsEnabled;
+             if (ImGui.Checkbox("PBR environment reflections", ref pbrEnvironmentMapsEnabled))
+                 res.PbrEnvironmentMapsEnabled = pbrEnvironmentMapsEnabled;
++            bool pbrDiffuseIblEnabled = res.PbrDiffuseIblEnabled;
++            if (ImGui.Checkbox("PBR diffuse image-based lighting", ref pbrDiffuseIblEnabled))
++                res.PbrDiffuseIblEnabled = pbrDiffuseIblEnabled;
+             bool surfaceNormalMapsEnabled = res.SurfaceNormalMapsEnabled;
+             if (ImGui.Checkbox("Surface normal maps", ref surfaceNormalMapsEnabled))
+                 res.SurfaceNormalMapsEnabled = surfaceNormalMapsEnabled;
+--- a/src/LibreLancer/FreelancerGame.cs
++++ b/src/LibreLancer/FreelancerGame.cs
+@@ -103,6 +103,7 @@
+             ResourceManager.SurfaceNormalMapsEnabled = _cfg.Settings.SurfaceNormalMapsEnabled;
+             ResourceManager.SurfacePbrMapsEnabled = _cfg.Settings.SurfacePbrMapsEnabled;
+             ResourceManager.PbrEnvironmentMapsEnabled = _cfg.Settings.PbrEnvironmentMapsEnabled;
++            ResourceManager.PbrDiffuseIblEnabled = _cfg.Settings.PbrDiffuseIblEnabled;
+             ResourceManager.SurfaceGeneratedTangentsEnabled = _cfg.Settings.SurfaceGeneratedTangentsEnabled;
+ 			// Init Audio
+ 			FLLog.Info("Audio", "Initialising Audio");
+--- a/src/LibreLancer/GameSettings.cs
++++ b/src/LibreLancer/GameSettings.cs
+@@ -116,6 +116,9 @@
+         [Entry("pbr_environment_maps")]
+         public bool PbrEnvironmentMapsEnabled = false;
+ 
++        [Entry("pbr_diffuse_ibl")]
++        public bool PbrDiffuseIblEnabled = true;
++
+         [Entry("surface_generated_tangents")]
+         public bool SurfaceGeneratedTangentsEnabled = true;
+ 
+@@ -188,6 +191,7 @@
+             writer.WriteLine($"surface_normal_maps = {SurfaceNormalMapsEnabled.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"surface_pbr_maps = {SurfacePbrMapsEnabled.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"pbr_environment_maps = {PbrEnvironmentMapsEnabled.ToString().ToLowerInvariant()}");
++            writer.WriteLine($"pbr_diffuse_ibl = {PbrDiffuseIblEnabled.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"surface_generated_tangents = {SurfaceGeneratedTangentsEnabled.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"master_volume = {Fmt(MasterVolume)}");
+             writer.WriteLine($"sfx_volume = {Fmt(SfxVolume)}");
+@@ -259,6 +263,7 @@
+                 SurfaceNormalMapsEnabled = SurfaceNormalMapsEnabled,
+                 SurfacePbrMapsEnabled = SurfacePbrMapsEnabled,
+                 PbrEnvironmentMapsEnabled = PbrEnvironmentMapsEnabled,
++                PbrDiffuseIblEnabled = PbrDiffuseIblEnabled,
+                 SurfaceGeneratedTangentsEnabled = SurfaceGeneratedTangentsEnabled,
+                 PerPixelLighting = PerPixelLighting,
+                 DynamicLighting = DynamicLighting,
+@@ -315,6 +320,7 @@
+             SurfaceNormalMapsEnabled = other.SurfaceNormalMapsEnabled;
+             SurfacePbrMapsEnabled = other.SurfacePbrMapsEnabled;
+             PbrEnvironmentMapsEnabled = other.PbrEnvironmentMapsEnabled;
++            PbrDiffuseIblEnabled = other.PbrDiffuseIblEnabled;
+             SurfaceGeneratedTangentsEnabled = other.SurfaceGeneratedTangentsEnabled;
+             PerPixelLighting = other.PerPixelLighting;
+             DynamicLighting = other.DynamicLighting;
+--- a/src/LibreLancer/GameStates/LuaMenu.cs
++++ b/src/LibreLancer/GameStates/LuaMenu.cs
+@@ -247,6 +247,7 @@
+                 state.Game.ResourceManager.SurfaceNormalMapsEnabled = settings.SurfaceNormalMapsEnabled;
+                 state.Game.ResourceManager.SurfacePbrMapsEnabled = settings.SurfacePbrMapsEnabled;
+                 state.Game.ResourceManager.PbrEnvironmentMapsEnabled = settings.PbrEnvironmentMapsEnabled;
++                state.Game.ResourceManager.PbrDiffuseIblEnabled = settings.PbrDiffuseIblEnabled;
+                 state.Game.ResourceManager.SurfaceGeneratedTangentsEnabled = settings.SurfaceGeneratedTangentsEnabled;
+                 if (disableSurfaceNormalMaps || disableGeneratedTangents) state.Game.ResourceManager.ClearGeneratedTangentResources();
+                 if (disableSurfaceNormalMaps || disableSurfacePbrMaps) state.Game.ResourceManager.SurfaceGpuTextures?.ClearUnused();
+--- a/src/LibreLancer/GameStates/RoomGameplay.cs
++++ b/src/LibreLancer/GameStates/RoomGameplay.cs
+@@ -401,6 +401,7 @@
+                 g.Game.ResourceManager.SurfaceNormalMapsEnabled = settings.SurfaceNormalMapsEnabled;
+                 g.Game.ResourceManager.SurfacePbrMapsEnabled = settings.SurfacePbrMapsEnabled;
+                 g.Game.ResourceManager.PbrEnvironmentMapsEnabled = settings.PbrEnvironmentMapsEnabled;
++                g.Game.ResourceManager.PbrDiffuseIblEnabled = settings.PbrDiffuseIblEnabled;
+                 g.Game.ResourceManager.SurfaceGeneratedTangentsEnabled = settings.SurfaceGeneratedTangentsEnabled;
+                 if (disableSurfaceNormalMaps || disableGeneratedTangents) g.Game.ResourceManager.ClearGeneratedTangentResources();
+                 if (disableSurfaceNormalMaps || disableSurfacePbrMaps) g.Game.ResourceManager.SurfaceGpuTextures?.ClearUnused();
+--- a/src/LibreLancer/GameStates/SpaceGameplay.Hud.cs
++++ b/src/LibreLancer/GameStates/SpaceGameplay.Hud.cs
+@@ -538,6 +538,7 @@
+             g.Game.ResourceManager.SurfaceNormalMapsEnabled = settings.SurfaceNormalMapsEnabled;
+             g.Game.ResourceManager.SurfacePbrMapsEnabled = settings.SurfacePbrMapsEnabled;
+             g.Game.ResourceManager.PbrEnvironmentMapsEnabled = settings.PbrEnvironmentMapsEnabled;
++            g.Game.ResourceManager.PbrDiffuseIblEnabled = settings.PbrDiffuseIblEnabled;
+             g.Game.ResourceManager.SurfaceGeneratedTangentsEnabled = settings.SurfaceGeneratedTangentsEnabled;
+             if (disableSurfaceNormalMaps || disableGeneratedTangents) g.Game.ResourceManager.ClearGeneratedTangentResources();
+             if (disableSurfaceNormalMaps || disableSurfacePbrMaps) g.Game.ResourceManager.SurfaceGpuTextures?.ClearUnused();
+--- a/src/LibreLancer/Interface/Default/interface.json
++++ b/src/LibreLancer/Interface/Default/interface.json
+@@ -45,8 +45,8 @@
+     "news.designer.lua": "G2EbAOSamvVuqh35Q0QBxYICySFkRpbWOsYc3MA6pD/3y8Z3qqrr/BKoAtkam2xSQBhPmPeSdJvsbgHwmIQ7fUaeEYD2pDrZfyqxJUz1xBrSHK+b+Dci/hVg8SWoFQx6sujhYwkAwjN+/aaxpwAA/gj5z3GuxwkJBHTGn7wtMLAdfe9xp7cDerVpCf1DP6A6HtAiU8riS2G8mHVWzfUemBBAwMdXDW8zbugNKJc8POn4LRDOFUqbgjrb+e9AD2pHB1JKtaDhVLd1f6VUO1hlKaYdKf6gt2j+VLmUneuRZiCgzJO4r7GBepoRCMjr+9nSDjPnQcAvd2xrO7IrBMuTslFwRLb4yd9jc95PuKaNOUcox9lB/3lnZPEl/JGJMMWXrmljQAD5J4z7lBNtCQSsI3XOOP8rWl77YomqmHemg743CKeREQt6e8bkOP5SjmfS7JKSUd+Ds80VEBCdSBzpDjP53oKncedcgIBQDoJ1eB351EsQkPGSFwsXKebm+kan+gjtiL6/f2ZmX/ECX2NXdFiY/m1bVkaZn2WswIN33bi51ZcslmKG/Fr+C3JLlblAnsoCHW6lkfPObuWK6FWcMS15dM1vdbk1YkZRMK4SE1UWwBUuocMID74USRUgdUROPH5Wz9U+ETnLvVVVr+82LmAU2X5Mb2zRvo70a9ev6PXkeUgh0u3urSducaSnGRVKNm+zrOeplyAgzYPZSK9Ns9T8BcZV5szlUkGnWHndufJbMLpWugP3/if4Sq1xw+Pz/S9BQNV6BCPi6zpFEvdR5/W7s9QbafRk50jksjfUtVELfaHXIwhI06aI/Pon+EogINpbPT+O7omPgO7iPMJXsupXOMFXOp71o3txLOXJF2x9h4qdoSc99AQPv4CduEVF++p3RIHMrPoWU1IXFHvnZDXLsHaPSxDAjcKMmIusqValpQxhpOxnre9LHNQswZU+yTfOsB+Ntvi32EJ4VTZCw00atYTdrVxTjbVyJ671LZeLn83z7uhArXstIPZO/OvdRgeKEhBGNJNgsppFSg5Lt8q1sfByhjcJ53xpZIy74jXIPsiODrRJOB+z92HdTJvRo7VYTGO6NBhbC2NFGRsBAyzcVco5I0h1Wr2X8yLceknhS2pntbbkRYivQBLo4kldc/4LoNdUm/r+UYcffKqEf5sG+CN6oeNJKC25umGTW8TyXTVrL5JNgpa4D5SGyPRTjjzBV3ryON+TWtPKpjoVUg7BdALIkDjhdm3avALOyeImN0GyvX6OSZ5u8YXc41uyuIKUzVJ2ugUrLNKkKDAd0T8yi2zQMWWkoHcqW6T62pmtvbDpEOLgKOxFhyhnxUw3OWQjgKu3yq0OUpfWrc2qYALZtU39yjTU3rzK0gv63cideIpts3RY0RHNElypppiug/CV1JKPrdFxooPaJX4OV+StInpwlnpjMw8lyh2m4yrJLKMSb+ig/6SEXWDaZDpu89pGW1tj2tyt9VF6rAE7xd8H6KAOkYQQ8xIClDIrwRtdAS3p+kHlPQNQ9rOpkET6e+EKd2Y+OxZXuOuzqWHz/qdsoDEO/iI0e5QoxW76H9CGQkdH1/PBkGh7XW6ds2kf3ND7kWNlWKeKynMNZTxUSKTzMA93X2ZBGaLeMhKOSVBRtLT3pC77rf/2s4Mqw1LMgMC+jMpy602uMAPfn0ktAMBm4WWDTsoOEsBWcY8xLR1QsyVtNdhtl554SqmXQXpLJ119X0tfSw==",
+     "news.lua": "G9EJAOQydb2lz2vp9hXlWjM9jZLQeka2lmSPtcRICw5taJy1vtRWC0+D1My72/ZEZ6Kbmb6ttW+Qqdo6wYQq0fg7f2Fqo4BvELDC0nPBmT3C/wc/2CWtOVSW4d7KJI2+uhIKeNFq1/udggJm+4Oj9kFnbaPdGrSPD4aD9lFr0D49PGkPNocHLY9NGvH/Kjw2yXx15ewHrapIQpVlHfk1pUTBSzLayIJyXfCCAhiISDx4esSYEH+wH7rbx7Z3gwbtW2RJXl5ZBS8x8Iiq4EdfXZl5W+MHUizXL1qx9TBV8EYoYIDNsPyPlWSzx3SA3mG0JeNsrpUV/NR7U5sDRQscuknpnu3TRuAQD8KqMsMZUEAX5XJkNrtNSsjIRbEOs+Zcm5csJmqI/QGhacFucMh7I2NtjsiL0SmCU/Finjo4ZA8a+14w3toKlQHG1cyelQkU9Zp36W2N1xynnR1WlhEK+PplWOgcANLsWgRK23JbhR43ySgo3acxJRmRYJ1RFfwHSBLJZRNGaAwmx27doSR9wXo216rVgvUFG6JaMZlLThhayPjsDUWMeviUImo90GyuVUMRk01ij80y/oYbikhfci88YsTVjYjeP3FoRiU/4OgJmUMzi6AFiNrD5RUmjS5y3RgzFhvHdLMzs9WCvmCN886+YL1r45j8GRTw+Ruhj7VMu/esbxbUftQcAesKS/bIlYTMKblOsH35QRjIumZYOGNIWV4dOMKprHOo7mZzpZWUphciPQcvlteYxr7Gnm1GiZgdvBWxOR7hVIoMMW38cGJdaGC+uUJK0yFmKEDiA45lH0okB0UzAS4qjD2++vuRZmNC7CJ6s+ZcJmWu1bK4qzLpN623Qwra1Ax/uvWKTUw09hihIZmACrx26j/oF608NinLtXrRSpU2YZb/1Ur9+QY0d7jvSaiwGUMIBfCh6WKt9FcrhWZHIdeYod9gqu6yLIdi+Vxtg0PCLNf/2rUoVDEmKKBrazRdlAE2iQTtxW9DhOzWvp6wxVNaOp7Di1aY1PRTyZuckLjJ9AsKj1T00Domj4B8Co0gJ7ohEqwxa99w751QkoT4lHnhuvx87RqjDDfMfvve4RQK+MQ0eujfa21MrB+ji1orBhlFHEuh9/D5Osi+N63QIr9RjlvJH4VPMwkPqUdu3GhXdg3jYAa2Rs4pO2EcnL1OcCrmEOVQIvlx9jWvE0Pd38QGemmWPNdqEsAZg/lDGA+jKvhcqzf9pgE=",
+     "objects.lua": "G2ADAMTEMdOLUZFj4YDon9PuhqUR+bZ7cFjtUUJBltT5VncBJ2GahQWhf8APWZtxg8DhyAZ+2X7HeC2GvdpCn46c4ScxM082Q7gFDqIMOMMlcxjfA47p9kYd0BancfhruBMOS9H4m2yGcESa/vtzuCadflneHIORe8cvYJIKDhdpWFPyxh8q5WLE2eaA4rfw23gJjMcUmJm7bDG3AqPcNhbPp5N3LkZboYdHp/sWSaDic08hBMhBnDYTFJb5YHtzPDVOsONhNfDhvrgDQlKAJ8e4nYrG6x0MOQxma3JerRxJzd539Kanwndx7d2YLOrVNkZF/37TXqX3l1fbn2iM3kRE",
+-    "options.designer.lua": "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",
+-    "options.lua": "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",
++    "options.designer.lua": "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",
++    "options.lua": "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",
+     "pausemenu.designer.lua": "G9AOAOT/perdl9N/StJutEBJBwfPKalj8Yj0a/OKwRUo2RPXPF+UytcKZCZftEhNwMQui6ZumvEEKnBIbz+zAeAewG0rYdjzPyJ+Hpxk6/CIphUDdGpvsIHHDgAABa9eYyg1AAB/R/4QX1W9Rw8c+rop7k/oyEJdN7iQpsJGTI3H5q+sUOQVGiRCGLxlRrLJMdS/gMDFAYfHZ/Auta2kBmEj/uco1Q5NjY281mIIXqB4WH7vPB5F3huc+CD7C1CVWCjnhRDSHAfKnbS817o0IYTIJBPVcYbt+1bbhpdV2IRAbYDDGP1Z66vgLDrIS0cB9qqYdOv6lbAJi6jIt0ZhY5oIH7oIkl8oYmTEOO2Jz3SlyhG/3vIVlgCYdNxIg5r8GPJV1f4AHDKq+WliMkG1P3jgQK+A1q6pDi7FzjTNlanJj7H1RE17lCkBW06kdppS+zmpVBoD0vw0ZsDgh24p+Q4c3mcXE2VIBzr4IjYQTVZ8aWtvazMCxUbo2RWvAnSVPOF/qvTesxgog6A+IuOrAoGU5tlASLZpgXe+p231j8Vo8g040MwL9d+BQ15OwEiBd76ZNfJ45z14ZIF3Pj/I2t5i420PYqRkdZCfxB9YeQzjXIpYWz0gcIhT6MPAIRh3l0PYdMt8OAjI5VmHBbFgy2KiXuu9NTVsT0nu7zVmFnrW6VVwqxp8I6EP9KOmA+AQNOjaI2qWCHUCEhqHhoxBs1mKGZCrXkxJ7htVA4f4KonJ3gkcgt0wL5dDGHeXQx8CqPdVv+KnhbF/V0K6mKdFxFhsDCdvcC/nIU62wErD27rAnA1isROyaQKHIO9+2SBjpInY1qsfUSmlf6K2st7LeXbMrEuerOHTPi/W3QHMSBOpvfXx8xLo5yYyTqIMno5ab4rpepWnRJAbwj5qr/68/63y3h7RtHMZJ+wSnj23LacFFGtYdqcrWA5XZREG2as9jfWT3XtS0j8oXTdoEt8rP+RRPKNSZ8eIabzvfuDxh4qxWzQ+aLEuaXnuPHcA",
+     "pausemenu.lua": "G1UDAMT3U+eMl+mznSG5t6e0OuYJLNdrsXSQOnE5sGd6tTn5N+BYu/AJ/hJKLPFJAWXzmuXF5oWrK/2R/yPiU0iUhT2HjK3+h48Tlq4JPGLdaYvbWJErfgsAGMmUc/DKcwCwIGFTFpPJL+UhnPcydGrK7W2RFY1g7KJeOXXvHuBEycPYukhVQ57taaCF4wq7mJ6TZ3spt9lplxx982i9DPb8fTh23XIwpsTuHjXU9oFrcBsuiiqQ+yEAuMaS+FiRWzWf15TicNto28kGXAPv/6s6JVuhFXuBwRoVQNDWiCtIKbl2eJlETo5JDSOSp38WAIhJ5SgmpYSky733rmpY7X04lSUlHhRO33xiyd7CiWMeuygzJaGnxp2lHrWm5Qs+c6caPYesyfqYO32Jt8lfi4/xX/wX",
+     "playerstatus.designer.lua": "G6kRAORarvrv59WVEyfiD1bUKDbpmVBH6CnoFfu/tRbSJSxW03yvEypxPzOIeCWazp81v4S4RG2JEkRDp4WtR+Ihm+9iIlH6Zv8j4q8AM6tf0QfW/BjUKgYzdejhfQ4A4DE/f0GrJQAAf0r+OS5MP0UGCSvWn77OMIhd8+BxV7sOvdpyjH6iO1QnHToUSjl8RkbRRFizv4NgUAAJ75/g6yx12oKiBP9RJ6+BcVRWWx/Ux9C/A9OpXRNYKUVB7ZmhdWalFB2kZzZTRvI+1A7tTxWl4sL0PICEqkhgr7GJZjowSCia5dgl1w3kQcKdLTvG9eIHwlLcRApRkU0yKLedM3W9olxcgoSs4+OvQMK/vH6ciHR6kbXt6XR6VqeITrG1ChKi93gbR5K0WTD4FmfmGF2PXj9YcyU2meFl/1UTZla/Wr9kvaSxKkA4+x716qmpBLQXSNhAvvuSn1E3aK+Mm9A/hNRF3VxXiqW+/6moQqQrPHWqorIfnlzEKqFB4uI/V2C/PKVIUK4ky7VSGluqylDJfCmGL0RiCjS7xCzSWN/uFF942VL3n/Gy2mGOZcMWI6BoYJr5lGaurK2dVF9jYWKePoG9/BRf+MS8IUhIi7XRVVCA9i0rZCNk7QbePcnPiPGFI15ecMLe9CChzQNCWWHDiWqcaspuuC+5M1jMQgCEy6RsjoSPvQQJaSMAIsrwplWVQsp5WNn9tLRsSJG5Z7kNpkQ/mcCaw65+QDv5A8pJ+KokYafK2+eZLj8yk9ug/7jCsUspXr/92EwHxiKInCPakiuz4fHf+mrRdYW77T+jlzfJIppkGhdQq7wkznbXBF6mFx+tmHwLj72w2uEKJJTxiTptLppSnyl+UC22GEePTshzkuOTNKpkjnzumsBbjOOdimqxMhjbe3SWhfxGpjaowETMMo3N7qua9WlJNU1R4+T6CCgUiv40ebzkKuPgHUlEHLnrGoVgmstE6XXDY3peoUfHNjyqEcvUv64T9ObR133yo7ZRIzZ0GDcN5AbdAY04Gej5O6nrA7wBnH8euEL2cXTLX+UlseUcj+l5g6OwKlWJoEIgSHJhktaWwSbmoTWtCPTHg4TI6bE4OYNWrGrW0N5bzrDRtibpOUTfoQL9VdJwtRVrZsIuadNknyVrpm7s9olN8uaNHGsLWUHs4iQcQgDTtwwERQL0R6dLWIqBJeyjqZjUNsJkjUPuIvE+dQ3EAMh6yKcMytCFKseyKomksiRFOmRTFLANctyoXCjLpqnL2aFMyNOJc4MUOxrULUuoTi6FUSgcqkB/3Z9zn3M=",
+--- a/src/LibreLancer/Render/Materials/BasicMaterial.cs
++++ b/src/LibreLancer/Render/Materials/BasicMaterial.cs
+@@ -293,6 +293,8 @@
+             public float EnvMapStrength;
+             public float EnvPrefiltered;
+             public float EnvDiffuseEnabled;
++            public float EnvDiffuseIblEnabled;
++            public Vector3 Padding;
+         }
+ 
+ 
+@@ -331,7 +333,7 @@
+                 pbrEnvironment = Library.ResolveEnvironmentCube(envmaptex, out envMapStrength,
+                     out pbrEnvironmentPrefiltered);
+                 pbrEnvMapping = pbrEnvironment != null;
+-                if (pbrEnvMapping)
++                if (pbrEnvMapping && Library.PbrDiffuseIblEnabled)
+                     pbrDiffuseIrradiance = Library.ResolveEnvironmentIrradiance(envmaptex);
+             }
+ 
+@@ -426,7 +428,8 @@
+                       EnvMipCount = pbrEnvironment == null ? 0 : Math.Max(pbrEnvironment.LevelCount - 1, 0),
+                       EnvMapStrength = envMapStrength,
+                       EnvPrefiltered = pbrEnvironmentPrefiltered ? 1.0f : 0.0f,
+-                      EnvDiffuseEnabled = pbrDiffuseIrradiance != null ? 1.0f : 0.0f };
++                      EnvDiffuseEnabled = pbrDiffuseIrradiance != null ? 1.0f : 0.0f,
++                      EnvDiffuseIblEnabled = Library?.PbrDiffuseIblEnabled == true ? 1.0f : 0.0f };
+                 shader.SetUniformBlock(3, ref param);
+ 
+                 if (!string.IsNullOrEmpty(MtSampler))
+--- a/src/LibreLancer/Resources/GameResourceManager.cs
++++ b/src/LibreLancer/Resources/GameResourceManager.cs
+@@ -177,6 +177,7 @@
+         SurfaceNormalMapsEnabled = src.SurfaceNormalMapsEnabled;
+         SurfacePbrMapsEnabled = src.SurfacePbrMapsEnabled;
+         PbrEnvironmentMapsEnabled = src.PbrEnvironmentMapsEnabled;
++        PbrDiffuseIblEnabled = src.PbrDiffuseIblEnabled;
+         SurfaceGeneratedTangentsEnabled = src.SurfaceGeneratedTangentsEnabled;
+         texturefiles = new Dictionary<string, string>(src.texturefiles, StringComparer.OrdinalIgnoreCase);
+         shapes = new Dictionary<string, TextureShape?>(src.shapes, StringComparer.OrdinalIgnoreCase);
+--- a/src/LibreLancer/Resources/ResourceManager.cs
++++ b/src/LibreLancer/Resources/ResourceManager.cs
+@@ -40,6 +40,7 @@
+     public bool SurfaceNormalMapsEnabled { get; set; }
+     public bool SurfacePbrMapsEnabled { get; set; }
+     public bool PbrEnvironmentMapsEnabled { get; set; }
++    public bool PbrDiffuseIblEnabled { get; set; } = true;
+     public bool SurfaceGeneratedTangentsEnabled { get; set; } = true;
+ 
+     /// <summary>Allocates supplementary runtime tangent geometry, or returns null when its budget is full.</summary>
+--- a/src/LibreLancer/Shaders/PBR.frag.hlsl
++++ b/src/LibreLancer/Shaders/PBR.frag.hlsl
+@@ -60,6 +60,8 @@
+     float EnvMapStrength;
+     float EnvPrefiltered;
+     float EnvDiffuseEnabled;
++    float EnvDiffuseIblEnabled;
++    float3 PBRPadding;
+ };
+ 
+ cbuffer TexCoordSelectors : register(b5, UNIFORM_SPACE)
+@@ -316,10 +318,13 @@
+     color += envColor * (specularColor * envBrdf.x + envBrdf.y) * EnvMapStrength;
+     // Surface metadata can provide cosine-convolved irradiance (stored as E/pi).
+     // Older catalogs retain the low-frequency final-mip fallback.
+-    float3 diffuseEnvironment = EnvDiffuseEnabled > 0.5
+-        ? SRGBtoLinear(EnvDiffuseTexture.SampleLevel(EnvSampler, n, 0.0)).rgb
+-        : SRGBtoLinear(EnvTexture.SampleLevel(EnvSampler, n, EnvMipCount)).rgb;
+-    color += diffuseColor * diffuseEnvironment * (1.0 - envFresnel) * EnvMapStrength;
++    if (EnvDiffuseIblEnabled > 0.5)
++    {
++        float3 diffuseEnvironment = EnvDiffuseEnabled > 0.5
++            ? SRGBtoLinear(EnvDiffuseTexture.SampleLevel(EnvSampler, n, 0.0)).rgb
++            : SRGBtoLinear(EnvTexture.SampleLevel(EnvSampler, n, EnvMipCount)).rgb;
++        color += diffuseColor * diffuseEnvironment * (1.0 - envFresnel) * EnvMapStrength;
++    }
+ #endif
+ #ifdef VERTEX_LIGHTING
+     float3 vertexDiffuse = input.frontFacing ? input.diffuseTermFront : input.diffuseTermBack;
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -26,6 +26,7 @@
+             Console.WriteLine("         --render-normal-maps=on|off");
+             Console.WriteLine("         --render-surface-pbr-maps=on|off");
+             Console.WriteLine("         --render-pbr-environment-maps=on|off");
++            Console.WriteLine("         --render-pbr-diffuse-ibl=on|off");
+             Console.WriteLine("         --render-generated-tangents=on|off");
+             Console.WriteLine("         --render-surface-profile=original|minimal|standard|full");
+             Console.WriteLine("         --render-per-pixel-lighting=on|off");
+@@ -228,6 +229,7 @@
+         private bool? normalMaps;
+         private bool? surfacePbrMaps;
+         private bool? pbrEnvironmentMaps;
++        private bool? pbrDiffuseIbl;
+         private bool? generatedTangents;
+         private SurfaceMapProfile? surfaceProfile;
+         private bool? perPixelLighting;
+@@ -301,6 +303,10 @@
+                     if (!ParseToggle(out var pbrEnvironment)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
+                     pbrEnvironmentMaps = pbrEnvironment;
+                     return true;
++                case "--render-pbr-diffuse-ibl":
++                    if (!ParseToggle(out var diffuseIbl)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
++                    pbrDiffuseIbl = diffuseIbl;
++                    return true;
+                 case "--render-generated-tangents":
+                     if (!ParseToggle(out var tangents)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
+                     generatedTangents = tangents;
+@@ -532,6 +538,7 @@
+             if (normalMaps.HasValue) settings.SurfaceNormalMapsEnabled = normalMaps.Value;
+             if (surfacePbrMaps.HasValue) settings.SurfacePbrMapsEnabled = surfacePbrMaps.Value;
+             if (pbrEnvironmentMaps.HasValue) settings.PbrEnvironmentMapsEnabled = pbrEnvironmentMaps.Value;
++            if (pbrDiffuseIbl.HasValue) settings.PbrDiffuseIblEnabled = pbrDiffuseIbl.Value;
+             if (generatedTangents.HasValue) settings.SurfaceGeneratedTangentsEnabled = generatedTangents.Value;
+             if (surfaceProfile.HasValue) settings.SurfaceProfile = surfaceProfile.Value;
+             if (perPixelLighting.HasValue) settings.PerPixelLighting = perPixelLighting.Value;
+--- a/uixml/options.lua
++++ b/uixml/options.lua
+@@ -134,6 +134,7 @@
+         e.ssao_bias.Max = 0.25
+         e.ssao_bias.Value = this.opts.SsaoBias
+         e.environment_maps.Selected = this.opts.PbrEnvironmentMapsEnabled
++        e.diffuse_ibl.Selected = this.opts.PbrDiffuseIblEnabled
+         e.dynamic_lighting.Selected = this.opts.DynamicLighting
+         e.transient_effect_lights.Selected = this.opts.RenderTransientEffectLights
+         e.weapon_muzzle_lights.Selected = this.opts.RenderWeaponMuzzleLights
+@@ -194,6 +195,12 @@
+             settings.PbrEnvironmentMapsEnabled = e.environment_maps.Selected
+             Game.ApplySettings(settings)
+         })
++        e.diffuse_ibl.OnClick(() => {
++            this.opts.PbrDiffuseIblEnabled = e.diffuse_ibl.Selected
++            local settings = Game.GetCurrentSettings()
++            settings.PbrDiffuseIblEnabled = e.diffuse_ibl.Selected
++            Game.ApplySettings(settings)
++        })
+         e.bloom.OnClick(() => {
+             this.opts.RenderBloom = e.bloom.Selected
+             local settings = Game.GetCurrentSettings()
+@@ -261,6 +268,7 @@
+         this.opts.SurfaceGeneratedTangentsEnabled = e.generated_tangents.Selected
+         this.opts.SurfacePbrMapsEnabled = e.surface_pbr_maps.Selected
+         this.opts.PbrEnvironmentMapsEnabled = e.environment_maps.Selected
++        this.opts.PbrDiffuseIblEnabled = e.diffuse_ibl.Selected
+         this.opts.DynamicLighting = e.dynamic_lighting.Selected
+         this.opts.RenderTransientEffectLights = e.transient_effect_lights.Selected
+         this.opts.RenderWeaponMuzzleLights = e.weapon_muzzle_lights.Selected
+--- a/uixml/options.xml
++++ b/uixml/options.xml
+@@ -106,15 +106,16 @@
+                 <Checkbox id="generated_tangents" X="18" Y="190" Width="350" Text="GENERATE MISSING MESH TANGENTS"/>
+                 <TextBlock X="18" Y="214" Height="18" Width="350" TextColor="text" TextShadow="black" TextSize="9" Text="TURN OFF TO KEEP ORIGINAL MESHES WITHOUT GENERATED TANGENTS"/>
+                 <Checkbox id="environment_maps" X="18" Y="236" Width="350" Text="PBR CUBEMAP REFLECTIONS"/>
+-                <Checkbox id="surface_pbr_maps" X="18" Y="260" Width="350" Text="SURFACE ROUGHNESS / METALLIC MAPS"/>
+-                <Checkbox id="shadows" X="18" Y="284" Width="350" Text="DIRECTIONAL SHADOW MAPS (BASIC / PBR)"/>
+-                <Checkbox id="ssao" X="18" Y="308" Width="350" Text="SCREEN SPACE AMBIENT OCCLUSION"/>
+-                <TextBlock X="18" Y="332" Width="170" Height="16" Text="SSAO RADIUS" TextColor="text" TextShadow="black" TextSize="9"/>
+-                <HSlider id="ssao_radius" X="200" Y="334" Width="160" Height="10"/>
+-                <TextBlock X="18" Y="354" Width="170" Height="16" Text="SSAO STRENGTH" TextColor="text" TextShadow="black" TextSize="9"/>
+-                <HSlider id="ssao_strength" X="200" Y="356" Width="160" Height="10"/>
+-                <TextBlock X="18" Y="376" Width="170" Height="16" Text="SSAO OCCLUSION BIAS" TextColor="text" TextShadow="black" TextSize="9"/>
+-                <HSlider id="ssao_bias" X="200" Y="378" Width="160" Height="10"/>
++                <Checkbox id="diffuse_ibl" X="18" Y="260" Width="350" Text="PBR DIFFUSE IRRADIANCE"/>
++                <Checkbox id="surface_pbr_maps" X="18" Y="284" Width="350" Text="SURFACE ROUGHNESS / METALLIC MAPS"/>
++                <Checkbox id="shadows" X="18" Y="308" Width="350" Text="DIRECTIONAL SHADOW MAPS (BASIC / PBR)"/>
++                <Checkbox id="ssao" X="18" Y="332" Width="350" Text="SCREEN SPACE AMBIENT OCCLUSION"/>
++                <TextBlock X="18" Y="356" Width="170" Height="16" Text="SSAO RADIUS" TextColor="text" TextShadow="black" TextSize="9"/>
++                <HSlider id="ssao_radius" X="200" Y="358" Width="160" Height="10"/>
++                <TextBlock X="18" Y="380" Width="170" Height="16" Text="SSAO STRENGTH" TextColor="text" TextShadow="black" TextSize="9"/>
++                <HSlider id="ssao_strength" X="200" Y="382" Width="160" Height="10"/>
++                <TextBlock X="18" Y="404" Width="170" Height="16" Text="SSAO OCCLUSION BIAS" TextColor="text" TextShadow="black" TextSize="9"/>
++                <HSlider id="ssao_bias" X="200" Y="406" Width="160" Height="10"/>
+                 <!-- Toggles -->
+                 <Checkbox id="ppl" X="18" Y="68" Width="200" Text="PER-PIXEL LIGHTING"/>
+             </Panel>

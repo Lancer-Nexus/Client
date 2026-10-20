@@ -1,0 +1,108 @@
+diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -514,7 +514,7 @@
+   `--render-bloom=on|off` und ein Effekte-Schalter steuern sie unabhängig; sie
+   benötigt `render_hdr` und fällt bei nicht verfügbaren Bloom-Zielen auf HDR
+   ohne Bloom zurück. Die aufwendigere mehrstufige Downsample-Pyramide,
+-  visuelle Kalibrierung und UI-Regler bleiben offen. `render_bloom_threshold`
++  visuelle Kalibrierung bleibt offen. `render_bloom_threshold`
+   (0–8; Standard 1) und `render_bloom_strength` (0–2; Standard 0,18) lassen
+   sich in der Clientkonfiguration und über gleichnamige CLI-Parameter setzen.
+   UI-Blur, Tiefenunschärfe und Cutscene-Radialblur behalten eigene begrenzte
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -173,6 +173,7 @@
+ - [x] Opt-in HDR-Ausgabestufe mit Half-Float-Szenenziel, float MSAA/SMAA-Eingang und ACES-Tonemapping; per `render_hdr`, `--render-hdr=on|off` und Effects-Checkbox schaltbar. Alle 18 aktuellen Client-Fragmentshader schreiben im HDR-Ziel lineare RGB-Werte, PBR bleibt nativ linear, und Clear-Farben werden nach sRGB-EOTF dekodiert. Dadurch erfolgt auch transparentes Blending im linearen Ziel. Die UI folgt im Spielzustand nach `SystemRenderer.Draw()` und damit nach dem Tonemapping. Legacy-Lichtberechnung und Farbmultiplikation arbeiten weiterhin teilweise mit kodierten Textur-/Materialwerten; vollständige lineare Beleuchtungsinputs und visuelle Laufzeitabnahme bleiben offen. Details: [HDR-Linear-Ausgabe](evidence/renderer/hdr-linear-output-implementation-20261016.md).
+ - [x] Erste HDR-Bloom-Stufe mit luminanzbasierter Schwelle, Viertelauflösung und horizontalem/vertikalem Gauß-Blur; separat per `render_bloom` und `--render-bloom=on|off` steuerbar, erfordert `render_hdr`.
+ - [x] Schwelle (`render_bloom_threshold`, 0–8, Standard 1) und Stärke (`render_bloom_strength`, 0–2, Standard 0,18) in der Clientkonfiguration und per CLI-Override einstellbar; Werte werden validiert.
++- [x] Effekte-Tab-Regler für Schwelle und Stärke; Werte werden beim Bestätigen der Optionsseite übernommen und gespeichert.
+ - [ ] Bloom visuell kalibrieren und die einfache Viertelauflösung bei Bedarf durch eine mehrstufige Pyramide ersetzen.
+ - [ ] Sonnen-Lens-Glow anhand reproduzierbarer NAP-Szenen visuell abnehmen; `lens_flare` und die Stern-Intensitäts-/Zonen-Fades bleiben separate offene Datenpfade ([Parser-/Laufzeitabgleich](data-client-plan.md)).
+   - [x] `lens_flare`-Datenpfad auditiert: `StararchIni` und `Star` parsen Profile/Referenzen, aber `GameItemDb.InitStars` übernimmt nur StarGlow, LensGlow und Spines; `Sun` und `SunRenderer` haben keinen Flare-Pfad. Retail-Funktion `FUN_00511248` ruft beim Einlesen eines Star-`lens_flare`-Verweises `FUN_0050f3a0` auf und wertet deren Rückgabewert für den Parse-Status aus. Der Parser liest Shape, Min-/Max-Radius und sechs Floatwerte je Bead. `Data/NAP/World/solar/StarArch.ini` enthält 7 Profile mit 61 Beads, auf die 38 Sterne verweisen. Die Bedeutung der Bead-Komponenten und der Retail-Zeichnung ist noch nicht nachgewiesen; siehe [Retail-Stringtrace](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-15-lens-flare-trace/Freelancer-lens-flare.md>) und [Parser-Aufrufer](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-15-lens-flare-trace/Freelancer-lens-flare-loader-caller.md>).
+diff --git a/docs/evidence/renderer/hdr-bloom-stage-20261016.md b/docs/evidence/renderer/hdr-bloom-stage-20261016.md
+--- a/docs/evidence/renderer/hdr-bloom-stage-20261016.md
++++ b/docs/evidence/renderer/hdr-bloom-stage-20261016.md
+@@ -29,5 +29,5 @@
+   Performance müssen mit einer gültigen NAP-only-Szene geprüft werden.
+ - Dies ist ein einfacher Viertelauflösungs-Blur und noch keine mehrstufige
+   Bloom-Pyramide. UI-/Cutscene-Blur bleibt davon getrennt.
+-- Die Schwellen- und Stärkewerte sind in `client.ini`/CLI parametrierbar, aber
+-  noch nicht als Regler im Effekte-Tab verfügbar.
++- Der Effekte-Tab hat nun Regler für beide Werte. Sie werden beim Verlassen der
++  Optionsseite übernommen und mit den übrigen Clientoptionen gespeichert.
+diff --git a/uixml/options.lua b/uixml/options.lua
+--- a/uixml/options.lua
++++ b/uixml/options.lua
+@@ -138,6 +138,12 @@
+             Game.ApplySettings(settings)
+         })
+         e.bloom.Selected = this.opts.RenderBloom
++        e.bloom_threshold.Min = 0
++        e.bloom_threshold.Max = 8
++        e.bloom_threshold.Value = this.opts.BloomThreshold
++        e.bloom_strength.Min = 0
++        e.bloom_strength.Max = 2
++        e.bloom_strength.Value = this.opts.BloomStrength
+         e.bloom.OnClick(() => {
+             this.opts.RenderBloom = e.bloom.Selected
+             local settings = Game.GetCurrentSettings()
+@@ -195,6 +201,9 @@
+         this.opts.RenderSunLensGlow = e.sun_lens_glow.Selected
+         this.opts.RenderSunAmbient = Game.GetCurrentSettings().RenderSunAmbient
+         this.opts.RenderHdr = Game.GetCurrentSettings().RenderHdr
++        this.opts.RenderBloom = Game.GetCurrentSettings().RenderBloom
++        this.opts.BloomThreshold = e.bloom_threshold.Value
++        this.opts.BloomStrength = e.bloom_strength.Value
+         this.opts.RenderNebulae = e.nebulae.Selected
+         this.opts.RenderStarsphere = e.starsphere.Selected
+         this.opts.VSync = e.vsync.Selected
+diff --git a/uixml/options.xml b/uixml/options.xml
+--- a/uixml/options.xml
++++ b/uixml/options.xml
+@@ -8,7 +8,7 @@
+         <Button X="33" Y="246" Style="menubutton" ID="audio" Text="AUDIO"/>
+         <Button X="33" Y="298" Style="menubutton" ID="effects" Text="EFFECTS" />
+         <Button X="33" Y="407" Style="menubutton" ID="goback" Text="MAIN MENU"/>
+-        <Panel Width="390" Height="380" X="30" Y="32" Anchor="CenterRight">
++        <Panel Width="390" Height="450" X="30" Y="0" Anchor="CenterRight">
+             <Panel.Background><DisplayModel model="framewithdipdown"/></Panel.Background>
+             <Panel Width="390" Height="380" ID="win_display" Visible="false">
+                 <TextBlock Text="DISPLAY OPTIONS" Width="390" Height="22" Y="-22" Anchor="TopCenter" TextColor="text" TextShadow="black" TextSize="13"/>
+@@ -18,7 +18,7 @@
+                 <Checkbox id="vulkan" X="18" Y="146" Width="340" Text="VULKAN / SDL_GPU" Enabled="false"/>
+                 <TextBlock X="18" Y="180" Width="350" Height="30" Text="VULKAN IS NOT AVAILABLE YET" TextColor="text" TextShadow="black" TextSize="10"/>
+             </Panel>
+-            <Panel Width="390" Height="380" ID="win_effects" Visible="false">
++            <Panel Width="390" Height="450" ID="win_effects" Visible="false">
+                 <TextBlock Text="AVAILABLE GRAPHICS EFFECTS" Width="390" Height="22" Y="-22" Anchor="TopCenter" TextColor="text" TextShadow="black" TextSize="13"/>
+                 <Checkbox id="dynamic_lighting" X="18" Y="12" Width="350" Text="DYNAMIC LIGHTING"/>
+                 <TextBlock X="18" Y="40" Width="170" Height="22" Text="FRAME LIGHT BUDGET" TextColor="text" TextShadow="black" TextSize="11"/>
+@@ -39,6 +39,10 @@
+                 <Checkbox id="sun_ambient" X="18" Y="304" Width="350" Text="SUN-COLORED AMBIENT LIGHT"/>
+                 <Checkbox id="hdr" X="18" Y="332" Width="350" Text="HDR TONE MAPPING"/>
+                 <Checkbox id="bloom" X="18" Y="360" Width="350" Text="HDR BLOOM (REQUIRES HDR)"/>
++                <TextBlock X="18" Y="388" Width="170" Height="18" Text="BLOOM THRESHOLD" TextColor="text" TextShadow="black" TextSize="10"/>
++                <HSlider id="bloom_threshold" X="200" Y="390" Width="160" Height="12"/>
++                <TextBlock X="18" Y="416" Width="170" Height="18" Text="BLOOM STRENGTH" TextColor="text" TextShadow="black" TextSize="10"/>
++                <HSlider id="bloom_strength" X="200" Y="418" Width="160" Height="12"/>
+             </Panel>
+             <Panel Width="390" Height="380" ID="win_audio" Visible="false">
+                 <TextBlock Text="AUDIO OPTIONS" Strid="1679" Width="390" Height="22" Y="-22"  Anchor="TopCenter" TextColor="text" TextShadow="black" TextSize="13"/>
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -163,3 +163,4 @@
+ | 2169 | Linearize scene shader outputs before HDR blending and tone mapping |
+ | 2170 | Add optional quarter-resolution HDR bloom with separable blur |
+ | 2171 | Configure and validate HDR bloom threshold and strength |
++| 2172 | Add bloom threshold and strength controls to Effects options |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -171,3 +171,4 @@
+ client 2169-linear-hdr-shader-output.patch
+ client 2170-hdr-bloom-first-pass.patch
+ client 2171-configurable-bloom-controls.patch
++client 2172-bloom-quality-options-ui.patch

@@ -3,7 +3,6 @@
 // LICENSE, which is part of this source code package
 
 using System;
-using System.IO;
 using System.Numerics;
 using LibreLancer.Data.GameData;
 using LibreLancer.Physics;
@@ -47,7 +46,6 @@ namespace LibreLancer.World.Components
         public float ChargePercent;
         public float CruiseAccelPct = 0;
         public Vector3 Steering;
-        public float AngularDragScale = 1;
         public StrafeControls CurrentStrafe = StrafeControls.None;
 
         public ShipPhysicsComponent(GameObject parent, Ship ship) : base(parent)
@@ -74,54 +72,6 @@ namespace LibreLancer.World.Components
         public override void SetEngineState(EngineStates es)
         {
             throw new InvalidOperationException("Cannot force EngineState on sim object");
-        }
-
-        internal LibreLancer.Server.NpcShipPhysicsTransferStateV1 CaptureNpcTransferState()
-        {
-            var engine = Parent.GetComponent<SEngineComponent>() ??
-                throw new InvalidOperationException("NPC ship physics has no engine component.");
-            return new LibreLancer.Server.NpcShipPhysicsTransferStateV1
-            {
-                Active = Active,
-                EngineState = EngineState,
-                ThrustRequested = ThrustRequested,
-                ThrustDepleted = thrustDepleted,
-                CruiseEnabled = cruiseEnabled,
-                PreviousCruiseEnabled = previousCruiseEnabled,
-                CruiseSpeedOffset = CruiseSpeedOffset,
-                EngineKillEnabled = EngineKillEnabled,
-                ChargePercent = ChargePercent,
-                CruiseAccelPercent = CruiseAccelPct,
-                EnginePower = EnginePower,
-                Steering = new LibreLancer.Server.NpcTransferVectorV1(Steering.X, Steering.Y, Steering.Z),
-                Strafe = CurrentStrafe,
-                EngineSpeed = engine.Speed,
-                EngineKill = engine.EngineKill,
-                CruiseThrust = engine.CruiseThrust
-            };
-        }
-
-        internal void RestoreNpcTransferState(LibreLancer.Server.NpcShipPhysicsTransferStateV1 state)
-        {
-            state.Validate();
-            var engine = Parent.GetComponent<SEngineComponent>() ??
-                throw new InvalidDataException("NPC ship physics has no engine component during restore.");
-            Active = state.Active;
-            EngineState = state.EngineState;
-            ThrustRequested = state.ThrustRequested;
-            thrustDepleted = state.ThrustDepleted;
-            cruiseEnabled = state.CruiseEnabled;
-            previousCruiseEnabled = state.PreviousCruiseEnabled;
-            CruiseSpeedOffset = state.CruiseSpeedOffset;
-            EngineKillEnabled = state.EngineKillEnabled;
-            ChargePercent = state.ChargePercent;
-            CruiseAccelPct = state.CruiseAccelPercent;
-            EnginePower = state.EnginePower;
-            Steering = new Vector3(state.Steering.X, state.Steering.Y, state.Steering.Z);
-            CurrentStrafe = state.Strafe;
-            engine.Speed = state.EngineSpeed;
-            engine.EngineKill = state.EngineKill;
-            engine.CruiseThrust = state.CruiseThrust;
         }
 
         // TODO: Engine Kill
@@ -169,8 +119,8 @@ namespace LibreLancer.World.Components
             }
 
             SetCruiseState(prev, CruiseAccelPct);
-            var engine = Parent.GetComponent<SEngineComponent>()!; // Get mounted engine
-            ChargePercent = prev + (1.0f / engine.Engine.Def.CruiseChargeTime) * (float) time;
+            var engine = Parent.CoreEquipment.Engine!; // Get mounted engine
+            ChargePercent = prev + (1.0f / engine.Equipment.Def.CruiseChargeTime) * (float) time;
             if (ChargePercent >= 1) {
                 ChargePercent = 1;
                 EngineState = EngineStates.Cruise;
@@ -189,8 +139,8 @@ namespace LibreLancer.World.Components
 
             if (EngineState == EngineStates.Cruise)
             {
-                var engine = Parent.GetComponent<SEngineComponent>()!; // Get mounted engine
-                CruiseAccelPct = prev + (float)(time * 1.0f / engine.Engine.CruiseAccelTime);
+                var engine = Parent.CoreEquipment.Engine!; // Get mounted engine
+                CruiseAccelPct = prev + (float)(time * 1.0f / engine.Equipment.CruiseAccelTime);
                 if (CruiseAccelPct > 1.0f) CruiseAccelPct = 1.0f;
             }
         }
@@ -222,8 +172,8 @@ namespace LibreLancer.World.Components
             }
             previousCruiseEnabled = CruiseEnabled;
             // Component checks
-            var engine = Parent.GetComponent<SEngineComponent>(); // Get mounted engine
-            var power = Parent.GetComponent<PowerCoreComponent>();
+            var engine = Parent.CoreEquipment.Engine; // Get mounted engine
+            var power = Parent.CoreEquipment.Power;
             if (Parent.PhysicsComponent == null) return;
 
             if ((PhysicsObject?)Parent.PhysicsComponent.Body == null)
@@ -238,16 +188,16 @@ namespace LibreLancer.World.Components
             float requestedEnginePower = EnginePower;
             if (requestedEnginePower <= 0)
             {
-                requestedEnginePower = MathHelper.Clamp(EnginePower, -engine.Engine.Def.ReverseFraction, 1);
+                requestedEnginePower = MathHelper.Clamp(EnginePower, -engine.Equipment.Def.ReverseFraction, 1);
             }
 
             float totalDrag = Ship.LinearDrag;
             float thrusterForce = 0;
 
             var thrustCapacityWasEmpty = power.CurrentThrustCapacity <= 0;
-            power.CurrentThrustCapacity += power.Equip.ThrustChargeRate * (float)(time);
-            power.CurrentThrustCapacity = MathHelper.Clamp(power.CurrentThrustCapacity, 0, power.Equip.ThrustCapacity);
-            foreach (var thruster in Parent.GetChildComponents<ThrusterComponent>())
+            power.CurrentThrustCapacity += power.Equipment.Def.ThrustChargeRate * (float)(time);
+            power.CurrentThrustCapacity = MathHelper.Clamp(power.CurrentThrustCapacity, 0, power.Equipment.Def.ThrustCapacity);
+            foreach (var thruster in engine.Thrusters)
             {
                 thruster.Enabled = false;
             }
@@ -260,13 +210,13 @@ namespace LibreLancer.World.Components
             if (ThrustRequested && !thrustDepleted && EngineState <= EngineStates.EngineKill &&
                 power.CurrentThrustCapacity > 0)
             {
-                foreach (var thruster in Parent.GetChildComponents<ThrusterComponent>())
+                foreach (var thruster in engine.Thrusters)
                 {
-                    thrusterForce += thruster.Equip.Force;
+                    thrusterForce += thruster.Equipment.Force;
                     thruster.Enabled = true;
                     ThrustEnabled = true;
-                    power.CurrentThrustCapacity -= (float)(thruster.Equip.Drain * time);
-                    power.CurrentThrustCapacity = MathHelper.Clamp(power.CurrentThrustCapacity, 0, power.Equip.ThrustCapacity);
+                    power.CurrentThrustCapacity -= (float)(thruster.Equipment.Drain * time);
+                    power.CurrentThrustCapacity = MathHelper.Clamp(power.CurrentThrustCapacity, 0, power.Equipment.Def.ThrustCapacity);
                 }
 
                 if (power.CurrentThrustCapacity <= 0)
@@ -279,7 +229,7 @@ namespace LibreLancer.World.Components
                     requestedEnginePower < 0)
                 {
                     requestedEnginePower = requestedEnginePower < 0 ? requestedEnginePower : 1;
-                    totalDrag += engine.Engine.Def.LinearDrag;
+                    totalDrag += engine.Equipment.Def.LinearDrag;
                     engine.EngineKill = false;
                 }
                 else
@@ -290,7 +240,7 @@ namespace LibreLancer.World.Components
             }
             else
             {
-                totalDrag += engine.Engine.Def.LinearDrag;
+                totalDrag += engine.Equipment.Def.LinearDrag;
                 engine.EngineKill = false;
             }
             var drag = -totalDrag * Parent.PhysicsComponent.Body.LinearVelocity;
@@ -301,12 +251,12 @@ namespace LibreLancer.World.Components
                     CruiseSpeedOffset < 0);
             }
 
-            var engineForce = requestedEnginePower * engine.Engine.Def.MaxForce
+            var engineForce = requestedEnginePower * engine.Equipment.Def.MaxForce
                               + thrusterForce;
 
 
             if (EngineState == EngineStates.CruiseCharging) {
-                ChargePercent += (1.0f / engine.Engine.Def.CruiseChargeTime) * (float)time;
+                ChargePercent += (1.0f / engine.Equipment.Def.CruiseChargeTime) * (float)time;
                 if (ChargePercent >= 1.0f)
                 {
                     EngineState = EngineStates.Cruise;
@@ -322,12 +272,13 @@ namespace LibreLancer.World.Components
                 }
             }
             else if (EngineState == EngineStates.Cruise)
-            { // Cruise has entirely different force calculation
-                CruiseAccelPct += (float)(time * 1.0f / engine.Engine.CruiseAccelTime);
+            {
+                // Cruise has entirely different force calculation
+                CruiseAccelPct += (float)(time * 1.0f / engine.Equipment.CruiseAccelTime);
                 if (CruiseAccelPct > 1.0f) CruiseAccelPct = 1.0f;
-                var cruiseSpeed = MathF.Max(0, engine.Engine.CruiseSpeed + CruiseSpeedOffset);
-                engineForce = CruiseEngineForce(cruiseSpeed, engine.Engine.CruiseSpeed,
-                    engine.Engine.Def.MaxForce, engine.Engine.Def.LinearDrag, CruiseAccelPct);
+                var cruiseSpeed = MathF.Max(0, engine.Equipment.CruiseSpeed + CruiseSpeedOffset);
+                engineForce = CruiseEngineForce(cruiseSpeed, engine.Equipment.CruiseSpeed,
+                    engine.Equipment.Def.MaxForce, engine.Equipment.Def.LinearDrag, CruiseAccelPct);
                 // Set fx sparam. TODO: This is poorly named
                 engine.Speed = 1.0f;
                 ChargePercent = 1f;
@@ -357,7 +308,7 @@ namespace LibreLancer.World.Components
                 (Parent.PhysicsComponent.Body.RotateVector(-Vector3.UnitZ) * engineForce)
             );
             var angularForce = Steering * Ship.SteeringTorque;
-            angularForce += (Parent.PhysicsComponent.Body.AngularVelocity * -1) * (Ship.AngularDrag * AngularDragScale);
+            angularForce += (Parent.PhysicsComponent.Body.AngularVelocity * -1) * Ship.AngularDrag;
             // Add forces
             Parent.PhysicsComponent.Body.AddForce(totalForce);
             Parent.PhysicsComponent.Body.AddTorque(angularForce);

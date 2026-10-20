@@ -1,4 +1,3 @@
-using System;
 using System.Threading.Tasks;
 
 namespace LibreLancer.Net.Protocol;
@@ -7,8 +6,6 @@ namespace LibreLancer.Net.Protocol;
 public interface IServerPlayer
 {
     void Launch();
-    void BeginClusterTransfer(string transferId, long characterId, long leaseVersion, string targetSystem, string target,
-        string targetInstanceId, string targetEndpoint);
     void RTCComplete(string rtc);
     void LineSpoken(uint hash);
     void OnLocationEnter(string _base, string room);

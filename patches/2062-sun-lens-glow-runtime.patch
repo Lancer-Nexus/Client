@@ -1,0 +1,266 @@
+--- a/src/LibreLancer.Data/GameData/Archetypes/Sun.cs
++++ b/src/LibreLancer.Data/GameData/Archetypes/Sun.cs
+@@ -18,6 +18,10 @@
+     public Color3f CenterColorInner;
+     public Color3f CenterColorOuter;
+     public float CenterScale;
++    public string? LensGlowSprite;
++    public Color3f LensGlowColorInner;
++    public Color3f LensGlowColorOuter;
++    public float LensGlowRadiusScale;
+     public string? SpinesSprite;
+     public float SpinesScale;
+     public List<Spine>? Spines;
+--- a/src/LibreLancer.Data/GameItemDb.cs
++++ b/src/LibreLancer.Data/GameItemDb.cs
+@@ -2443,6 +2443,7 @@
+     {
+         FLLog.Info("Game", "Initing " + flData.Stars.Stars.Count + " stars");
+         var glows = new Dictionary<string, StarGlow>(StringComparer.OrdinalIgnoreCase);
++        var lensGlows = new Dictionary<string, LensGlow>(StringComparer.OrdinalIgnoreCase);
+         var spines = new Dictionary<string, Spines>(StringComparer.OrdinalIgnoreCase);
+ 
+         StarGlow? GetGlow(string? g)
+@@ -2456,6 +2457,17 @@
+             return glow;
+         }
+ 
++        LensGlow? GetLensGlow(string? id)
++        {
++            if (string.IsNullOrWhiteSpace(id))
++            {
++                return null;
++            }
++
++            lensGlows.TryGetValue(id, out var glow);
++            return glow;
++        }
++
+         Spines? GetSpines(string? id)
+         {
+             if (string.IsNullOrWhiteSpace(id))
+@@ -2470,6 +2482,11 @@
+         foreach (var glow in flData.Stars.StarGlows)
+         {
+             glows[glow.Nickname] = glow;
++        }
++
++        foreach (var glow in flData.Stars.LensGlows)
++        {
++            lensGlows[glow.Nickname] = glow;
+         }
+ 
+         foreach (var sp in flData.Stars.Spines)
+@@ -2508,6 +2525,15 @@
+                 s.CenterColorInner = centerglow.InnerColor;
+                 s.CenterColorOuter = centerglow.OuterColor;
+                 s.CenterScale = centerglow.Scale;
++            }
++
++            var lensGlow = GetLensGlow(star.LensGlow);
++            if (lensGlow is not null && lensGlow.RadiusScale > 0)
++            {
++                s.LensGlowSprite = lensGlow.Shape;
++                s.LensGlowColorInner = lensGlow.InnerColor;
++                s.LensGlowColorOuter = lensGlow.OuterColor;
++                s.LensGlowRadiusScale = lensGlow.RadiusScale;
+             }
+ 
+             var sp = GetSpines(star.Spines);
+--- a/src/LibreLancer/Render/SunRenderer.cs
++++ b/src/LibreLancer/Render/SunRenderer.cs
+@@ -24,6 +24,7 @@
+         private SunSpineMaterial spineMaterial = null!;
+         private SunRadialMaterial centerMaterial = null!;
+         private SunRadialMaterial glowMaterial = null!;
++        private SunRadialMaterial? lensGlowMaterial;
+ 
+         private Vector3 genPos;
+         private int bufferIndex;
+@@ -68,6 +69,8 @@
+             var count = 4; // glow quad
+             if (sun.CenterSprite != null)
+                 count += 4; // center quad
++            if (sun.LensGlowSprite != null)
++                count += 4; // lens glow quad
+             if (sun.SpinesSprite != null)
+                 count += sun.Spines!.Count * 4;
+             return count;
+@@ -85,6 +88,12 @@
+             AddQuad(vx, ref idx, pos, new Vector2(sun.Radius * sun.GlowScale), 0,
+                 new Color4(sun.GlowColorInner, 1),
+                 new Color4(sun.GlowColorOuter, 1));
++
++            // lens glow
++            if (sun.LensGlowSprite != null)
++                AddQuad(vx, ref idx, pos, new Vector2(sun.Radius * sun.LensGlowRadiusScale), 0,
++                    new Color4(sun.LensGlowColorInner, 1),
++                    new Color4(sun.LensGlowColorOuter, 1));
+ 
+             // spines
+             if (sun.SpinesSprite != null)
+@@ -123,6 +132,15 @@
+                 {
+                     Texture = Sun.GlowSprite!
+                 };
++
++                if (Sun.LensGlowSprite != null)
++                {
++                    lensGlowMaterial = new SunRadialMaterial(sys.ResourceManager)
++                    {
++                        Texture = Sun.LensGlowSprite,
++                        Additive = true
++                    };
++                }
+             }
+ 
+             sysr = sys;
+@@ -172,6 +190,16 @@
+                 0, idx, 2, SortLayers.SUN, z, null, 1);
+             // next
+             idx += 6;
++            // draw lens glow
++            if (Sun.LensGlowSprite != null && sysr.Settings.RenderSunLensGlow && lensGlowMaterial != null)
++            {
++                lensGlowMaterial.SizeMultiplier = new Vector2(distScale);
++                lensGlowMaterial.OuterAlpha = alpha;
++                commands.AddCommand(lensGlowMaterial, null, commands.WorldBuffer.Identity,
++                    Lighting.Empty, sysr.QuadBuffer.VertexBuffer, 1.0f, PrimitiveTypes.TriangleList,
++                    0, idx, 2, SortLayers.SUN, z, null, 2);
++                idx += 6;
++            }
+             // draw spines
+             if (Sun is { SpinesSprite: not null, Spines.Count: > 0 } && nr == null)
+             {
+--- a/src/LibreLancer/Render/IRendererSettings.cs
++++ b/src/LibreLancer/Render/IRendererSettings.cs
+@@ -12,4 +12,5 @@
+     bool DynamicLighting => true;
+     bool RenderNebulae => true;
+     bool RenderStarsphere => true;
++    bool RenderSunLensGlow => true;
+ }
+--- a/src/LibreLancer/GameSettings.cs
++++ b/src/LibreLancer/GameSettings.cs
+@@ -49,6 +49,8 @@
+         public bool RenderNebulae = true;
+         [Entry("render_starsphere")]
+         public bool RenderStarsphere = true;
++        [Entry("render_sun_lens_glow")]
++        public bool RenderSunLensGlow = true;
+ 
+         [WattleScriptHidden]
+         public SurfaceMapProfile SurfaceProfile = SurfaceMapProfile.Original;
+@@ -89,6 +91,7 @@
+         bool IRendererSettings.DynamicLighting => DynamicLighting;
+         bool IRendererSettings.RenderNebulae => RenderNebulae;
+         bool IRendererSettings.RenderStarsphere => RenderStarsphere;
++        bool IRendererSettings.RenderSunLensGlow => RenderSunLensGlow;
+ 
+         int IRendererSettings.SelectedAnisotropy => Anisotropy;
+         TextureFiltering IRendererSettings.SelectedFiltering =>
+@@ -126,6 +129,7 @@
+             writer.WriteLine($"dynamic_lighting = {(DynamicLighting ? "true" : "false")}");
+             writer.WriteLine($"render_nebulae = {(RenderNebulae ? "true" : "false")}");
+             writer.WriteLine($"render_starsphere = {(RenderStarsphere ? "true" : "false")}");
++            writer.WriteLine($"render_sun_lens_glow = {RenderSunLensGlow.ToString().ToLowerInvariant()}");
+         }
+ 
+         [WattleScriptHidden]
+@@ -156,7 +160,8 @@
+                 PerPixelLighting = PerPixelLighting,
+                 DynamicLighting = DynamicLighting,
+                 RenderNebulae = RenderNebulae,
+-                RenderStarsphere = RenderStarsphere
++                RenderStarsphere = RenderStarsphere,
++                RenderSunLensGlow = RenderSunLensGlow
+             };
+ 
+             return gs;
+@@ -186,6 +191,7 @@
+             DynamicLighting = other.DynamicLighting;
+             RenderNebulae = other.RenderNebulae;
+             RenderStarsphere = other.RenderStarsphere;
++            RenderSunLensGlow = other.RenderSunLensGlow;
+         }
+ 
+         public void Validate()
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -29,6 +29,7 @@
+             Console.WriteLine("         --render-dynamic-lighting=on|off");
+             Console.WriteLine("         --render-nebulae=on|off");
+             Console.WriteLine("         --render-starsphere=on|off");
++            Console.WriteLine("         --render-sun-lens-glow=on|off");
+             Console.WriteLine("         --render-antialias=none|smaa-low|smaa-medium|smaa-high|smaa-ultra|msaa-2x|msaa-4x|msaa-8x");
+             Console.WriteLine("         --render-anisotropy=0|2|4|8|16");
+ #if DEBUG
+@@ -175,6 +176,7 @@
+         private bool? dynamicLighting;
+         private bool? nebulae;
+         private bool? starsphere;
++        private bool? sunLensGlow;
+         private AntialiasMode? antialias;
+         private int? anisotropy;
+ 
+@@ -234,6 +236,10 @@
+                 case "--render-starsphere":
+                     if (!ParseToggle(out var drawStarsphere)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
+                     starsphere = drawStarsphere;
++                    return true;
++                case "--render-sun-lens-glow":
++                    if (!ParseToggle(out var drawSunLensGlow)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
++                    sunLensGlow = drawSunLensGlow;
+                     return true;
+                 case "--render-surface-profile":
+                     if (Enum.TryParse(value, true, out SurfaceMapProfile profile) && Enum.IsDefined(profile))
+@@ -277,6 +283,7 @@
+             if (dynamicLighting.HasValue) settings.DynamicLighting = dynamicLighting.Value;
+             if (nebulae.HasValue) settings.RenderNebulae = nebulae.Value;
+             if (starsphere.HasValue) settings.RenderStarsphere = starsphere.Value;
++            if (sunLensGlow.HasValue) settings.RenderSunLensGlow = sunLensGlow.Value;
+             if (antialias.HasValue) settings.Antialias = (int)antialias.Value;
+             if (anisotropy.HasValue) settings.Anisotropy = anisotropy.Value;
+         }
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -231,6 +231,7 @@
+   - `--render-dynamic-lighting=on|off` → `dynamic_lighting`.
+   - `--render-nebulae=on|off` → `render_nebulae`.
+   - `--render-starsphere=on|off` → `render_starsphere`.
++  - `--render-sun-lens-glow=on|off` → `render_sun_lens_glow`.
+   - `--render-antialias=none|smaa-low|smaa-medium|smaa-high|smaa-ultra|msaa-2x|msaa-4x|msaa-8x` → `antialias`.
+   - `--render-anisotropy=0|2|4|8|16` → `anisotropy`.
+ - Boolean controls accept only `on` or `off`. Surface profile selects the
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -125,7 +125,9 @@
+   Reproduktion stehen in [ship-light-occlusion.md](ship-light-occlusion.md).
+ - [ ] HDR-Zwischenpuffer, Belichtung und Tonemapping als zusammenhängenden Farbmanagement-Schritt entwerfen; sRGB-Ein-/Ausgabe und UI-Komposition berücksichtigen.
+ - [ ] Bloom als nachgelagerten Effekt mit Threshold, Downsampling-Pyramide und konfigurierbarer Intensität untersuchen.
+-- [ ] Den geparsten `StarArch.ini`-Wert `lens_glow` bis zum `SunRenderer` durchreichen und den Sonnen-Lens-Glow anhand einer reproduzierbaren NAP-Szene mit Ein-/Aus-Vergleich und abschaltbarer Option abnehmen; `lens_flare` und Fade-Werte sind separate offene Datenpfade ([Parser-/Laufzeitabgleich](data-client-plan.md)).
++- [ ] Sonnen-Lens-Glow anhand reproduzierbarer NAP-Szenen visuell abnehmen; `lens_flare` und die `lens_glow`-Fade-Werte bleiben separate offene Datenpfade ([Parser-/Laufzeitabgleich](data-client-plan.md)).
++  - [x] `lens_glow`-Form, Farbe und Radius aus `StarArch.ini` bis zum `SunRenderer` durchreichen und über `render_sun_lens_glow` / `--render-sun-lens-glow=on|off` einzeln schaltbar machen.
++  - [ ] Renderer-A/B-Bilder bei sichtbarer und verdeckter Sonne aufnehmen und Radius, Farbe, Blendmodus sowie Fade-Verhalten gegen das Original abstimmen.
+ - [ ] Image-Based Lighting und konsistente Umgebungsreflexionen für den PBR-Pfad prüfen.
+ - [ ] Screen-Space Ambient Occlusion als optionale Ergänzung bewerten; Geometrie- und Nebelartefakte gegen Vanilla-Szenen abgleichen.
+ - [ ] Echtzeit-Schatten (zunächst gerichtete Lichter, Kaskaden und PCF) anhand vorhandener Freelancer-Lichtdaten und der GPU-Kosten bewerten.
+--- a/patches/series
++++ b/patches/series
+@@ -61,3 +61,4 @@
+ client 2059-retail-pbr-maps-and-independent-uv.patch
+ client 2060-rgtc-native-and-fallback.patch
+ client 2061-sun-lens-glow-and-jump-gate-effect-todos.patch
++client 2062-sun-lens-glow-runtime.patch
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -34,7 +34,8 @@
+ | 2035 | Release PBR map leases and preserve room/backface lighting |
+ | 2036 | Optional PBR reflections from existing Freelancer environment cubes and preview control |
+ | 2060 | Independent BC4/BC5 capability detection and CPU RGTC fallback |
+-| 2061 | Sun lens glow and jump gate effect renderer TODOs |
++| 2061 | Sun lens glow, jump gate and tradelane effect renderer TODOs |
++| 2062 | StarArch lens glow rendering and independent startup/config toggle |
+ | 2011 (`lancerdecode`) | Native Vorbis EOF/reset handling |
+ | 2012 (`blurgtext`) | System FreeType without OT-SVG hooks |
+ 

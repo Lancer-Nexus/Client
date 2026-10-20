@@ -1,0 +1,230 @@
+--- a/src/LibreLancer.Data/Schema/Effects/JumpGateEffect.cs
++++ b/src/LibreLancer.Data/Schema/Effects/JumpGateEffect.cs
+@@ -2,7 +2,6 @@
+ // This file is subject to the terms and conditions defined in
+ // LICENSE, which is part of this source code package
+ 
+-using System.Collections.Generic;
+ using System.Numerics;
+ using LibreLancer.Data.Ini;
+ 
+@@ -12,8 +11,8 @@
+ public partial class JumpGateEffect
+ {
+     [Entry("nickname", Required = true)] public string Nickname = null!;
+-    [Entry("glow_ring_effect")] public List<string> GlowRingEffects = [];
+-    [Entry("glow_ring_hp")] public List<string> GlowRingHardpoints = [];
++    [Entry("glow_ring_effect")] public string[]? GlowRingEffects;
++    [Entry("glow_ring_hp")] public string[]? GlowRingHardpoints;
+     [Entry("glow_create_time")] public float[]? GlowCreateTimes;
+     [Entry("jump_out_time")] public float JumpOutTime;
+     [Entry("jump_out_tunnel_time")] public float JumpOutTunnelTime;
+--- a/src/LibreLancer.Data/Schema/Effects/GateTunnel.cs
++++ b/src/LibreLancer.Data/Schema/Effects/GateTunnel.cs
+@@ -32,7 +32,7 @@
+     [Entry("max_rotation")] public float MaxRotation;
+     [Entry("min_rgb")] public Vector3 MinRgb;
+     [Entry("max_rgb")] public Vector3 MaxRgb;
+-    [Section("layer")] public List<GateTunnelLayer> Layers = [];
++    [Section("layer", Child = true)] public List<GateTunnelLayer> Layers = [];
+ }
+ 
+ [ParsedSection]
+--- a/src/LibreLancer.Data/Schema/Effects/GateTunnelsIni.cs
++++ b/src/LibreLancer.Data/Schema/Effects/GateTunnelsIni.cs
+@@ -11,7 +11,9 @@
+ [ParsedIni]
+ public partial class GateTunnelsIni
+ {
+-    [Section("gate_tunnel")] public List<GateTunnel> Tunnels = [];
++    [Section("gate_tunnel")]
++    [Section("layer", Type = typeof(GateTunnelLayer), Child = true)]
++    public List<GateTunnel> Tunnels = [];
+ 
+     public void Load(string path, FileSystem vfs, IniStringPool? stringPool = null) => ParseIni(path, vfs, stringPool);
+ }
+--- a/src/LibreLancer/GameStates/SpaceGameplay.cs
++++ b/src/LibreLancer/GameStates/SpaceGameplay.cs
+@@ -33,6 +33,12 @@
+ {
+     public partial class SpaceGameplay : GameState
+     {
++        private sealed record PendingJumpRingEffect(
++            double StartTime,
++            GameObject Gate,
++            ResolvedFx Effect,
++            Hardpoint Hardpoint);
++
+         private StarSystem sys;
+         public GameWorld world = null!;
+         public FreelancerGame FlGame => Game;
+@@ -72,6 +78,9 @@
+         private SoundInstance? jumpTunnelSound;
+         private double jumpTunnelSoundRemaining;
+         private bool jumpTunnelStarted;
++        private double jumpSequenceElapsed;
++        private readonly List<PendingJumpRingEffect> pendingJumpRingEffects = [];
++        private readonly List<(GameObject Gate, ParticleEffectRenderer Renderer)> activeJumpRingEffects = [];
+         private TradelaneEquipment? activeTradelaneEquipment;
+         private ParticleEffectRenderer? tradelaneTravelRenderer;
+         private SoundInstance? tradelaneTravelSound;
+@@ -705,6 +714,10 @@
+             transientShipEffects.Clear();
+             jumpTunnelSound?.Stop();
+             jumpTunnelSound = null;
++            foreach (var (gate, renderer) in activeJumpRingEffects)
++                gate.ExtraRenderers.Remove(renderer);
++            activeJumpRingEffects.Clear();
++            pendingJumpRingEffects.Clear();
+             StopTradelaneEffects(null);
+             sysrender?.Dispose();
+             world?.Dispose();
+@@ -754,10 +767,18 @@
+             var sourceGate = world.Objects
+                 .Where(x => x.SystemObject?.Dock is { Kind: DockKinds.Jump, Target: not null } dock &&
+                             dock.Target.Equals(targetSystem, StringComparison.OrdinalIgnoreCase) &&
+-                            x.SystemObject.JumpEffectData?.JumpTunnelEffect != null)
++                            x.SystemObject.JumpEffectData != null)
+                 .OrderBy(x => Vector3.DistanceSquared(x.Transform.Position, player.Transform.Position))
+                 .FirstOrDefault();
+             var jumpEffect = sourceGate?.SystemObject?.JumpEffectData;
++            if (sourceGate == null || jumpEffect == null)
++            {
++                FLLog.Debug("Jump", $"No configured jump effect profile for destination {targetSystem}");
++                return;
++            }
++
++            jumpSequenceElapsed = 0;
++            ScheduleJumpRingEffects(sourceGate, jumpEffect);
+             var tunnelEffectName = jumpEffect?.JumpTunnelEffect;
+             if (tunnelEffectName == null)
+             {
+@@ -778,6 +799,65 @@
+             jumpTunnelSound = attached.Sound;
+             jumpTunnelSoundRemaining = Math.Max(0.1,
+                 jumpEffect!.JumpOutTime + jumpEffect.JumpOutTunnelTime);
++        }
++
++        private void ScheduleJumpRingEffects(GameObject gate, LibreLancer.Data.Schema.Effects.JumpGateEffect profile)
++        {
++            var effects = profile.GlowRingEffects ?? Array.Empty<string>();
++            var hardpoints = profile.GlowRingHardpoints ?? Array.Empty<string>();
++            if (effects.Length != hardpoints.Length)
++                FLLog.Warning("Jump", $"Jump gate profile '{profile.Nickname}' has {effects.Length} ring effects but {hardpoints.Length} hardpoints");
++            if (profile.GlowCreateTimes != null && profile.GlowCreateTimes.Length != effects.Length)
++                FLLog.Warning("Jump", $"Jump gate profile '{profile.Nickname}' has {profile.GlowCreateTimes.Length} ring times for {effects.Length} effects");
++            var count = Math.Min(effects.Length, hardpoints.Length);
++            for (var i = 0; i < count; i++)
++            {
++                var effect = Game.GameData.Items.Effects.Get(effects[i]);
++                if (effect == null)
++                {
++                    FLLog.Warning("Jump", $"Jump gate ring effect '{effects[i]}' was not found");
++                    continue;
++                }
++
++                var hardpoint = gate.GetHardpoint(hardpoints[i]);
++                if (hardpoint == null)
++                {
++                    FLLog.Warning("Jump", $"Jump gate hardpoint '{hardpoints[i]}' was not found on {gate.Nickname}");
++                    continue;
++                }
++
++                var configuredTime = profile.GlowCreateTimes != null && i < profile.GlowCreateTimes.Length
++                    ? profile.GlowCreateTimes[i]
++                    : 0f;
++                var startTime = float.IsFinite(configuredTime) ? Math.Max(0, configuredTime) : 0;
++                pendingJumpRingEffects.Add(new PendingJumpRingEffect(startTime, gate, effect, hardpoint));
++            }
++
++            pendingJumpRingEffects.Sort((a, b) => a.StartTime.CompareTo(b.StartTime));
++        }
++
++        private void StartPendingJumpRingEffects(double delta)
++        {
++            jumpSequenceElapsed += delta;
++            while (pendingJumpRingEffects.Count > 0 &&
++                   pendingJumpRingEffects[0].StartTime <= jumpSequenceElapsed)
++            {
++                var pending = pendingJumpRingEffects[0];
++                pendingJumpRingEffects.RemoveAt(0);
++                var particles = pending.Effect.GetEffect(Game.ResourceManager);
++                if (particles == null)
++                    continue;
++
++                var renderer = new ParticleEffectRenderer(particles) { Attachment = pending.Hardpoint };
++                pending.Gate.ExtraRenderers.Add(renderer);
++                activeJumpRingEffects.Add((pending.Gate, renderer));
++                if (pending.Effect.Sound != null)
++                {
++                    var sound = Game.Sound.GetInstance(pending.Effect.Sound.Nickname, 0, -1, -1,
++                        pending.Gate.Transform.Position);
++                    sound?.Play();
++                }
++            }
+         }
+ 
+         private TradelaneEquipment? GetTradelaneEquipment(ObjNetId ring)
+@@ -811,6 +891,7 @@
+ 
+         private void UpdateTransientShipEffects(double delta)
+         {
++            StartPendingJumpRingEffects(delta);
+             if (jumpTunnelSound != null)
+             {
+                 jumpTunnelSoundRemaining -= delta;
+@@ -827,6 +908,15 @@
+                     continue;
+                 player.ExtraRenderers.Remove(transientShipEffects[i]);
+                 transientShipEffects.RemoveAt(i);
++            }
++
++            for (var i = activeJumpRingEffects.Count - 1; i >= 0; i--)
++            {
++                var (gate, renderer) = activeJumpRingEffects[i];
++                if (!renderer.Finished)
++                    continue;
++                gate.ExtraRenderers.Remove(renderer);
++                activeJumpRingEffects.RemoveAt(i);
+             }
+         }
+ 
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -154,6 +154,7 @@
+   - [x] Integrationspfad geprüft: `Universe.SystemObject.jump_effect` wird in `GameData.World.SystemObject.JumpEffect` kopiert, aber im Client nicht konsumiert. `DockAction.Tunnel` wird serialisiert, hat jedoch keinen Renderer-Verbraucher. `IClientPlayer.StartLocalJumpTunnel` und `StartJumpTunnel` schalten derzeit nur den Tradelane-Zustand ab; keiner startet eine sichtbare Übergangssequenz. Der lokale Callback liegt vor dem Systemwechsel, der Cluster-Callback vor dem asynchronen Gateway-Transfer. Die Implementierung muss beide Abläufe und Fehler/Abbruch sauber abdecken.
+   - [x] Datenfundament: `FreelancerData` lädt die in `Freelancer.ini` konfigurierten `jump_effect`- und `gate_tunnels`-Pfade optional in typisierte Modelle für Gate-/Schiffseffekte, Tunnelparameter und Tunnel-Layer. `GameItemDb` löst `SystemObject.jump_effect` case-insensitiv auf das Gate-Profil auf; das Profil ist über `GameObject.SystemObject` erreichbar.
+   - [x] Der konfigurierte `jump_tunnel_effect` startet beim lokalen Sprung sowie bei einem zulässigen Cluster-Sprung am Spielerschiff. Der Client startet ihn direkt im RPC-Update, bevor ein `SpawnPlayer`-Paket die aktuelle Szene austauschen kann. Die Quelle wird über das nächstgelegene Sprungtor mit passendem Zielsystem gesucht. Der Effekt ist mit `render_jump_gate_effects` beziehungsweise `--render-jump-gate-effects=on|off` separat schaltbar; die Loop-Sounddauer folgt `jump_out_time + jump_out_tunnel_time`. Ringeffekte, Gate-Tunnelgeometrie und Ankunftssequenz bleiben offen.
++  - [x] `glow_ring_effect`, `glow_ring_hp` und `glow_create_time` werden aus den INIs geladen. Die konfigurierten FX starten jetzt zu ihren Zeitpunkten an den Gate-Hardpoints und werden nach Ende wieder vom Objekt entfernt. Der Quellen- und Ankunftszeitpunkt ist noch nicht visuell im Spiel abgenommen.
+ - [ ] Tradelane-Reiseeffekt gegen das Original vergleichen und die vereinfachte Darstellung korrigieren. Der Client hängt `PlayerTravel` als `ParticleEffectRenderer` an; anhand von `basic_tl_player_travel`/`EFT_LANE_SHIP_TRAVEL` und `tradelaneinship01` prüfen, welche ALE-Geometrie, Partikel, Bewegung, Skalierung oder Schichtung für die originale Tunnelansicht fehlen. Mit NAP-Referenzbildern für Eintritt, Fahrt und Austritt abnehmen.
+ - [ ] Laser-, Projektil- und Explosionseffekte visuell überarbeiten: Beam- und Trefferdarstellung, Trails, Partikel, Farbverläufe, Größen- und Zeitverhalten sowie Zusammenspiel mit dynamischem Licht. Originale Freelancer-Effekte müssen weiter funktionieren; neue Qualitätseinstellungen sollen einzeln abschaltbar bleiben. Mit reproduzierbaren NAP-Kampfszenen, Vergleichsbildern und GPU-/CPU-Messungen abnehmen.
+   - [x] `vis_beam`-Geometrie gegen parallele/degenerierte Richtungen absichern und Schreibzugriffe auf den 500-Beam-Streamingpuffer begrenzen; vier Geometrietests bestehen.
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -522,7 +522,8 @@
+   - [ ] Sichtprüfung der Beam-/Explosiondarstellung, Timing-/Partikelabstimmung und einzeln schaltbare Qualitätsoptionen anhand von NAP-Referenzszenen.
+ - [x] Die in `Freelancer.ini` konfigurierten `jump_effect`- und `gate_tunnels`-Dateien in `FreelancerData` optional in typisierte Modelle laden und `SystemObject.jump_effect` case-insensitiv zum Gate-Profil auflösen. Das Profil ist vom zugehörigen `GameObject` erreichbar.
+ - [x] Den konfigurierten `jump_tunnel_effect` beim lokalen Sprung sowie beim zugelassenen Cluster-Sprung am Spielerschiff starten. Der Client startet ihn vor einem möglichen Szenenwechsel; der Loop-Sound endet nach `jump_out_time + jump_out_tunnel_time`. Die Auflösung nutzt das nächstgelegene Sprungtor mit passendem Zielsystem.
+-- [ ] Ringeffekte, Gate-Tunnelgeometrie und Ankunftssequenz implementieren. Der Abflug-Innenraumeffekt besitzt bereits den unabhängigen Startparameter `--render-jump-gate-effects=on|off`; der Übergang muss Transferbestätigung und Fehlerpfade berücksichtigen. Quellcodebefund siehe [Renderer-Roadmap](renderer-roadmap.md).
++- [x] Die per `glow_ring_effect`, `glow_ring_hp` und `glow_create_time` konfigurierten Gate-FX zeitgesteuert an den Hardpoints des Quelltores ausführen. Das Datenmodell bindet auch die `layer`-Child-Sections der Tunnel-INI korrekt ein.
++- [ ] Gate-Tunnelgeometrie und Ankunftssequenz implementieren und Abflug-/Ankunftszeiten für lokale und Cluster-Transfers im Spiel abnehmen. Der Effektpfad besitzt den unabhängigen Startparameter `--render-jump-gate-effects=on|off`; Quellcodebefund siehe [Renderer-Roadmap](renderer-roadmap.md).
+ - [ ] SSAO mit Geometrie-/Nebelmasken und Forward+ mit vielen Lichtquellen
+   implementieren; die feste Lichtgrenze erst nach Messung ersetzen.
+ - [ ] Instancing/Batching für Asteroiden, Partikel und wiederholte Objekte
+--- a/patches/series
++++ b/patches/series
+@@ -98,3 +98,4 @@
+ client 2096-system-renderer-exception-state.patch
+ client 2097-jump-effect-data-models.patch
+ client 2098-jump-tunnel-interior-effect.patch
++client 2099-jump-gate-ring-effects.patch
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -72,6 +72,7 @@
+ | 2096 | Restore SystemRenderer graphics state after exceptions |
+ | 2097 | Load typed jump gate and gate tunnel effect data |
+ | 2098 | Start the configured jump tunnel interior effect |
++| 2099 | Parse and render timed jump gate ring effects |
+ | 2011 (`lancerdecode`) | Native Vorbis EOF/reset handling |
+ | 2012 (`blurgtext`) | System FreeType without OT-SVG hooks |
+ 

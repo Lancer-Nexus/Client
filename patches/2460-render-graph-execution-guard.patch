@@ -1,0 +1,151 @@
+From: Lancer-Nexus renderer follow-up
+Subject: [PATCH] Guard render graph callback execution
+
+Reject callback-driven mutation, nested execution and schedule compilation while a render graph is running.
+
+diff --git a/src/LibreLancer.Base/Graphics/SystemRenderPass.cs b/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
+--- a/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
++++ b/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
+@@ -315,6 +315,7 @@
+     private int topologyVersion;
+     private NodeTopology[]? cachedTopology;
+     private SystemRenderResource cachedExternalResources;
++    private bool isExecuting;
+ 
+     public SystemRenderPassGraph()
+     {
+@@ -329,6 +330,7 @@
+ 
+     public void Reset()
+     {
++        EnsureNotExecuting("reset");
+         for (var i = 0; i < nodeCount; i++)
+             nodes[i].Reset();
+         nodeCount = 0;
+@@ -406,6 +408,7 @@
+         SystemRenderResource optionalReads = SystemRenderResource.None,
+         SystemRenderResource optionalWrites = SystemRenderResource.None)
+     {
++        EnsureNotExecuting("modify");
+         ArgumentException.ThrowIfNullOrWhiteSpace(name);
+         ArgumentNullException.ThrowIfNull(execute);
+         for (var i = 0; i < nodeCount; i++)
+@@ -421,18 +424,26 @@
+ 
+     public void Execute(SystemRenderResource externalResources = SystemRenderResource.None)
+     {
+-        EnsureCapacity(nodeCount);
+-        if (!HasCachedSchedule(externalResources))
+-        {
+-            // A failed compilation may have written a partial order buffer. Do not
+-            // let an older matching topology reuse that buffer on a later frame.
+-            cachedTopology = null;
+-            var count = CompileOrder(externalResources, executionOrder);
+-            CacheSchedule(externalResources);
+-            ExecuteCompiled(executionOrder, count, topologyVersion);
+-            return;
+-        }
+-        ExecuteCached();
++        BeginExecution();
++        try
++        {
++            EnsureCapacity(nodeCount);
++            if (!HasCachedSchedule(externalResources))
++            {
++                // A failed compilation may have written a partial order buffer. Do not
++                // let an older matching topology reuse that buffer on a later frame.
++                cachedTopology = null;
++                var count = CompileOrder(externalResources, executionOrder);
++                CacheSchedule(externalResources);
++                ExecuteNodes(executionOrder, count);
++                return;
++            }
++            ExecuteCached();
++        }
++        finally
++        {
++            isExecuting = false;
++        }
+     }
+ 
+     private void ExecuteCached()
+@@ -467,6 +478,7 @@
+     public SystemRenderPassSchedule CompileSchedule(
+         SystemRenderResource externalResources = SystemRenderResource.None)
+     {
++        EnsureNotExecuting("compile a schedule for");
+         var order = new int[nodeCount];
+         var count = CompileOrder(externalResources, order);
+         return new SystemRenderPassSchedule(this, order, count, topologyVersion);
+@@ -621,10 +633,35 @@
+ 
+     internal void ExecuteCompiled(int[] order, int count, int compiledVersion)
+     {
+-        if (compiledVersion != topologyVersion || count != nodeCount || order.Length < count)
+-            throw new InvalidOperationException("The render graph changed after its execution schedule was compiled.");
++        BeginExecution();
++        try
++        {
++            if (compiledVersion != topologyVersion || count != nodeCount || order.Length < count)
++                throw new InvalidOperationException("The render graph changed after its execution schedule was compiled.");
++            ExecuteNodes(order, count);
++        }
++        finally
++        {
++            isExecuting = false;
++        }
++    }
++
++    private void ExecuteNodes(int[] order, int count)
++    {
+         for (var i = 0; i < count; i++)
+             nodes[order[i]].Execute!();
++    }
++
++    private void BeginExecution()
++    {
++        EnsureNotExecuting("execute");
++        isExecuting = true;
++    }
++
++    private void EnsureNotExecuting(string operation)
++    {
++        if (isExecuting)
++            throw new InvalidOperationException($"Cannot {operation} a render graph while it is executing.");
+     }
+ 
+     private void EnsureCapacity(int required)
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -254,8 +254,11 @@
+    abhängigkeiten ordnen diese Actions auch ohne Namensverkettung ein. Ein
+    `FrameState`-Token wird vom Frame-Setup erzeugt und von Tiefen-, Schatten-,
+    Opaque-, Sterne- und Transparenzpass gelesen; dadurch folgen diese Pässe dem
+-   Setup über einen Ressourcenvertrag. Graph-Tests decken sowohl den vollständigen
+-   Forward-Pass-Ablauf als auch Lesezugriffe vor dem nächsten Writer ab. Der aktuelle
++   Setup über einen Ressourcenvertrag. Während Callback-Ausführung weist der
++   Graph Änderungen, erneute Ausführung und Schedule-Kompilierung zurück, damit
++   ein Callback die laufende Frame-Reihenfolge nicht invalidieren kann. Graph-Tests
++   decken sowohl den vollständigen Forward-Pass-Ablauf als auch Lesezugriffe vor
++   dem nächsten Writer ab. Der aktuelle
+    Systemrenderer enthält keine direkten
+    GL-Aufrufe; seine Pass-Callbacks setzen jedoch sofort Zustand und Ressourcen
+    über den konkreten `RenderContext`, dessen Laufzeitfabrik weiterhin das
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -389,3 +389,5 @@
+ | 2457 | Cover MAT normal-map PBR routing for all specialized detail-map materials |
+ | 2458 | Preserve asteroid LOD fades in PBR draws and reset per-command material fade state |
+ | 2459 | Bind the legacy Nomad BT facing-gradient sampler with compatibility fallbacks |
++
++| 2460 | Reject render-graph callback mutation and reentrant execution |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -451,3 +451,4 @@
+ client 2457-cover-mat-normal-routing-for-detail-materials.patch
+ client 2458-preserve-lod-fade-in-pbr-materials.patch
+ client 2459-use-nomad-bt-gradient.patch
++client 2460-render-graph-execution-guard.patch

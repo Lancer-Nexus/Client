@@ -1,0 +1,78 @@
+--- a/src/LibreLancer/Render/AsteroidFieldRenderer.cs
++++ b/src/LibreLancer/Render/AsteroidFieldRenderer.cs
+@@ -4,7 +4,6 @@
+ 
+ using System;
+ using System.Collections.Generic;
+-using System.Linq;
+ using System.Numerics;
+ using System.Threading.Tasks;
+ using LibreLancer.Data;
+@@ -120,8 +119,16 @@
+             }
+         }
+ 
+-        private AsteroidExclusionZone? GetExclusionZone(Vector3 pt) =>
+-            field.ExclusionZones.FirstOrDefault(f => f.Zone!.ContainsPoint(pt));
++        private bool IsInsideExclusionZone(Vector3 pt)
++        {
++            for (var i = 0; i < field.ExclusionZones.Count; i++)
++            {
++                if (field.ExclusionZones[i].Zone!.ContainsPoint(pt))
++                    return true;
++            }
++
++            return false;
++        }
+ 
+         private struct AsteroidBillboard : IComparable<AsteroidBillboard>
+         {
+@@ -297,7 +304,7 @@
+                             continue;
+                         }
+ 
+-                        if (GetExclusionZone(center) != null)
++                        if (IsInsideExclusionZone(center))
+                         {
+                             continue;
+                         }
+@@ -357,13 +364,14 @@
+                     {
+                         var center = cubes[j].pos;
+                         var z = RenderHelpers.GetZ(cameraPos, center);
++                        var renderOpaque = Vector3.Distance(center, cameraPos) + cubeMesh.Radius < fadeNear;
+ 
+                         for (var i = 0; i < cubeMesh.Drawcalls.Length; i++)
+                         {
+                             var dc = cubeMesh.Drawcalls[i];
+                             var mat = res.FindMaterial(dc.MaterialCrc);
+ 
+-                            if ((Vector3.Distance(center, cameraPos) + cubeMesh.Radius) < fadeNear)
++                            if (renderOpaque)
+                             {
+                                 buffer.AddCommand(
+                                     mat!.Render,
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -21,6 +21,7 @@
+ | LOD-/Modell-Culling | Die größte Archetyp- oder Mesh-LOD-Distanz wird ohne LINQ-Iteratoren ermittelt und pro Renderer gecacht, bis sich Modell oder Override-Array ändern. Leere Modelldistanzen blenden das Modell nicht mehr fälschlich aus; Mesh-eigene LOD-Distanzen aktivieren den frühen Distanz-Cull auch ohne Archetypwerte. | Vermeidet wiederholte Scans aller Modellteile im frühen Draw-Cull und erhält gültige Mesh-LODs. Der tatsächliche CPU-/FPS-Gewinn muss in festen Schiff-, Stations- und Asteroiden-Szenen gemessen werden. |
+ | Asteroidenfeld-Culling | Asteroidenwürfel und Billboards vergleichen ihre quadrierten Distanzen gegen die jeweiligen Reichweiten; die innere Kandidatenprüfung vermeidet damit wiederholte Quadratwurzeln. | Der Cull-Grenzwert bleibt mathematisch äquivalent für endliche, nichtnegative Reichweiten. Der CPU-Gewinn und Sichtbarkeit an Grenzfällen müssen in dichten NAP-Asteroidenfeldern gemessen werden. |
+ | Asteroidenfeld-Puffer | Kandidatenpuffer für dynamische Billboards und Asteroidenwürfel wachsen vor dem Einfügen, wenn ein dichtes Feld die bisherige Standardkapazität überschreitet. | Verhindert Indexfehler bei größeren Feldern; Billboard-Endausgabe bleibt weiterhin auf die konfigurierte Zahl begrenzt und nach Distanz sortiert. Speicherkosten bei Extremfeldern müssen noch gemessen werden. |
++| Asteroidenfeld-Culling | Ausschlusszonen werden ohne LINQ-Iterator geprüft; die Cube-Oberflächenentfernung wird einmal je Cube statt für jeden Material-Drawcall berechnet. | Entfernt pro Kandidat Iterator-Allokationen und vermeidet wiederholte Quadratwurzeln bei mehrteiligen Asteroidenmeshes. Sichtbarkeit bleibt gleich; FPS-Wirkung muss mit festem Asteroidenfeld-Profil gemessen werden. |
+ | Temporäre Effekte | `SystemRenderer.SpawnTempFx` reiht keine fehlenden ParticleEffects ein; `ParticleEffectRenderer(null)` gilt sofort als beendet und bleibt auch nach `Restart()` beendet. Der Partikel-Cull verwendet die vorhandene vorberechnete Distanzkonstante statt `Math.Pow` pro Effekt und Frame. Kurzlebige Effektlichter akkumulieren nur endliche Framezeiten und sättigen ihr Animationsalter, bevor es nicht-endlich werden kann. Über `SpawnTempFx` erzeugte Partikeleffekte simulieren außerhalb der Distanzgrenze weiter und können regulär auslaufen; dauerhafte Effekte bleiben gecullt. | Ein Regressionstest deckt den Null-Effekt-Lebenszyklus ab. Fehlende oder nicht auflösbare ALE-Effekte bleiben als mögliche Ursache unsichtbarer Einzel-Explosionen gesondert zu diagnostizieren. |
+ | Antialiasing | SMAA-Pässe und MSAA-Auflösung; HDR/LDR-Kombinationen sowie Resize und Minimize/Restore wurden auf OpenGL/Mesa geprüft. | Andere Backends/Treiber, wiederholte Lifecycle-Zyklen und Fehler-Injektion stehen aus. |
+ | GPU-Subpass-Abbruch | Postprocess-, Bloom-, SMAA-, SSAO- und MSAA-Subpasses melden `Begin`, `End` oder `Abort`. Nur ein erfolgreich beendeter Subpass veröffentlicht seine geschriebenen Ressourcen für nachfolgende Pässe. | Zwei Regressionstests prüfen, dass abgebrochene Ausgaben nicht verfügbar werden und erfolgreiche Ausgaben weitergereicht werden. Fehler-Injektion im nativen Backend bleibt offen. Siehe Patch `2407-render-subpass-abort-contract.patch`. |
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -399,3 +399,4 @@
+ | 2464 | Record NAP-only PBR and legacy nebula render captures with explicit visual limits |
+ | 2465 | Record the NAP version mismatch diagnosis and successful current manifest recheck |
+ | 2466 | Record paired Hi02 normal-map option captures and visual limits |
++| 2467 | Avoid redundant asteroid exclusion-zone and cube-distance work during rendering |
+--- a/patches/series
++++ b/patches/series
+@@ -458,3 +458,4 @@
+ client 2464-pbr-nebula-visual-smoke.patch
+ client 2465-document-nap-manifest-recheck.patch
+ client 2466-hi02-normalmaps-run-ab-evidence.patch
++client 2467-asteroid-render-culling-hotpath.patch

@@ -1,0 +1,98 @@
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -463,13 +463,16 @@
+             LightAnim? lightAnimation = null, float lightRadius = 0, float lightTimeScale = 1f,
+             float lightRangeScale = 0f)
+         {
+-            var ren = new ParticleEffectRenderer(fx)
+-            {
+-                SParam = 0,
+-                Active = true
+-            };
+-
+-            tempFx.Add(new TemporaryFx(ren, position));
++            if (fx != null)
++            {
++                var ren = new ParticleEffectRenderer(fx)
++                {
++                    SParam = 0,
++                    Active = true
++                };
++
++                tempFx.Add(new TemporaryFx(ren, position));
++            }
+             if (lightAnimation is not { Duration: > 0 } || !float.IsFinite(lightRadius) || lightRadius <= 0)
+                 return;
+ 
+diff --git a/src/LibreLancer/Render/ParticleEffectRenderer.cs b/src/LibreLancer/Render/ParticleEffectRenderer.cs
+--- a/src/LibreLancer/Render/ParticleEffectRenderer.cs
++++ b/src/LibreLancer/Render/ParticleEffectRenderer.cs
+@@ -38,5 +38,6 @@
+ 		{
+             if (effect == null)
+             {
++                Finished = true;
+                 return;
+             }
+@@ -53,7 +54,13 @@
+         public void Restart()
+         {
+-            fx?.Reset();
++            if (fx == null)
++            {
++                Finished = true;
++                return;
++            }
++
++            fx.Reset();
+             Finished = false;
+             effectLightAge = 0;
+         }
+ 
+@@ -73,7 +74,7 @@
+             cameraPos = camera.Position;
+             dist = Vector3.DistanceSquared(pos, camera.Position);
+             fx.Resources = sys.ResourceManager;
+-            if (Active && dist < Math.Pow(20000, 2) && !forceCull)
++            if (Active && dist < CULL && !forceCull)
+             {
+                 sys.AddObject(this);
+                 fx.Pool = sys.FxPool;
+diff --git a/src/LibreLancer.Tests/ParticleEffectRendererTests.cs b/src/LibreLancer.Tests/ParticleEffectRendererTests.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Tests/ParticleEffectRendererTests.cs
+@@ -0,0 +1,13 @@
++using LibreLancer.Render;
++using Xunit;
++
++public class ParticleEffectRendererTests
++{
++    [Fact]
++    public void MissingParticleEffectStartsFinished()
++    {
++        var renderer = new ParticleEffectRenderer(null);
++
++        Assert.True(renderer.Finished);
++    }
++}
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -15,6 +15,7 @@
+ | Legacy-Environment-Maps | Bestehende Freelancer-Cubemap-Reflexionen lassen sich unabhängig vom PBR-IBL per Einstellung oder `--render-legacy-environment-maps=on|off` umschalten. Der Standard bleibt `on`, damit ältere Materialien ihr bisheriges Verhalten behalten. | Beide Startwerte laden bis ins Intro. Der gleiche Kamera-A/B-Bildvergleich fehlt noch; externe Bildschirmaufnahmen waren in der letzten Sitzung schwarz. |
+ | HDR und Tonemapping | Linearisiertes Scene-Target, ACES-Tonemapping, linearisierte PBR-Albedo-/Licht-/Emissionswerte und exakte sRGB-Ausgabe im PBR-LDR-Pfad. System- und Nebel-Clearfarben werden ebenfalls vor dem HDR-Clear linearisiert; LDR bleibt unverändert. Ein Source-Audit hat alle 19 Ingame-Fragmentshader und den Postprocess-Ausgang geprüft; 2 Farbraum- und 21 Ambientlicht-Regressionstests bestehen. | Retail-Farbannahmen, visuelle Gleichheit zwischen Legacy/PBR, transparente Effekte, Fog und zusammengesetzte Ingame-Szenen brauchen weiterhin feste Bildvergleiche, Original-Client-Referenz und Hardware-GPU-Abnahme. HDR/LDR-Vergleiche: `docs/evidence/renderer/postprocess-four-mode-ab-20261017/` und der same-session-Hi02-Lauf `docs/evidence/renderer/hdr-ldr-hi02-live-ab-20261018/`; letzterer zeigt in dieser Legacy-Szene nur geringe Pixelabweichung und ersetzt keine Material-/Emissions-Referenz. Shaderaudit: `docs/evidence/renderer/hdr-shader-color-contract-audit-20261018.md`; Clear-Farbvertrag: `docs/evidence/renderer/hdr-clear-color-contract-20261018.md`. |
+ | Bloom | HDR-Extraktion mittelt jetzt ein vollständiges 4×4-Quellfenster in Viertelauflösung; aufrundende Zielmaße behalten Randpixel bei ungeraden Fenstergrößen. Basis-, mittlere und breite Blur-Stufen sowie Schwelle, Radius, Auflösung und Kernel sind konfigurierbar. | Die Extraktion beseitigt das bisherige Unterabtasten der zentralen vier Texel. Der Code führt alle drei Stufen aus. NAP-only M01A-Läufe am 19.10. vergleichen Bloom ein/aus und schalten in einem dritten Lauf zusätzlich Partikeleffekte aus. Der große Ring verschwindet mit den Explosionspartikeln; NAP-Fuse- und ALE-Daten verknüpfen ihn mit dem `planetflare`-Flashbang der Freeport-7-Explosion und grenzen ihn von Bloom ab. Die bewegten Frames sind nicht pixelgenau, die einzelne Flashbang-Instanz bleibt offen. Siehe [`NAP M01A Bloom-/Partikelmatrix`](evidence/renderer/nap-full-runtime-20261019/README.md). GPU-Kosten bleiben offen. |
++| Temporäre Effekte | `SystemRenderer.SpawnTempFx` reiht keine fehlenden ParticleEffects ein; `ParticleEffectRenderer(null)` gilt sofort als beendet und bleibt auch nach `Restart()` beendet. Der Partikel-Cull verwendet die vorhandene vorberechnete Distanzkonstante statt `Math.Pow` pro Effekt und Frame. | Ein Regressionstest deckt den Null-Effekt-Lebenszyklus ab. Fehlende oder nicht auflösbare ALE-Effekte bleiben als mögliche Ursache unsichtbarer Einzel-Explosionen gesondert zu diagnostizieren. |
+ | Antialiasing | SMAA-Pässe und MSAA-Auflösung; HDR/LDR-Kombinationen sowie Resize und Minimize/Restore wurden auf OpenGL/Mesa geprüft. | Andere Backends/Treiber, wiederholte Lifecycle-Zyklen und Fehler-Injektion stehen aus. |
+ | GPU-Subpass-Abbruch | Postprocess-, Bloom-, SMAA-, SSAO- und MSAA-Subpasses melden `Begin`, `End` oder `Abort`. Nur ein erfolgreich beendeter Subpass veröffentlicht seine geschriebenen Ressourcen für nachfolgende Pässe. | Zwei Regressionstests prüfen, dass abgebrochene Ausgaben nicht verfügbar werden und erfolgreiche Ausgaben weitergereicht werden. Fehler-Injektion im nativen Backend bleibt offen. Siehe Patch `2407-render-subpass-abort-contract.patch`. |
+ | Nomad-Gradient | Der HLSL-Shader begrenzt den View-/Normal-Dot-Product nun wie der frühere LibreLancer-Shader auf `[0, 1]`, anstatt den gesamten signierten Bereich auf `[0, 1]` umzurechnen. | Produktionsshader-Build und gezielter Nomad-Schiff-A/B mit Retail-NAP-Daten stehen aus. Quellvergleich: `docs/evidence/renderer/nomad-gradient-legacy-parity-20261018.md`. |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -406,3 +406,4 @@
+ client 2406-sdl-gpu-cmp-material-submeshes.patch
+ client 2407-render-subpass-abort-contract.patch
+ client 2408-sdl-gpu-dfm-readback-validation.patch
++client 2409-temporary-effect-null-lifecycle.patch

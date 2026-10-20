@@ -1,0 +1,216 @@
+From: Lancer-Nexus renderer follow-up
+Subject: [PATCH] Split update and draw CPU frame timings
+
+Expose per-frame CPU time for simulation updates and drawing plus RenderContext.EndFrame, preserving the existing total update/draw duration. Record both components in renderer CSV and percentile diagnostics.
+
+diff --git a/src/LibreLancer.Base/Platforms/IGame.cs b/src/LibreLancer.Base/Platforms/IGame.cs
+--- a/src/LibreLancer.Base/Platforms/IGame.cs
++++ b/src/LibreLancer.Base/Platforms/IGame.cs
+@@ -33,6 +33,8 @@
+     double RenderFrequency { get; }
+     double FrameTime { get; }
+     double FrameWorkTime { get; }
++    double FrameUpdateTime { get; }
++    double FrameDrawEndTime { get; }
+     double FrameInterval { get; }
+     //Hardware
+     bool RelativeMouseMode { get; set; }
+diff --git a/src/LibreLancer.Base/Game.cs b/src/LibreLancer.Base/Game.cs
+--- a/src/LibreLancer.Base/Game.cs
++++ b/src/LibreLancer.Base/Game.cs
+@@ -176,6 +176,8 @@
+     public double RenderFrequency => impl.RenderFrequency;
+     public double FrameTime => impl.FrameTime;
+     public double FrameWorkTime => impl.FrameWorkTime;
++    public double FrameUpdateTime => impl.FrameUpdateTime;
++    public double FrameDrawEndTime => impl.FrameDrawEndTime;
+     public double FrameInterval => impl.FrameInterval;
+ 
+ 
+diff --git a/src/LibreLancer.Base/Platforms/NullGame.cs b/src/LibreLancer.Base/Platforms/NullGame.cs
+--- a/src/LibreLancer.Base/Platforms/NullGame.cs
++++ b/src/LibreLancer.Base/Platforms/NullGame.cs
+@@ -103,6 +103,8 @@
+     public double RenderFrequency => 60.0;
+     public double FrameTime => 1 / 60.0;
+     public double FrameWorkTime => 1 / 60.0;
++    public double FrameUpdateTime => 1 / 120.0;
++    public double FrameDrawEndTime => 1 / 120.0;
+     public double FrameInterval => 1 / 60.0;
+     public string? Renderer => "NULL";
+     public RenderContext RenderContext { get; set; } = new(new NullRenderContext());
+diff --git a/src/LibreLancer.Base/Platforms/SDL2Game.cs b/src/LibreLancer.Base/Platforms/SDL2Game.cs
+--- a/src/LibreLancer.Base/Platforms/SDL2Game.cs
++++ b/src/LibreLancer.Base/Platforms/SDL2Game.cs
+@@ -185,10 +185,14 @@
+ 
+     public double RenderFrequency => renderFrequency;
+     public double FrameWorkTime => lastFrameWorkTime;
++    public double FrameUpdateTime => lastFrameUpdateTime;
++    public double FrameDrawEndTime => lastFrameDrawEndTime;
+     public double FrameInterval => lastFrameInterval;
+ 
+     private double frameTime;
+     private double lastFrameWorkTime;
++    private double lastFrameUpdateTime;
++    private double lastFrameDrawEndTime;
+     private double lastFrameInterval;
+     public double FrameTime => frameTime;
+ 
+@@ -606,6 +610,7 @@
+             RenderContext.Backend.QueryFences();
+             totalTime = timer.Elapsed.TotalSeconds;
+             loop.OnUpdate(elapsed);
++            var updateWorkTime = timer.Elapsed.TotalSeconds - totalTime;
+             if (!running)
+             {
+                 break;
+@@ -616,6 +621,8 @@
+             //Frame time before, FPS after
+             var tk = timer.Elapsed.TotalSeconds - totalTime;
+             lastFrameWorkTime = tk;
++            lastFrameUpdateTime = updateWorkTime;
++            lastFrameDrawEndTime = tk - updateWorkTime;
+             frameTime = CalcAverageTime(tk);
+             if (_screenshot)
+             {
+diff --git a/src/LibreLancer.Base/Platforms/SDL3Game.cs b/src/LibreLancer.Base/Platforms/SDL3Game.cs
+--- a/src/LibreLancer.Base/Platforms/SDL3Game.cs
++++ b/src/LibreLancer.Base/Platforms/SDL3Game.cs
+@@ -228,11 +228,15 @@
+ 
+     public double RenderFrequency => renderFrequency;
+     public double FrameWorkTime => lastFrameWorkTime;
++    public double FrameUpdateTime => lastFrameUpdateTime;
++    public double FrameDrawEndTime => lastFrameDrawEndTime;
+     public double FrameInterval => lastFrameInterval;
+     public double FrameTime => frameTime;
+ 
+     private double frameTime;
+     private double lastFrameWorkTime;
++    private double lastFrameUpdateTime;
++    private double lastFrameDrawEndTime;
+     private double lastFrameInterval;
+ 
+     public void QueueUIThread(Action work)
+@@ -628,6 +632,7 @@
+ 
+             totalTime = timer.Elapsed.TotalSeconds;
+             loop.OnUpdate(elapsed);
++            var updateWorkTime = timer.Elapsed.TotalSeconds - totalTime;
+             if (!running)
+                 break;
+             loop.OnDraw(elapsed);
+@@ -635,6 +640,8 @@
+             //Frame time before, FPS after
+             var tk = timer.Elapsed.TotalSeconds - totalTime;
+             lastFrameWorkTime = tk;
++            lastFrameUpdateTime = updateWorkTime;
++            lastFrameDrawEndTime = tk - updateWorkTime;
+             frameTime = CalcAverageTime(tk);
+             if (_screenshot)
+             {
+diff --git a/src/LibreLancer/Interface/DebugView.cs b/src/LibreLancer/Interface/DebugView.cs
+--- a/src/LibreLancer/Interface/DebugView.cs
++++ b/src/LibreLancer/Interface/DebugView.cs
+@@ -22,6 +22,8 @@
+     {
+         private const int PerformanceSampleCount = 300;
+         private readonly double[] frameWorkSamples = new double[PerformanceSampleCount];
++        private readonly double[] frameUpdateSamples = new double[PerformanceSampleCount];
++        private readonly double[] frameDrawEndSamples = new double[PerformanceSampleCount];
+         private readonly double[] frameIntervalSamples = new double[PerformanceSampleCount];
+         private readonly double[] gpuPassTimeSamples = new double[PerformanceSampleCount * GpuPassProfile.Count];
+         private readonly long[] gpuPassAgeSamples = new long[PerformanceSampleCount * GpuPassProfile.Count];
+@@ -45,6 +47,8 @@
+         private int performanceSamplesRecorded;
+         private double nextPerformancePercentileTime;
+         private double[] frameWorkPercentiles = new double[3];
++        private double[] frameUpdatePercentiles = new double[3];
++        private double[] frameDrawEndPercentiles = new double[3];
+         private double[] frameIntervalPercentiles = new double[3];
+         private string? profileExportMessage;
+         private string? profileOptionsSnapshot;
+@@ -225,6 +229,8 @@
+                 if (captureProfile || !settings.RenderProfileCapture)
+                 {
+                     frameWorkSamples[performanceSampleIndex] = game.FrameWorkTime;
++                    frameUpdateSamples[performanceSampleIndex] = game.FrameUpdateTime;
++                    frameDrawEndSamples[performanceSampleIndex] = game.FrameDrawEndTime;
+                     frameIntervalSamples[performanceSampleIndex] = game.FrameInterval;
+                     frameWidthSamples[performanceSampleIndex] = game.Width;
+                     frameHeightSamples[performanceSampleIndex] = game.Height;
+@@ -255,6 +261,8 @@
+                     if (performanceSamplesRecorded > 0 && game.TotalTime >= nextPerformancePercentileTime)
+                     {
+                         UpdatePercentiles(frameWorkSamples, performanceSamplesRecorded, frameWorkPercentiles);
++                        UpdatePercentiles(frameUpdateSamples, performanceSamplesRecorded, frameUpdatePercentiles);
++                        UpdatePercentiles(frameDrawEndSamples, performanceSamplesRecorded, frameDrawEndPercentiles);
+                         UpdatePercentiles(frameIntervalSamples, performanceSamplesRecorded, frameIntervalPercentiles);
+                         nextPerformancePercentileTime = game.TotalTime + 0.25;
+                     }
+@@ -293,6 +301,8 @@
+                 if (performanceSamplesRecorded > 0)
+                 {
+                     ImGui.Text($"Update + draw ms p50/p95/p99 (n={performanceSamplesRecorded}/{PerformanceSampleCount}): {frameWorkPercentiles[0] * 1000:F2} / {frameWorkPercentiles[1] * 1000:F2} / {frameWorkPercentiles[2] * 1000:F2}");
++                    ImGui.Text($"Update ms p50/p95/p99: {frameUpdatePercentiles[0] * 1000:F2} / {frameUpdatePercentiles[1] * 1000:F2} / {frameUpdatePercentiles[2] * 1000:F2}");
++                    ImGui.Text($"Draw + EndFrame ms p50/p95/p99: {frameDrawEndPercentiles[0] * 1000:F2} / {frameDrawEndPercentiles[1] * 1000:F2} / {frameDrawEndPercentiles[2] * 1000:F2}");
+                     ImGui.Text($"Frame interval ms p50/p95/p99: {frameIntervalPercentiles[0] * 1000:F2} / {frameIntervalPercentiles[1] * 1000:F2} / {frameIntervalPercentiles[2] * 1000:F2}");
+                 }
+                 if (!game.RenderContext.SupportsGpuTimerQueries)
+@@ -374,7 +384,7 @@
+             var filename = $"frame-profile-{timestamp}.csv";
+             var path = Path.Combine(directory, filename);
+             var csv = new StringBuilder();
+-            csv.Append("frame,renderer,width,height,update_draw_ms,frame_interval_ms,fps,render_options_initial_json");
++            csv.Append("frame,renderer,width,height,update_draw_ms,update_ms,draw_endframe_ms,frame_interval_ms,fps,render_options_initial_json");
+             for (var pass = 0; pass < GpuPassProfile.Count; pass++)
+             {
+                 var columnName = GpuPassProfile.GetColumnName(pass);
+@@ -388,6 +398,8 @@
+             {
+                 var index = (start + i) % PerformanceSampleCount;
+                 var workMs = frameWorkSamples[index] * 1000;
++                var updateMs = frameUpdateSamples[index] * 1000;
++                var drawEndMs = frameDrawEndSamples[index] * 1000;
+                 var intervalMs = frameIntervalSamples[index] * 1000;
+                 var fps = frameIntervalSamples[index] > 0 ? 1 / frameIntervalSamples[index] : 0;
+                 csv.Append(i.ToString(CultureInfo.InvariantCulture)).Append(',');
+@@ -396,6 +408,8 @@
+                     .Append(frameWidthSamples[index].ToString(CultureInfo.InvariantCulture)).Append(',')
+                     .Append(frameHeightSamples[index].ToString(CultureInfo.InvariantCulture)).Append(',')
+                     .Append(workMs.ToString("F4", CultureInfo.InvariantCulture)).Append(',')
++                    .Append(updateMs.ToString("F4", CultureInfo.InvariantCulture)).Append(',')
++                    .Append(drawEndMs.ToString("F4", CultureInfo.InvariantCulture)).Append(',')
+                     .Append(intervalMs.ToString("F4", CultureInfo.InvariantCulture)).Append(',')
+                     .Append(fps.ToString("F2", CultureInfo.InvariantCulture)).Append(",");
+                 AppendCsvField(csv, profileOptionsSnapshot ?? "{}");
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -32,7 +32,7 @@
+ | Shader-Cache über Context-Wechsel | Built-in-Shaderbündel werden je `RenderContext` neu bezogen; `AsteroidBandMaterial` hält keinen globalen Shaderverweis mehr. | Headless-Regression prüft den Wechsel nach dem Schließen des ersten Shader-Scopes. Native GL-Kontextverlust- und Gerätewechselabnahme bleiben offen. Siehe `docs/evidence/renderer/render-context-shader-cache-20261018.md`. |
+ | Shader-Kompilierung | Alle 26 Shader-Bundles und die definierten Feature-Permutationen kompilieren mit dem im Repository enthaltenen DXC; der Release-Build vom 19.10. bindet zusätzlich den skinned DFM-DetailMap-Shader ein. Der SDL_GPU/Vulkan-Pipeline-Audit erstellte alle 3.495 Produktionspipelines. | Shader- und Pipeline-Erstellung sind belegt, nicht das Zeichnen realer Assets auf unterstützten Treibern. Der Haswell-Vulkan-Treiber meldet unvollständige Unterstützung. Siehe [Pipeline-Audit 2026-10-19](evidence/renderer/sdl-gpu-production-pipeline-audit-20261019.md). |
+ | Dynamische Lichter und Schatten | Persistente und kurzlebige Lichter werden priorisiert; `lgt_effect`-Lichter von fliegenden Projektilen folgen nun dem Projektilalter und seiner Position. Ein ausgewähltes Richtungslicht läuft durch Shadow-Map-Pass und 3×3-PCF. Alpha-Test-Texturen werden auch in PBR-Depth-/Shadow-Pässen anhand eines Material-Uniforms ausgeschnitten; blendtransparente Materialien werfen keine Schatten. Lichtprojektion ist im Licht-XY-Raum verankert und texelgesnappt; Mesh-Cullingradien berücksichtigen `RenderScale`. Der Shadow-Frustum-Fit hält seine acht Ecken in einem Stack-Puffer statt pro Frame ein Array zu allozieren. Die Frame-Lichtaufnahme verwirft jetzt zusätzlich nicht-endliche Positionen, Richtungen, Farben, Attenuation- und Projektionsparameter, bevor Priorisierung oder Shaderbindung sie verwenden. | Unit-Tests decken Lichtkurvenzeit, Position, Gruppe und ungültige Radien für Projektil-Lichter ab. Hi02 belegt Pass, Lichtauswahl und Live-Schaltung auf einer OpenGL-GPU. Kamera-Fit-/Stabilitäts- und RenderScale-Radiustests bestehen. Ein NAP-only-Hi02-A/B auf Intel HD 4600 bestätigt den aktiven Pass bei Bias 0 und 0,02; der Hull-Unterschied ist subtil und kalibriert keinen empfohlenen Wert. Eine Ingame-Abnahme von Waffenfeuer-/Projektillichtern, Offscreen-Castern, weiteren Materialien/Szenen und GPU-Kosten bleibt offen. Siehe `docs/evidence/renderer/shadow-map-hi02-live-toggle-20261017/`, `docs/evidence/renderer/shadow-camera-stability-20261018.md` und `docs/evidence/renderer/scaled-model-culling-20261018.md`. |
+-| Diagnose | CPU-Framezeitprofile, asynchrone OpenGL-GPU-Passzeiten, Bloom-/Shadow-Passzeiten, Ziel-/Speicherschätzungen und CSV-Ausgabe. Environment-Cubemaps mit mehreren Catalog-Aliasen werden im geschätzten GPU-Texturspeicher nur einmal gezählt und bei Bereinigung auch nur einmal freigegeben. Fehlende nullable GPU-Timer-Handles werden beim Polling übersprungen; das Abschalten des Profilings nutzt denselben fehlerfortsetzenden Freigabepfad wie der Systemrenderer-Lifecycle. | Fokustests prüfen fehlende und erfolgreiche Timer-Samples sowie Cleanup-Fehlerfortsetzung. Langzeitprofile und plattformübergreifende Vergleichsbaselines fehlen. Einzelne asynchrone Samples sind keine FPS-Baseline. |
++| Diagnose | CPU-Framezeitprofile trennen nun Simulation-Update von Draw plus GPU-Submit; asynchrone OpenGL-GPU-Passzeiten, Bloom-/Shadow-Passzeiten, Ziel-/Speicherschätzungen und CSV-Ausgabe sind ebenfalls enthalten. Environment-Cubemaps mit mehreren Catalog-Aliasen werden im geschätzten GPU-Texturspeicher nur einmal gezählt und bei Bereinigung auch nur einmal freigegeben. Fehlende nullable GPU-Timer-Handles werden beim Polling übersprungen; das Abschalten des Profilings nutzt denselben fehlerfortsetzenden Freigabepfad wie der Systemrenderer-Lifecycle. | Fokustests prüfen fehlende und erfolgreiche Timer-Samples sowie Cleanup-Fehlerfortsetzung. Langzeitprofile und plattformübergreifende Vergleichsbaselines fehlen. Einzelne asynchrone Samples sind keine FPS-Baseline. |
+ 
+ Der Null-Lichtpfad ist mit `RenderLightingTests.SetLightsAcceptsAmbientOnlyLightingWithoutSourceOwner` direkt abgesichert: Ambient-Beleuchtung ohne `SourceLighting`-Besitzer muss gültig bleiben. Der NAP-only-Intro-Smoke in [Intro-Licht-Smoke](evidence/renderer/dynamic-lighting-intro-smoke-20261018/README.md) erreichte FP7 mit dynamischer Beleuchtung an und aus ohne Renderer-Ausnahme. Die visuellen Unterschiede zeigen, dass deaktivierte dynamische Beleuchtung das Intro deutlich abdunkelt; abschließende Kalibrierung und Hardware-Performance sind offen.
+ 
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -391,3 +391,5 @@
+ | 2459 | Bind the legacy Nomad BT facing-gradient sampler with compatibility fallbacks |
+ 
+ | 2460 | Reject render-graph callback mutation and reentrant execution |
++
++| 2461 | Split renderer CPU profiles into update and draw plus GPU submit time |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -452,3 +452,4 @@
+ client 2458-preserve-lod-fade-in-pbr-materials.patch
+ client 2459-use-nomad-bt-gradient.patch
+ client 2460-render-graph-execution-guard.patch
++client 2461-split-renderer-cpu-profile-times.patch

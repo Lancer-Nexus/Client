@@ -18,22 +18,7 @@ namespace LibreLancer.World.Components
         private StrafeControls avoidanceStrafe = StrafeControls.None;
         private Vector2 avoidanceVector = Vector2.Zero;
         private float avoidanceClearTimer = 0;
-        internal const float AvoidanceClearDelay = 1.0f;
-
-        internal AutopilotAvoidanceTransferState CaptureTransferState() => new()
-        {
-            Strafe = avoidanceStrafe,
-            Vector = avoidanceVector,
-            ClearTimer = avoidanceClearTimer
-        };
-
-        internal void RestoreTransferState(AutopilotAvoidanceTransferState state)
-        {
-            state.Validate();
-            avoidanceStrafe = state.Strafe;
-            avoidanceVector = state.Vector;
-            avoidanceClearTimer = state.ClearTimer;
-        }
+        private const float AvoidanceClearDelay = 1.0f;
 
         internal readonly struct AvoidancePlan(bool active, StrafeControls strafe, Vector2 strafeVector)
         {
@@ -176,7 +161,7 @@ namespace LibreLancer.World.Components
                     candidates, heldIndex, false);
                 if (avoidanceVector != Vector2.Zero)
                 {
-                    avoidanceClearTimer = MathF.Min(AvoidanceClearDelay, avoidanceClearTimer + (float)time);
+                    avoidanceClearTimer += (float)time;
                     if (avoidanceClearTimer < AvoidanceClearDelay)
                     {
                         return new AvoidancePlan(true, avoidanceStrafe, avoidanceVector);

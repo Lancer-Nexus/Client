@@ -1,0 +1,141 @@
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -229,6 +229,34 @@
+ Treibern oder GPUs.
+ 
+ 
++## SDL_GPU-Probe
++
++`lancer --sdl-gpu-smoke` initialisiert SDL3, erstellt ein SDL_GPU-Gerät,
++beansprucht ein Fenster ohne OpenGL-Flag und erwirbt ein Swapchain-Bild. Der
++normale Shader-Build erzeugt ein SPIR-V-Vertex-/Fragmentpaar. Der Probe lädt
++einen interleavten Vertexbuffer aus `FLOAT2`-Position und `FLOAT2`-UV über
++einen Transferbuffer hoch und richtet das Vertexlayout ein. Zusätzlich lädt er
++einen bekannten 4×4-BC5-Block mit konstanten Normal-XY-Werten hoch, bindet
++einen Nearest-Sampler und rekonstruiert die Z-Komponente im Fragmentshader.
++Vor der Anlage wird die Formatfähigkeit des SDL_GPU-Geräts abgefragt. Der Shadercompiler übergibt nun die aus SPIR-V
++reflektierten Sampler-, Storage- und Uniformbuffer-Zahlen korrekt an SDL_GPU;
++zuvor blieben diese Felder trotz vorhandener Reflektion auf null.
++
++Nach dem Draw lädt ein Download-Transferbuffer den mittleren Swapchain-Pixel
++zurück. Der Probe wartet auf das Fence und vergleicht den Pixel mit der
++bekannten rekonstruierten Normalfarbe. Damit sind Shader-Pipeline, Vertexbuffer und -layout,
++BC5-Textur-Upload, Samplerbindung, Fragment-Sampling, Normalrekonstruktion, Pixel-Readback und
++Präsentation auf SDL_GPU praktisch geprüft. Der Probe enthält weiterhin keine
++Freelancer-Spielshader, Freelancer-FVF-Layouts, Skinning, Materialauflösung
++oder Spiel-/Editor-Szenen; er ersetzt die SDL_GPU-Spike-Abnahme aus P5 nicht.
++
++Am 18.10.2026 bestand der Release-Client den Probe auf Mesa/Vulkan mit Intel
++Haswell sowie auf Lavapipe. Beide Läufe lieferten bei 640×360 den Mittelpunkt
++`(204, 153, 226, 255)` innerhalb der UNORM-Toleranz. Mesa meldet
++unvollständige Haswell-Vulkan-Unterstützung. Der konstante BC5-Block prüft den
++komprimierten Formatpfad, aber keine Freelancer-Texturen, Tangentenbasis,
++Freelancer-FVF-Layouts oder Bildqualität in einer Spielszene.
++
+ ## Backend-Grenzen
+ 
+ Der Screenshotpfad ist von SDL2/SDL3 nach `RenderContext.ReadBackbuffer`
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -290,3 +290,5 @@
+ | 2342 | Record backend-neutral enum and depth-state NAP runtime smoke |
+ 
+ | 2343 | Move SDL screenshot readback behind the render backend interface |
++
++| 2344 | Add SDL_GPU vertex upload, BC5 normal-map sampling, pipeline and pixel readback smoke |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -343,3 +343,4 @@
+ client 2341-neutralize-wrap-and-vertex-enums.patch
+ client 2342-record-neutral-enums-nap-smoke.patch
+ client 2343-renderer-readback-contract.patch
++client 2344-sdl-gpu-swapchain-smoke.patch
+diff --git a/src/LLShaderCompiler/Translation/SpvcReflection.cs b/src/LLShaderCompiler/Translation/SpvcReflection.cs
+--- a/src/LLShaderCompiler/Translation/SpvcReflection.cs
++++ b/src/LLShaderCompiler/Translation/SpvcReflection.cs
+@@ -98,6 +98,12 @@
+             }
+         }
+ 
+-        return new ReflectedShader("main", spirv);
++        return new ReflectedShader("main", spirv)
++        {
++            NumSamplers = checked((uint)numTextureSamplers),
++            NumStorageTextures = checked((uint)numStorageTextures),
++            NumStorageBuffers = checked((uint)numStorageBuffers),
++            NumUniformBuffers = checked((uint)numUniformBuffers)
++        };
+     }
+ }
+diff --git a/src/LibreLancer.Base/LibreLancer.Base.csproj b/src/LibreLancer.Base/LibreLancer.Base.csproj
+--- a/src/LibreLancer.Base/LibreLancer.Base.csproj
++++ b/src/LibreLancer.Base/LibreLancer.Base.csproj
+@@ -46,6 +46,7 @@
+     <Shader Include="Shaders\BloomExtract.txt" />
+     <Shader Include="Shaders\BloomBlur.txt" />
+     <Shader Include="Shaders\ScreenSpaceAmbientOcclusion.txt" />
++    <Shader Include="Shaders\SDLGPUSmoke.txt" />
+   </ItemGroup>
+ 
+   <ItemGroup>
+diff --git a/src/LibreLancer.Base/SDL/SDL3.cs b/src/LibreLancer.Base/SDL/SDL3.cs
+--- a/src/LibreLancer.Base/SDL/SDL3.cs
++++ b/src/LibreLancer.Base/SDL/SDL3.cs
+@@ -5354,8 +5354,6 @@
+ 	[return: MarshalUsing(typeof(CallerOwnedStringMarshaller))]
+ 	public static partial string SDL_GetCurrentDirectory();
+ 
+-    /* SDL3_FULL
+-
+ 	// /usr/local/include/SDL3/SDL_gpu.h
+ 
+ 	public const string SDL_PROP_GPU_DEVICE_CREATE_DEBUGMODE_BOOLEAN = "SDL.gpu.device.create.debugmode";
+@@ -6284,7 +6282,7 @@
+ 
+ 	[LibraryImport(nativeLibName)]
+ 	[UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+-	public static partial IntPtr SDL_BeginGPURenderPass(IntPtr command_buffer, Span<SDL_GPUColorTargetInfo> color_target_infos, uint num_color_targets, in SDL_GPUDepthStencilTargetInfo depth_stencil_target_info);
++	public static partial IntPtr SDL_BeginGPURenderPass(IntPtr command_buffer, Span<SDL_GPUColorTargetInfo> color_target_infos, uint num_color_targets, IntPtr depth_stencil_target_info);
+ 
+ 	[LibraryImport(nativeLibName)]
+ 	[UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+@@ -6522,7 +6520,7 @@
+ 	[UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+ 	public static partial uint SDL_CalculateGPUTextureFormatSize(SDL_GPUTextureFormat format, uint width, uint height, uint depth_or_layer_count);
+ 
+-*/
++
+     /* SDL3_FULL
+ 	// /usr/local/include/SDL3/SDL_haptic.h
+ 
+diff --git a/src/lancer/Program.cs b/src/lancer/Program.cs
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -10,6 +10,7 @@
+ using LibreLancer.Data.Schema;
+ using LibreLancer.Graphics;
+ using LibreLancer;
++using LibreLancer.Platforms;
+ 
+ namespace lancer;
+ 
+@@ -18,10 +19,16 @@
+     [STAThread]
+     public static void Main(string[] args)
+     {
++        if (args.Length == 1 && args[0] == "--sdl-gpu-smoke")
++        {
++            Environment.ExitCode = SDL3GpuSmoke.Run();
++            return;
++        }
+         if (args.Length == 1 && args[0] is "--help" or "-h")
+         {
+             Console.WriteLine("Usage: lancer [configuration-path] [--new-game | --load-save <savegame.fl>]");
+             Console.WriteLine("       Standalone test option: --invulnerable=on|off (local embedded server only)");
++            Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-smoke (SDL3 GPU shader, pipeline, draw, and swapchain test)");
+             Console.WriteLine("       Render overrides (each option is independent):");
+             Console.WriteLine("         --render-normal-maps=on|off");
+             Console.WriteLine("         --render-surface-pbr-maps=on|off");

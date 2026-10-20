@@ -6,7 +6,7 @@ namespace LibreLancer.Server.ConsoleCommands;
 public class DamageSelfCommand : IConsoleCommand
 {
     public string Name => "damageself";
-    public string? Permission => "command.damageself";
+    public bool Admin => true;
     public void Run(Player player, string arguments)
     {
         if (!ConsoleCommands.ParseString(arguments, out float x))
@@ -17,7 +17,7 @@ public class DamageSelfCommand : IConsoleCommand
         player.Space?.World?.EnqueueAction(() =>
         {
             var component = player.Space.World.Players[player].GetComponent<SHealthComponent>()!;
-            component.Damage(x, x, null, null);
+            component.Damage(x, x, null, null, player.Space.World.GameWorld);
         });
     }
 }

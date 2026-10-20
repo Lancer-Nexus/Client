@@ -1,0 +1,387 @@
+diff --git a/src/LibreLancer/Render/SystemLighting.cs b/src/LibreLancer/Render/SystemLighting.cs
+--- a/src/LibreLancer/Render/SystemLighting.cs
++++ b/src/LibreLancer/Render/SystemLighting.cs
+@@ -10,14 +10,73 @@
+ {
+ 	public class SystemLighting
+ 	{
++        public const int MaxFrameLights = 32;
++
+         public int ID = Environment.TickCount;
+ 		public Color4 Ambient = Color4.Black;
+ 		public List<DynamicLight> Lights = [];
++		private readonly List<DynamicLight> frameLights = new(64);
++		private bool frameStarted;
++		public List<DynamicLight> FrameLights => frameStarted ? frameLights : Lights;
+ 		public bool DynamicLightsEnabled = true;
+ 		public FogModes FogMode = FogModes.None;
+ 		public float FogDensity = 0f;
+ 		public Color4 FogColor = Color4.Black;
+ 		public Vector2 FogRange = Vector2.Zero;
+ 		public int NumberOfTilesX;
++
++        private int transientStart;
++        private Vector3 frameCameraPosition;
++
++        public void BeginFrame(Vector3 cameraPosition)
++        {
++            frameCameraPosition = cameraPosition;
++            frameLights.Clear();
++            var persistentCount = Math.Min(Lights.Count, BitArray128.Capacity);
++            for (var i = 0; i < persistentCount; i++)
++                frameLights.Add(Lights[i]);
++            transientStart = frameLights.Count;
++            frameStarted = true;
++        }
++
++        public bool AddFrameLight(DynamicLight light)
++        {
++            if (!DynamicLightsEnabled || !light.Active)
++                return false;
++
++            if (!frameStarted)
++                BeginFrame(frameCameraPosition);
++
++            if (frameLights.Count >= BitArray128.Capacity)
++                return false;
++
++            var transientCount = frameLights.Count - transientStart;
++            if (transientCount < MaxFrameLights)
++            {
++                frameLights.Add(light);
++                return true;
++            }
++
++            var lightPosition = light.Light.Position;
++            var distance = Vector3.DistanceSquared(frameCameraPosition, lightPosition);
++            var farthestIndex = transientStart;
++            var farthestDistance = Vector3.DistanceSquared(frameCameraPosition,
++                frameLights[farthestIndex].Light.Position);
++            for (var i = transientStart + 1; i < frameLights.Count; i++)
++            {
++                var candidateDistance = Vector3.DistanceSquared(frameCameraPosition, frameLights[i].Light.Position);
++                if (candidateDistance > farthestDistance)
++                {
++                    farthestIndex = i;
++                    farthestDistance = candidateDistance;
++                }
++            }
++
++            if (distance >= farthestDistance)
++                return false;
++
++            frameLights[farthestIndex] = light;
++            return true;
++        }
+ 	}
+ }
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -322,6 +322,8 @@
+             rstate.PreferredFilterLevel = Settings.SelectedFiltering;
+             rstate.AnisotropyLevel = Settings.SelectedAnisotropy;
+             var nr = CheckNebulae(); // are we in a nebula?
++            SystemLighting.DynamicLightsEnabled = Settings.DynamicLighting;
++            SystemLighting.BeginFrame(camera.Position);
+             rstate.SetCamera(camera);
+             Commands.Camera = camera;
+             var transitioned = false;
+diff --git a/src/LibreLancer/Render/RenderHelpers.cs b/src/LibreLancer/Render/RenderHelpers.cs
+--- a/src/LibreLancer/Render/RenderHelpers.cs
++++ b/src/LibreLancer/Render/RenderHelpers.cs
+@@ -10,7 +10,7 @@
+ {
+ 	public static class RenderHelpers
+ 	{
+-        private const int MAX_LIGHTS = 8;
++        internal const int MAX_LIGHTS = 8;
+ 		public static float GetZ(Matrix4x4 world, Vector3 cameraPosition, Vector3 vec)
+ 		{
+ 			var res =  Vector3.DistanceSquared(Vector3.Transform(vec,world), cameraPosition);
+@@ -53,20 +53,22 @@
+ 			if (ldynamic)
+ 			{
+                 lights.Lights.SourceLighting = src;
+-				for (var i = 0; i < src.Lights.Count; i++)
++
++                Span<int> selected = stackalloc int[MAX_LIGHTS];
++                Span<float> distances = stackalloc float[MAX_LIGHTS];
++				for (var i = 0; i < src.FrameLights.Count; i++)
+ 				{
+-
+-					if (src.Lights[i].LightGroup != lightGroup)
++					if (src.FrameLights[i].LightGroup != lightGroup)
+                     {
+                         continue;
+                     }
+ 
+-                    if (!src.Lights[i].Active)
++                    if (!src.FrameLights[i].Active)
+                     {
+                         continue;
+                     }
+ 
+-                    var l = src.Lights[i].Light;
++                    var l = src.FrameLights[i].Light;
+ 					var r2 = r + l.Range;
+ 					// l.Kind > 0 - test if not directional
+ 					if (l.Kind > 0 && Vector3.DistanceSquared(l.Position, c) > (r2 * r2))
+@@ -80,14 +82,32 @@
+                         continue;
+                     }
+ 
+-                    if ((lc + 1) > MAX_LIGHTS)
++                    if (i >= BitArray128.Capacity)
+                     {
+-                        break;
++                        continue;
+                     }
+ 
+-                    lc++;
+-                    lights.Lights.SourceEnabled[i] = true;
++                    var distance = l.Kind == LightKind.Directional ? -1f : Vector3.DistanceSquared(l.Position, c);
++                    var insertAt = 0;
++                    while (insertAt < lc && distances[insertAt] <= distance)
++                        insertAt++;
++                    if (insertAt >= MAX_LIGHTS)
++                        continue;
++
++                    var newCount = Math.Min(lc + 1, MAX_LIGHTS);
++                    for (var move = newCount - 1; move > insertAt; move--)
++                    {
++                        selected[move] = selected[move - 1];
++                        distances[move] = distances[move - 1];
++                    }
++
++                    selected[insertAt] = i;
++                    distances[insertAt] = distance;
++                    lc = newCount;
+ 				}
++
++                for (var i = 0; i < lc; i++)
++                    lights.Lights.SourceEnabled[selected[i]] = true;
+ 			}
+ 
+             if (nebula == null)
+diff --git a/src/LibreLancer/Render/RenderMaterial.cs b/src/LibreLancer/Render/RenderMaterial.cs
+--- a/src/LibreLancer/Render/RenderMaterial.cs
++++ b/src/LibreLancer/Render/RenderMaterial.cs
+@@ -142,14 +142,14 @@
+             var lt = 0;
+             var lights = new Span<PackedLight>(&data.Light0, 9);
+ 
+-            for (var i = 0; i < lighting.Lights.SourceLighting.Lights.Count; i++)
++            for (var i = 0; i < lighting.Lights.SourceLighting.FrameLights.Count; i++)
+             {
+                 if (!lighting.Lights.SourceEnabled[i])
+                 {
+                     continue;
+                 }
+ 
+-                var src = lighting.Lights.SourceLighting.Lights[i].Light;
++                var src = lighting.Lights.SourceLighting.FrameLights[i].Light;
+                 lights[lt].Position = src.Position;
+                 lights[lt].Attentuation = src.Attenuation;
+                 lights[lt].Direction = src.Direction;
+diff --git a/src/LibreLancer/Render/LightEquipRenderer.cs b/src/LibreLancer/Render/LightEquipRenderer.cs
+--- a/src/LibreLancer/Render/LightEquipRenderer.cs
++++ b/src/LibreLancer/Render/LightEquipRenderer.cs
+@@ -5,6 +5,7 @@
+ using System;
+ using System.Numerics;
+ using LibreLancer.Data;
++using LibreLancer.Data.GameData;
+ using LibreLancer.Data.GameData.Items;
+ using LibreLancer.Graphics;
+ using LibreLancer.Resources;
+@@ -20,6 +21,7 @@
+ 
+         private SystemRenderer? sys;
+         private LightEquipment equip;
++        private readonly DynamicLight emittedLight = new();
+         internal GameObject? OcclusionOwner { get; set; }
+         public bool LightOn = true;
+         private static Random rnd = new();
+@@ -223,9 +225,19 @@
+                 }
+             }
+ 
+-            if (equip.EmitRange > 0 && showLight && camera.FrustumCheck(new BoundingSphere(pos, equip.EmitRange)))
+-            {
+-                // sys.PointLightDX(pos, equip.EmitRange, new Color4(equip.GlowColor, 1), equip.EmitAttenuation);
++            if (visible && equip.EmitRange > 0 && showLight && camera.FrustumCheck(new BoundingSphere(pos, equip.EmitRange)))
++            {
++                emittedLight.LightGroup = OcclusionOwner?.RenderComponent?.LightGroup ?? 0;
++                emittedLight.Active = true;
++                emittedLight.Light = new RenderLight
++                {
++                    Kind = LightKind.Point,
++                    Position = pos,
++                    Attenuation = equip.EmitAttenuation,
++                    Color = colorGlow,
++                    Range = equip.EmitRange
++                };
++                sys.SystemLighting.AddFrameLight(emittedLight);
+             }
+ 
+             if (visible)
+diff --git a/src/LibreLancer.Tests/TransientLightTests.cs b/src/LibreLancer.Tests/TransientLightTests.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Tests/TransientLightTests.cs
+@@ -0,0 +1,73 @@
++using System.Numerics;
++using LibreLancer.Data.GameData;
++using LibreLancer.Render;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public sealed class TransientLightTests
++{
++    [Fact]
++    public void DirectPreviewLightingUsesPersistentSourcesWithoutFrameSetup()
++    {
++        var lighting = new SystemLighting();
++        var source = CreateLight(1);
++        lighting.Lights.Add(source);
++
++        Assert.Same(lighting.Lights, lighting.FrameLights);
++    }
++
++    [Fact]
++    public void FrameLightBudgetKeepsNearestLights()
++    {
++        var lighting = new SystemLighting();
++        lighting.BeginFrame(Vector3.Zero);
++
++        for (var i = 1; i <= SystemLighting.MaxFrameLights; i++)
++            Assert.True(lighting.AddFrameLight(CreateLight(i)));
++
++        Assert.True(lighting.AddFrameLight(CreateLight(0.5f)));
++
++        Assert.Equal(SystemLighting.MaxFrameLights, lighting.FrameLights.Count);
++        Assert.Contains(lighting.FrameLights, x => x.Light.Position.X == 0.5f);
++        Assert.DoesNotContain(lighting.FrameLights, x => x.Light.Position.X == SystemLighting.MaxFrameLights);
++    }
++
++    [Fact]
++    public void DynamicLightingSettingDisablesFrameLights()
++    {
++        var lighting = new SystemLighting { DynamicLightsEnabled = false };
++        lighting.BeginFrame(Vector3.Zero);
++
++        Assert.False(lighting.AddFrameLight(CreateLight(1)));
++        Assert.Empty(lighting.FrameLights);
++    }
++
++    [Fact]
++    public void ObjectLightingSelectsNearestEightMatchingLights()
++    {
++        var lighting = new SystemLighting();
++        lighting.BeginFrame(Vector3.Zero);
++        for (var i = 1; i <= 10; i++)
++            lighting.AddFrameLight(CreateLight(i));
++
++        var selected = RenderHelpers.ApplyLights(lighting, 0, Vector3.Zero, 0, null).Lights.SourceEnabled;
++
++        for (var i = 0; i < 8; i++)
++            Assert.True(selected[i]);
++        Assert.False(selected[8]);
++        Assert.False(selected[9]);
++    }
++
++    private static DynamicLight CreateLight(float distance) => new()
++    {
++        Light = new RenderLight
++        {
++            Kind = LightKind.Point,
++            Position = new Vector3(distance, 0, 0),
++            Range = 100,
++            Attenuation = Vector3.One,
++            Color = Color3f.White
++        }
++    };
++}
+diff --git a/docs/dynamic-lighting-audit.md b/docs/dynamic-lighting-audit.md
+--- a/docs/dynamic-lighting-audit.md
++++ b/docs/dynamic-lighting-audit.md
+@@ -1,22 +1,30 @@
+ # Audit: dynamisches Licht für Effekte
+ 
+-Stand: 2026-10-14. Der Renderer besitzt einen funktionierenden Pfad für
+-statische Systemlichter und THN-Lichter. Kurzlebige lokale Lichtquellen aus
+-Waffenfeuer, Treffern, Explosionen und Feuer werden noch nicht erzeugt.
++Stand: 2026-10-14. Der Renderer besitzt einen Pfad für statische Systemlichter,
++THN-Lichter und jetzt auch pro Frame registrierte lokale Lichter aus
++Lichtequipment. Waffenfeuer, Treffer, Explosionen und Feuer erzeugen noch keine
++Lichtquellen.
+ 
+ ## Verifizierter Bestand
+ 
+ - `SystemRenderer.LoadLights()` übernimmt die Lichtquellen eines Systems;
+-  `Update()` aktualisiert deren Farbkurven. Eine Lebensdauer oder ein eigener
+-  Pool für Effektlichter existiert dort nicht.
+-- `RenderHelpers.ApplyLights()` filtert nach Lichtgruppe und Objektabstand,
+-  übernimmt aber bis zu acht passende Lichter in der Reihenfolge der Quellliste.
++  `Update()` aktualisiert deren Farbkurven. `BeginFrame()` kopiert diese
++  Quellen in die Frame-Liste; lokale Lichtquellen werden pro Frame ergänzt.
++- `RenderHelpers.ApplyLights()` filtert nach Lichtgruppe und Objektabstand und
++  wählt nun bis zu acht passende Lichter nach Nähe zum Objektzentrum aus.
+   Die Shader unterstützen neun Slots, von denen ein weiterer für Nebelblitze
+-  vorgesehen ist. Eine Priorisierung nach Nähe oder Helligkeit fehlt.
++  vorgesehen ist. Eine Gewichtung nach Lichtintensität oder Attenuation fehlt.
+ - `Settings.DynamicLighting` schaltet den bestehenden Beleuchtungspfad global
+   ein oder aus.
+-- `LightEquipment.EmitRange` und `EmitAttenuation` werden geparst. Die
+-  Registrierung des Lichts im `LightEquipRenderer` ist derzeit auskommentiert.
++- `LightEquipment.EmitRange` und `EmitAttenuation` werden geparst und vom
++  `LightEquipRenderer` nun als lokale Frame-Lichtquelle registriert. Der Pool
++  begrenzt diese zusätzlichen Quellen pro Frame auf 32 und behält die dem
++  Kameraort nächsten Kandidaten.
++- `Effect` enthält bereits `lgt_effect`, `lgt_range_scale` und `lgt_radius`;
++  `InitEffects()` kopiert diese Werte aber nicht in `ResolvedFx`.
++- Retail `FX\\lightanim.ini` enthält benannte `[LightAnim]`-Kurven mit Frames
++  aus Zeit, RGB-Farbe und Intensität. `Gun` parst `light_anim` und
++  `flash_radius`; beide Datenpfade sind noch nicht an Laufzeitlichter gebunden.
+ - Waffenfeuer startet vorhandene `ParticleEffectRenderer`-Mündungsblitze.
+   `CGameSession.Space` erzeugt Partikeleffekte für Explosionen. Beide Pfade
+   erzeugen dabei keine dynamische Lichtquelle.
+@@ -25,13 +33,15 @@
+ 
+ ## Umsetzung in Arbeitsschritten
+ 
+-1. Einen begrenzten Transient-Light-Pool mit Position, Gruppe, Farbe, Reichweite,
+-   Abklingzeit und Priorität ergänzen. Er muss pro Frame aktualisiert und nach
+-   Ablauf entfernt werden; `DynamicLighting` bleibt der globale Ausschalter.
+-2. Den Lichtbudget-Selektor so erweitern, dass nahe aktive Effektlichter nicht
+-   allein wegen ihrer Position am Ende der Quellliste verworfen werden. Die
+-   Grenze von acht lokalen Lichtern und der Nebelblitz-Slot bleiben erhalten.
+-3. Erst Mündungsblitze und Explosionen anschließen, danach datengetriebene
++1. `FX\\lightanim.ini` laden und die Framewerte zeitbasiert auswerten. Den
++   Waffenpfad über `light_anim` und `flash_radius` anbinden.
++2. Für Explosionen `lgt_effect`, `lgt_radius` und `lgt_range_scale` auflösen;
++   die Bedeutung beider Reichweitenwerte muss vor der Laufzeitumsetzung anhand
++   einer belastbaren Engine-Referenz bestätigt werden.
++3. Eine lebensdauerbasierte Registrierung für Ereignislichter ergänzen, sodass
++   jeder Effekt seine Lichtposition und Abklingzeit über die gesamte Dauer
++   aktualisieren kann.
++4. Danach datengetriebene
+    Lichtwerte für weitere Effekte und Feuer definieren. Keine künstlichen
+    Standardlichter für vorhandene Partikeleffekte einführen, bevor Farbe,
+    Reichweite und Dauer aus Assets oder einer abgestimmten Konfiguration kommen.
+@@ -38,3 +48,3 @@
+-4. Lebensdauer, Ausschalter, Budgetauswahl, Lichtgruppen und deterministische
++5. Lebensdauer, Ausschalter, Budgetauswahl, Lichtgruppen und deterministische
+    Überlastfälle mit Tests abdecken. Danach typische Kampf- und Stationsszenen
+    messen und mit NAP-Daten visuell abnehmen.
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -20,4 +20,5 @@
+ client 2019-lanceredit-surface-material-inspector.patch
+ client 2020-lanceredit-surface-map-workspace-editor.patch
+ client 2021-ship-light-depth-occlusion.patch
+ client 2022-dynamic-effect-light-audit.patch
++client 2023-frame-dynamic-light-pool.patch

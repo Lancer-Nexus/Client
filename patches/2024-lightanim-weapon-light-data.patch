@@ -1,0 +1,380 @@
+diff --git a/src/LibreLancer.Data/Schema/FreelancerData.cs b/src/LibreLancer.Data/Schema/FreelancerData.cs
+--- a/src/LibreLancer.Data/Schema/FreelancerData.cs
++++ b/src/LibreLancer.Data/Schema/FreelancerData.cs
+@@ -59,6 +59,7 @@
+     public GoodsIni? Goods;
+     public MarketsIni? Markets;
+     public GraphIni Graphs = null!;
++    public LightAnimIni LightAnimations = new();
+     public TexturePanels EffectShapes = null!;
+     public MouseIni Mouse = null!;
+     public AsteroidArchIni Asteroids = null!;
+@@ -213,6 +214,14 @@
+             foreach (var g in Freelancer.GraphPaths)
+                 Graphs.AddGraphIni(g, VFS, stringPool);
+         });
++        Run(() =>
++        {
++            const string lightAnimPath = "FX\\lightanim.ini";
++            var path = Freelancer.DataPath + lightAnimPath;
++            LightAnimations = new LightAnimIni();
++            if (VFS.FileExists(path))
++                LightAnimations.Load(path, VFS, stringPool);
++        });
+         //Shapes
+         Run(() =>
+         {
+
+diff --git a/src/LibreLancer.Data/GameData/Items/GunEquipment.cs b/src/LibreLancer.Data/GameData/Items/GunEquipment.cs
+--- a/src/LibreLancer.Data/GameData/Items/GunEquipment.cs
++++ b/src/LibreLancer.Data/GameData/Items/GunEquipment.cs
+@@ -9,4 +9,6 @@
+     public required Data.Schema.Equipment.Gun Def;
+     public required MunitionEquip Munition;
+     public ResolvedFx? FlashEffect;
++    public Data.Schema.LightAnim? FlashLightAnimation;
++    public float FlashRadius;
+ }
+
+diff --git a/src/LibreLancer.Data/GameData/Items/MissileLauncherEquipment.cs b/src/LibreLancer.Data/GameData/Items/MissileLauncherEquipment.cs
+--- a/src/LibreLancer.Data/GameData/Items/MissileLauncherEquipment.cs
++++ b/src/LibreLancer.Data/GameData/Items/MissileLauncherEquipment.cs
+@@ -4,4 +4,6 @@
+ {
+     public required Data.Schema.Equipment.Gun Def;
+     public required MissileEquip Munition;
++    public Data.Schema.LightAnim? FlashLightAnimation;
++    public float FlashRadius;
+ }
+
+diff --git a/src/LibreLancer.Data/GameItemDb.cs b/src/LibreLancer.Data/GameItemDb.cs
+--- a/src/LibreLancer.Data/GameItemDb.cs
++++ b/src/LibreLancer.Data/GameItemDb.cs
+@@ -1181,7 +1181,9 @@
+                         HpType = gn.HpGunType,
+                         Munition = mn,
+                         Def = gn,
+-                        FlashEffect = Effects.Get(gn.FlashParticleName)
++                        FlashEffect = Effects.Get(gn.FlashParticleName),
++                        FlashLightAnimation = flData.LightAnimations.Find(gn.LightAnim),
++                        FlashRadius = gn.FlashRadius
+                     };
+                     equip = eqp;
+                     equip.ModelFile = ResolveDrawable(gn.MaterialLibrary, gn.DaArchetype);
+@@ -1192,7 +1194,9 @@
+                     {
+                         HpType = gn.HpGunType,
+                         Munition = me,
+-                        Def = gn
++                        Def = gn,
++                        FlashLightAnimation = flData.LightAnimations.Find(gn.LightAnim),
++                        FlashRadius = gn.FlashRadius
+                     };
+                     equip = eqp;
+                     equip.ModelFile = ResolveDrawable(gn.MaterialLibrary, gn.DaArchetype);
+
+diff --git a/src/LibreLancer.Data/Schema/LightAnimIni.cs b/src/LibreLancer.Data/Schema/LightAnimIni.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Data/Schema/LightAnimIni.cs
+@@ -0,0 +1,98 @@
++// MIT License - Copyright (c) Callum McGing
++// This file is subject to the terms and conditions defined in
++// LICENSE, which is part of this source code package
++
++using System;
++using System.Collections.Generic;
++using System.Linq;
++using System.Numerics;
++using LibreLancer.Data.Ini;
++using LibreLancer.Data.IO;
++
++namespace LibreLancer.Data.Schema;
++
++public readonly record struct LightAnimFrame(float Time, Vector3 Color, float Intensity);
++
++public sealed class LightAnim
++{
++    public string Name { get; }
++    public IReadOnlyList<LightAnimFrame> Frames { get; }
++    public float Duration => Frames.Count == 0 ? 0 : Frames[^1].Time;
++
++    public LightAnim(string name, IEnumerable<LightAnimFrame> frames)
++    {
++        Name = name;
++        Frames = frames.OrderBy(f => f.Time).ToArray();
++    }
++
++    public LightAnimFrame Sample(float time)
++    {
++        if (Frames.Count == 0)
++            return default;
++        if (Frames.Count == 1 || time <= Frames[0].Time)
++            return Frames[0];
++        if (time >= Frames[^1].Time)
++            return Frames[^1];
++
++        for (var i = 1; i < Frames.Count; i++)
++        {
++            var right = Frames[i];
++            if (time > right.Time)
++                continue;
++            var left = Frames[i - 1];
++            var span = right.Time - left.Time;
++            if (span <= 0)
++                return right;
++            var amount = Math.Clamp((time - left.Time) / span, 0, 1);
++            return new LightAnimFrame(
++                time,
++                Vector3.Lerp(left.Color, right.Color, amount),
++                left.Intensity + ((right.Intensity - left.Intensity) * amount));
++        }
++
++        return Frames[^1];
++    }
++}
++
++public sealed class LightAnimIni
++{
++    private readonly Dictionary<string, LightAnim> animations = new(StringComparer.OrdinalIgnoreCase);
++
++    public LightAnim? Find(string? name) =>
++        name != null && animations.TryGetValue(name, out var animation) ? animation : null;
++
++    public void Load(string path, FileSystem vfs, IniStringPool? stringPool = null)
++    {
++        foreach (var section in IniFile.ParseFile(path, vfs, false, stringPool))
++        {
++            if (!section.Name.Equals("LightAnim", StringComparison.OrdinalIgnoreCase))
++                continue;
++
++            string? name = null;
++            List<LightAnimFrame> frames = [];
++            foreach (var entry in section)
++            {
++                if (entry.Name.Equals("name", StringComparison.OrdinalIgnoreCase) && entry.Count == 1)
++                {
++                    name = entry[0].ToString();
++                }
++                else if (entry.Name.Equals("frame", StringComparison.OrdinalIgnoreCase) && entry.Count == 5)
++                {
++                    var time = entry[0].ToSingle();
++                    var intensity = entry[4].ToSingle();
++                    if (!float.IsFinite(time) || !float.IsFinite(intensity) || time < 0 || intensity < 0)
++                        continue;
++
++                    var color = new Vector3(
++                        Math.Clamp(entry[1].ToInt32(), 0, 255) / 255f,
++                        Math.Clamp(entry[2].ToInt32(), 0, 255) / 255f,
++                        Math.Clamp(entry[3].ToInt32(), 0, 255) / 255f);
++                    frames.Add(new LightAnimFrame(time, color, intensity));
++                }
++            }
++
++            if (!string.IsNullOrWhiteSpace(name) && frames.Count > 0)
++                animations.TryAdd(name, new LightAnim(name, frames));
++        }
++    }
++}
+
+diff --git a/src/LibreLancer/World/Equipments/AbstractWeapon.cs b/src/LibreLancer/World/Equipments/AbstractWeapon.cs
+--- a/src/LibreLancer/World/Equipments/AbstractWeapon.cs
++++ b/src/LibreLancer/World/Equipments/AbstractWeapon.cs
+@@ -4,6 +4,7 @@
+ using System.Numerics;
+ using LibreLancer.Data.GameData;
+ using LibreLancer.Data.GameData.Items;
++using LibreLancer.Data.Schema;
+ using LibreLancer.Render;
+ using LibreLancer.Resources;
+ using LibreLancer.World.Components;
+@@ -23,6 +24,11 @@
+     public abstract float MaxRange { get; }
+ 
+     private List<ParticleEffectRenderer> flashFx = [];
++    private readonly LightAnim? muzzleLightAnimation;
++    private readonly float muzzleLightRadius;
++    private readonly Hardpoint[] muzzleLightHardpoints;
++    private readonly DynamicLight[] muzzleLights;
++    private float muzzleLightAge = -1;
+ 
+ 
+     protected AbstractWeapon(
+@@ -30,8 +36,20 @@
+         Hardpoint? attachment,
+         Equipment equipment,
+         EquipmentType type,
+-        ResourceManager resources) : base(parent, attachment, equipment, type, resources, true)
++        ResourceManager resources,
++        LightAnim? lightAnimation = null,
++        float lightRadius = 0) : base(parent, attachment, equipment, type, resources, true)
+     {
++        muzzleLightAnimation = lightAnimation is { Duration: > 0 } && lightRadius > 0
++            ? lightAnimation
++            : null;
++        muzzleLightRadius = muzzleLightAnimation == null ? 0 : lightRadius;
++        muzzleLightHardpoints = muzzleLightAnimation == null
++            ? []
++            : GetHardpoints()
++                .Where(x => x.Name.StartsWith("hpfire", StringComparison.OrdinalIgnoreCase))
++                .ToArray();
++        muzzleLights = muzzleLightHardpoints.Select(_ => new DynamicLight()).ToArray();
+     }
+ 
+ 
+@@ -57,6 +75,9 @@
+ 
+     protected void RunMuzzleFlash()
+     {
++        if (muzzleLights.Length > 0)
++            muzzleLightAge = 0;
++
+         foreach (var fire in flashFx)
+         {
+             fire.Active = true;
+@@ -71,11 +92,40 @@
+         {
+             fx.PrepareRender(camera, nr, sys, parentCull);
+         }
++
++        if (parentCull || muzzleLightAge < 0 || muzzleLightAnimation == null)
++            return;
++
++        var sample = muzzleLightAnimation.Sample(muzzleLightAge);
++        var color = new Color3f(sample.Color) * sample.Intensity;
++        var worldTransform = GetTransform();
++        for (var i = 0; i < muzzleLightHardpoints.Length; i++)
++        {
++            var light = muzzleLights[i];
++            light.LightGroup = Parent.RenderComponent?.LightGroup ?? 0;
++            light.Active = true;
++            light.Light = new RenderLight
++            {
++                Kind = LightKind.PointAttenCurve,
++                Position = (muzzleLightHardpoints[i].Transform * worldTransform).Position,
++                Attenuation = new Vector3(0, -1, 1),
++                Color = color,
++                Range = muzzleLightRadius
++            };
++            sys.SystemLighting.AddFrameLight(light);
++        }
+     }
+ 
+     public override void RenderUpdate(double delta)
+     {
+         base.RenderUpdate(delta);
++        if (muzzleLightAge >= 0 && muzzleLightAnimation != null)
++        {
++            muzzleLightAge += (float)delta;
++            if (muzzleLightAge >= muzzleLightAnimation.Duration)
++                muzzleLightAge = -1;
++        }
++
+         if (flashFx.Count > 0)
+         {
+             var tr = GetTransform();
+
+diff --git a/src/LibreLancer/World/Equipments/Gun.cs b/src/LibreLancer/World/Equipments/Gun.cs
+--- a/src/LibreLancer/World/Equipments/Gun.cs
++++ b/src/LibreLancer/World/Equipments/Gun.cs
+@@ -19,7 +19,8 @@
+         Hardpoint? attachment,
+         GunEquipment equipment,
+         EquipmentType type,
+-        ResourceManager resources) : base(parent, attachment, equipment, type, resources)
++        ResourceManager resources) : base(parent, attachment, equipment, type, resources,
++            equipment.FlashLightAnimation, equipment.FlashRadius)
+     {
+         GunEquipment = equipment;
+         CaptureRestPose();
+@@ -140,7 +141,9 @@
+         }
+ 
+         if(didFire)
++        {
+             RunMuzzleFlash();
++        }
+ 
+         return didFire;
+     }
+
+diff --git a/src/LibreLancer/World/Equipments/MissileLauncher.cs b/src/LibreLancer/World/Equipments/MissileLauncher.cs
+--- a/src/LibreLancer/World/Equipments/MissileLauncher.cs
++++ b/src/LibreLancer/World/Equipments/MissileLauncher.cs
+@@ -23,7 +23,8 @@
+         Hardpoint? attachment,
+         MissileLauncherEquipment equipment,
+         EquipmentType type,
+-        ResourceManager resources) : base(parent, attachment, equipment, type, resources)
++        ResourceManager resources) : base(parent, attachment, equipment, type, resources,
++            equipment.FlashLightAnimation, equipment.FlashRadius)
+     {
+         missile = equipment;
+         maxRange = CalculateRange(missile.Munition.Def.Lifetime, missile.Def.MuzzleVelocity,
+@@ -112,6 +113,7 @@
+         }
+ 
+         CurrentCooldown = missile.Def.RefireDelay;
++        RunMuzzleFlash();
+         return true;
+     }
+ }
+
+diff --git a/docs/dynamic-lighting-audit.md b/docs/dynamic-lighting-audit.md
+--- a/docs/dynamic-lighting-audit.md
++++ b/docs/dynamic-lighting-audit.md
+@@ -22,30 +22,32 @@
+   Kameraort nächsten Kandidaten.
+ - `Effect` enthält bereits `lgt_effect`, `lgt_range_scale` und `lgt_radius`;
+   `InitEffects()` kopiert diese Werte aber nicht in `ResolvedFx`.
+-- Retail `FX\\lightanim.ini` enthält benannte `[LightAnim]`-Kurven mit Frames
+-  aus Zeit, RGB-Farbe und Intensität. `Gun` parst `light_anim` und
+-  `flash_radius`; beide Datenpfade sind noch nicht an Laufzeitlichter gebunden.
+-- Waffenfeuer startet vorhandene `ParticleEffectRenderer`-Mündungsblitze.
+-  `CGameSession.Space` erzeugt Partikeleffekte für Explosionen. Beide Pfade
+-  erzeugen dabei keine dynamische Lichtquelle.
++- `FreelancerData` lädt nun die benannten Kurven aus Retail
++  `FX\\lightanim.ini`; `GameItemDb` löst `Gun.light_anim` auf und übergibt die
++  Kurve samt `flash_radius` an Gun- und Missile-Launcher-Equipment.
++  `AbstractWeapon` registriert beim Schuss pro Feuer-Hardpoint ein Licht,
++  wertet die Farb-/Intensitätskurve über deren Dauer aus und nutzt
++  `flash_radius` als Reichweite.
++- Waffenfeuer startet weiterhin die vorhandenen
++  `ParticleEffectRenderer`-Mündungsblitze. Treffer und Explosionen in
++  `CGameSession.Space` erzeugen weiterhin Partikeleffekte, aber noch keine
++  dynamische Lichtquelle.
+ - THN-Lichter werden direkt in `SystemLighting.Lights` registriert. Sie nutzen
+   also die bestehende globale Lichtliste, aber keinen kurzlebigen Effektpool.
+ 
+ ## Umsetzung in Arbeitsschritten
+ 
+-1. `FX\\lightanim.ini` laden und die Framewerte zeitbasiert auswerten. Den
+-   Waffenpfad über `light_anim` und `flash_radius` anbinden.
+-2. Für Explosionen `lgt_effect`, `lgt_radius` und `lgt_range_scale` auflösen;
++1. Für Explosionen `lgt_effect`, `lgt_radius` und `lgt_range_scale` auflösen;
+    die Bedeutung beider Reichweitenwerte muss vor der Laufzeitumsetzung anhand
+    einer belastbaren Engine-Referenz bestätigt werden.
+-3. Eine lebensdauerbasierte Registrierung für Ereignislichter ergänzen, sodass
++2. Eine lebensdauerbasierte Registrierung für Ereignislichter ergänzen, sodass
+    jeder Effekt seine Lichtposition und Abklingzeit über die gesamte Dauer
+    aktualisieren kann.
+-4. Danach datengetriebene
++3. Danach datengetriebene
+    Lichtwerte für weitere Effekte und Feuer definieren. Keine künstlichen
+    Standardlichter für vorhandene Partikeleffekte einführen, bevor Farbe,
+    Reichweite und Dauer aus Assets oder einer abgestimmten Konfiguration kommen.
+-5. Lebensdauer, Ausschalter, Budgetauswahl, Lichtgruppen und deterministische
++4. Lebensdauer, Ausschalter, Budgetauswahl, Lichtgruppen und deterministische
+    Überlastfälle mit Tests abdecken. Danach typische Kampf- und Stationsszenen
+    messen und mit NAP-Daten visuell abnehmen.
+ 
+
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -23,3 +23,4 @@
+ client 2021-ship-light-depth-occlusion.patch
+ client 2022-dynamic-effect-light-audit.patch
+ client 2023-frame-dynamic-light-pool.patch
++client 2024-lightanim-weapon-light-data.patch
+

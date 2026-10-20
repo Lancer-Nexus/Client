@@ -1,0 +1,227 @@
+--- a/src/LibreLancer/Render/AsteroidCubeMesh.cs
++++ b/src/LibreLancer/Render/AsteroidCubeMesh.cs
+@@ -14,6 +14,7 @@
+ public struct CubeDrawcall
+ {
+     public uint MaterialCrc;
++    public MaterialAnim? MaterialAnim;
+     public int StartIndex;
+     public int Count;
+     public int BaseVertex;
+@@ -57,43 +58,54 @@
+         hashes = [];
+         cubeDrawCalls = [];
+         radius = 0;
+-        // Gather a list of all materials
+-        List<uint> matCrcs = [];
++        // Keep draw batches separate when the same material uses different UV animations.
++        List<(uint MaterialCrc, MaterialAnim? Animation)> drawGroups = [];
++
++        void AddDrawGroup(uint materialCrc, MaterialAnim? animation)
++        {
++            var group = (materialCrc, animation);
++            if (!drawGroups.Contains(group))
++                drawGroups.Add(group);
++        }
+ 
+         if (field.AllowMultipleMaterials)
+         {
+             foreach (var ast in field.Cube!)
+             {
+-                var f = (ModelFile) ast.Archetype!.ModelFile!.LoadFile(resources, MeshLoadMode.CPU)!.Drawable;
+-                var l0 = f.Levels[0];
+-                var vms = resources.FindMeshData(l0!.MeshCrc)!;
+-
+-                for (int i = l0.StartMesh; i < l0.StartMesh + l0.MeshCount; i++)
++                var model = (ModelFile) ast.Archetype!.ModelFile!.LoadFile(resources, MeshLoadMode.CPU)!.Drawable;
++                var level = model.Levels[0];
++                var meshData = resources.FindMeshData(level!.MeshCrc)!;
++
++                for (int i = level.StartMesh; i < level.StartMesh + level.MeshCount; i++)
+                 {
+-                    var m = vms.Meshes[i].MaterialCrc;
+-                    if (!matCrcs.Contains(m))
+-                        matCrcs.Add(m);
++                    var mesh = meshData.Meshes[i];
++                    AddDrawGroup(mesh.MaterialCrc, GetMaterialAnim(model, mesh.MaterialCrc, resources));
+                 }
+             }
+         }
+         else
+         {
+-            var f = (ModelFile) field.Cube![0].Archetype!.ModelFile!.LoadFile(resources, MeshLoadMode.CPU)!.Drawable;
+-            var l0 = f.Levels[0];
+-            var vms = resources.FindMeshData(l0!.MeshCrc)!;
+-            matCrcs.Add(vms.Meshes[l0.StartMesh].MaterialCrc);
+-        }
+-
+-        // Create the draw calls
+-        foreach (var mat in matCrcs)
++            var model = (ModelFile) field.Cube![0].Archetype!.ModelFile!.LoadFile(resources, MeshLoadMode.CPU)!.Drawable;
++            var level = model.Levels[0];
++            var meshData = resources.FindMeshData(level!.MeshCrc)!;
++            var materialCrc = meshData.Meshes[level.StartMesh].MaterialCrc;
++            AddDrawGroup(materialCrc, GetMaterialAnim(model, materialCrc, resources));
++        }
++
++        // Create geometry batches by material and animation profile.
++        foreach (var group in drawGroups)
+         {
+             var start = indices.Count;
+             var newIndices = new List<int>();
+ 
+-            foreach (var ast in field.Cube)
+-            {
+-                AddAsteroidToBuffer(ast, mat, matCrcs.Count == 1, newIndices, resources, field.CubeSize);
+-            }
++            foreach (var ast in field.Cube!)
++            {
++                AddAsteroidToBuffer(ast, group.MaterialCrc, group.Animation, !field.AllowMultipleMaterials,
++                    newIndices, resources, field.CubeSize);
++            }
++
++            if (newIndices.Count == 0)
++                continue;
+ 
+             var min = newIndices.Min();
+ 
+@@ -104,7 +116,8 @@
+ 
+             var count = indices.Count - start;
+             cubeDrawCalls.Add(new CubeDrawcall()
+-                { BaseVertex = min, MaterialCrc = mat, StartIndex = start, Count = count });
++                { BaseVertex = min, MaterialCrc = group.MaterialCrc, MaterialAnim = group.Animation,
++                    StartIndex = start, Count = count });
+         }
+ 
+         var cubeVbo = new VertexBuffer(context, typeof(VertexPositionNormalDiffuseTexture), verts.Count);
+@@ -138,8 +151,16 @@
+         return vert;
+     }
+ 
+-    private void AddAsteroidToBuffer(StaticAsteroid ast, uint matCrc, bool singleMat, List<int> newIndices,
+-        ResourceManager resources, float cubeSize)
++    private static MaterialAnim? GetMaterialAnim(ModelFile model, uint materialCrc, ResourceManager resources)
++    {
++        var material = resources.FindMaterial(materialCrc);
++        if (material == null || model.MaterialAnim == null)
++            return null;
++        return model.MaterialAnim.Anims.GetValueOrDefault(material.Name);
++    }
++
++    private void AddAsteroidToBuffer(StaticAsteroid ast, uint matCrc, MaterialAnim? animation, bool singleMat,
++        List<int> newIndices, ResourceManager resources, float cubeSize)
+     {
+         var model = (ModelFile) ast.Archetype!.ModelFile!.LoadFile(resources, MeshLoadMode.CPU)!.Drawable;
+         var l0 = model.Levels[0];
+@@ -153,6 +174,7 @@
+         {
+             var m = vms!.Meshes[i];
+             if (m.MaterialCrc != matCrc && !singleMat) continue;
++            if (GetMaterialAnim(model, m.MaterialCrc, resources) != animation) continue;
+             var baseVertex = l0.StartVertex + m.StartVertex;
+             var indexStart = m.TriangleStart;
+             int indexCount = m.NumRefVertices;
+--- a/src/LibreLancer/Render/AsteroidFieldRenderer.cs
++++ b/src/LibreLancer/Render/AsteroidFieldRenderer.cs
+@@ -341,8 +341,8 @@
+                         lastFog = float.MaxValue;
+                     }
+ 
+-                    var fadeCount = 0;
+-                    var regCount = 0;
++                    foreach (var drawcall in cubeMesh.Drawcalls)
++                        drawcall.MaterialAnim?.Update((float) sys.Game.TotalTime);
+ 
+                     for (var j = 0; j < cubeCount; j++)
+                     {
+@@ -358,7 +358,7 @@
+                             {
+                                 buffer.AddCommand(
+                                     mat!.Render,
+-                                    null,
++                                    dc.MaterialAnim,
+                                     buffer.WorldBuffer.SubmitMatrix(ref cubes[j].tr),
+                                     lt,
+                                     cubeMesh.VertexBuffer,
+@@ -370,7 +370,6 @@
+                                     SortLayers.OBJECT,
+                                     0, null, 0, BasicMaterial.SetDc(field.DiffuseColor)
+                                 );
+-                                regCount++;
+                             }
+                             else
+                             {
+@@ -385,9 +384,8 @@
+                                     dc.Count / 3,
+                                     SortLayers.OBJECT,
+                                     new Vector2(fadeNear, fadeFar),
+-                                    z, 0, BasicMaterial.SetDc(field.DiffuseColor)
++                                    z, 0, BasicMaterial.SetDc(field.DiffuseColor), dc.MaterialAnim
+                                 );
+-                                fadeCount++;
+                             }
+                         }
+                     }
+--- a/src/LibreLancer/Render/CommandBuffer.cs
++++ b/src/LibreLancer/Render/CommandBuffer.cs
+@@ -122,7 +122,6 @@
+                 }
+             }
+ 		}
+-		// TODO: Implement MaterialAnim for asteroids
+ 		public void AddCommandFade(
+             RenderMaterial material,
+             WorldMatrixHandle world,
+@@ -136,13 +135,14 @@
+             Vector2 fadeParams,
+             float z = 0,
+             int offset = 0,
+-            int userData = 0)
++            int userData = 0,
++            MaterialAnim? anim = null)
+ 		{
+ 			Transparents[transparentCommand++] = new RenderCommand()
+ 			{
+                 Key = RenderCommand.MakeKey(RenderType.Transparent, material.Key, layer, z, offset),
+ 				Source = material,
+-				MaterialAnim = null,
++				MaterialAnim = anim,
+ 				Lights = lights,
+ 				Buffer = buffer,
+ 				Start = start,
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 213 Client bundles and two native bundles. Each
++The active series contains 221 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -129,6 +129,7 @@
+ | 2219 | Retry failed Bloom and blur targets after render-size changes |
+ | 2220 | Allow sun-tinted ambient above one only in active HDR scene targets |
+ | 2221 | Record exploratory HDR sun-ambient runtime images and limitations |
++| 2222 | Preserve material UV animations in batched asteroid fields |
+ | 2116 | Estimate active SMAA and MSAA render-target memory |
+ | 2117 | Record the M01A dark station and ship lighting report |
+ | 2118 | Apply THN ambient and dynamic lights to shared gameplay lighting, then remove them on cleanup |
+--- a/patches/series
++++ b/patches/series
+@@ -221,3 +221,4 @@
+ client 2219-retry-postprocess-targets-after-resize.patch
+ client 2220-hdr-sun-ambient-range.patch
+ client 2221-record-hdr-sun-ambient-runtime-attempt.patch
++client 2222-asteroid-material-animation.patch
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -260,6 +260,7 @@
+   - [ ] Eingebaute Shader-Bundles vor Multi-Context- oder Gerätewiederherstellung per `RenderContext` besitzen; Neuaufbau und Fehlerrollback anhand der Kriterien in [Shader-Lifecycle](shader-lifecycle.md) abnehmen.
+   - [ ] Start, Wechsel zwischen Raum/Basis/Editor und Wiederherstellung nach minimiertem Fenster auf Shader-Compile-Spitzen, CPU-/GPU-Zeit und Backendfehler messen.
+ - [ ] GPU-Instancing, GPU-Culling und gezieltes Batching für wiederholte Asteroiden, Schiffe, Partikel und Basisobjekte anhand CPU-/GPU-Profilen bewerten; vorhandene CPU-Frustum-/Distanz-Culling- und LOD-Pfade als Vergleichsbasis verwenden.
++  - [x] Asteroiden-Cube-Batches werden nach Material und UV-Animationsprofil getrennt; `MaterialAnim` wird bei opaken und distanzgeblendeten Draws mitgeführt und pro Frame aktualisiert. Die zusätzlichen Drawcalls pro unterschiedlichem Profil sind noch gegen NAP-Asteroidenfelder zu messen.
+ - [ ] GPU-Partikel nur dann ergänzen, wenn CPU-/GPU-Profile einen Engpass belegen; bestehende Freelancer-Effekte und CPU-Fallback erhalten.
+ - [ ] RenderDoc-/Debug-Marker pro Render-Pass und lesbare GPU-Fehlerdiagnostik für reproduzierbare Grafikfehler vorsehen.
+ 

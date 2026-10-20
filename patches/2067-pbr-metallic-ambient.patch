@@ -1,0 +1,71 @@
+diff --git a/src/LibreLancer/Shaders/PBR.frag.hlsl b/src/LibreLancer/Shaders/PBR.frag.hlsl
+--- a/src/LibreLancer/Shaders/PBR.frag.hlsl
++++ b/src/LibreLancer/Shaders/PBR.frag.hlsl
+@@ -183,8 +183,8 @@
+     float3 n = getNormal(input);
+     if (!input.frontFacing)
+         n = -n;
+-    float metallic = getMetallic(input);
+-    float perceptualRoughness = getRoughness(input);
++    float metallic = saturate(getMetallic(input));
++    float perceptualRoughness = clamp(getRoughness(input), c_MinRoughness, 1.0);
+     float alphaRoughness = perceptualRoughness * perceptualRoughness;
+ 
+     float4 baseColor = SRGBtoLinear(DtTexture.Sample(DtSampler, GetTexCoord(0, input)) * Dc);
+@@ -273,9 +273,9 @@
+         color += NdotL * Lights[i].Diffuse * attenuation * specContrib;
+ #ifndef VERTEX_LIGHTING
+         color += NdotL * Lights[i].Diffuse * attenuation * diffuseContrib;
++        color += diffuseColor * Lights[i].Ambient * attenuation;
+ #endif
+     }
+-    color += AmbientColor.xyz * baseColor.xyz;
+ #ifdef ENVMAP
+     float3 viewNormal = normalize(mul(float4(n, 0.0), View).xyz);
+     float3 viewPosition = mul(float4(input.worldPosition, 1.0), View).xyz;
+@@ -290,7 +290,9 @@
+ #ifdef VERTEX_LIGHTING
+     float3 vertexDiffuse = input.frontFacing ? input.diffuseTermFront : input.diffuseTermBack;
+     float3 vertexAmbient = input.frontFacing ? input.ambientTermFront : input.ambientTermBack;
+-    color += diffuseColor * (vertexDiffuse + vertexAmbient);
++    color += diffuseColor * (vertexDiffuse + vertexAmbient + AmbientColor.xyz);
++#else
++    color += diffuseColor * AmbientColor.xyz;
+ #endif
+ 
+     #ifdef ET_ENABLED
+diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -443,7 +443,11 @@
+   Der Metallic-Fallback ist angepasst: ohne expliziten Faktor oder gebundene
+   Metallic-Karte gilt 0; eine MAT-Karte oder aktivierte Surface-Karte verwendet
+   standardmäßig den Kartenfaktor 1. Umgebungslicht und die übrigen Parameter
+-  dieses Arbeitspakets bleiben offen.
++  dieses Arbeitspakets bleiben offen. Die diffuse Umgebungsbeleuchtung folgt
++  jetzt `diffuseColor` und damit dem nichtmetallischen Anteil; lokale Ambient-
++  Lichtbeiträge werden im Pixellichtpfad berücksichtigt und im Vertexlichtpfad
++  nicht doppelt addiert. Der Shader begrenzt außerdem Roughness auf mindestens
++  0,04 und Metallic auf 0–1. Eine sichtbare Abnahme dieser Änderung steht aus.
+ 
+ ### P4 – Pässe und Post-Processing
+ 
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -40,6 +40,7 @@
+ | 2064 | Fade sun lens glow as the sun enters or leaves the camera frustum |
+ | 2065 | Prioritize frame lights by attenuated contribution near the camera |
+ | 2066 | Enable PBR materials and surface roughness/metallic maps on skinned DFM meshes |
++| 2067 | Keep PBR ambient lighting energy-conserving for metallic materials |
+ | 2011 (`lancerdecode`) | Native Vorbis EOF/reset handling |
+ | 2012 (`blurgtext`) | System FreeType without OT-SVG hooks |
+ 
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -66,3 +66,4 @@
+ client 2064-sun-lens-glow-fades.patch
+ client 2065-frame-light-contribution-priority.patch
+ client 2066-pbr-skinned-materials.patch
++client 2067-pbr-metallic-ambient.patch

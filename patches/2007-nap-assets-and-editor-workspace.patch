@@ -1,0 +1,3932 @@
+diff --git a/src/Editor/LancerEdit/EditorConfiguration.cs b/src/Editor/LancerEdit/EditorConfiguration.cs
+index 816ba5c..1abf432 100644
+--- a/src/Editor/LancerEdit/EditorConfiguration.cs
++++ b/src/Editor/LancerEdit/EditorConfiguration.cs
+@@ -76,6 +76,18 @@ namespace LancerEdit
+         public int WindowWidth = 800;
+         [Entry("window_height")]
+         public int WindowHeight = 600;
++        [Entry("trading_planner_include_jumpholes")]
++        public bool TradingPlannerIncludeJumpholes = true;
++        [Entry("trading_planner_shown_routes")]
++        public int TradingPlannerShownRoutes = 500;
++        [Entry("trading_planner_map_routes")]
++        public int TradingPlannerMapRoutes = 80;
++        [Entry("trading_planner_system_spacing")]
++        public float TradingPlannerSystemSpacing = 40f;
++        [Entry("trading_planner_sector_spacing")]
++        public float TradingPlannerSectorSpacing = 30f;
++        [Entry("trading_planner_system_exclusion")]
++        public string TradingPlannerSystemExclusion = "";
+         [Entry("per_pixel_lighting")]
+         public bool PerPixelLighting = true;
+
+@@ -171,6 +183,12 @@ namespace LancerEdit
+                 .Entry("collada_visible", ColladaVisible)
+                 .Entry("window_width", WindowWidth)
+                 .Entry("window_height", WindowHeight)
++                .Entry("trading_planner_include_jumpholes", TradingPlannerIncludeJumpholes)
++                .Entry("trading_planner_shown_routes", TradingPlannerShownRoutes)
++                .Entry("trading_planner_map_routes", TradingPlannerMapRoutes)
++                .Entry("trading_planner_system_spacing", TradingPlannerSystemSpacing)
++                .Entry("trading_planner_sector_spacing", TradingPlannerSectorSpacing)
++                .OptionalEntry("trading_planner_system_exclusion", TradingPlannerSystemExclusion)
+                 .Entry("per_pixel_lighting", PerPixelLighting);
+             foreach (var fav in Favorites)
+                 c.Entry("favorite", Encode(fav.Name), Encode(fav.FullPath));
+diff --git a/src/Editor/LancerEdit/GameContent/AsteroidFieldList.cs b/src/Editor/LancerEdit/GameContent/AsteroidFieldList.cs
+index 0401e85..d59c2b2 100644
+--- a/src/Editor/LancerEdit/GameContent/AsteroidFieldList.cs
++++ b/src/Editor/LancerEdit/GameContent/AsteroidFieldList.cs
+@@ -45,7 +45,7 @@ public class AsteroidFieldList
+             if (!DataEquality.ObjectEquals(f, OriginalFields[f]))
+             {
+                 var sections = IniSerializer.SerializeAsteroidField(f);
+-                var filename = gameData.VFS.GetBackingFileName(gameData.Items.DataPath(f.SourceFile));
++                var filename = WritableDataPath.Resolve(gameData.VFS, gameData.Items.DataPath(f.SourceFile));
+                 IniWriter.WriteIniFile(filename, sections);
+                 FLLog.Info("Ini", $"Saved to {filename}");
+             }
+diff --git a/src/Editor/LancerEdit/GameContent/MissionEditor/MissionScriptDocument.cs b/src/Editor/LancerEdit/GameContent/MissionEditor/MissionScriptDocument.cs
+index c7c96a5..4b6fd1c 100644
+--- a/src/Editor/LancerEdit/GameContent/MissionEditor/MissionScriptDocument.cs
++++ b/src/Editor/LancerEdit/GameContent/MissionEditor/MissionScriptDocument.cs
+@@ -38,15 +38,9 @@ public class MissionScriptDocument
+         var srcNpcIni = iniFile?.Info?.NpcShipFile ?? "";
+         if (!string.IsNullOrWhiteSpace(srcNpcIni))
+         {
+-            var npcPath = gameData.GameData.VFS.GetBackingFileName(gameData.GameData.Items.DataPath(srcNpcIni));
+-            if (npcPath is not null)
+-            {
+-                iniFile.ShipIni = new NPCShipIni(npcPath, null);
+-            }
+-            else
+-            {
+-                srcNpcIni = "";
+-            }
++            var npcPath = WritableDataPath.Resolve(gameData.GameData.VFS,
++                gameData.GameData.Items.DataPath(srcNpcIni));
++            iniFile.ShipIni = new NPCShipIni(npcPath, null);
+         }
+         var gameScript = new MissionScript(iniFile, gameData.GameData.Items);
+         var missionIni = new MissionScriptDocument(gameScript);
+@@ -81,14 +75,12 @@ public class MissionScriptDocument
+     {
+         if (!string.IsNullOrWhiteSpace(Info.NpcShipFile))
+         {
+-            var npcPath = gameData.GameData.VFS.GetBackingFileName(gameData.GameData.Items.DataPath(Info.NpcShipFile));
+-            if (npcPath is not null)
+-            {
+-                var npcBuilder = new IniBuilder();
+-                foreach(var npc in NpcShips)
+-                    IniSerializer.SerializeShipArch(npc.Value, npcBuilder);
+-                IniWriter.WriteIniFile(npcPath, npcBuilder.Sections);
+-            }
++            var npcPath = WritableDataPath.Resolve(gameData.GameData.VFS,
++                gameData.GameData.Items.DataPath(Info.NpcShipFile));
++            var npcBuilder = new IniBuilder();
++            foreach(var npc in NpcShips)
++                IniSerializer.SerializeShipArch(npc.Value, npcBuilder);
++            IniWriter.WriteIniFile(npcPath, npcBuilder.Sections);
+         }
+
+         IniBuilder ini = new();
+diff --git a/src/Editor/LancerEdit/GameContent/MissionEditor/MissionScriptEditorTab.cs b/src/Editor/LancerEdit/GameContent/MissionEditor/MissionScriptEditorTab.cs
+index 5743aa2..89e3167 100644
+--- a/src/Editor/LancerEdit/GameContent/MissionEditor/MissionScriptEditorTab.cs
++++ b/src/Editor/LancerEdit/GameContent/MissionEditor/MissionScriptEditorTab.cs
+@@ -738,6 +738,14 @@ public sealed partial class MissionScriptEditorTab : GameContentTab
+
+     internal EditResult<bool> SaveMission(string savePath = null)
+     {
++        var emptyTriggerFields = FindEmptyTriggerFields(nodes.OfType<NodeMissionTrigger>());
++        if (emptyTriggerFields.Count > 0)
++        {
++            return EditResult<bool>.Error(
++                "Cannot save mission: trigger entries contain empty fields. " +
++                string.Join("; ", emptyTriggerFields));
++        }
++
+         if (savePath != null)
+         {
+             FileSaveLocation = savePath;
+@@ -763,6 +771,38 @@ public sealed partial class MissionScriptEditorTab : GameContentTab
+         return new EditResult<bool>(true);
+     }
+
++    public static List<string> FindEmptyTriggerFields(IEnumerable<NodeMissionTrigger> triggers)
++    {
++        var emptyFields = new List<string>();
++        foreach (var trigger in triggers)
++        {
++            CheckEntries(trigger, "condition", trigger.Conditions, emptyFields);
++            CheckEntries(trigger, "action", trigger.Actions, emptyFields);
++        }
++        return emptyFields;
++    }
++
++    private static void CheckEntries(NodeMissionTrigger trigger, string kind,
++        IEnumerable<NodeTriggerEntry> entries, List<string> emptyFields)
++    {
++        foreach (var entry in entries)
++        {
++            var builder = new IniBuilder();
++            var section = builder.Section("Trigger");
++            entry.WriteEntry(section);
++            foreach (var field in section.Section)
++            {
++                for (var i = 0; i < field.Count; i++)
++                {
++                    if (field[i] is StringValue text && string.IsNullOrWhiteSpace(text.ToString()))
++                    {
++                        emptyFields.Add($"'{trigger.Data.Nickname}' {kind} '{field.Name}' argument {i + 1}");
++                    }
++                }
++            }
++        }
++    }
++
+     private void DuplicateSelectedNodes()
+     {
+         Span<NodeId> nodeIds = stackalloc NodeId[nodes.Count];
+diff --git a/src/Editor/LancerEdit/GameContent/NewsSaveStrategy.cs b/src/Editor/LancerEdit/GameContent/NewsSaveStrategy.cs
+index 9a2f7fa..814676c 100644
+--- a/src/Editor/LancerEdit/GameContent/NewsSaveStrategy.cs
++++ b/src/Editor/LancerEdit/GameContent/NewsSaveStrategy.cs
+@@ -10,7 +10,7 @@ public class NewsSaveStrategy(NewsEditorTab tab) : ISaveStrategy
+     {
+         tab.Data.GameData.Items.News = tab.News.Clone();
+         var newsPath = tab.Data.GameData.Items.DataPath("MISSIONS/news.ini");
+-        var filePath = tab.Data.GameData.VFS.GetBackingFileName(newsPath);
++        var filePath = WritableDataPath.Resolve(tab.Data.GameData.VFS, newsPath);
+         IniWriter.WriteIniFile(filePath, IniSerializer.SerializeNews(tab.News));
+         tab.Dirty = false;
+         tab.OnSaved();
+diff --git a/src/Editor/LancerEdit/GameContent/StarSystemSaveStrategy.cs b/src/Editor/LancerEdit/GameContent/StarSystemSaveStrategy.cs
+index 77af73e..94a102a 100644
+--- a/src/Editor/LancerEdit/GameContent/StarSystemSaveStrategy.cs
++++ b/src/Editor/LancerEdit/GameContent/StarSystemSaveStrategy.cs
+@@ -59,21 +59,21 @@ public class StarSystemSaveStrategy : ISaveStrategy
+
+         if (!ShortestPathWriter.PathInisEqual(allNew, await all))
+         {
+-            var resolved = tab.Data.GameData.VFS.GetBackingFileName(fileAll);
++            var resolved = WritableDataPath.Resolve(tab.Data.GameData.VFS, fileAll);
+             IniWriter.WriteIniFile(resolved, ShortestPathWriter.Serialize(allNew));
+             FLLog.Info("Ini", $"Saved to {resolved}");
+         }
+
+         if (!ShortestPathWriter.PathInisEqual(legalNew, await legal))
+         {
+-            var resolved = tab.Data.GameData.VFS.GetBackingFileName(fileLegal);
++            var resolved = WritableDataPath.Resolve(tab.Data.GameData.VFS, fileLegal);
+             IniWriter.WriteIniFile(resolved, ShortestPathWriter.Serialize(legalNew));
+             FLLog.Info("Ini", $"Saved to {resolved}");
+         }
+
+         if (!ShortestPathWriter.PathInisEqual(illegalNew, await illegal))
+         {
+-            var resolved = tab.Data.GameData.VFS.GetBackingFileName(fileIllegal);
++            var resolved = WritableDataPath.Resolve(tab.Data.GameData.VFS, fileIllegal);
+             IniWriter.WriteIniFile(resolved, ShortestPathWriter.Serialize(illegalNew));
+             FLLog.Info("Ini", $"Saved to {resolved}");
+         }
+@@ -91,12 +91,14 @@ public class StarSystemSaveStrategy : ISaveStrategy
+         tab.ResetOriginalObjects();
+         var paths = WriteShortestPaths();
+
+-        var resolved = tab.Data.GameData.VFS.GetBackingFileName(tab.Data.UniverseVfsFolder + tab.CurrentSystem.SourceFile);
++        var resolved = WritableDataPath.Resolve(tab.Data.GameData.VFS,
++            tab.Data.UniverseVfsFolder + tab.CurrentSystem.SourceFile);
+         IniWriter.WriteIniFile(resolved, IniSerializer.SerializeStarSystem(tab.CurrentSystem));
+         FLLog.Info("Ini", $"Saved to {resolved}");
+         if (writeUniverse)
+         {
+-            var path = tab.Data.GameData.VFS.GetBackingFileName(tab.Data.GameData.Items.Ini.Freelancer.UniversePath);
++            var path = WritableDataPath.Resolve(tab.Data.GameData.VFS,
++                tab.Data.GameData.Items.Ini.Freelancer.UniversePath);
+             IniWriter.WriteIniFile(path, IniSerializer.SerializeUniverse(tab.Data.GameData.Items.Systems, tab.Data.GameData.Items.Bases));
+             FLLog.Info("Ini", $"Saved to {path}");
+         }
+diff --git a/src/Editor/LancerEdit/GameContent/TradingPlannerTab.Markets.cs b/src/Editor/LancerEdit/GameContent/TradingPlannerTab.Markets.cs
+new file mode 100644
+index 0000000..22135c6
+--- /dev/null
++++ b/src/Editor/LancerEdit/GameContent/TradingPlannerTab.Markets.cs
+@@ -0,0 +1,376 @@
++#nullable enable
++
++using System;
++using System.Collections.Generic;
++using System.IO;
++using System.Linq;
++using ImGuiNET;
++using LibreLancer;
++using LibreLancer.ContentEdit;
++using LibreLancer.Data.GameData;
++using LibreLancer.Data.GameData.Items;
++using LibreLancer.Data.Ini;
++using LibreLancer.Data.Schema.Goods;
++using LibreLancer.ImUI;
++using Base = LibreLancer.Data.GameData.World.Base;
++
++namespace LancerEdit.GameContent;
++
++public partial class TradingPlannerTab
++{
++    private void DrawSelectedBaseMarket()
++    {
++        if (selectedBase == null)
++        {
++            ImGui.TextDisabled("No base selected.");
++            return;
++        }
++
++        ImGui.Text(BaseDisplayName(selectedBase));
++        ImGui.SameLine();
++        ImGui.TextDisabled(selectedBase.System ?? "(no system)");
++
++        ImGui.BeginDisabled(dirtyMarketBases.Count == 0);
++        if (ImGui.Button($"{Icons.Save} Save commodities"))
++            SaveCommodityMarkets();
++        ImGui.EndDisabled();
++        if (!string.IsNullOrWhiteSpace(commoditySaveStatus))
++            ImGui.TextDisabled(commoditySaveStatus);
++
++        DrawAddMarketGood(selectedBase);
++
++        var entries = selectedBase.SoldGoods
++            .Select((sold, index) => new { Sold = sold, Index = index })
++            .Where(x => x.Sold.Good.Ini.Category == GoodCategory.Commodity)
++            .OrderBy(x => x.Sold.Good.Nickname)
++            .ToList();
++
++        var size = ImGui.GetContentRegionAvail();
++        size.Y -= 3 * ImGuiHelper.Scale;
++        if (!ImGui.BeginTable("##basemarketgoods", 7,
++                ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.Resizable |
++                ImGuiTableFlags.ScrollY | ImGuiTableFlags.NoHostExtendY,
++                size))
++            return;
++
++        ImGui.TableSetupColumn("Commodity", ImGuiTableColumnFlags.WidthStretch, 2.0f);
++        ImGui.TableSetupColumn("For sale", ImGuiTableColumnFlags.WidthFixed, 68 * ImGuiHelper.Scale);
++        ImGui.TableSetupColumn("Price", ImGuiTableColumnFlags.WidthFixed, 80 * ImGuiHelper.Scale);
++        ImGui.TableSetupColumn("Mult", ImGuiTableColumnFlags.WidthFixed, 70 * ImGuiHelper.Scale);
++        ImGui.TableSetupColumn("Rank", ImGuiTableColumnFlags.WidthFixed, 55 * ImGuiHelper.Scale);
++        ImGui.TableSetupColumn("Rep", ImGuiTableColumnFlags.WidthFixed, 70 * ImGuiHelper.Scale);
++        ImGui.TableSetupColumn("", ImGuiTableColumnFlags.WidthFixed, 58 * ImGuiHelper.Scale);
++        ImGui.TableSetupScrollFreeze(0, 1);
++        ImGui.TableHeadersRow();
++
++        for (var i = 0; i < entries.Count; i++)
++        {
++            var index = entries[i].Index;
++            var original = selectedBase.SoldGoods[index];
++            var sold = original;
++            ImGui.PushID(i);
++            ImGui.TableNextRow();
++            ImGui.TableNextColumn();
++
++            if (DrawCommodityGoodCombo("##marketgood", sold.Good, selected =>
++                {
++                    sold.Good = selected;
++                    sold.Price = (ulong)selected.Ini.Price;
++                    sold.Multiplier = 1f;
++                }, g => g.Nickname.Equals(sold.Good.Nickname, StringComparison.OrdinalIgnoreCase) ||
++                        !BaseHasGood(selectedBase, g, index)))
++            {
++                selectedCommodity = sold.Good.Nickname;
++            }
++
++            if (ImGui.IsItemHovered())
++                ImGui.SetTooltip(CommodityDisplayName(sold.Good));
++            if (ImGui.IsItemClicked())
++                selectedCommodity = sold.Good.Nickname;
++
++            ImGui.TableNextColumn();
++            var forSale = sold.ForSale;
++            if (ImGui.Checkbox("##forsale", ref forSale))
++            {
++                sold.ForSale = forSale;
++                sold.Max = forSale ? Math.Max(1, sold.Max) : 0;
++            }
++
++            ImGui.TableNextColumn();
++            var price = sold.Price > int.MaxValue ? int.MaxValue : (int)sold.Price;
++            ImGui.SetNextItemWidth(-1);
++            if (ImGui.InputInt("##price", ref price, 0, 0))
++            {
++                sold.Price = (ulong)Math.Clamp(price, 0, int.MaxValue);
++                sold.Multiplier = (float)(sold.Price / (double)Math.Max(1, sold.Good.Ini.Price));
++            }
++
++            ImGui.TableNextColumn();
++            var multiplier = sold.Multiplier;
++            ImGui.SetNextItemWidth(-1);
++            if (ImGui.InputFloat("##mult", ref multiplier, 0, 0, "%.2f"))
++            {
++                if (!float.IsFinite(multiplier))
++                    multiplier = 0f;
++                multiplier = Math.Clamp(multiplier, 0f, 100f);
++                sold.Multiplier = multiplier;
++                sold.Price = (ulong)Math.Round(Math.Max(1, sold.Good.Ini.Price) * multiplier);
++            }
++
++            ImGui.TableNextColumn();
++            var rank = sold.Rank;
++            ImGui.SetNextItemWidth(-1);
++            if (ImGui.InputInt("##rank", ref rank, 0, 0))
++                sold.Rank = Math.Clamp(rank, 0, 100);
++
++            ImGui.TableNextColumn();
++            var rep = sold.Rep;
++            ImGui.SetNextItemWidth(-1);
++            if (ImGui.InputFloat("##rep", ref rep, 0, 0, "%.2f"))
++                sold.Rep = Math.Clamp(rep, -1f, 1f);
++
++            ImGui.TableNextColumn();
++            if (ImGui.SmallButton("Remove"))
++            {
++                CommitMarketGoodRemove(selectedBase, index, original);
++                ImGui.PopID();
++                break;
++            }
++
++            if (!MarketGoodsEqual(original, sold))
++                CommitMarketGoodSet(selectedBase, index, original, sold);
++            if (ImGui.IsItemHovered())
++                ImGui.SetTooltip("Remove commodity from this base");
++            ImGui.PopID();
++        }
++
++        ImGui.EndTable();
++    }
++
++    private void DrawAddMarketGood(Base b)
++    {
++        if (commodityGoods.Count == 0)
++        {
++            ImGui.TextDisabled("No commodity goods available.");
++            return;
++        }
++
++        if (newMarketGood == null || BaseHasGood(b, newMarketGood))
++            newMarketGood = commodityGoods.FirstOrDefault(x => !BaseHasGood(b, x));
++        ImGui.SetNextItemWidth(Math.Min(320 * ImGuiHelper.Scale, ImGui.GetContentRegionAvail().X * 0.62f));
++        DrawCommodityGoodCombo("##newmarketgood", newMarketGood, selected => newMarketGood = selected,
++            g => !BaseHasGood(b, g));
++
++        ImGui.SameLine();
++        var canAdd = newMarketGood != null &&
++                     !BaseHasGood(b, newMarketGood) &&
++                     data.GameData.Items.Ini.Freelancer.MarketsPaths.Count > 0;
++        ImGui.BeginDisabled(!canAdd);
++        if (ImGui.Button("Add commodity") && newMarketGood != null)
++        {
++            var sold = new BaseSoldGood(
++                0,
++                newMarketGood,
++                0,
++                (ulong)newMarketGood.Ini.Price,
++                true,
++                DefaultCommodityMarketPath(b),
++                0,
++                1,
++                false,
++                1f);
++            CommitMarketGoodAdd(b, sold);
++            selectedCommodity = newMarketGood.Nickname;
++            newMarketGood = commodityGoods.FirstOrDefault(x => !BaseHasGood(b, x));
++        }
++        ImGui.EndDisabled();
++    }
++
++    private bool DrawCommodityGoodCombo(
++        string id,
++        ResolvedGood? current,
++        Action<ResolvedGood> set,
++        Func<ResolvedGood, bool>? allow = null)
++    {
++        var changed = false;
++        var label = current == null ? "(none)" : current.Nickname;
++        if (ImGui.BeginCombo(id, label))
++        {
++            foreach (var good in commodityGoods)
++            {
++                var enabled = allow?.Invoke(good) ?? true;
++                ImGui.BeginDisabled(!enabled);
++                var selected = current != null &&
++                               current.Nickname.Equals(good.Nickname, StringComparison.OrdinalIgnoreCase);
++                if (ImGui.Selectable(good.Nickname, selected) && enabled)
++                {
++                    set(good);
++                    changed = true;
++                }
++
++                if (ImGui.IsItemHovered())
++                    ImGui.SetTooltip(CommodityDisplayName(good));
++                ImGui.EndDisabled();
++            }
++            ImGui.EndCombo();
++        }
++
++        return changed;
++    }
++
++    private static bool BaseHasGood(Base b, ResolvedGood good, int ignoreIndex = -1)
++    {
++        for (var i = 0; i < b.SoldGoods.Count; i++)
++        {
++            if (i == ignoreIndex)
++                continue;
++            if (b.SoldGoods[i].Good.Nickname.Equals(good.Nickname, StringComparison.OrdinalIgnoreCase))
++                return true;
++        }
++
++        return false;
++    }
++
++    private void CommitMarketGoodSet(Base b, int index, BaseSoldGood oldValue, BaseSoldGood newValue)
++    {
++        undoBuffer.Commit(new MarketGoodAction(
++            $"Market good edit {b.Nickname}",
++            b,
++            oldValue.SourceFile,
++            () =>
++            {
++                if (index < b.SoldGoods.Count)
++                    b.SoldGoods[index] = newValue;
++            },
++            () =>
++            {
++                if (index < b.SoldGoods.Count)
++                    b.SoldGoods[index] = oldValue;
++            },
++            ApplyMarketEdit));
++    }
++
++    private void CommitMarketGoodAdd(Base b, BaseSoldGood sold)
++    {
++        undoBuffer.Commit(new MarketGoodAction(
++            $"Market good add {sold.Good.Nickname}",
++            b,
++            sold.SourceFile,
++            () => b.SoldGoods.Add(sold),
++            () =>
++            {
++                var index = b.SoldGoods.FindLastIndex(x =>
++                    x.Good.Nickname.Equals(sold.Good.Nickname, StringComparison.OrdinalIgnoreCase));
++                if (index >= 0)
++                    b.SoldGoods.RemoveAt(index);
++            },
++            ApplyMarketEdit));
++    }
++
++    private void CommitMarketGoodRemove(Base b, int index, BaseSoldGood sold)
++    {
++        undoBuffer.Commit(new MarketGoodAction(
++            $"Market good remove {sold.Good.Nickname}",
++            b,
++            sold.SourceFile,
++            () =>
++            {
++                if (index < b.SoldGoods.Count)
++                    b.SoldGoods.RemoveAt(index);
++            },
++            () =>
++            {
++                var insertIndex = Math.Clamp(index, 0, b.SoldGoods.Count);
++                b.SoldGoods.Insert(insertIndex, sold);
++            },
++            ApplyMarketEdit));
++    }
++
++    private static bool MarketGoodsEqual(BaseSoldGood a, BaseSoldGood b) =>
++        a.Good.Nickname.Equals(b.Good.Nickname, StringComparison.OrdinalIgnoreCase) &&
++        a.ForSale == b.ForSale &&
++        a.Price == b.Price &&
++        a.Rank == b.Rank &&
++        Math.Abs(a.Rep - b.Rep) < 0.0001f &&
++        string.Equals(a.SourceFile, b.SourceFile, StringComparison.OrdinalIgnoreCase) &&
++        a.Min == b.Min &&
++        a.Max == b.Max &&
++        a.Preserve == b.Preserve &&
++        Math.Abs(a.Multiplier - b.Multiplier) < 0.000001f;
++
++    private void ApplyMarketEdit(Base? dirtyBase = null, string? sourceFile = null)
++    {
++        if (dirtyBase != null)
++            dirtyMarketBases.Add(dirtyBase.Nickname);
++        if (dirtyBase != null && !string.IsNullOrWhiteSpace(sourceFile))
++        {
++            if (!dirtyMarketFiles.TryGetValue(sourceFile, out var bases))
++                dirtyMarketFiles[sourceFile] = bases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
++            bases.Add(dirtyBase.Nickname);
++        }
++        commoditySaveStatus = dirtyMarketBases.Count == 0
++            ? ""
++            : $"{dirtyMarketBases.Count} base market(s) modified";
++        BuildMarketEntries();
++        RecalculateRoutes();
++    }
++
++    private void SaveCommodityMarkets()
++    {
++        if (dirtyMarketBases.Count == 0)
++        {
++            commoditySaveStatus = "No commodity edits to save.";
++            return;
++        }
++
++        if (dirtyMarketFiles.Count == 0)
++        {
++            commoditySaveStatus = "No writable commodity market file is known for these edits.";
++            return;
++        }
++
++        var vfs = data.GameData.Items.VFS;
++        var marketFiles = MarketIniSerializer.GetMarketFiles(data.GameData.Items, dirtyMarketFiles);
++        List<(string Path, List<Section> Sections)> writes = [];
++        foreach (var marketFile in marketFiles)
++        {
++            var backingFile = vfs.GetBackingFileName(marketFile.Filename);
++            if (string.IsNullOrWhiteSpace(backingFile))
++            {
++                commoditySaveStatus = $"Cannot save {marketFile.Filename}: no writable backing file.";
++                return;
++            }
++
++            var originalSections = IniFile.ParseFile(marketFile.Filename, vfs, true).ToList();
++            var mergedSections = MarketIniSerializer.MergeMarketFile(
++                originalSections,
++                marketFile,
++                nickname => data.GameData.Items.Goods.TryGetValue(nickname, out var good) &&
++                            good.Ini.Category == GoodCategory.Commodity);
++            writes.Add((backingFile, mergedSections));
++        }
++
++        foreach (var write in writes)
++            IniWriter.WriteIniFile(write.Path, write.Sections);
++
++        dirtyMarketBases.Clear();
++        dirtyMarketFiles.Clear();
++        commoditySaveStatus = writes.Count switch
++        {
++            0 => "No commodity market file changes were needed.",
++            1 => "Saved commodity markets to 1 file.",
++            _ => $"Saved commodity markets to {writes.Count} files."
++        };
++        window.OnSaved();
++    }
++
++    private string DefaultCommodityMarketPath(Base b) =>
++        b.SoldGoods
++            .Where(x => x.Good.Ini.Category == GoodCategory.Commodity)
++            .Select(x => x.SourceFile)
++            .FirstOrDefault(x => !string.IsNullOrWhiteSpace(x)) ??
++        data.GameData.Items.Ini.Freelancer.MarketsPaths.FirstOrDefault(x =>
++            Path.GetFileName(x.Replace('\\', Path.DirectorySeparatorChar))
++                .Equals("market_commodities.ini", StringComparison.OrdinalIgnoreCase)) ??
++        data.GameData.Items.Ini.Freelancer.MarketsPaths.First();
++}
+diff --git a/src/Editor/LancerEdit/GameContent/TradingPlannerTab.Models.cs b/src/Editor/LancerEdit/GameContent/TradingPlannerTab.Models.cs
+new file mode 100644
+index 0000000..4123562
+--- /dev/null
++++ b/src/Editor/LancerEdit/GameContent/TradingPlannerTab.Models.cs
+@@ -0,0 +1,98 @@
++#nullable enable
++
++using System;
++using System.Collections.Generic;
++using System.Numerics;
++using LibreLancer;
++using LibreLancer.Data.GameData;
++using LibreLancer.Data.GameData.Items;
++using LibreLancer.ImUI;
++using Base = LibreLancer.Data.GameData.World.Base;
++using StarSystem = LibreLancer.Data.GameData.World.StarSystem;
++
++namespace LancerEdit.GameContent;
++
++public partial class TradingPlannerTab
++{
++    private sealed class PlannerSystem(StarSystem system, Vector2 position) : EditorSystem(system, position)
++    {
++    }
++
++    private sealed class PlannerConnection(PlannerSystem source, PlannerSystem target, bool legal)
++    {
++        public PlannerSystem Source = source;
++        public PlannerSystem Target = target;
++        public bool Legal = legal;
++    }
++
++    private sealed class TradeMarketEntry
++    {
++        public required Base Base;
++        public required PlannerSystem System;
++        public required ResolvedGood Good;
++        public required bool ForSale;
++        public required ulong Price;
++        public required double Multiplier;
++        public required int Rank;
++        public required float Rep;
++        public Vector3? LocalPosition;
++    }
++
++    private sealed class TradeCommodity
++    {
++        public required ResolvedGood Good;
++        public List<TradeMarketEntry> Markets = [];
++        public List<TradeRoute> Routes = [];
++
++        public string Nickname => Good.Nickname;
++        public int BasePrice => Good.Ini.Price;
++    }
++
++    private sealed class TradeRoute
++    {
++        public required TradeCommodity Commodity;
++        public required TradeMarketEntry Seller;
++        public required TradeMarketEntry Buyer;
++        public required List<PlannerSystem> Path;
++        public required int Hops;
++        public required double Distance;
++        public required double ProfitPerUnit;
++    }
++
++    private sealed class MarketGoodAction(
++        string name,
++        Base b,
++        string sourceFile,
++        Action commit,
++        Action undo,
++        Action<Base, string> changed) : EditorAction
++    {
++        public override void Commit()
++        {
++            commit();
++            changed(b, sourceFile);
++        }
++
++        public override void Undo()
++        {
++            undo();
++            changed(b, sourceFile);
++        }
++
++        public override string ToString() => name;
++    }
++
++    private sealed class TradingPlannerSaveStrategy(TradingPlannerTab tab) : ISaveStrategy
++    {
++        public void Save() => tab.SaveCommodityMarkets();
++
++        public void DrawMenuOptions()
++        {
++            if (Theme.IconMenuItem(Icons.Save, "Save Commodities", tab.dirtyMarketBases.Count > 0))
++                Save();
++            Theme.IconMenuItem(Icons.Save, "Save As", false);
++        }
++
++        public bool ShouldSave => tab.dirtyMarketBases.Count > 0;
++    }
++}
+diff --git a/src/Editor/LancerEdit/GameContent/TradingPlannerTab.cs b/src/Editor/LancerEdit/GameContent/TradingPlannerTab.cs
+new file mode 100644
+index 0000000..3bf2eba
+--- /dev/null
++++ b/src/Editor/LancerEdit/GameContent/TradingPlannerTab.cs
+@@ -0,0 +1,874 @@
++#nullable enable
++
++using System;
++using System.Collections.Generic;
++using System.Globalization;
++using System.Linq;
++using System.Numerics;
++using ImGuiNET;
++using LibreLancer;
++using LibreLancer.ContentEdit;
++using LibreLancer.Data.GameData.Items;
++using LibreLancer.Data.GameData.World;
++using LibreLancer.Data.Schema.Goods;
++using LibreLancer.Data.Schema.Solar;
++using LibreLancer.ImUI;
++using Base = LibreLancer.Data.GameData.World.Base;
++using StarSystem = LibreLancer.Data.GameData.World.StarSystem;
++
++namespace LancerEdit.GameContent;
++
++public partial class TradingPlannerTab : GameContentTab
++{
++    private readonly GameDataContext data;
++    private readonly MainWindow window;
++    private readonly Dictionary<string, PlannerSystem> systems = new(StringComparer.OrdinalIgnoreCase);
++    private readonly Dictionary<string, List<string>> anyJumpGraph = new(StringComparer.OrdinalIgnoreCase);
++    private readonly Dictionary<string, List<string>> legalJumpGraph = new(StringComparer.OrdinalIgnoreCase);
++    private readonly List<PlannerConnection> connections = [];
++    private readonly List<TradeMarketEntry> marketEntries = [];
++    private readonly List<Base> allBases;
++    private readonly List<ResolvedGood> commodityGoods;
++    private readonly HashSet<string> dirtyMarketBases = new(StringComparer.OrdinalIgnoreCase);
++    private readonly Dictionary<string, HashSet<string>> dirtyMarketFiles = new(StringComparer.OrdinalIgnoreCase);
++    private readonly EditorUndoBuffer undoBuffer = new();
++    private readonly UniverseMap tradeMap = new();
++    private List<TradeCommodity> commodities = [];
++
++    private string commodityFilter = "";
++    private string routeFilter = "";
++    private string mapSystemExclusion = "";
++    private string commoditySaveStatus = "";
++    private string? selectedCommodity;
++    private ResolvedGood? newMarketGood;
++    private PlannerSystem? selectedSystem;
++    private Base? selectedBase;
++    private TradeRoute? selectedRoute;
++
++    private float buyerMultiplierMinimum = 3.0f;
++    private float sellerMultiplierMaximum = 1.0f;
++    private float rangeMultiplierMinimum = 0.0f;
++    private float rangeMultiplierMaximum = 10.0f;
++    private bool filterBuyerMultiplier = false;
++    private bool filterSellerMultiplier = false;
++    private bool filterRangeMultiplier = false;
++    private bool includeJumpHoles = true;
++    private int maxRoutesShown = 500;
++    private int maxMapRoutes = 80;
++    private float mapSystemSpacing = 40.0f;
++    private float mapSectorSystemSpacing = 30.0f;
++    private float mapHeight = 0;
++
++    public TradingPlannerTab(GameDataContext gameData, MainWindow mainWindow)
++    {
++        Title = "Trading Planner";
++        data = gameData;
++        window = mainWindow;
++        SaveStrategy = new TradingPlannerSaveStrategy(this);
++        allBases = data.GameData.Items.Bases.OrderBy(x => x.Nickname).ToList();
++        commodityGoods = data.GameData.Items.Goods
++            .Where(x => x.Ini.Category == GoodCategory.Commodity && x.Ini.Price > 0)
++            .OrderBy(x => x.Nickname)
++            .ToList();
++        newMarketGood = commodityGoods.FirstOrDefault();
++        LoadMapOptions();
++
++        BuildSystems();
++        BuildConnections();
++        BuildMarketEntries();
++        RecalculateRoutes();
++        selectedCommodity = commodities.FirstOrDefault(x => x.Routes.Count > 0)?.Nickname ??
++                            commodities.FirstOrDefault()?.Nickname;
++        selectedBase = allBases.FirstOrDefault();
++    }
++
++    public override void Draw(double elapsed)
++    {
++        DrawToolbar();
++
++        var size = ImGui.GetContentRegionAvail();
++        if (size.X <= 0 || size.Y <= 0)
++            return;
++
++        if (ImGui.BeginTable("##tradingplannerlayout", 2,
++                ImGuiTableFlags.BordersInnerV | ImGuiTableFlags.Resizable | ImGuiTableFlags.NoHostExtendY,
++                size))
++        {
++            ImGui.TableSetupColumn("##commodities", ImGuiTableColumnFlags.WidthFixed, 280 * ImGuiHelper.Scale);
++            ImGui.TableSetupColumn("##main", ImGuiTableColumnFlags.WidthStretch);
++            ImGui.TableNextRow();
++
++            ImGui.TableNextColumn();
++            DrawCommodityList();
++
++            ImGui.TableNextColumn();
++            DrawRoutesView();
++
++            ImGui.EndTable();
++        }
++    }
++
++    public override void OnHotkey(Hotkeys hk, bool shiftPressed)
++    {
++        if (hk == Hotkeys.Undo && undoBuffer.CanUndo)
++            undoBuffer.Undo();
++        if (hk == Hotkeys.Redo && undoBuffer.CanRedo)
++            undoBuffer.Redo();
++    }
++
++    private void DrawToolbar()
++    {
++        ImGui.Text($"{systems.Count} systems, {connections.Count} jump links, {marketEntries.Count} market entries");
++
++        if (ImGui.Button($"{Icons.SyncAlt} Refresh"))
++        {
++            BuildMarketEntries();
++            RecalculateRoutes();
++        }
++
++        ImGui.SameLine();
++        if (ImGui.Button($"{Icons.Map} Reset Camera"))
++        {
++            tradeMap.ResetView();
++        }
++
++        ImGui.Separator();
++    }
++
++    private void DrawCommodityList()
++    {
++        var fullHeight = ImGui.GetContentRegionAvail().Y;
++        var filterHeight = 190 * ImGuiHelper.Scale;
++        var mapOptionsHeight = 220 * ImGuiHelper.Scale;
++        var listHeight = Math.Max(140 * ImGuiHelper.Scale,
++            fullHeight - filterHeight - mapOptionsHeight - (16 * ImGuiHelper.Scale));
++
++        if (ImGui.BeginChild("##commoditylistpanel", new Vector2(0, listHeight), ImGuiChildFlags.Borders))
++        {
++            ImGui.TextDisabled("Commodities");
++            ImGui.SetNextItemWidth(-1);
++            ImGui.InputText("##commodityfilter", ref commodityFilter, 256);
++            ImGui.Separator();
++
++            foreach (var commodity in FilterCommodities())
++            {
++                var selected = selectedCommodity != null &&
++                               selectedCommodity.Equals(commodity.Nickname, StringComparison.OrdinalIgnoreCase);
++                var label = $"{commodity.Nickname}  ({commodity.Routes.Count})";
++                if (ImGui.Selectable(label, selected))
++                {
++                    selectedCommodity = commodity.Nickname;
++                    selectedRoute = commodity.Routes.FirstOrDefault();
++                }
++
++                if (ImGui.IsItemHovered())
++                {
++                    ImGui.SetTooltip(
++                        $"{CommodityDisplayName(commodity)}\nBase price: {commodity.BasePrice}\nMarkets: {commodity.Markets.Count}\nRoutes: {commodity.Routes.Count}");
++                }
++            }
++        }
++        ImGui.EndChild();
++
++        DrawFilterPanel();
++        DrawMapOptionsPanel();
++    }
++
++    private void DrawFilterPanel()
++    {
++        if (ImGui.BeginChild("##tradefilterpanel", new Vector2(0, 190 * ImGuiHelper.Scale), ImGuiChildFlags.Borders))
++        {
++            ImGui.TextDisabled("Route filters");
++            ImGui.Separator();
++
++            if (DrawOptionalFloatFilter("Min buyer multiplier", ref filterBuyerMultiplier,
++                    ref buyerMultiplierMinimum, "minimum buyer multiplier"))
++                RecalculateRoutes();
++
++            if (DrawOptionalFloatFilter("Max seller multiplier", ref filterSellerMultiplier,
++                    ref sellerMultiplierMaximum, "maximum seller multiplier"))
++                RecalculateRoutes();
++
++            var changed = false;
++            changed |= ImGui.Checkbox("##rangemultenabled", ref filterRangeMultiplier);
++            ImGui.SameLine();
++            ImGui.Text("Range multiplier");
++            ImGui.BeginDisabled(!filterRangeMultiplier);
++            ImGui.SetNextItemWidth(FilterInputWidth());
++            changed |= ImGui.DragFloatRange2("##rangemult", ref rangeMultiplierMinimum,
++                ref rangeMultiplierMaximum, 0.05f, 0, 100, "%.2f", "%.2f");
++            ImGui.EndDisabled();
++            ImGui.TextDisabled("buyer and seller multipliers must both be inside this range");
++
++            if (changed)
++            {
++                NormalizeMultiplierFilters();
++                RecalculateRoutes();
++            }
++        }
++
++        ImGui.EndChild();
++    }
++
++    private void DrawMapOptionsPanel()
++    {
++        if (ImGui.BeginChild("##mapoptionspanel", ImGui.GetContentRegionAvail(), ImGuiChildFlags.Borders))
++        {
++            ImGui.TextDisabled("Map options");
++            ImGui.Separator();
++
++            var newIncludeJumpHoles = includeJumpHoles;
++            if (ImGui.Checkbox("Include jump holes", ref newIncludeJumpHoles))
++            {
++                includeJumpHoles = newIncludeJumpHoles;
++                RecalculateRoutes();
++            }
++
++            ImGui.SetNextItemWidth(FilterInputWidth());
++            maxRoutesShown = Math.Clamp(maxRoutesShown, 25, 5000);
++            ImGui.InputInt("Shown routes", ref maxRoutesShown, 25, 100);
++            maxRoutesShown = Math.Clamp(maxRoutesShown, 25, 5000);
++
++            ImGui.SetNextItemWidth(FilterInputWidth());
++            maxMapRoutes = Math.Clamp(maxMapRoutes, 0, 5000);
++            ImGui.InputInt("Map routes", ref maxMapRoutes, 10, 50);
++            maxMapRoutes = Math.Clamp(maxMapRoutes, 0, 5000);
++
++            ImGui.SetNextItemWidth(FilterInputWidth());
++            ImGui.InputFloat("System spacing", ref mapSystemSpacing, 2f, 10f, "%.0f");
++            mapSystemSpacing = Math.Clamp(mapSystemSpacing, 0, 400);
++
++            ImGui.SetNextItemWidth(FilterInputWidth());
++            ImGui.InputFloat("Sector spacing", ref mapSectorSystemSpacing, 2f, 10f, "%.0f");
++            mapSectorSystemSpacing = Math.Clamp(mapSectorSystemSpacing, 0, 400);
++
++            ImGui.SetNextItemWidth(FilterInputWidth());
++            ImGui.InputText("System exclusion", ref mapSystemExclusion, 128);
++
++            if (ImGui.Button($"{Icons.Save} Save options"))
++                SaveMapOptions();
++        }
++
++        ImGui.EndChild();
++    }
++
++    private static float FilterInputWidth() =>
++        Math.Min(116 * ImGuiHelper.Scale, Math.Max(64 * ImGuiHelper.Scale, ImGui.GetContentRegionAvail().X * 0.46f));
++
++    private void LoadMapOptions()
++    {
++        includeJumpHoles = window.Config.TradingPlannerIncludeJumpholes;
++        maxRoutesShown = Math.Clamp(window.Config.TradingPlannerShownRoutes, 25, 5000);
++        maxMapRoutes = Math.Clamp(window.Config.TradingPlannerMapRoutes, 0, 5000);
++        mapSystemSpacing = Math.Clamp(window.Config.TradingPlannerSystemSpacing, 0, 400);
++        mapSectorSystemSpacing = Math.Clamp(window.Config.TradingPlannerSectorSpacing, 0, 400);
++        mapSystemExclusion = window.Config.TradingPlannerSystemExclusion ?? "";
++    }
++
++    private void SaveMapOptions()
++    {
++        window.Config.TradingPlannerIncludeJumpholes = includeJumpHoles;
++        window.Config.TradingPlannerShownRoutes = maxRoutesShown;
++        window.Config.TradingPlannerMapRoutes = maxMapRoutes;
++        window.Config.TradingPlannerSystemSpacing = mapSystemSpacing;
++        window.Config.TradingPlannerSectorSpacing = mapSectorSystemSpacing;
++        window.Config.TradingPlannerSystemExclusion = mapSystemExclusion;
++        window.Config.Save();
++    }
++
++    private static bool DrawOptionalFloatFilter(string label, ref bool enabled, ref float value, string hint)
++    {
++        var changed = ImGui.Checkbox($"##{label}enabled", ref enabled);
++        ImGui.SameLine();
++        ImGui.Text(label);
++        ImGui.SameLine();
++        ImGui.BeginDisabled(!enabled);
++        ImGui.SetNextItemWidth(FilterInputWidth());
++        changed |= ImGui.InputFloat($"##{label}value", ref value, 0.1f, 0.5f, "%.2f");
++        ImGui.EndDisabled();
++        ImGui.TextDisabled(hint);
++        return changed;
++    }
++
++    private void DrawRoutesView()
++    {
++        var commodity = SelectedCommodity();
++        if (commodity == null)
++        {
++            ImGui.TextDisabled("No commodity selected.");
++            return;
++        }
++
++        ImGui.Text($"{CommodityDisplayName(commodity)}");
++        ImGui.SameLine();
++        ImGui.TextDisabled(
++            $"Base {commodity.BasePrice} | markets {commodity.Markets.Count} | routes {commodity.Routes.Count}");
++
++        if (selectedSystem != null)
++        {
++            if (ImGui.BeginTable("##routeplannerwithinspector", 2,
++                    ImGuiTableFlags.BordersInnerV | ImGuiTableFlags.Resizable | ImGuiTableFlags.NoHostExtendY,
++                    ImGui.GetContentRegionAvail()))
++            {
++                ImGui.TableSetupColumn("##planner", ImGuiTableColumnFlags.WidthStretch);
++                ImGui.TableSetupColumn("##systeminspector", ImGuiTableColumnFlags.WidthFixed, 640 * ImGuiHelper.Scale);
++                ImGui.TableNextRow();
++
++                ImGui.TableNextColumn();
++                DrawRoutePlannerArea(commodity);
++
++                ImGui.TableNextColumn();
++                DrawMarketsView();
++
++                ImGui.EndTable();
++            }
++
++            return;
++        }
++
++        DrawRoutePlannerArea(commodity);
++    }
++
++    private void DrawRoutePlannerArea(TradeCommodity commodity)
++    {
++        var avail = ImGui.GetContentRegionAvail();
++        var minMapHeight = 120 * ImGuiHelper.Scale;
++        var maxMapHeight = Math.Max(minMapHeight, avail.Y - (170 * ImGuiHelper.Scale));
++        if (mapHeight <= 0)
++            mapHeight = Math.Clamp(avail.Y * 0.32f, minMapHeight, maxMapHeight);
++        mapHeight = Math.Clamp(mapHeight, minMapHeight, maxMapHeight);
++        DrawTradeMap(commodity, new Vector2(avail.X, mapHeight));
++        DrawMapSplitter(avail.X, minMapHeight, maxMapHeight);
++        ImGui.Separator();
++
++        ImGui.SetNextItemWidth(260 * ImGuiHelper.Scale);
++        ImGui.InputText("Route filter", ref routeFilter, 256);
++        ImGui.SameLine();
++        ImGui.TextDisabled("matches base, system, or path");
++
++        DrawRouteTable(commodity);
++    }
++
++    private void DrawMapSplitter(float width, float minHeight, float maxHeight)
++    {
++        var splitterHeight = 8 * ImGuiHelper.Scale;
++        ImGui.InvisibleButton("##maproutesplitter", new Vector2(width, splitterHeight));
++        var hovered = ImGui.IsItemHovered();
++        var active = ImGui.IsItemActive();
++        var draw = ImGui.GetWindowDrawList();
++        var min = ImGui.GetItemRectMin();
++        var max = ImGui.GetItemRectMax();
++        var y = (min.Y + max.Y) * 0.5f;
++        var color = ImGui.GetColorU32(active ? ImGuiCol.ButtonActive :
++            hovered ? ImGuiCol.ButtonHovered : ImGuiCol.Border);
++        draw.AddLine(new Vector2(min.X, y), new Vector2(max.X, y), color, 2 * ImGuiHelper.Scale);
++
++        if (active)
++            mapHeight = Math.Clamp(mapHeight + ImGui.GetIO().MouseDelta.Y, minHeight, maxHeight);
++        if (hovered || active)
++            ImGui.SetMouseCursor(ImGuiMouseCursor.ResizeNS);
++    }
++
++    private void DrawRouteTable(TradeCommodity commodity)
++    {
++        var visibleRoutes = commodity.Routes
++            .Where(RouteMatchesFilter)
++            .Take(Math.Max(25, maxRoutesShown))
++            .ToList();
++
++        var tableSize = ImGui.GetContentRegionAvail();
++        tableSize.Y -= 3 * ImGuiHelper.Scale;
++        if (!ImGui.BeginTable("##routes", 8,
++                ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.Resizable |
++                ImGuiTableFlags.ScrollY | ImGuiTableFlags.NoHostExtendY,
++                tableSize))
++            return;
++
++        ImGui.TableSetupColumn("Seller", ImGuiTableColumnFlags.WidthStretch, 1.4f);
++        ImGui.TableSetupColumn("Buyer", ImGuiTableColumnFlags.WidthStretch, 1.4f);
++        ImGui.TableSetupColumn("Jumps", ImGuiTableColumnFlags.WidthFixed, 56 * ImGuiHelper.Scale);
++        ImGui.TableSetupColumn("Distance", ImGuiTableColumnFlags.WidthFixed, 82 * ImGuiHelper.Scale);
++        ImGui.TableSetupColumn("Sell x", ImGuiTableColumnFlags.WidthFixed, 70 * ImGuiHelper.Scale);
++        ImGui.TableSetupColumn("Buy x", ImGuiTableColumnFlags.WidthFixed, 70 * ImGuiHelper.Scale);
++        ImGui.TableSetupColumn("Profit/u", ImGuiTableColumnFlags.WidthFixed, 90 * ImGuiHelper.Scale);
++        ImGui.TableSetupColumn("Path", ImGuiTableColumnFlags.WidthStretch, 1.6f);
++        ImGui.TableSetupScrollFreeze(0, 1);
++        ImGui.TableHeadersRow();
++
++        for (var i = 0; i < visibleRoutes.Count; i++)
++        {
++            var route = visibleRoutes[i];
++            ImGui.PushID(i);
++            ImGui.TableNextRow();
++            ImGui.TableNextColumn();
++
++            var selected = ReferenceEquals(selectedRoute, route);
++            if (ImGui.Selectable($"{route.Seller.Base.Nickname}##select", selected,
++                    ImGuiSelectableFlags.SpanAllColumns))
++            {
++                selectedRoute = route;
++                selectedBase = route.Seller.Base;
++            }
++
++            if (ImGui.IsItemHovered())
++                ImGui.SetTooltip(RouteTooltip(route));
++
++            ImGui.TableNextColumn();
++            ImGui.Text(route.Buyer.Base.Nickname);
++            ImGui.TableNextColumn();
++            ImGui.Text(route.Hops.ToString(CultureInfo.InvariantCulture));
++            ImGui.TableNextColumn();
++            ImGui.Text(FormatDistance(route.Distance));
++            ImGui.TableNextColumn();
++            ImGui.Text($"x{route.Seller.Multiplier:0.##}");
++            ImGui.TableNextColumn();
++            ImGui.Text($"x{route.Buyer.Multiplier:0.##}");
++            ImGui.TableNextColumn();
++            ImGui.Text(FormatNumber(route.ProfitPerUnit));
++            ImGui.TableNextColumn();
++            ImGui.Text(RoutePathText(route));
++            ImGui.PopID();
++        }
++
++        ImGui.EndTable();
++    }
++
++    private void DrawMarketsView()
++    {
++        if (selectedSystem == null && selectedBase?.System != null &&
++            systems.TryGetValue(selectedBase.System, out var baseSystem))
++        {
++            selectedSystem = baseSystem;
++        }
++
++        if (selectedSystem == null)
++        {
++            ImGui.TextDisabled("Click a system in the map to inspect its bases and commodities.");
++            return;
++        }
++
++        var bases = BasesForSelectedSystem().ToList();
++        if (ImGui.SmallButton("x##closesystemmarket"))
++        {
++            selectedSystem = null;
++            return;
++        }
++
++        ImGui.SameLine();
++        ImGui.Text(SystemDisplayName(selectedSystem.System));
++        ImGui.SameLine();
++        ImGui.TextDisabled($"{bases.Count} bases");
++
++        var avail = ImGui.GetContentRegionAvail();
++        var basesHeight = Math.Clamp(avail.Y * 0.30f, 120 * ImGuiHelper.Scale, 240 * ImGuiHelper.Scale);
++        if (ImGui.BeginChild("##systembases", new Vector2(0, basesHeight), ImGuiChildFlags.Borders))
++        {
++            ImGui.TextDisabled("Bases");
++            ImGui.Separator();
++            foreach (var b in bases)
++            {
++                var isSelected = selectedBase == b;
++                if (ImGui.Selectable(BaseDisplayName(b), isSelected))
++                    selectedBase = b;
++            }
++        }
++        ImGui.EndChild();
++
++        DrawSelectedBaseMarket();
++    }
++
++    private IEnumerable<Base> BasesForSelectedSystem()
++    {
++        if (selectedSystem == null)
++            return [];
++
++        return allBases
++            .Where(x => x.System != null &&
++                        x.System.Equals(selectedSystem.System.Nickname, StringComparison.OrdinalIgnoreCase))
++            .OrderBy(x => x.Nickname);
++    }
++
++    private void DrawTradeMap(TradeCommodity commodity, Vector2 size)
++    {
++        var selectedPath = selectedRoute?.Path
++            .Select(x => x.System.Nickname)
++            .ToHashSet(StringComparer.OrdinalIgnoreCase);
++
++        List<UniverseMap.Route> routeOverlays = [];
++        foreach (var route in commodity.Routes.Take(maxMapRoutes))
++        {
++            if (!RouteVisibleOnMap(route))
++                continue;
++
++            routeOverlays.Add(new UniverseMap.Route(
++                route.Path,
++                ImGui.GetColorU32(new Vector4(1f, 0.55f, 0.10f, 0.16f)),
++                2.0f * ImGuiHelper.Scale));
++        }
++
++        if (selectedRoute is { } selected && selected.Commodity == commodity && RouteVisibleOnMap(selected))
++            routeOverlays.Add(new UniverseMap.Route(
++                selected.Path,
++                ImGui.GetColorU32(new Vector4(1f, 0.18f, 0.10f, 0.95f)),
++                4.0f * ImGuiHelper.Scale));
++
++        var mapConnections = connections
++            .Select(x => new UniverseMap.Connection(x.Source, x.Target, x.Legal))
++            .ToList();
++        var options = new UniverseMap.ViewOptions
++        {
++            Id = "##trademap",
++            IsVisible = x => x is PlannerSystem plannerSystem && SystemVisibleOnMap(plannerSystem),
++            Label = x => SystemDisplayName(x.System),
++            Tooltip = x =>
++            {
++                var baseCount = allBases.Count(b => b.System != null &&
++                                                    b.System.Equals(x.System.Nickname,
++                                                        StringComparison.OrdinalIgnoreCase));
++                return $"{SystemDisplayName(x.System)}\nBases: {baseCount}";
++            },
++            OnClick = x =>
++            {
++                if (x is not PlannerSystem plannerSystem)
++                    return;
++                selectedSystem = plannerSystem;
++                selectedBase = BasesForSelectedSystem().FirstOrDefault();
++            },
++            HighlightedSystems = selectedPath,
++            NodeSpacing = mapSystemSpacing,
++            RelatedNodeSpacing = mapSectorSystemSpacing,
++            EmptyText = "No systems visible with current map exclusion."
++        };
++
++        tradeMap.Draw(systems.Values.Cast<EditorSystem>().ToList(),
++            data.GameData,
++            mapConnections,
++            routeOverlays,
++            size,
++            options);
++    }
++
++    private bool SystemVisibleOnMap(PlannerSystem system)
++    {
++        var text = mapSystemExclusion.Trim();
++        return string.IsNullOrWhiteSpace(text) ||
++               !system.System.Nickname.Contains(text, StringComparison.OrdinalIgnoreCase);
++    }
++
++    private bool RouteVisibleOnMap(TradeRoute route) =>
++        route.Path.All(SystemVisibleOnMap);
++
++    private IEnumerable<TradeCommodity> FilterCommodities()
++    {
++        var text = commodityFilter.Trim();
++        var filtered = commodities.AsEnumerable();
++        if (!string.IsNullOrWhiteSpace(text))
++        {
++            filtered = filtered.Where(x =>
++                x.Nickname.Contains(text, StringComparison.OrdinalIgnoreCase) ||
++                CommodityDisplayName(x).Contains(text, StringComparison.OrdinalIgnoreCase));
++        }
++
++        return filtered.OrderByDescending(x => x.Routes.Count).ThenBy(x => x.Nickname);
++    }
++
++    private bool RouteMatchesFilter(TradeRoute route)
++    {
++        var text = routeFilter.Trim();
++        if (string.IsNullOrWhiteSpace(text))
++            return true;
++
++        return route.Seller.Base.Nickname.Contains(text, StringComparison.OrdinalIgnoreCase) ||
++               route.Buyer.Base.Nickname.Contains(text, StringComparison.OrdinalIgnoreCase) ||
++               route.Seller.System.System.Nickname.Contains(text, StringComparison.OrdinalIgnoreCase) ||
++               route.Buyer.System.System.Nickname.Contains(text, StringComparison.OrdinalIgnoreCase) ||
++               RoutePathText(route).Contains(text, StringComparison.OrdinalIgnoreCase);
++    }
++
++    private TradeCommodity? SelectedCommodity() =>
++        selectedCommodity == null
++            ? null
++            : commodities.FirstOrDefault(x => x.Nickname.Equals(selectedCommodity, StringComparison.OrdinalIgnoreCase));
++
++    private void BuildSystems()
++    {
++        systems.Clear();
++        foreach (var system in data.GameData.Items.Systems)
++            systems[system.Nickname] = new PlannerSystem(system, system.UniversePosition);
++    }
++
++    private void BuildConnections()
++    {
++        connections.Clear();
++        anyJumpGraph.Clear();
++        legalJumpGraph.Clear();
++        Dictionary<string, PlannerConnection> byPair = new(StringComparer.OrdinalIgnoreCase);
++
++        foreach (var source in systems.Values)
++        {
++            foreach (var obj in source.System.Objects)
++            {
++                if (obj.Dock?.Kind != DockKinds.Jump ||
++                    string.IsNullOrWhiteSpace(obj.Dock.Target) ||
++                    obj.Dock.Target.Equals(source.System.Nickname, StringComparison.OrdinalIgnoreCase) ||
++                    !systems.TryGetValue(obj.Dock.Target, out var target))
++                    continue;
++
++                var legal = obj.Archetype?.Type == ArchetypeType.jump_gate;
++                TradeRouteGraph.AddDirectedConnection(anyJumpGraph, source.System.Nickname, target.System.Nickname);
++                if (legal)
++                    TradeRouteGraph.AddDirectedConnection(legalJumpGraph, source.System.Nickname, target.System.Nickname);
++
++                var key = PairKey(source.System.Nickname, target.System.Nickname);
++                if (byPair.TryGetValue(key, out var existing))
++                {
++                    existing.Legal |= legal;
++                }
++                else
++                {
++                    byPair[key] = new PlannerConnection(source, target, legal);
++                }
++            }
++        }
++
++        connections.AddRange(byPair.Values.OrderBy(x => x.Source.System.Nickname).ThenBy(x => x.Target.System.Nickname));
++    }
++
++    private void BuildMarketEntries()
++    {
++        marketEntries.Clear();
++        foreach (var b in data.GameData.Items.Bases)
++        {
++            if (b.System == null || !systems.TryGetValue(b.System, out var system))
++                continue;
++
++            var localPosition = system.System.Objects.FirstOrDefault(x =>
++                x.Base?.Nickname?.Equals(b.Nickname, StringComparison.OrdinalIgnoreCase) == true)?.Position;
++
++            foreach (var sold in b.SoldGoods)
++            {
++                if (sold.Good.Ini.Category != GoodCategory.Commodity || sold.Good.Ini.Price <= 0)
++                    continue;
++
++                marketEntries.Add(new TradeMarketEntry
++                {
++                    Base = b,
++                    System = system,
++                    Good = sold.Good,
++                    ForSale = sold.ForSale,
++                    Price = sold.Price,
++                    Multiplier = sold.Multiplier,
++                    Rank = sold.Rank,
++                    Rep = sold.Rep,
++                    LocalPosition = localPosition
++                });
++            }
++        }
++    }
++
++    private void RecalculateRoutes()
++    {
++        var previousSelectedRoute = selectedRoute;
++        commodities = marketEntries
++            .GroupBy(x => x.Good.Nickname, StringComparer.OrdinalIgnoreCase)
++            .Select(group => new TradeCommodity
++            {
++                Good = group.First().Good,
++                Markets = group.OrderBy(x => x.Base.Nickname).ToList()
++            })
++            .OrderBy(x => x.Nickname)
++            .ToList();
++
++        foreach (var commodity in commodities)
++        {
++            var sellers = commodity.Markets
++                .Where(x => x.ForSale)
++                .OrderBy(x => x.Multiplier)
++                .ThenBy(x => x.Base.Nickname)
++                .ToList();
++            var buyers = commodity.Markets
++                .OrderByDescending(x => x.Multiplier)
++                .ThenBy(x => x.Base.Nickname)
++                .ToList();
++
++            foreach (var seller in sellers)
++            {
++                foreach (var buyer in buyers)
++                {
++                    if (buyer.Base == seller.Base || buyer.Multiplier <= seller.Multiplier)
++                        continue;
++                    if (!RoutePassesMultiplierFilters(seller.Multiplier, buyer.Multiplier))
++                        continue;
++
++                    if (!TryGetPath(seller.System, buyer.System, out var path))
++                        continue;
++
++                    var profit = (double)buyer.Price - seller.Price;
++                    if (profit <= 0)
++                        continue;
++
++                    commodity.Routes.Add(new TradeRoute
++                    {
++                        Commodity = commodity,
++                        Seller = seller,
++                        Buyer = buyer,
++                        Path = path,
++                        Hops = Math.Max(0, path.Count - 1),
++                        Distance = CalculateDistance(path, seller, buyer),
++                        ProfitPerUnit = profit
++                    });
++                }
++            }
++
++            commodity.Routes.Sort((a, b) =>
++            {
++                var hops = a.Hops.CompareTo(b.Hops);
++                if (hops != 0) return hops;
++                var profit = -a.ProfitPerUnit.CompareTo(b.ProfitPerUnit);
++                if (profit != 0) return profit;
++                var seller = string.Compare(a.Seller.Base.Nickname, b.Seller.Base.Nickname, StringComparison.OrdinalIgnoreCase);
++                return seller != 0
++                    ? seller
++                    : string.Compare(a.Buyer.Base.Nickname, b.Buyer.Base.Nickname, StringComparison.OrdinalIgnoreCase);
++            });
++        }
++
++        if (previousSelectedRoute != null)
++        {
++            selectedRoute = commodities
++                .SelectMany(x => x.Routes)
++                .FirstOrDefault(x =>
++                    x.Commodity.Nickname.Equals(previousSelectedRoute.Commodity.Nickname, StringComparison.OrdinalIgnoreCase) &&
++                    x.Seller.Base.Nickname.Equals(previousSelectedRoute.Seller.Base.Nickname, StringComparison.OrdinalIgnoreCase) &&
++                    x.Buyer.Base.Nickname.Equals(previousSelectedRoute.Buyer.Base.Nickname, StringComparison.OrdinalIgnoreCase));
++        }
++
++        if (selectedRoute == null)
++            selectedRoute = SelectedCommodity()?.Routes.FirstOrDefault();
++    }
++
++    private void NormalizeMultiplierFilters()
++    {
++        buyerMultiplierMinimum = Math.Clamp(buyerMultiplierMinimum, 0, 100);
++        sellerMultiplierMaximum = Math.Clamp(sellerMultiplierMaximum, 0, 100);
++        rangeMultiplierMinimum = Math.Clamp(rangeMultiplierMinimum, 0, 100);
++        rangeMultiplierMaximum = Math.Clamp(rangeMultiplierMaximum, 0, 100);
++        if (rangeMultiplierMaximum < rangeMultiplierMinimum)
++            (rangeMultiplierMinimum, rangeMultiplierMaximum) = (rangeMultiplierMaximum, rangeMultiplierMinimum);
++    }
++
++    private bool RoutePassesMultiplierFilters(double sellerMultiplier, double buyerMultiplier)
++    {
++        if (filterBuyerMultiplier && buyerMultiplier < buyerMultiplierMinimum)
++            return false;
++        if (filterSellerMultiplier && sellerMultiplier > sellerMultiplierMaximum)
++            return false;
++        if (filterRangeMultiplier &&
++            (sellerMultiplier < rangeMultiplierMinimum ||
++             sellerMultiplier > rangeMultiplierMaximum ||
++             buyerMultiplier < rangeMultiplierMinimum ||
++             buyerMultiplier > rangeMultiplierMaximum))
++            return false;
++        return true;
++    }
++
++    private bool TryGetPath(PlannerSystem source, PlannerSystem target, out List<PlannerSystem> path)
++    {
++        path = [];
++        if (source == target)
++        {
++            path.Add(source);
++            return true;
++        }
++
++        var lancerPaths = includeJumpHoles
++            ? source.System.ShortestPathsAny
++            : source.System.ShortestPathsLegal;
++        if (lancerPaths.TryGetValue(target.System, out var existingPath))
++        {
++            path = existingPath
++                .Select(x => systems.TryGetValue(x.Nickname, out var plannerSystem) ? plannerSystem : null)
++                .Where(x => x != null)
++                .ToList()!;
++            if (path.Count > 0)
++                return true;
++        }
++
++        return TryGetGraphPath(includeJumpHoles ? anyJumpGraph : legalJumpGraph,
++            source.System.Nickname, target.System.Nickname, out path);
++    }
++
++    private bool TryGetGraphPath(
++        Dictionary<string, List<string>> graph,
++        string source,
++        string target,
++        out List<PlannerSystem> path)
++    {
++        path = [];
++        if (!TradeRouteGraph.TryGetPath(graph, source, target, out var names))
++            return false;
++
++        foreach (var name in names)
++        {
++            if (systems.TryGetValue(name, out var system))
++                path.Add(system);
++        }
++
++        return path.Count > 0 && path[^1].System.Nickname.Equals(target, StringComparison.OrdinalIgnoreCase);
++    }
++
++    private double CalculateDistance(List<PlannerSystem> path, TradeMarketEntry seller, TradeMarketEntry buyer)
++    {
++        if (path.Count <= 1)
++        {
++            if (seller.LocalPosition.HasValue && buyer.LocalPosition.HasValue)
++                return Vector3.Distance(seller.LocalPosition.Value, buyer.LocalPosition.Value);
++            return 0;
++        }
++
++        double distance = 0;
++        for (var i = 0; i < path.Count - 1; i++)
++            distance += Vector2.Distance(path[i].Position, path[i + 1].Position);
++        return distance;
++    }
++
++    private static string PairKey(string a, string b) =>
++        string.Compare(a, b, StringComparison.OrdinalIgnoreCase) <= 0
++            ? $"{a}\n{b}"
++            : $"{b}\n{a}";
++
++    private string BaseDisplayName(Base b)
++    {
++        var name = data.GameData.GetString(b.IdsName);
++        return string.IsNullOrWhiteSpace(name) ? b.Nickname : $"{b.Nickname} ({name})";
++    }
++
++    private string CommodityDisplayName(TradeCommodity commodity) => CommodityDisplayName(commodity.Good);
++
++    private string CommodityDisplayName(ResolvedGood good)
++    {
++        var name = data.GameData.GetString(good.Ini.IdsName);
++        return string.IsNullOrWhiteSpace(name) ? good.Nickname : $"{good.Nickname} ({name})";
++    }
++
++    private string SystemDisplayName(StarSystem system)
++    {
++        var name = data.GameData.GetString(system.IdsName);
++        return string.IsNullOrWhiteSpace(name) ? system.Nickname : $"{system.Nickname} ({name})";
++    }
++
++    private static string RoutePathText(TradeRoute route) =>
++        string.Join(" -> ", route.Path.Select(x => x.System.Nickname));
++
++    private string RouteTooltip(TradeRoute route) =>
++        $"{route.Seller.Base.Nickname} ({route.Seller.System.System.Nickname}) -> {route.Buyer.Base.Nickname} ({route.Buyer.System.System.Nickname})\n" +
++        $"{RoutePathText(route)}\n" +
++        $"{route.Hops} jumps | x{route.Seller.Multiplier:0.##} -> x{route.Buyer.Multiplier:0.##} | profit/unit {FormatNumber(route.ProfitPerUnit)}";
++
++    private static string FormatNumber(double value) =>
++        value.ToString(value >= 100 ? "0" : "0.##", CultureInfo.InvariantCulture);
++
++    private static string FormatDistance(double value) =>
++        value == 0 ? "-" : value.ToString(value >= 100 ? "0" : "0.##", CultureInfo.InvariantCulture);
++
++}
+diff --git a/src/Editor/LancerEdit/GameContent/UniverseEditorTab.cs b/src/Editor/LancerEdit/GameContent/UniverseEditorTab.cs
+index 461a712..7905dfe 100644
+--- a/src/Editor/LancerEdit/GameContent/UniverseEditorTab.cs
++++ b/src/Editor/LancerEdit/GameContent/UniverseEditorTab.cs
+@@ -183,8 +183,8 @@ public class UniverseEditorTab : GameContentTab
+
+     void NewSystem(string nickname, Vector2 position)
+     {
+-        var systemsFolder =
+-            Data.GameData.VFS.GetBackingFileName(Data.GameData.Items.Ini.Freelancer.DataPath + "/UNIVERSE/SYSTEMS");
++        var systemsFolder = WritableDataPath.Resolve(Data.GameData.VFS,
++            Data.GameData.Items.Ini.Freelancer.DataPath + "/UNIVERSE/SYSTEMS");
+         var newFolder = Path.Combine(systemsFolder, nickname);
+         Directory.CreateDirectory(newFolder);
+         var system = new StarSystem()
+@@ -200,7 +200,8 @@ public class UniverseEditorTab : GameContentTab
+             UniversePosition = position,
+         };
+         Data.GameData.Items.Systems.Add(system);
+-        var universePath = Data.GameData.VFS.GetBackingFileName(Data.GameData.Items.Ini.Freelancer.UniversePath);
++        var universePath = WritableDataPath.Resolve(Data.GameData.VFS,
++            Data.GameData.Items.Ini.Freelancer.UniversePath);
+         using (var stream = File.Create(Path.Combine(newFolder, $"{nickname}.ini")))
+         {
+             var sections = IniSerializer.SerializeStarSystem(system);
+diff --git a/src/Editor/LancerEdit/GameContent/UniverseSaveStrategy.cs b/src/Editor/LancerEdit/GameContent/UniverseSaveStrategy.cs
+index 00d45ac..ae36d22 100644
+--- a/src/Editor/LancerEdit/GameContent/UniverseSaveStrategy.cs
++++ b/src/Editor/LancerEdit/GameContent/UniverseSaveStrategy.cs
+@@ -12,7 +12,8 @@ public class UniverseSaveStrategy : ISaveStrategy
+     {
+         foreach (var s in Tab.AllSystems)
+             s.System.UniversePosition = s.Position;
+-        var path = Tab.Data.GameData.VFS.GetBackingFileName(Tab.Data.GameData.Items.Ini.Freelancer.UniversePath);
++        var path = WritableDataPath.Resolve(Tab.Data.GameData.VFS,
++            Tab.Data.GameData.Items.Ini.Freelancer.UniversePath);
+         IniWriter.WriteIniFile(path, IniSerializer.SerializeUniverse(Tab.Data.GameData.Items.Systems, Tab.Data.GameData.Items.Bases));
+         Tab.Dirty = false;
+         Tab.OnSaved();
+diff --git a/src/Editor/LancerEdit/GameContent/WritableDataPath.cs b/src/Editor/LancerEdit/GameContent/WritableDataPath.cs
+new file mode 100644
+index 0000000..ea1f84f
+--- /dev/null
++++ b/src/Editor/LancerEdit/GameContent/WritableDataPath.cs
+@@ -0,0 +1,15 @@
++using System.IO;
++using LibreLancer.Data.IO;
++
++namespace LancerEdit.GameContent;
++
++/// <summary>Resolves a VFS asset to its writable loose or editor-workspace path.</summary>
++internal static class WritableDataPath
++{
++    public static string Resolve(FileSystem vfs, string virtualPath)
++    {
++        var path = vfs.GetBackingFileName(virtualPath);
++        if (!string.IsNullOrWhiteSpace(path)) return path;
++        throw new IOException($"No writable backing file is available for '{virtualPath}'.");
++    }
++}
+diff --git a/src/Editor/LancerEdit/GameDataContext.cs b/src/Editor/LancerEdit/GameDataContext.cs
+index 856e9bf..07f966b 100644
+--- a/src/Editor/LancerEdit/GameDataContext.cs
++++ b/src/Editor/LancerEdit/GameDataContext.cs
+@@ -25,6 +25,7 @@ using LibreLancer.Data.IO;
+ using LibreLancer.ImageLib;
+ using LibreLancer.Resources;
+ using LibreLancer.Sounds;
++using Nexus.Assets;
+ using Archetype = LibreLancer.Data.GameData.Archetype;
+
+ namespace LancerEdit;
+@@ -50,6 +51,7 @@ public class GameDataContext : IDisposable
+
+     public string Folder;
+     public string UniverseVfsFolder;
++    public string? WorkspaceDirectory { get; private set; }
+
+     private string cacheDir;
+
+@@ -62,7 +64,7 @@ public class GameDataContext : IDisposable
+
+     static string CacheID(string path)
+     {
+-        var data = SHA256.HashData(Encoding.UTF8.GetBytes(path.ToUpper()));
++        var data = SHA256.HashData(Encoding.UTF8.GetBytes(path.ToUpperInvariant()));
+         var builder = new StringBuilder();
+         // Get the first 192 bits of hash, don't need all 256 for this purpose
+         var val = new BigInteger(data.AsSpan().Slice(0,24), true);
+@@ -76,6 +78,13 @@ public class GameDataContext : IDisposable
+         return builder.ToString();
+     }
+
++    static string WorkspaceBaseDirectory()
++    {
++        var directory = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
++        if (!string.IsNullOrWhiteSpace(directory)) return Path.Combine(directory, "LancerEdit");
++        return Path.Combine(AppContext.BaseDirectory, "user-data", "LancerEdit");
++    }
++
+     T YieldAndWait<T>(Task<T> task)
+     {
+         do
+@@ -174,6 +183,14 @@ public class GameDataContext : IDisposable
+         {
+             try
+             {
++                var packageProvider = NexusPackageFileProvider.LoadActive(AppContext.BaseDirectory);
++                if (packageProvider is not null)
++                {
++                    vfs.FileProviders.Add(packageProvider);
++                    WorkspaceDirectory = Path.Combine(WorkspaceBaseDirectory(), "NAPWorkspace", CacheID(folder));
++                    vfs.FileProviders.Add(new NexusPackageWorkspaceFileProvider(WorkspaceDirectory, packageProvider));
++                    FLLog.Info("NAP", $"LancerEdit package workspace: {WorkspaceDirectory}");
++                }
+                 var sw = Stopwatch.StartNew();
+                 GameData = new GameDataManager(new GameItemDb(vfs), Resources);
+                 GameData.LoadData(win);
+diff --git a/src/Editor/LancerEdit/MainWindow.cs b/src/Editor/LancerEdit/MainWindow.cs
+--- a/src/Editor/LancerEdit/MainWindow.cs
++++ b/src/Editor/LancerEdit/MainWindow.cs
+@@ -35,6 +35,7 @@
+ using LibreLancer.Resources;
+ using LibreLancer.Shaders;
+ using LibreLancer.Utf.Ale;
++using Nexus.Assets;
+ 
+ namespace LancerEdit
+ {
+@@ -75,11 +76,14 @@
+ 
+         public bool EnableAudioConversion;
+ 
++        private bool initialDataLoadPending;
++
+         private const int LOG_SIZE = 128 * 1024; //128k UTF-16, 256k UTF-8
+ 
+         Dictionary<string, ResourceUsage> ResourceIndex = new(StringComparer.OrdinalIgnoreCase);
+ 
+-        public MainWindow(EditorConfiguration editorConfig, GameConfiguration configuration = null) : base(editorConfig.WindowWidth, editorConfig.WindowHeight, true, configuration)
++        public MainWindow(EditorConfiguration editorConfig, GameConfiguration configuration = null,
++            string startupDataPath = null) : base(editorConfig.WindowWidth, editorConfig.WindowHeight, true, configuration)
+ 
+         {
+             Version = "LancerEdit " + Platform.GetInformationalVersion<MainWindow>();
+@@ -103,9 +107,11 @@
+             recentFiles = new RecentFilesHandler(OpenFile);
+             Updater = new UpdateChecks(this, GetBasePath());
+             EnableAudioConversion = Mp3Encoder.EncoderAvailable();
+-            if (!string.IsNullOrWhiteSpace(Config.AutoLoadPath))
+-            {
+-                QueueUIThread(() => LoadGameData(Config.AutoLoadPath));
++            var dataPath = string.IsNullOrWhiteSpace(startupDataPath) ? Config.AutoLoadPath : startupDataPath;
++            if (!string.IsNullOrWhiteSpace(dataPath))
++            {
++                initialDataLoadPending = true;
++                QueueUIThread(() => LoadGameData(dataPath));
+             }
+         }
+         double errorTimer = 0;
+@@ -173,7 +179,8 @@
+             Audio = new AudioManager(this);
+             Bell.Init(Audio);
+             options = new OptionsWindow(this);
+-            Resources = new GameResourceManager(this, null);
++            // The editor keeps a placeholder resource manager before a data VFS is loaded.
++            Resources = new GameResourceManager(this, new LibreLancer.Data.IO.FileSystem());
+             Commands = new CommandBuffer(RenderContext);
+             Polyline = new PolylineRender(RenderContext, Commands);
+             LineRenderer = new LineRenderer(RenderContext);
+@@ -190,10 +197,10 @@
+                 var icon = (Texture2D)LibreLancer.ImageLib.Generic.TextureFromStream(RenderContext, stream);
+                 logoTexture = ImGuiHelper.RegisterTexture(icon);
+             }
+-            //Open passed in files!
+-            if (InitOpenFile != null)
+-                foreach (var f in InitOpenFile)
+-                    OpenFile(f);
++            // Open files after the initial data set finishes loading so preview tabs
++            // (such as THN scenes) have their game data context available.
++            if (!initialDataLoadPending)
++                OpenInitialFiles();
+             RichText = RenderContext.Renderer2D.RichText;
+             Fonts = new FontManager();
+             Fonts.ConstructDefaultFonts();
+@@ -331,6 +338,22 @@
+             }
+         }
+ 
++        private void OpenInitialFiles()
++        {
++            var files = InitOpenFile;
++            InitOpenFile = null;
++            if (files == null) return;
++            foreach (var f in files)
++                OpenFile(f);
++        }
++
++        private void CompleteInitialDataLoad()
++        {
++            if (!initialDataLoadPending) return;
++            initialDataLoadPending = false;
++            OpenInitialFiles();
++        }
++
+         public PopupManager Popups = new PopupManager();
+ 
+         private int bottomTab = 0;
+@@ -457,11 +480,106 @@
+             });
+         }
+ 
++        void UnpackNap()
++        {
++            FileDialog.Open(packagePath =>
++            {
++                if (string.IsNullOrWhiteSpace(packagePath)) return;
++                QueueUIThread(() => FileDialog.ChooseFolder(outputParent =>
++                {
++                    if (string.IsNullOrWhiteSpace(outputParent)) return;
++                    Task.Run(() =>
++                    {
++                        try
++                        {
++                            var archive = NapArchive.Open(packagePath);
++                            var output = archive.ExtractToDirectory(outputParent);
++                            QueueUIThread(() => Popups.MessageBox("NAP", $"Unpacked to {output}"));
++                        }
++                        catch (Exception exception)
++                        {
++                            QueueUIThread(() => ErrorDialog($"Could not unpack NAP: {exception.Message}"));
++                        }
++                    });
++                }));
++            }, new FileDialogFilters(new FileFilter("Nexus Asset Package", "nap")));
++        }
++
++        void PackNap()
++        {
++            FileDialog.ChooseFolder(sourceDirectory =>
++            {
++                if (string.IsNullOrWhiteSpace(sourceDirectory)) return;
++                QueueUIThread(() => FileDialog.Save(outputPath =>
++                {
++                    if (string.IsNullOrWhiteSpace(outputPath)) return;
++                    if (!outputPath.EndsWith(".nap", StringComparison.OrdinalIgnoreCase))
++                        outputPath += ".nap";
++                    Task.Run(() =>
++                    {
++                        try
++                        {
++                            NapWriter.PackDirectory(sourceDirectory, outputPath);
++                            QueueUIThread(() => Popups.MessageBox("NAP", $"Packed to {outputPath}"));
++                        }
++                        catch (Exception exception)
++                        {
++                            QueueUIThread(() => ErrorDialog($"Could not pack NAP: {exception.Message}"));
++                        }
++                    });
++                }, new FileDialogFilters(new FileFilter("Nexus Asset Package", "nap"))));
++            });
++        }
++
++        void ExportEditedNap()
++        {
++            var workspace = OpenDataContext?.WorkspaceDirectory;
++            if (string.IsNullOrWhiteSpace(workspace))
++            {
++                ErrorDialog("Load an active NAP package snapshot before exporting editor changes.");
++                return;
++            }
++            FileDialog.Save(outputPath =>
++            {
++                if (string.IsNullOrWhiteSpace(outputPath)) return;
++                if (!outputPath.EndsWith(".nap", StringComparison.OrdinalIgnoreCase))
++                    outputPath += ".nap";
++                Task.Run(() =>
++                {
++                    try
++                    {
++                        var fullOutput = Path.GetFullPath(outputPath);
++                        EnsureOutside(fullOutput, AppContext.BaseDirectory, "active application directory");
++                        EnsureOutside(fullOutput, workspace, "editor workspace");
++                        var provider = NexusPackageFileProvider.LoadActive(AppContext.BaseDirectory)
++                            ?? throw new InvalidDataException("No active NAP package snapshot was found.");
++                        var fileSystem = new LibreLancer.Data.IO.FileSystem(provider);
++                        fileSystem.FileProviders.Add(new NexusPackageWorkspaceFileProvider(workspace, provider));
++                        var packageId = NapOverlayBuilder.Compact(fileSystem, fullOutput);
++                        QueueUIThread(() => Popups.MessageBox("NAP", $"Exported edited package snapshot to {fullOutput}\nPackage: {packageId:D}"));
++                    }
++                    catch (Exception exception)
++                    {
++                        QueueUIThread(() => ErrorDialog($"Could not export edited NAP snapshot: {exception.Message}"));
++                    }
++                });
++            }, new FileDialogFilters(new FileFilter("Nexus Asset Package", "nap")));
++        }
++
++        static void EnsureOutside(string filePath, string protectedDirectory, string description)
++        {
++            var relative = Path.GetRelativePath(Path.GetFullPath(protectedDirectory), filePath);
++            if (!Path.IsPathRooted(relative) && relative != ".." &&
++                !relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal))
++                throw new InvalidOperationException($"NAP output must be outside the {description}.");
++        }
++
+         void LoadGameData(string folder)
+         {
+             if (!GameConfig.CheckFLDirectory(folder))
+             {
+                 ErrorDialog($"'{folder}' is not a valid Freelancer folder");
++                CompleteInitialDataLoad();
+                 return;
+             }
+             QueueUIThread(() =>
+@@ -484,10 +602,12 @@
+                 {
+                     OpenDataContext = c;
+                     FinishLoadingSpinner();
++                    CompleteInitialDataLoad();
+                 }, e =>
+                 {
+                     FinishLoadingSpinner();
+                     ErrorDialog(GetExceptionText(e));
++                    CompleteInitialDataLoad();
+                 });
+             });
+         }
+@@ -628,6 +748,14 @@
+                         LoadGameData(OpenDataContext!.Folder);
+                 }
+                 ImGui.Separator();
++                if (Theme.IconMenuItem(Icons.BoxOpen, "Unpack NAP Container...", true))
++                    UnpackNap();
++                if (Theme.IconMenuItem(Icons.Save, "Pack Folder as NAP...", true))
++                    PackNap();
++                if (Theme.IconMenuItem(Icons.Save, "Export Edited NAP Snapshot...",
++                        OpenDataContext?.WorkspaceDirectory != null))
++                    ExportEditedNap();
++                ImGui.Separator();
+                 if (Theme.IconMenuItem(Icons.BookOpen, "Infocard Browser", OpenDataContext != null))
+                     AddTab(new InfocardBrowserTab(OpenDataContext, this));
+                 if (Theme.IconMenuItem(Icons.Globe, "Universe Editor", OpenDataContext != null))
+@@ -662,6 +790,14 @@
+                     {
+                         AddTab(new MissionScriptEditorTab(OpenDataContext, this, x));
+                     }, AppFilters.IniFilters, GetDataPath());
++                }
++                if (Theme.IconMenuItem(Icons.Calculator, "Trading Planner", OpenDataContext != null))
++                {
++                    var fd = TabControl.Tabs.FirstOrDefault(x => x is TradingPlannerTab);
++                    if (fd != null)
++                        TabControl.SetSelected(fd);
++                    else
++                        AddTab(new TradingPlannerTab(OpenDataContext, this));
+                 }
+                 ImGui.Separator();
+                 if (Theme.IconMenuItem(Icons.Fire, "Projectile Viewer", OpenDataContext != null))
+
+diff --git a/src/Editor/LancerEdit/ParticleEditor/AleNodeEditor.cs b/src/Editor/LancerEdit/ParticleEditor/AleNodeEditor.cs
+index c425fa1..ae76c02 100644
+--- a/src/Editor/LancerEdit/ParticleEditor/AleNodeEditor.cs
++++ b/src/Editor/LancerEdit/ParticleEditor/AleNodeEditor.cs
+@@ -84,7 +84,7 @@ static class AleNodeEditor
+             if (ImGui.Selectable("Reverse", v == LoopFlags.Reverse) && v != LoopFlags.Reverse)
+                 undo.Set("Loop", loop, LoopFlags.Reverse);
+             if (ImGui.Selectable("Continue", v == LoopFlags.Continue) && v != LoopFlags.Continue)
+-                undo.Set("Loop", loop, LoopFlags.PlayOnce);
++                undo.Set("Loop", loop, LoopFlags.Continue);
+             ImGui.EndCombo();
+         }
+
+diff --git a/src/Editor/LancerEdit/Program.cs b/src/Editor/LancerEdit/Program.cs
+index 7892d5b..da03bae 100644
+--- a/src/Editor/LancerEdit/Program.cs
++++ b/src/Editor/LancerEdit/Program.cs
+@@ -27,7 +27,18 @@ namespace LancerEdit
+         [SuppressMessage("ReSharper", "MethodSupportsCancellation")]
+         static void Main(string[] args)
+         {
+-            if (!OpenOnOther(args))
++            if (!TryParseArguments(args, out var startupDataPath, out var openFiles, out var showHelp))
++            {
++                Environment.ExitCode = 2;
++                return;
++            }
++            if (showHelp)
++            {
++                Console.WriteLine("Usage: LancerEdit [--data <Freelancer directory>] [file ...]");
++                Console.WriteLine("  --data <path>  Load this Freelancer installation on startup.");
++                return;
++            }
++            if (startupDataPath != null || !OpenOnOther(openFiles))
+             {
+                 MainWindow mw = null;
+                 Task pipeServer = null;
+@@ -35,7 +46,10 @@ namespace LancerEdit
+                 AppHandler.Run(() =>
+                 {
+                     var editorConfig = EditorConfiguration.Load(true);
+-                    mw = new MainWindow(editorConfig) { InitOpenFile = args };
++                    mw = new MainWindow(editorConfig, startupDataPath: startupDataPath)
++                    {
++                        InitOpenFile = openFiles
++                    };
+                     pipeServer = Task.Run(async () => await PipeServer(cts.Token, x =>
+                     {
+                         mw.QueueUIThread(() =>
+@@ -58,6 +72,54 @@ namespace LancerEdit
+             }
+         }
+
++        static bool TryParseArguments(string[] args, out string startupDataPath, out string[] openFiles,
++            out bool showHelp)
++        {
++            startupDataPath = null;
++            showHelp = false;
++            var files = new System.Collections.Generic.List<string>();
++            for (int i = 0; i < args.Length; i++)
++            {
++                var arg = args[i];
++                if (arg == "--help" || arg == "-h")
++                {
++                    showHelp = true;
++                    continue;
++                }
++                if (arg == "--data")
++                {
++                    if (i + 1 >= args.Length || args[i + 1].StartsWith("--", StringComparison.Ordinal))
++                    {
++                        Console.Error.WriteLine("Missing path after --data.");
++                        openFiles = System.Array.Empty<string>();
++                        return false;
++                    }
++                    if (startupDataPath != null)
++                    {
++                        Console.Error.WriteLine("Specify --data only once.");
++                        openFiles = System.Array.Empty<string>();
++                        return false;
++                    }
++                    startupDataPath = args[++i];
++                    continue;
++                }
++                if (arg.StartsWith("--data=", StringComparison.Ordinal))
++                {
++                    if (startupDataPath != null || arg.Length == "--data=".Length)
++                    {
++                        Console.Error.WriteLine("Specify --data once with a non-empty path.");
++                        openFiles = System.Array.Empty<string>();
++                        return false;
++                    }
++                    startupDataPath = arg["--data=".Length..];
++                    continue;
++                }
++                files.Add(arg);
++            }
++            openFiles = files.ToArray();
++            return true;
++        }
++
+         static async Task PipeServer(CancellationToken token, Action<string> openFile)
+         {
+             var myPid = Process.GetCurrentProcess().Id;
+diff --git a/src/Editor/LibreLancer.ContentEdit/MarketIniSerializer.cs b/src/Editor/LibreLancer.ContentEdit/MarketIniSerializer.cs
+new file mode 100644
+index 0000000..b181139
+--- /dev/null
++++ b/src/Editor/LibreLancer.ContentEdit/MarketIniSerializer.cs
+@@ -0,0 +1,143 @@
++using System;
++using System.Collections.Generic;
++using System.IO;
++using System.Linq;
++using LibreLancer.Data;
++using LibreLancer.Data.GameData;
++using LibreLancer.Data.GameData.Items;
++using LibreLancer.Data.GameData.World;
++using LibreLancer.Data.Ini;
++using LibreLancer.Data.Schema.Goods;
++
++namespace LibreLancer.ContentEdit;
++
++public static class MarketIniSerializer
++{
++    public record MarketFile(string Filename, Dictionary<string, List<BaseSoldGood>> BaseGoods);
++
++    public static List<MarketFile> GetMarketFiles(
++        GameItemDb items,
++        IReadOnlyDictionary<string, HashSet<string>> dirtyFiles)
++    {
++        List<MarketFile> files = [];
++        foreach (var dirtyFile in dirtyFiles)
++        {
++            if (string.IsNullOrWhiteSpace(dirtyFile.Key))
++                continue;
++
++            var marketFile = new MarketFile(dirtyFile.Key,
++                new Dictionary<string, List<BaseSoldGood>>(StringComparer.OrdinalIgnoreCase));
++            foreach (var baseName in dirtyFile.Value)
++            {
++                var @base = items.Bases.FirstOrDefault(x =>
++                    x.Nickname.Equals(baseName, StringComparison.OrdinalIgnoreCase));
++                if (@base == null)
++                    continue;
++
++                marketFile.BaseGoods[@base.Nickname] = @base.SoldGoods
++                    .Where(x => x.Good.Ini.Category == GoodCategory.Commodity &&
++                                string.Equals(x.SourceFile, dirtyFile.Key, StringComparison.OrdinalIgnoreCase))
++                    .ToList();
++            }
++
++            files.Add(marketFile);
++        }
++
++        return files;
++    }
++
++    public static List<Section> MergeMarketFile(
++        IEnumerable<Section> originalSections,
++        MarketFile changes,
++        Func<string, bool> isCommodity)
++    {
++        var sections = originalSections.ToList();
++        var pending = changes.BaseGoods.ToDictionary(
++            x => x.Key,
++            x => x.Value.ToList(),
++            StringComparer.OrdinalIgnoreCase);
++        var targetSections = new Dictionary<string, Section>(StringComparer.OrdinalIgnoreCase);
++
++        foreach (var section in sections)
++        {
++            if (!section.Name.Equals("BaseGood", StringComparison.OrdinalIgnoreCase))
++                continue;
++
++            var baseEntry = section.FirstOrDefault(x => x.Name.Equals("base", StringComparison.OrdinalIgnoreCase));
++            var baseName = baseEntry?.FirstOrDefault()?.ToString();
++            if (string.IsNullOrWhiteSpace(baseName) || !pending.TryGetValue(baseName, out var baseChanges))
++                continue;
++
++            targetSections.TryAdd(baseName, section);
++            foreach (var entry in section.Where(x => x.Name.Equals("marketgood", StringComparison.OrdinalIgnoreCase)).ToList())
++            {
++                if (entry.Count == 0)
++                    continue;
++
++                var nickname = entry[0].ToString();
++                var changeIndex = baseChanges.FindIndex(x =>
++                    x.Good.Nickname.Equals(nickname, StringComparison.OrdinalIgnoreCase));
++                if (changeIndex >= 0)
++                {
++                    UpdateMarketGoodEntry(entry, baseChanges[changeIndex], changes.Filename);
++                    baseChanges.RemoveAt(changeIndex);
++                }
++                else if (isCommodity(nickname))
++                {
++                    section.Remove(entry);
++                }
++            }
++        }
++
++        foreach (var baseChange in pending)
++        {
++            if (targetSections.TryGetValue(baseChange.Key, out var section))
++            {
++                foreach (var sold in baseChange.Value)
++                    section.Add(CreateMarketGoodEntry(section, sold));
++                continue;
++            }
++
++            section = new Section("BaseGood");
++            section.Add(CreateEntry(section, "base", baseChange.Key));
++            foreach (var sold in baseChange.Value)
++                section.Add(CreateMarketGoodEntry(section, sold));
++            sections.Add(section);
++        }
++
++        return sections;
++    }
++
++    private static void UpdateMarketGoodEntry(Entry entry, BaseSoldGood sold, string filename)
++    {
++        if (entry.Count < 7)
++            throw new InvalidDataException(
++                $"Cannot safely update malformed marketgood '{sold.Good.Nickname}' in {filename}.");
++
++        entry[0] = sold.Good.Nickname;
++        entry[1] = sold.Rank;
++        entry[2] = sold.Rep;
++        entry[3] = sold.Min;
++        entry[4] = sold.Max;
++        entry[5] = sold.Preserve ? 1 : 0;
++        entry[6] = sold.Multiplier;
++    }
++
++    private static Entry CreateMarketGoodEntry(Section section, BaseSoldGood sold) =>
++        CreateEntry(section, "marketgood",
++            sold.Good.Nickname,
++            sold.Rank,
++            sold.Rep,
++            sold.Min,
++            sold.Max,
++            sold.Preserve ? 1 : 0,
++            sold.Multiplier);
++
++    private static Entry CreateEntry(Section section, string name, params ValueBase[] values)
++    {
++        var entry = new Entry(section, name);
++        foreach (var value in values)
++            entry.Add(value);
++        return entry;
++    }
++}
+diff --git a/src/Editor/LibreLancer.ContentEdit/TradeRouteGraph.cs b/src/Editor/LibreLancer.ContentEdit/TradeRouteGraph.cs
+new file mode 100644
+index 0000000..5f019b3
+--- /dev/null
++++ b/src/Editor/LibreLancer.ContentEdit/TradeRouteGraph.cs
+@@ -0,0 +1,63 @@
++using System;
++using System.Collections.Generic;
++using System.Linq;
++
++namespace LibreLancer.ContentEdit;
++
++public static class TradeRouteGraph
++{
++    public static void AddDirectedConnection(Dictionary<string, List<string>> graph, string source, string target)
++    {
++        if (!graph.TryGetValue(source, out var targets))
++            graph[source] = targets = [];
++        if (!targets.Contains(target, StringComparer.OrdinalIgnoreCase))
++            targets.Add(target);
++        if (!graph.ContainsKey(target))
++            graph[target] = [];
++    }
++
++    public static bool TryGetPath(
++        IReadOnlyDictionary<string, List<string>> graph,
++        string source,
++        string target,
++        out List<string> path)
++    {
++        path = [];
++        if (!graph.ContainsKey(source) || !graph.ContainsKey(target))
++            return false;
++
++        Queue<string> queue = new();
++        HashSet<string> visited = new(StringComparer.OrdinalIgnoreCase);
++        Dictionary<string, string?> previous = new(StringComparer.OrdinalIgnoreCase);
++        queue.Enqueue(source);
++        visited.Add(source);
++        previous[source] = null;
++
++        while (queue.Count > 0)
++        {
++            var current = queue.Dequeue();
++            if (current.Equals(target, StringComparison.OrdinalIgnoreCase))
++                break;
++
++            foreach (var next in graph[current])
++            {
++                if (!visited.Add(next))
++                    continue;
++                previous[next] = current;
++                queue.Enqueue(next);
++            }
++        }
++
++        if (!previous.ContainsKey(target))
++            return false;
++
++        string? walker = target;
++        while (walker != null)
++        {
++            path.Add(walker);
++            walker = previous[walker];
++        }
++        path.Reverse();
++        return true;
++    }
++}
+diff --git a/src/Nexus.Assets/NapArchive.cs b/src/Nexus.Assets/NapArchive.cs
+new file mode 100644
+index 0000000..6f43b62
+--- /dev/null
++++ b/src/Nexus.Assets/NapArchive.cs
+@@ -0,0 +1,368 @@
++using System.Buffers.Binary;
++using System.Security.Cryptography;
++using System.Text;
++using ZstdSharp;
++
++namespace Nexus.Assets;
++
++public sealed record NapEntry(string Path, long Length, byte[] Sha256, IReadOnlyList<int> Chunks, bool Tombstone);
++
++internal sealed record NapChunk(byte[] Sha256, long CompressedLength, long Length, long Offset, byte Codec);
++
++public sealed class NapArchive
++{
++    private static readonly byte[] Magic = [0x4c, 0x4e, 0x41, 0x50, 0x00, 0x0d, 0x0a, 0x1a];
++    private readonly string fileName;
++    private readonly NapChunk[] chunks;
++    private readonly Dictionary<string, NapEntry> entries;
++    private readonly NapChunkCache cache;
++
++    public Guid PackageId { get; }
++    public ulong ContentVersion { get; }
++    public IReadOnlyCollection<NapEntry> Entries => entries.Values;
++    public long CachedChunkBytes => cache.Size;
++
++    private NapArchive(string fileName, Guid packageId, ulong contentVersion,
++        NapChunk[] chunks, Dictionary<string, NapEntry> entries, int cacheBudget)
++    {
++        this.fileName = fileName;
++        PackageId = packageId;
++        ContentVersion = contentVersion;
++        this.chunks = chunks;
++        this.entries = entries;
++        cache = new NapChunkCache(cacheBudget);
++    }
++
++    public static NapArchive Open(string fileName, int chunkCacheBytes = 32 * 1024 * 1024)
++    {
++        ArgumentException.ThrowIfNullOrWhiteSpace(fileName);
++        if (chunkCacheBytes < 0) throw new ArgumentOutOfRangeException(nameof(chunkCacheBytes));
++        using var stream = new FileStream(fileName, FileMode.Open, FileAccess.Read, FileShare.Read);
++        return Open(stream, fileName, chunkCacheBytes);
++    }
++
++    internal static NapArchive Open(Stream stream, string fileName, int chunkCacheBytes = 32 * 1024 * 1024)
++    {
++        ArgumentNullException.ThrowIfNull(stream);
++        ArgumentException.ThrowIfNullOrWhiteSpace(fileName);
++        if (!stream.CanRead || !stream.CanSeek) throw new ArgumentException("NAP stream must be readable and seekable.", nameof(stream));
++        if (chunkCacheBytes < 0) throw new ArgumentOutOfRangeException(nameof(chunkCacheBytes));
++        stream.Position = 0;
++        if (stream.Length < NapLimits.HeaderLength)
++            throw new InvalidDataException("NAP header is truncated.");
++        using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
++        var header = reader.ReadBytes(NapLimits.HeaderLength);
++        if (!header.AsSpan(0, 8).SequenceEqual(Magic)) throw new InvalidDataException("Invalid NAP magic.");
++        if (U16(header, 8) != 1 || U16(header, 10) != NapLimits.HeaderLength)
++            throw new InvalidDataException("Unsupported NAP header version or size.");
++        if (U32(header, 12) != 0 || U32(header, 44) != 0)
++            throw new InvalidDataException("NAP contains unknown flags or nonzero reserved bytes.");
++
++        var packageId = new Guid(header.AsSpan(16, 16));
++        var version = U64(header, 32);
++        var indexOffset = CheckedLong(U64(header, 48));
++        var indexLength = CheckedLong(U64(header, 56));
++        var chunkOffset = CheckedLong(U64(header, 64));
++        var chunkLength = CheckedLong(U64(header, 72));
++        var payloadOffset = CheckedLong(U64(header, 80));
++        var payloadLength = CheckedLong(U64(header, 88));
++        var chunkHint = U32(header, 40);
++        if (chunkHint is 0 or > NapLimits.MaxChunkSize || indexLength is < 8 or > NapLimits.MaxIndexLength ||
++            chunkLength % NapLimits.ChunkRecordLength != 0 ||
++            chunkLength / NapLimits.ChunkRecordLength > NapLimits.MaxChunks)
++            throw new InvalidDataException("NAP table sizes exceed supported limits.");
++        Range(indexOffset, indexLength, stream.Length);
++        Range(chunkOffset, chunkLength, stream.Length);
++        Range(payloadOffset, payloadLength, stream.Length);
++        if (indexOffset < NapLimits.HeaderLength || chunkOffset < indexOffset + indexLength ||
++            payloadOffset < chunkOffset + chunkLength || payloadOffset + payloadLength != stream.Length)
++            throw new InvalidDataException("NAP sections overlap or do not cover the declared package layout.");
++
++        stream.Position = indexOffset;
++        var indexBytes = reader.ReadBytes((int)indexLength);
++        if (indexBytes.Length != indexLength || !SHA256.HashData(indexBytes).AsSpan().SequenceEqual(header.AsSpan(96, 32)))
++            throw new InvalidDataException("NAP index hash mismatch.");
++
++        stream.Position = chunkOffset;
++        var chunkCount = checked((int)(chunkLength / NapLimits.ChunkRecordLength));
++        var chunks = new NapChunk[chunkCount];
++        var occupied = new List<(long Start, long End)>(chunkCount);
++        for (var i = 0; i < chunkCount; i++)
++        {
++            var record = reader.ReadBytes(NapLimits.ChunkRecordLength);
++            var codec = record[56];
++            if (codec > 1 || record.AsSpan(57, 7).IndexOfAnyExcept((byte)0) >= 0)
++                throw new InvalidDataException("NAP chunk has an unsupported codec or nonzero reserved bytes.");
++            var compressedLength = CheckedLong(U64(record, 32));
++            var length = CheckedLong(U64(record, 40));
++            var offset = CheckedLong(U64(record, 48));
++            if (length is <= 0 or > NapLimits.MaxChunkSize || compressedLength is <= 0 or > NapLimits.MaxCompressedChunkSize ||
++                offset < payloadOffset || compressedLength > payloadOffset + payloadLength - offset ||
++                (codec == 0 && compressedLength != length))
++                throw new InvalidDataException("NAP chunk bounds or lengths are invalid.");
++            chunks[i] = new NapChunk(record[..32], compressedLength, length, offset, codec);
++            occupied.Add((offset, checked(offset + compressedLength)));
++        }
++        occupied.Sort((a, b) => a.Start.CompareTo(b.Start));
++        for (var i = 1; i < occupied.Count; i++)
++            if (occupied[i].Start < occupied[i - 1].End)
++                throw new InvalidDataException("NAP chunk payloads overlap.");
++
++        var entries = ParseIndex(indexBytes, chunks);
++        return new NapArchive(Path.GetFullPath(fileName), packageId, version, chunks, entries, chunkCacheBytes);
++    }
++
++    public bool TryGetEntry(string path, out NapEntry? entry) => entries.TryGetValue(NapPath.Normalize(path), out entry);
++
++    public Stream OpenFile(string path)
++    {
++        var normalized = NapPath.Normalize(path);
++        if (!entries.TryGetValue(normalized, out var entry) || entry.Tombstone)
++            throw new FileNotFoundException("NAP entry does not exist.", normalized);
++        return new NapEntryStream(fileName, entry, chunks, cache);
++    }
++
++    public void VerifyAll()
++    {
++        foreach (var entry in entries.Values)
++        {
++            if (entry.Tombstone) continue;
++            using var input = OpenFile(entry.Path);
++            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
++            var buffer = new byte[64 * 1024];
++            int read;
++            while ((read = input.Read(buffer, 0, buffer.Length)) != 0)
++                hash.AppendData(buffer, 0, read);
++            if (!hash.GetHashAndReset().AsSpan().SequenceEqual(entry.Sha256))
++                throw new InvalidDataException($"NAP file hash mismatch: {entry.Path}");
++        }
++    }
++
++    /// <summary>Verifies and extracts this archive into a new child directory.</summary>
++    public string ExtractToDirectory(string parentDirectory)
++    {
++        ArgumentException.ThrowIfNullOrWhiteSpace(parentDirectory);
++        VerifyAll();
++        var parent = Path.GetFullPath(parentDirectory);
++        if (!Directory.Exists(parent)) throw new DirectoryNotFoundException(parent);
++        var directoryName = Path.GetFileNameWithoutExtension(fileName);
++        if (string.IsNullOrWhiteSpace(directoryName) || directoryName is "." or ".." ||
++            !string.Equals(NapPath.Normalize(directoryName), directoryName, StringComparison.Ordinal))
++            throw new InvalidDataException("NAP filename cannot be used as an extraction directory name.");
++        var destination = Path.Combine(parent, directoryName);
++        if (Directory.Exists(destination) || File.Exists(destination))
++            throw new IOException($"Unpack destination already exists: {destination}");
++
++        var staging = Path.Combine(parent, ".nap-unpack-" + Guid.NewGuid().ToString("N"));
++        Directory.CreateDirectory(staging);
++        try
++        {
++            foreach (var entry in entries.Values)
++            {
++                if (entry.Tombstone) continue;
++                var relative = NapPath.Normalize(entry.Path).Replace('/', Path.DirectorySeparatorChar);
++                var outputPath = Path.GetFullPath(Path.Combine(staging, relative));
++                var outputRelative = Path.GetRelativePath(staging, outputPath);
++                if (Path.IsPathRooted(outputRelative) || outputRelative == ".." ||
++                    outputRelative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal))
++                    throw new InvalidDataException($"NAP entry escapes extraction directory: {entry.Path}");
++                Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
++                using var input = OpenFile(entry.Path);
++                using var output = new FileStream(outputPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
++                input.CopyTo(output);
++                output.Flush(flushToDisk: true);
++            }
++            Directory.Move(staging, destination);
++            return destination;
++        }
++        finally
++        {
++            if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
++        }
++    }
++
++    private static Dictionary<string, NapEntry> ParseIndex(byte[] data, NapChunk[] chunks)
++    {
++        using var stream = new MemoryStream(data, writable: false);
++        using var reader = new BinaryReader(stream, Encoding.UTF8);
++        if (!reader.ReadBytes(8).AsSpan().SequenceEqual(Encoding.ASCII.GetBytes("NAPIDX1\0")))
++            throw new InvalidDataException("Invalid NAP index magic.");
++        var count = reader.ReadUInt32();
++        if (count > NapLimits.MaxEntries) throw new InvalidDataException("NAP entry count exceeds limit.");
++        var result = new Dictionary<string, NapEntry>(StringComparer.OrdinalIgnoreCase);
++        string? previous = null;
++        for (var i = 0; i < count; i++)
++        {
++            var pathLength = reader.ReadUInt16();
++            if (pathLength is 0 or > NapLimits.MaxPathBytes) throw new InvalidDataException("Invalid NAP path length.");
++            var rawPath = new UTF8Encoding(false, true).GetString(ReadExact(reader, pathLength));
++            var path = NapPath.Normalize(rawPath);
++            if (!string.Equals(path, rawPath, StringComparison.Ordinal) ||
++                (previous is not null && StringComparer.Ordinal.Compare(previous, path) >= 0))
++                throw new InvalidDataException("NAP paths are not canonical and strictly sorted.");
++            previous = path;
++            var flags = reader.ReadByte();
++            if (flags > 1) throw new InvalidDataException("Unknown NAP entry flags.");
++            var length = CheckedLong(reader.ReadUInt64());
++            var hash = ReadExact(reader, 32);
++            var refCount = reader.ReadUInt32();
++            if (refCount > NapLimits.MaxChunks || (flags == 1 && (length != 0 || refCount != 0)))
++                throw new InvalidDataException("Invalid NAP entry chunk list.");
++            var refs = new int[checked((int)refCount)];
++            long total = 0;
++            for (var r = 0; r < refs.Length; r++)
++            {
++                refs[r] = checked((int)reader.ReadUInt32());
++                if (refs[r] >= chunks.Length) throw new InvalidDataException("NAP entry references an unknown chunk.");
++                total = checked(total + chunks[refs[r]].Length);
++            }
++            if (flags == 0 && total != length) throw new InvalidDataException("NAP entry length does not match its chunks.");
++            if (flags == 0 && length == 0 && !hash.AsSpan().SequenceEqual(SHA256.HashData([])))
++                throw new InvalidDataException("Empty NAP file has an invalid content hash.");
++            if (flags == 1 && hash.AsSpan().IndexOfAnyExcept((byte)0) >= 0)
++                throw new InvalidDataException("NAP tombstone has a nonzero content hash.");
++            if (!result.TryAdd(path, new NapEntry(path, length, hash, refs, flags == 1)))
++                throw new InvalidDataException("Duplicate NAP path.");
++        }
++        if (stream.Position != stream.Length) throw new InvalidDataException("Trailing bytes in NAP index.");
++        return result;
++    }
++
++    internal static uint U32(byte[] b, int o) => BinaryPrimitives.ReadUInt32LittleEndian(b.AsSpan(o, 4));
++    internal static ushort U16(byte[] b, int o) => BinaryPrimitives.ReadUInt16LittleEndian(b.AsSpan(o, 2));
++    internal static ulong U64(byte[] b, int o) => BinaryPrimitives.ReadUInt64LittleEndian(b.AsSpan(o, 8));
++    internal static long CheckedLong(ulong value) => value <= long.MaxValue ? (long)value : throw new InvalidDataException("NAP integer exceeds supported range.");
++    internal static void Range(long offset, long length, long total)
++    {
++        if (offset < 0 || length < 0 || offset > total || length > total - offset)
++            throw new InvalidDataException("NAP section is outside the package.");
++    }
++    private static byte[] ReadExact(BinaryReader reader, int count)
++    {
++        var bytes = reader.ReadBytes(count);
++        return bytes.Length == count ? bytes : throw new InvalidDataException("NAP index is truncated.");
++    }
++
++    private sealed class NapChunkCache(int budget)
++    {
++        private readonly object gate = new();
++        private readonly Dictionary<int, LinkedListNode<(int Index, byte[] Data)>> items = new();
++        private readonly LinkedList<(int Index, byte[] Data)> lru = new();
++        private long size;
++        public long Size { get { lock (gate) return size; } }
++
++        public byte[] Get(int index, Func<byte[]> load)
++        {
++            lock (gate)
++            {
++                if (items.TryGetValue(index, out var node))
++                {
++                    lru.Remove(node);
++                    lru.AddFirst(node);
++                    return node.Value.Data;
++                }
++                var data = load();
++                if (data.Length <= budget)
++                {
++                    var added = lru.AddFirst((index, data));
++                    items.Add(index, added);
++                    size += data.Length;
++                    while (size > budget && lru.Last is { } last)
++                    {
++                        lru.RemoveLast();
++                        items.Remove(last.Value.Index);
++                        size -= last.Value.Data.Length;
++                    }
++                }
++                return data;
++            }
++        }
++    }
++
++    private sealed class NapEntryStream(string fileName, NapEntry entry, NapChunk[] chunks, NapChunkCache cache) : Stream
++    {
++        private readonly FileStream file = new(fileName, FileMode.Open, FileAccess.Read, FileShare.Read);
++        private byte[]? current;
++        private int currentChunk = -1;
++        private long position;
++        public override bool CanRead => true;
++        public override bool CanSeek => true;
++        public override bool CanWrite => false;
++        public override long Length => entry.Length;
++        public override long Position { get => position; set => Seek(value, SeekOrigin.Begin); }
++        public override long Seek(long offset, SeekOrigin origin)
++        {
++            var next = origin switch { SeekOrigin.Begin => offset, SeekOrigin.Current => checked(position + offset), SeekOrigin.End => checked(Length + offset), _ => throw new ArgumentOutOfRangeException(nameof(origin)) };
++            if (next < 0) throw new IOException("Cannot seek before the beginning of a NAP file.");
++            return position = next;
++        }
++        public override int Read(byte[] buffer, int offset, int count)
++        {
++            ArgumentNullException.ThrowIfNull(buffer);
++            if (offset < 0 || count < 0 || offset > buffer.Length - count) throw new ArgumentOutOfRangeException();
++            return ReadCore(buffer.AsSpan(offset, count));
++        }
++        public override int Read(Span<byte> buffer) => ReadCore(buffer);
++        private int ReadCore(Span<byte> buffer)
++        {
++            var wanted = (int)Math.Min(buffer.Length, Math.Max(0, Length - position));
++            var copied = 0;
++            long baseOffset = 0;
++            for (var i = 0; i < entry.Chunks.Count && copied < wanted; i++)
++            {
++                var chunk = chunks[entry.Chunks[i]];
++                if (position >= baseOffset + chunk.Length) { baseOffset += chunk.Length; continue; }
++                Load(i, chunk);
++                var inChunk = checked((int)(position - baseOffset));
++                var n = Math.Min(wanted - copied, current!.Length - inChunk);
++                current.AsSpan(inChunk, n).CopyTo(buffer.Slice(copied, n));
++                copied += n;
++                position += n;
++                baseOffset += chunk.Length;
++            }
++            return copied;
++        }
++        private void Load(int index, NapChunk chunk)
++        {
++            if (currentChunk == index) return;
++            current = cache.Get(entry.Chunks[index], () =>
++            {
++                file.Position = chunk.Offset;
++                var compressed = new byte[checked((int)chunk.CompressedLength)];
++                file.ReadExactly(compressed);
++                byte[] data;
++                if (chunk.Codec == 0) data = compressed;
++                else
++                {
++                    try
++                    {
++                        using var source = new MemoryStream(compressed, writable: false);
++                        using var decoder = new DecompressionStream(source);
++                        using var output = new MemoryStream(checked((int)chunk.Length));
++                        var block = new byte[8192];
++                        int read;
++                        while ((read = decoder.Read(block, 0, block.Length)) != 0)
++                        {
++                            if (output.Length > chunk.Length - read)
++                                throw new InvalidDataException("NAP chunk expands beyond its declared size.");
++                            output.Write(block, 0, read);
++                        }
++                        data = output.ToArray();
++                    }
++                    catch (Exception exception) when (exception is not InvalidDataException)
++                    {
++                        throw new InvalidDataException("NAP chunk decompression failed.", exception);
++                    }
++                }
++                if (data.LongLength != chunk.Length || !SHA256.HashData(data).AsSpan().SequenceEqual(chunk.Sha256))
++                    throw new InvalidDataException("NAP chunk length or hash mismatch.");
++                return data;
++            });
++            currentChunk = index;
++        }
++        protected override void Dispose(bool disposing) { if (disposing) file.Dispose(); base.Dispose(disposing); }
++        public override void Flush() => throw new NotSupportedException();
++        public override void SetLength(long value) => throw new NotSupportedException();
++        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
++    }
++}
+diff --git a/src/Nexus.Assets/NapOverlayBuilder.cs b/src/Nexus.Assets/NapOverlayBuilder.cs
+new file mode 100644
+index 0000000..7370a60
+--- /dev/null
++++ b/src/Nexus.Assets/NapOverlayBuilder.cs
+@@ -0,0 +1,113 @@
++namespace Nexus.Assets;
++
++public sealed record NapDiffResult(string BasePackageId, Guid PackageGuid, int ChangedFiles, int Tombstones,
++    ulong ContentVersion);
++
++/// <summary>Builds versioned overlay packages and compacts an effective package mount into one NAP.</summary>
++public static class NapOverlayBuilder
++{
++    public static NapDiffResult BuildDiff(NapArchive baseline, NapArchive target, string basePackageId,
++        string outputFile)
++    {
++        ArgumentNullException.ThrowIfNull(baseline);
++        ArgumentNullException.ThrowIfNull(target);
++        ValidatePackageId(basePackageId);
++        baseline.VerifyAll();
++        target.VerifyAll();
++
++        var oldFiles = baseline.Entries.Where(e => !e.Tombstone)
++            .ToDictionary(e => e.Path, StringComparer.OrdinalIgnoreCase);
++        var newFiles = target.Entries.Where(e => !e.Tombstone)
++            .ToDictionary(e => e.Path, StringComparer.OrdinalIgnoreCase);
++        var changed = newFiles.Values.Where(entry =>
++                !oldFiles.TryGetValue(entry.Path, out var previous) ||
++                previous.Length != entry.Length || !previous.Sha256.AsSpan().SequenceEqual(entry.Sha256))
++            .OrderBy(e => e.Path, StringComparer.Ordinal).ToArray();
++        var deleted = oldFiles.Keys.Where(path => !newFiles.ContainsKey(path))
++            .OrderBy(path => path, StringComparer.Ordinal).ToArray();
++
++        var temporaryRoot = Path.Combine(Path.GetTempPath(), "nexus-nap-diff-" + Guid.NewGuid().ToString("N"));
++        Directory.CreateDirectory(temporaryRoot);
++        try
++        {
++            var entries = new List<NapSourceEntry>(changed.Length + deleted.Length);
++            foreach (var entry in changed)
++            {
++                var destination = Path.Combine(temporaryRoot, entry.Path.Replace('/', Path.DirectorySeparatorChar));
++                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
++                using var source = target.OpenFile(entry.Path);
++                using var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None);
++                source.CopyTo(output);
++                output.Flush(flushToDisk: true);
++                entries.Add(new NapSourceEntry(entry.Path, destination));
++            }
++            entries.AddRange(deleted.Select(path => new NapSourceEntry(path, null)));
++            NapWriter.Pack(entries, outputFile, new NapPackOptions { ContentVersion = target.ContentVersion });
++            var result = NapArchive.Open(outputFile);
++            result.VerifyAll();
++            return new NapDiffResult(basePackageId, result.PackageId, changed.Length, deleted.Length, target.ContentVersion);
++        }
++        finally
++        {
++            if (Directory.Exists(temporaryRoot)) Directory.Delete(temporaryRoot, recursive: true);
++        }
++    }
++
++    public static Guid Compact(NexusPackageFileProvider provider, string outputFile, ulong contentVersion = 1)
++    {
++        ArgumentNullException.ThrowIfNull(provider);
++        return Compact(new LibreLancer.Data.IO.FileSystem(provider), outputFile, contentVersion);
++    }
++
++    public static Guid Compact(LibreLancer.Data.IO.FileSystem fileSystem, string outputFile,
++        ulong contentVersion = 1)
++    {
++        ArgumentNullException.ThrowIfNull(fileSystem);
++        var temporaryRoot = Path.Combine(Path.GetTempPath(), "nexus-nap-compact-" + Guid.NewGuid().ToString("N"));
++        Directory.CreateDirectory(temporaryRoot);
++        try
++        {
++            var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
++            CopyDirectory("", temporaryRoot, fileSystem, visited);
++            NapWriter.PackDirectory(temporaryRoot, outputFile, new NapPackOptions { ContentVersion = contentVersion });
++            var archive = NapArchive.Open(outputFile);
++            archive.VerifyAll();
++            return archive.PackageId;
++        }
++        finally
++        {
++            if (Directory.Exists(temporaryRoot)) Directory.Delete(temporaryRoot, recursive: true);
++        }
++    }
++
++    private static void CopyDirectory(string virtualDirectory, string outputDirectory,
++        LibreLancer.Data.IO.FileSystem fileSystem, HashSet<string> visited)
++    {
++        var normalized = virtualDirectory.Replace('\\', '/').Trim('/');
++        if (!visited.Add(normalized)) return;
++        foreach (var file in fileSystem.GetFiles(virtualDirectory))
++        {
++            var virtualPath = normalized.Length == 0 ? file : normalized + "/" + file;
++            var safePath = NapPath.Normalize(virtualPath);
++            var destination = Path.Combine(outputDirectory, safePath.Replace('/', Path.DirectorySeparatorChar));
++            Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
++            using var input = fileSystem.Open(virtualPath);
++            using var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None);
++            input.CopyTo(output);
++        }
++        foreach (var directory in fileSystem.GetDirectories(virtualDirectory))
++        {
++            var childVirtual = normalized.Length == 0 ? directory : normalized + "/" + directory;
++            var childOutput = Path.Combine(outputDirectory, directory);
++            Directory.CreateDirectory(childOutput);
++            CopyDirectory(childVirtual, outputDirectory, fileSystem, visited);
++        }
++    }
++
++    private static void ValidatePackageId(string id)
++    {
++        if (string.IsNullOrEmpty(id) || id.Length > 96 ||
++            id.Any(c => !(char.IsAsciiLetterOrDigit(c) || c is '-' or '_' or '.')))
++            throw new ArgumentException("Base package ID is invalid.", nameof(id));
++    }
++}
+diff --git a/src/Nexus.Assets/NapPath.cs b/src/Nexus.Assets/NapPath.cs
+new file mode 100644
+index 0000000..3fb6555
+--- /dev/null
++++ b/src/Nexus.Assets/NapPath.cs
+@@ -0,0 +1,57 @@
++using System.Text;
++
++namespace Nexus.Assets;
++
++public static class NapPath
++{
++    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
++
++    public static string Normalize(string path)
++    {
++        ArgumentNullException.ThrowIfNull(path);
++        if (path.Length == 0 || path.IndexOf('\0') >= 0 || path.Contains(':') ||
++            path.StartsWith('/') || path.StartsWith('\\') || Path.IsPathRooted(path))
++            throw new InvalidDataException("NAP paths must be relative virtual paths.");
++
++        var normalized = path.Replace('\\', '/');
++        if (normalized.StartsWith("EXE/../DATA/", StringComparison.OrdinalIgnoreCase))
++            normalized = normalized[12..];
++        else if (normalized.StartsWith("../DATA/", StringComparison.OrdinalIgnoreCase))
++            normalized = normalized[8..];
++        else if (normalized.StartsWith("DATA/", StringComparison.OrdinalIgnoreCase))
++            normalized = normalized[5..];
++
++        var parts = normalized.Split('/');
++        if (parts.Any(p => p.Length == 0 || p is "." or ".." || p.Length > 255 ||
++                           p.EndsWith(' ') || p.EndsWith('.') || p.Any(c => c < 0x20 || "<>\"|?*".Contains(c)) ||
++                           IsDeviceName(p)))
++            throw new InvalidDataException("NAP path contains an empty, dot, traversal, or oversized component.");
++        if (StrictUtf8.GetByteCount(normalized) > NapLimits.MaxPathBytes)
++            throw new InvalidDataException("NAP path is too long.");
++        return string.Join('/', parts);
++    }
++
++    private static bool IsDeviceName(string component)
++    {
++        var stem = component.Split('.')[0];
++        return stem.Equals("CON", StringComparison.OrdinalIgnoreCase) ||
++               stem.Equals("PRN", StringComparison.OrdinalIgnoreCase) ||
++               stem.Equals("AUX", StringComparison.OrdinalIgnoreCase) ||
++               stem.Equals("NUL", StringComparison.OrdinalIgnoreCase) ||
++               (stem.Length == 4 && (stem.StartsWith("COM", StringComparison.OrdinalIgnoreCase) ||
++                                     stem.StartsWith("LPT", StringComparison.OrdinalIgnoreCase)) &&
++                stem[3] is >= '1' and <= '9');
++    }
++}
++
++internal static class NapLimits
++{
++    public const int HeaderLength = 128;
++    public const int ChunkRecordLength = 64;
++    public const int MaxIndexLength = 64 * 1024 * 1024;
++    public const int MaxEntries = 1_000_000;
++    public const int MaxChunks = 4_000_000;
++    public const int MaxPathBytes = 4096;
++    public const int MaxChunkSize = 1024 * 1024;
++    public const int MaxCompressedChunkSize = MaxChunkSize + 64 * 1024;
++}
+diff --git a/src/Nexus.Assets/NapWriter.cs b/src/Nexus.Assets/NapWriter.cs
+new file mode 100644
+index 0000000..7b87ab4
+--- /dev/null
++++ b/src/Nexus.Assets/NapWriter.cs
+@@ -0,0 +1,238 @@
++using System.Buffers.Binary;
++using System.Security.Cryptography;
++using System.Text;
++using ZstdSharp;
++
++namespace Nexus.Assets;
++
++public sealed record NapPackOptions
++{
++    public ulong ContentVersion { get; init; } = 1;
++    public int ChunkSize { get; init; } = 256 * 1024;
++    public int CompressionLevel { get; init; } = 3;
++}
++
++public sealed record NapSourceEntry(string Path, string? FileName);
++
++public static class NapWriter
++{
++    private sealed record PendingEntry(string Path, long Length, byte[] Hash, int[] Chunks, bool Tombstone);
++    private sealed record PendingChunk(byte[] Hash, byte[] Stored, long Length, byte Codec);
++
++    public static void PackDirectory(string sourceDirectory, string outputFile, NapPackOptions? options = null)
++    {
++        var root = Path.GetFullPath(sourceDirectory);
++        if (!Directory.Exists(root)) throw new DirectoryNotFoundException(root);
++        if ((File.GetAttributes(root) & FileAttributes.ReparsePoint) != 0)
++            throw new InvalidDataException("NAP source directory cannot be a symbolic link or reparse point.");
++        var output = Path.GetFullPath(outputFile);
++        var relativeOutput = Path.GetRelativePath(root, output);
++        if (!Path.IsPathRooted(relativeOutput) && relativeOutput != ".." &&
++            !relativeOutput.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal))
++            throw new InvalidDataException("NAP output must be outside the source directory.");
++        var files = EnumerateSourceFiles(root);
++        Pack(files, output, options);
++    }
++
++    private static IEnumerable<NapSourceEntry> EnumerateSourceFiles(string root)
++    {
++        var pending = new Stack<string>();
++        pending.Push(root);
++        while (pending.TryPop(out var directory))
++        {
++            foreach (var subdirectory in Directory.EnumerateDirectories(directory))
++            {
++                if ((File.GetAttributes(subdirectory) & FileAttributes.ReparsePoint) != 0)
++                    throw new InvalidDataException($"Symbolic links and reparse points are not packable: {subdirectory}");
++                pending.Push(subdirectory);
++            }
++            foreach (var file in Directory.EnumerateFiles(directory))
++            {
++                if ((File.GetAttributes(file) & FileAttributes.ReparsePoint) != 0)
++                    throw new InvalidDataException($"Symbolic links and reparse points are not packable: {file}");
++                var relative = Path.GetRelativePath(root, file).Replace(Path.DirectorySeparatorChar, '/');
++                yield return new NapSourceEntry(NapPath.Normalize(relative), file);
++            }
++        }
++    }
++
++    public static void Pack(IEnumerable<NapSourceEntry> sourceEntries, string outputFile, NapPackOptions? options = null)
++    {
++        ArgumentNullException.ThrowIfNull(sourceEntries);
++        options ??= new NapPackOptions();
++        if (options.ChunkSize is < 1 or > NapLimits.MaxChunkSize)
++            throw new ArgumentOutOfRangeException(nameof(options), "Chunk size must be between 1 byte and 1 MiB.");
++        if (options.CompressionLevel is < 1 or > 22)
++            throw new ArgumentOutOfRangeException(nameof(options), "Zstandard level must be between 1 and 22.");
++        var files = sourceEntries
++            .Select(x => (Path: NapPath.Normalize(x.Path), File: x.FileName is null ? null : Path.GetFullPath(x.FileName)))
++            .OrderBy(x => x.Path, StringComparer.Ordinal)
++            .ToArray();
++        if (files.Length > NapLimits.MaxEntries) throw new InvalidDataException("Source has too many files.");
++        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
++        foreach (var item in files)
++            if (!seen.Add(item.Path)) throw new InvalidDataException($"Case-insensitive duplicate path: {item.Path}");
++
++        var chunks = new List<PendingChunk>();
++        var chunkByHash = new Dictionary<string, int>(StringComparer.Ordinal);
++        var entries = new List<PendingEntry>(files.Length);
++        foreach (var item in files)
++        {
++            if (item.File is null)
++            {
++                entries.Add(new PendingEntry(item.Path, 0, new byte[32], [], true));
++                continue;
++            }
++            if ((File.GetAttributes(item.File) & FileAttributes.ReparsePoint) != 0)
++                throw new InvalidDataException($"Symbolic links and reparse points are not packable: {item.File}");
++            using var input = File.OpenRead(item.File);
++            using var fileHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
++            var refs = new List<int>();
++            var buffer = new byte[options.ChunkSize];
++            long fileLength = 0;
++            while (true)
++            {
++                var length = ReadChunk(input, buffer);
++                if (length == 0) break;
++                var raw = buffer.AsSpan(0, length).ToArray();
++                fileHash.AppendData(raw);
++                fileLength = checked(fileLength + length);
++                var digest = SHA256.HashData(raw);
++                var key = Convert.ToHexString(digest) + ":" + length;
++                if (!chunkByHash.TryGetValue(key, out var chunkIndex))
++                {
++                    var stored = raw;
++                    byte codec = 0;
++                    using var compressed = new MemoryStream();
++                    using (var encoder = new CompressionStream(compressed, options.CompressionLevel, 0, true))
++                        encoder.Write(raw);
++                    if (compressed.Length < raw.Length)
++                    {
++                        stored = compressed.ToArray();
++                        codec = 1;
++                    }
++                    chunkIndex = chunks.Count;
++                    chunks.Add(new PendingChunk(digest, stored, length, codec));
++                    chunkByHash.Add(key, chunkIndex);
++                }
++                refs.Add(chunkIndex);
++            }
++            entries.Add(new PendingEntry(item.Path, fileLength, fileHash.GetHashAndReset(), refs.ToArray(), false));
++        }
++
++        if (chunks.Count > NapLimits.MaxChunks) throw new InvalidDataException("Source has too many chunks.");
++        var index = BuildIndex(entries);
++        if (index.Length > NapLimits.MaxIndexLength) throw new InvalidDataException("NAP index exceeds size limit.");
++        var chunkTableLength = checked((long)chunks.Count * NapLimits.ChunkRecordLength);
++        var indexOffset = (long)NapLimits.HeaderLength;
++        var tableOffset = checked(indexOffset + index.Length);
++        var payloadOffset = checked(tableOffset + chunkTableLength);
++        var offsets = new long[chunks.Count];
++        var payloadLength = 0L;
++        for (var i = 0; i < chunks.Count; i++)
++        {
++            offsets[i] = checked(payloadOffset + payloadLength);
++            payloadLength = checked(payloadLength + chunks[i].Stored.Length);
++        }
++
++        var directory = Path.GetDirectoryName(Path.GetFullPath(outputFile))!;
++        Directory.CreateDirectory(directory);
++        var temporary = Path.Combine(directory, "." + Path.GetFileName(outputFile) + "." + Guid.NewGuid().ToString("N") + ".tmp");
++        try
++        {
++            using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
++            using (var writer = new BinaryWriter(output, Encoding.UTF8, leaveOpen: true))
++            {
++                var header = BuildHeader(entries, chunks, options, index, indexOffset, tableOffset,
++                    chunkTableLength, payloadOffset, payloadLength);
++                writer.Write(header);
++                writer.Write(index);
++                for (var i = 0; i < chunks.Count; i++)
++                {
++                    var chunk = chunks[i];
++                    writer.Write(chunk.Hash);
++                    writer.Write((ulong)chunk.Stored.Length);
++                    writer.Write((ulong)chunk.Length);
++                    writer.Write((ulong)offsets[i]);
++                    writer.Write(chunk.Codec);
++                    writer.Write(new byte[7]);
++                }
++                foreach (var chunk in chunks) writer.Write(chunk.Stored);
++                writer.Flush();
++                output.Flush(true);
++            }
++            File.Move(temporary, outputFile, overwrite: true);
++        }
++        catch
++        {
++            if (File.Exists(temporary)) File.Delete(temporary);
++            throw;
++        }
++    }
++
++    private static int ReadChunk(Stream input, byte[] buffer)
++    {
++        var used = 0;
++        while (used < buffer.Length)
++        {
++            var read = input.Read(buffer, used, buffer.Length - used);
++            if (read == 0) break;
++            used += read;
++        }
++        return used;
++    }
++
++    private static byte[] BuildIndex(List<PendingEntry> entries)
++    {
++        using var stream = new MemoryStream();
++        using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
++        writer.Write(Encoding.ASCII.GetBytes("NAPIDX1\0"));
++        writer.Write((uint)entries.Count);
++        foreach (var entry in entries)
++        {
++            var path = Encoding.UTF8.GetBytes(entry.Path);
++            if (path.Length > NapLimits.MaxPathBytes) throw new InvalidDataException("NAP path is too long.");
++            writer.Write((ushort)path.Length);
++            writer.Write(path);
++            writer.Write((byte)(entry.Tombstone ? 1 : 0));
++            writer.Write((ulong)entry.Length);
++            writer.Write(entry.Hash);
++            writer.Write((uint)entry.Chunks.Length);
++            foreach (var chunk in entry.Chunks) writer.Write((uint)chunk);
++        }
++        writer.Flush();
++        return stream.ToArray();
++    }
++
++    private static byte[] BuildHeader(List<PendingEntry> entries, List<PendingChunk> chunks,
++        NapPackOptions options, byte[] index, long indexOffset, long tableOffset,
++        long tableLength, long payloadOffset, long payloadLength)
++    {
++        using var identity = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
++        foreach (var entry in entries)
++        {
++            identity.AppendData(Encoding.UTF8.GetBytes(entry.Path));
++            identity.AppendData(entry.Hash);
++        }
++        var digest = identity.GetHashAndReset();
++        var header = new byte[NapLimits.HeaderLength];
++        new byte[] { 0x4c, 0x4e, 0x41, 0x50, 0x00, 0x0d, 0x0a, 0x1a }.CopyTo(header, 0);
++        PutU16(header, 8, 1);
++        PutU16(header, 10, NapLimits.HeaderLength);
++        digest.AsSpan(0, 16).CopyTo(header.AsSpan(16, 16));
++        PutU64(header, 32, options.ContentVersion);
++        PutU32(header, 40, (uint)options.ChunkSize);
++        PutU64(header, 48, (ulong)indexOffset);
++        PutU64(header, 56, (ulong)index.Length);
++        PutU64(header, 64, (ulong)tableOffset);
++        PutU64(header, 72, (ulong)tableLength);
++        PutU64(header, 80, (ulong)payloadOffset);
++        PutU64(header, 88, (ulong)payloadLength);
++        SHA256.HashData(index).CopyTo(header, 96);
++        return header;
++    }
++
++    private static void PutU16(byte[] target, int offset, ushort value) => BinaryPrimitives.WriteUInt16LittleEndian(target.AsSpan(offset, 2), value);
++    private static void PutU32(byte[] target, int offset, uint value) => BinaryPrimitives.WriteUInt32LittleEndian(target.AsSpan(offset, 4), value);
++    private static void PutU64(byte[] target, int offset, ulong value) => BinaryPrimitives.WriteUInt64LittleEndian(target.AsSpan(offset, 8), value);
++}
+diff --git a/src/Nexus.Assets/NexusPackageFileProvider.cs b/src/Nexus.Assets/NexusPackageFileProvider.cs
+new file mode 100644
+index 0000000..1cc574b
+--- /dev/null
++++ b/src/Nexus.Assets/NexusPackageFileProvider.cs
+@@ -0,0 +1,357 @@
++using System.Security.Cryptography;
++using System.Text;
++using System.Text.Json;
++using LibreLancer.Data.IO;
++
++namespace Nexus.Assets;
++
++public sealed class NexusPackageFileProvider : IOverlayFileProvider
++{
++    private sealed record Package(string Id, NapArchive Archive, int Priority, int MountOrder,
++        HashSet<string> Overrides);
++    private sealed record EffectiveEntry(Package Package, NapEntry Entry);
++    private sealed record ActiveSnapshot
++    {
++        public int SchemaVersion { get; init; }
++        public ActivePackage[]? Packages { get; init; }
++    }
++    private sealed record ActivePackage
++    {
++        public string? Id { get; init; }
++        public string? Path { get; init; }
++        public long Size { get; init; }
++        public string? Sha256 { get; init; }
++        public bool Required { get; init; }
++        public ulong? Version { get; init; }
++        public int Priority { get; init; }
++        public int MountOrder { get; init; }
++        public string[]? Dependencies { get; init; }
++        public string[]? Overrides { get; init; }
++    }
++
++    private readonly Dictionary<string, EffectiveEntry> files;
++    private readonly HashSet<string> tombstoneParentDirectories;
++
++    public NexusPackageFileProvider(IEnumerable<NexusPackageMount> mounts)
++    {
++        ArgumentNullException.ThrowIfNull(mounts);
++        var requested = mounts.ToArray();
++        if (requested.Any(x => x is null))
++            throw new ArgumentException("Package mounts cannot contain null entries.", nameof(mounts));
++        var sorted = requested.OrderBy(x => x.Priority)
++            .ThenBy(x => x.MountOrder)
++            .ThenBy(x => x.Id, StringComparer.Ordinal)
++            .ToArray();
++        if (sorted.Length == 0) throw new ArgumentException("At least one NAP package is required.", nameof(mounts));
++
++        var packageIds = new HashSet<string>(StringComparer.Ordinal);
++        var mountOrders = new HashSet<(int Priority, int MountOrder)>();
++        foreach (var mount in sorted)
++        {
++            if (mount is null || mount.Overrides is null)
++                throw new ArgumentException("Package mounts and override lists cannot be null.", nameof(mounts));
++            ValidateId(mount.Id);
++            if (!packageIds.Add(mount.Id)) throw new InvalidDataException($"Duplicate NAP package ID: {mount.Id}");
++            if (!mountOrders.Add((mount.Priority, mount.MountOrder)))
++                throw new InvalidDataException("Packages at the same priority require distinct mount orders.");
++        }
++        foreach (var mount in sorted)
++            foreach (var overrideId in mount.Overrides)
++                if (!packageIds.Contains(overrideId) || overrideId == mount.Id)
++                    throw new InvalidDataException($"Package {mount.Id} has an invalid override reference: {overrideId}");
++
++        files = new Dictionary<string, EffectiveEntry>(StringComparer.OrdinalIgnoreCase);
++        foreach (var mount in sorted)
++        {
++            var package = new Package(mount.Id, mount.Archive, mount.Priority, mount.MountOrder,
++                new HashSet<string>(mount.Overrides, StringComparer.Ordinal));
++            foreach (var entry in mount.Archive.Entries)
++            {
++                if (files.TryGetValue(entry.Path, out var previous) && !package.Overrides.Contains(previous.Package.Id))
++                    throw new InvalidDataException(
++                        $"Package {package.Id} conflicts with {previous.Package.Id} at {entry.Path} without an explicit override.");
++                files[entry.Path] = new EffectiveEntry(package, entry);
++            }
++        }
++        tombstoneParentDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
++        foreach (var entry in files.Values.Where(x => x.Entry.Tombstone))
++        {
++            var directory = entry.Entry.Path;
++            var separator = directory.LastIndexOf('/');
++            directory = separator < 0 ? "" : directory[..separator];
++            while (true)
++            {
++                tombstoneParentDirectories.Add(directory);
++                var parentSeparator = directory.LastIndexOf('/');
++                if (parentSeparator < 0) break;
++                directory = directory[..parentSeparator];
++            }
++        }
++    }
++
++    /// <summary>Loads a local activated snapshot from &lt;applicationDirectory&gt;/packages/active.json.</summary>
++    public static NexusPackageFileProvider? LoadActive(string applicationDirectory)
++    {
++        ArgumentException.ThrowIfNullOrWhiteSpace(applicationDirectory);
++        var root = Path.GetFullPath(Path.Combine(applicationDirectory, "packages"));
++        var activePath = Path.Combine(root, "active.json");
++        if (!File.Exists(activePath)) return null;
++        EnsureNoReparsePoints(root, activePath);
++        var info = new FileInfo(activePath);
++        if (info.Length is <= 0 or > 4 * 1024 * 1024)
++            throw new InvalidDataException("Active NAP snapshot metadata has an invalid size.");
++
++        ActiveSnapshot snapshot;
++        using (var input = new FileStream(activePath, FileMode.Open, FileAccess.Read, FileShare.Read))
++            snapshot = JsonSerializer.Deserialize<ActiveSnapshot>(input,
++                new JsonSerializerOptions(JsonSerializerDefaults.Web))
++                ?? throw new InvalidDataException("Active NAP snapshot metadata is empty.");
++        if (snapshot.SchemaVersion != 1 || snapshot.Packages is null || snapshot.Packages.Length > 1024)
++            throw new InvalidDataException("Active NAP snapshot schema or package count is invalid.");
++
++        var ids = new HashSet<string>(StringComparer.Ordinal);
++        foreach (var item in snapshot.Packages)
++        {
++            if (item.Id is null) throw new InvalidDataException("Active NAP package ID is missing.");
++            ValidateId(item.Id);
++            if (!ids.Add(item.Id)) throw new InvalidDataException($"Duplicate active NAP package ID: {item.Id}");
++        }
++        foreach (var item in snapshot.Packages)
++        {
++            foreach (var dependency in item.Dependencies ?? [])
++                if (!ids.Contains(dependency) || dependency == item.Id)
++                    throw new InvalidDataException($"Package {item.Id} has a missing or invalid dependency: {dependency}");
++            foreach (var overridden in item.Overrides ?? [])
++                if (!ids.Contains(overridden) || overridden == item.Id)
++                    throw new InvalidDataException($"Package {item.Id} has an invalid override reference: {overridden}");
++        }
++
++        var mounts = new List<NexusPackageMount>(snapshot.Packages.Length);
++        foreach (var item in snapshot.Packages)
++        {
++            var packagePath = ResolvePackagePath(root, item.Path);
++            EnsureNoReparsePoints(root, packagePath);
++            var fileInfo = new FileInfo(packagePath);
++            if (!fileInfo.Exists || item.Size <= 0 || fileInfo.Length != item.Size)
++                throw new InvalidDataException($"Active NAP package size does not match: {item.Id}");
++            if (item.Sha256 is null || item.Sha256.Length != 64 || !IsHex(item.Sha256))
++                throw new InvalidDataException($"Active NAP package hash is invalid: {item.Id}");
++            using var packageStream = new FileStream(packagePath, FileMode.Open, FileAccess.Read, FileShare.Read);
++            byte[] actualHash = SHA256.HashData(packageStream);
++            if (!CryptographicOperations.FixedTimeEquals(actualHash, Convert.FromHexString(item.Sha256)))
++                throw new InvalidDataException($"Active NAP package hash mismatch: {item.Id}");
++
++            // Parse the exact file handle whose bytes were hashed; an atomic path replacement
++            // between verification and parsing must not select a different archive.
++            var archive = NapArchive.Open(packageStream, packagePath);
++            if (item.Version.HasValue && item.Version.Value != archive.ContentVersion)
++                throw new InvalidDataException($"Active NAP package version does not match: {item.Id}");
++            mounts.Add(new NexusPackageMount(item.Id!, archive, item.Priority, item.MountOrder,
++                new HashSet<string>(item.Overrides ?? [], StringComparer.Ordinal)));
++        }
++        return mounts.Count == 0 ? null : new NexusPackageFileProvider(mounts);
++    }
++
++    public Stream? Open(string filename)
++    {
++        if (!TryGet(filename, out var effective) || effective.Entry.Tombstone) return null;
++        return effective.Package.Archive.OpenFile(effective.Entry.Path);
++    }
++
++    public bool FileExists(string filename) =>
++        TryGet(filename, out var effective) && !effective.Entry.Tombstone;
++
++    public bool ContainsDirectory(string path)
++    {
++        if (!TryNormalizeDirectory(path, out var directory)) return false;
++        var prefix = directory.Length == 0 ? "" : directory + "/";
++        return files.Any(pair => !pair.Value.Entry.Tombstone &&
++            pair.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) && pair.Key.Length > prefix.Length);
++    }
++
++    public string? GetCanonicalFilePath(string path) =>
++        TryGet(path, out var effective) && !effective.Entry.Tombstone ? effective.Entry.Path : null;
++
++    public string? GetCanonicalDirectoryPath(string path)
++    {
++        if (!TryNormalizeDirectory(path, out var directory) || !ContainsDirectory(directory)) return null;
++        if (directory.Length == 0) return "";
++        var prefix = directory + "/";
++        var matchingPath = files.Values.Where(x => !x.Entry.Tombstone)
++            .Select(x => x.Entry.Path)
++            .FirstOrDefault(x => x.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
++        if (matchingPath is null) return null;
++        return matchingPath[..matchingPath.IndexOf('/', prefix.Length - 1)];
++    }
++
++    public bool GetBackingFileName(string path, out string? fileName)
++    {
++        fileName = null;
++        return TryGet(path, out _);
++    }
++
++    public bool TryResolveOverlayFile(string filename, out bool exists)
++    {
++        if (TryGet(filename, out var effective))
++        {
++            exists = !effective.Entry.Tombstone;
++            return true;
++        }
++        exists = false;
++        return false;
++    }
++
++    public bool HasTombstonesUnder(string directory) =>
++        TryNormalizeDirectory(directory, out var normalized) &&
++        tombstoneParentDirectories.Contains(normalized);
++
++    public IEnumerable<string> GetFiles(string path)
++    {
++        if (!TryNormalizeDirectory(path, out var directory)) return Array.Empty<string>();
++        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
++        foreach (var pair in files)
++        {
++            if (pair.Value.Entry.Tombstone || !TryDirectChild(directory, pair.Key, out var child, out var isFile))
++                continue;
++            if (isFile) result.Add(child);
++        }
++        return result;
++    }
++
++    public IEnumerable<string> GetDirectories(string path)
++    {
++        if (!TryNormalizeDirectory(path, out var directory)) return Array.Empty<string>();
++        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
++        foreach (var pair in files)
++        {
++            if (pair.Value.Entry.Tombstone || !TryDirectChild(directory, pair.Key, out var child, out var isFile))
++                continue;
++            if (!isFile) result.Add(child);
++        }
++        return result;
++    }
++
++    public void Refresh() { }
++
++    private bool TryGet(string path, out EffectiveEntry effective)
++    {
++        try
++        {
++            var key = NormalizeFilePath(path);
++            return files.TryGetValue(key, out effective!);
++        }
++        catch (InvalidDataException)
++        {
++            effective = null!;
++            return false;
++        }
++    }
++
++    private static string NormalizeFilePath(string path)
++    {
++        var value = StripDataRoot(path);
++        return NapPath.Normalize(value);
++    }
++
++    private static bool TryNormalizeDirectory(string path, out string directory)
++    {
++        try
++        {
++            var value = StripDataRoot(path).TrimEnd('/');
++            directory = value.Length == 0 ? "" : NapPath.Normalize(value);
++            return true;
++        }
++        catch (InvalidDataException)
++        {
++            directory = "";
++            return false;
++        }
++    }
++
++    private static string StripDataRoot(string path)
++    {
++        var value = path.Replace('\\', '/');
++        if (value.Contains("//", StringComparison.Ordinal))
++        {
++            var normalized = new StringBuilder(value.Length);
++            var previousWasSlash = false;
++            foreach (var character in value)
++            {
++                if (character == '/' && previousWasSlash) continue;
++                normalized.Append(character);
++                previousWasSlash = character == '/';
++            }
++            value = normalized.ToString();
++        }
++        // Freelancer's VFS commonly requests paths rooted at "/". NAP paths are
++        // relative to the DATA root, so normalize that virtual root away.
++        value = value.TrimStart('/');
++        foreach (var prefix in new[] { "EXE/../DATA/", "../DATA/", "DATA/" })
++            if (value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
++                return value[prefix.Length..];
++        if (value.Equals("DATA", StringComparison.OrdinalIgnoreCase) ||
++            value.Equals("../DATA", StringComparison.OrdinalIgnoreCase) ||
++            value.Equals("EXE/../DATA", StringComparison.OrdinalIgnoreCase))
++            return "";
++        return value;
++    }
++
++    private static bool TryDirectChild(string directory, string path, out string child, out bool isFile)
++    {
++        var prefix = directory.Length == 0 ? "" : directory + "/";
++        if (!path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) || path.Length <= prefix.Length)
++        {
++            child = "";
++            isFile = false;
++            return false;
++        }
++        var remainder = path[prefix.Length..];
++        var separator = remainder.IndexOf('/');
++        isFile = separator < 0;
++        child = isFile ? remainder : remainder[..separator];
++        return child.Length != 0;
++    }
++
++    private static string ResolvePackagePath(string packagesRoot, string? relativePath)
++    {
++        if (string.IsNullOrWhiteSpace(relativePath) || relativePath.Contains('\0') || relativePath.Contains(':') ||
++            relativePath.StartsWith('/') || relativePath.StartsWith('\\'))
++            throw new InvalidDataException("Active NAP package path must be relative.");
++        var normalized = relativePath.Replace('\\', '/');
++        if (normalized.Split('/').Any(x => x.Length == 0 || x is "." or ".."))
++            throw new InvalidDataException("Active NAP package path contains an unsafe component.");
++        var fullPath = Path.GetFullPath(Path.Combine(packagesRoot,
++            normalized.Replace('/', Path.DirectorySeparatorChar)));
++        var relative = Path.GetRelativePath(packagesRoot, fullPath);
++        if (Path.IsPathRooted(relative) || relative == ".." ||
++            relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal))
++            throw new InvalidDataException("Active NAP package path escapes its package root.");
++        return fullPath;
++    }
++
++    private static void EnsureNoReparsePoints(string packagesRoot, string filePath)
++    {
++        if (!Directory.Exists(packagesRoot) || (File.GetAttributes(packagesRoot) & FileAttributes.ReparsePoint) != 0)
++            throw new InvalidDataException("Active NAP package root is missing or is a reparse point.");
++        var relative = Path.GetRelativePath(packagesRoot, filePath);
++        var current = packagesRoot;
++        foreach (var component in relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
++        {
++            current = Path.Combine(current, component);
++            if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
++                throw new InvalidDataException("Active NAP metadata and packages cannot use symbolic links or reparse points.");
++        }
++    }
++
++    private static void ValidateId(string? id)
++    {
++        if (string.IsNullOrEmpty(id) || id.Length > 96 ||
++            id.Any(c => !(char.IsAsciiLetterOrDigit(c) || c is '-' or '_' or '.')))
++            throw new InvalidDataException($"NAP package ID is invalid: {id}");
++    }
++
++    private static bool IsHex(string value) => value.All(Uri.IsHexDigit);
++}
++
++public sealed record NexusPackageMount(string Id, NapArchive Archive, int Priority, int MountOrder,
++    IReadOnlyCollection<string> Overrides);
+diff --git a/src/Nexus.Assets/NexusPackageWorkspaceFileProvider.cs b/src/Nexus.Assets/NexusPackageWorkspaceFileProvider.cs
+new file mode 100644
+index 0000000..23ded7f
+--- /dev/null
++++ b/src/Nexus.Assets/NexusPackageWorkspaceFileProvider.cs
+@@ -0,0 +1,174 @@
++using LibreLancer.Data.IO;
++
++namespace Nexus.Assets;
++
++/// <summary>Persistent loose-file edits layered above a package snapshot for editor workflows.</summary>
++public sealed class NexusPackageWorkspaceFileProvider : IOverlayFileProvider
++{
++    private readonly string root;
++    private readonly SysFolderQuickInit files;
++    private readonly NexusPackageFileProvider packages;
++
++    public NexusPackageWorkspaceFileProvider(string workspaceDirectory, NexusPackageFileProvider packages)
++    {
++        ArgumentException.ThrowIfNullOrWhiteSpace(workspaceDirectory);
++        ArgumentNullException.ThrowIfNull(packages);
++        root = Path.GetFullPath(workspaceDirectory);
++        Directory.CreateDirectory(root);
++        if ((File.GetAttributes(root) & FileAttributes.ReparsePoint) != 0)
++            throw new InvalidDataException("NAP editor workspace cannot be a symbolic link or reparse point.");
++        files = new SysFolderQuickInit(root);
++        this.packages = packages;
++    }
++
++    public string WorkspaceDirectory => root;
++
++    public Stream? Open(string filename)
++    {
++        if (!TryNormalize(filename, out var normalized) || !TryResolveExisting(normalized, out var path) ||
++            !File.Exists(path))
++            return null;
++        return File.OpenRead(path);
++    }
++
++    public bool FileExists(string filename) =>
++        TryNormalize(filename, out var normalized) &&
++        TryResolveExisting(normalized, out var path) && File.Exists(path);
++
++    public bool GetBackingFileName(string path, out string? fileName)
++    {
++        fileName = null;
++        if (!TryNormalize(path, out var normalized)) return false;
++        if (TryResolveExisting(normalized, out var existing) &&
++            (File.Exists(existing) || Directory.Exists(existing)))
++        {
++            fileName = existing;
++            return true;
++        }
++
++        var canonical = packages.GetCanonicalFilePath(normalized) ??
++                       packages.GetCanonicalDirectoryPath(normalized);
++        if (canonical is null) return false;
++        var destination = Path.GetFullPath(Path.Combine(root,
++            canonical.Replace('/', Path.DirectorySeparatorChar)));
++        if (!IsWithinRoot(destination) || !HasNoReparsePointAncestor(destination)) return false;
++        Directory.CreateDirectory(packages.GetCanonicalDirectoryPath(normalized) is not null
++            ? destination
++            : Path.GetDirectoryName(destination)!);
++        if (!HasNoReparsePointAncestor(destination)) return false;
++        fileName = destination;
++        return true;
++    }
++
++    public IEnumerable<string> GetFiles(string path)
++    {
++        if (!TryNormalize(path, out var normalized) || !TryResolveExisting(normalized, out var directory) ||
++            !Directory.Exists(directory))
++            return Array.Empty<string>();
++        return files.GetFiles(normalized).Where(name => IsSafeChild(directory, name, isDirectory: false)).ToArray();
++    }
++
++    public IEnumerable<string> GetDirectories(string path)
++    {
++        if (!TryNormalize(path, out var normalized) || !TryResolveExisting(normalized, out var directory) ||
++            !Directory.Exists(directory))
++            return Array.Empty<string>();
++        return files.GetDirectories(normalized).Where(name => IsSafeChild(directory, name, isDirectory: true)).ToArray();
++    }
++
++    public bool HasTombstonesUnder(string directory) => false;
++
++    public bool TryResolveOverlayFile(string filename, out bool exists)
++    {
++        exists = FileExists(filename);
++        return exists;
++    }
++
++    public void Refresh() => files.Refresh();
++
++    private bool TryNormalize(string path, out string normalized)
++    {
++        normalized = "";
++        if (string.IsNullOrWhiteSpace(path) || path.IndexOf('\0') >= 0) return false;
++        var value = path.Replace('\\', '/');
++        if (value.Contains("//", StringComparison.Ordinal))
++        {
++            var collapsed = new System.Text.StringBuilder(value.Length);
++            var previousWasSlash = false;
++            foreach (var character in value)
++            {
++                if (character == '/' && previousWasSlash) continue;
++                collapsed.Append(character);
++                previousWasSlash = character == '/';
++            }
++            value = collapsed.ToString();
++        }
++        foreach (var prefix in new[] { "EXE/../DATA/", "../DATA/", "DATA/" })
++        {
++            if (!value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
++            value = value[prefix.Length..];
++            break;
++        }
++        if (value.Equals("DATA", StringComparison.OrdinalIgnoreCase) ||
++            value.Equals("../DATA", StringComparison.OrdinalIgnoreCase) ||
++            value.Equals("EXE/../DATA", StringComparison.OrdinalIgnoreCase))
++            value = "";
++        value = value.TrimEnd('/');
++        if (value.Length == 0) return true;
++        try
++        {
++            normalized = NapPath.Normalize(value);
++            return true;
++        }
++        catch (InvalidDataException)
++        {
++            return false;
++        }
++    }
++
++    private bool TryResolveExisting(string relativePath, out string path)
++    {
++        path = root;
++        if (files.GetBackingFileName(relativePath, out var resolved) && resolved is not null &&
++            IsWithinRoot(resolved) && HasNoReparsePointAncestor(resolved))
++        {
++            path = resolved;
++            return true;
++        }
++        return relativePath.Length == 0 && HasNoReparsePointAncestor(root);
++    }
++
++    private bool IsSafeChild(string parent, string name, bool isDirectory)
++    {
++        if (string.IsNullOrEmpty(name) || name.Contains('/') || name.Contains('\\')) return false;
++        var path = Path.Combine(parent, name);
++        return IsWithinRoot(path) && HasNoReparsePointAncestor(path) &&
++               (isDirectory ? Directory.Exists(path) : File.Exists(path));
++    }
++
++    private bool IsWithinRoot(string path)
++    {
++        var fullPath = Path.GetFullPath(path);
++        var relative = Path.GetRelativePath(root, fullPath);
++        return !Path.IsPathRooted(relative) && relative != ".." &&
++               !relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal);
++    }
++
++    private bool HasNoReparsePointAncestor(string path)
++    {
++        if ((File.GetAttributes(root) & FileAttributes.ReparsePoint) != 0) return false;
++        var relative = Path.GetRelativePath(root, Path.GetFullPath(path));
++        if (Path.IsPathRooted(relative) || relative == ".." ||
++            relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal))
++            return false;
++        var current = root;
++        foreach (var component in relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
++        {
++            if (component.Length == 0 || component == ".") continue;
++            current = Path.Combine(current, component);
++            if (!File.Exists(current) && !Directory.Exists(current)) continue;
++            if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) return false;
++        }
++        return true;
++    }
++}
+diff --git a/src/Nexus.Packaging.Cli/Program.cs b/src/Nexus.Packaging.Cli/Program.cs
+new file mode 100644
+index 0000000..4ef3e70
+--- /dev/null
++++ b/src/Nexus.Packaging.Cli/Program.cs
+@@ -0,0 +1,145 @@
++using Nexus.Assets;
++using LibreLancer.Data.IO;
++using System.Text.Json;
++
++static int Usage()
++{
++    Console.Error.WriteLine("Usage:\n  nexus-pack pack <source-dir> <output.nap> [--version N] [--chunk-size BYTES] [--compression-level N]\n  nexus-pack inspect <file.nap>\n  nexus-pack verify <file.nap>\n  nexus-pack diff <base.nap> <target.nap> <patch.nap> <base-package-id>\n  nexus-pack compact <application-dir> <output.nap> [--version N] [--workspace <directory>]");
++    return 2;
++}
++
++try
++{
++    if (args.Length < 2) return Usage();
++    switch (args[0])
++    {
++        case "pack":
++            {
++                if (args.Length < 3) return Usage();
++                var options = new NapPackOptions();
++                for (var i = 3; i < args.Length; i += 2)
++                {
++                    if (i + 1 >= args.Length) return Usage();
++                    var value = args[i + 1];
++                    options = args[i] switch
++                    {
++                        "--version" when ulong.TryParse(value, out var v) => options with { ContentVersion = v },
++                        "--chunk-size" when int.TryParse(value, out var c) => options with { ChunkSize = c },
++                        "--compression-level" when int.TryParse(value, out var l) => options with { CompressionLevel = l },
++                        _ => throw new ArgumentException($"Invalid option or value: {args[i]}")
++                    };
++                }
++                NapWriter.PackDirectory(args[1], args[2], options);
++                Console.WriteLine($"Packed {Path.GetFullPath(args[1])} -> {Path.GetFullPath(args[2])}");
++                return 0;
++            }
++        case "inspect" when args.Length == 2:
++            {
++                var archive = NapArchive.Open(args[1]);
++                Console.WriteLine($"Package: {archive.PackageId:D}\nContent version: {archive.ContentVersion}\nEntries: {archive.Entries.Count}");
++                foreach (var entry in archive.Entries.OrderBy(e => e.Path, StringComparer.Ordinal))
++                    Console.WriteLine($"{(entry.Tombstone ? "DELETE" : "FILE  ")} {entry.Length,12} {Convert.ToHexString(entry.Sha256).ToLowerInvariant()} {entry.Path}");
++                return 0;
++            }
++        case "verify" when args.Length == 2:
++            {
++                var archive = NapArchive.Open(args[1]);
++                archive.VerifyAll();
++                Console.WriteLine($"Verified {archive.Entries.Count} entries in {Path.GetFullPath(args[1])}");
++                return 0;
++            }
++        case "diff" when args.Length == 5:
++            {
++                var basePath = Path.GetFullPath(args[1]);
++                var targetPath = Path.GetFullPath(args[2]);
++                var outputPath = Path.GetFullPath(args[3]);
++                var pathComparer = OperatingSystem.IsWindows()
++                    ? StringComparer.OrdinalIgnoreCase
++                    : StringComparer.Ordinal;
++                if (pathComparer.Equals(outputPath, basePath) || pathComparer.Equals(outputPath, targetPath) ||
++                    pathComparer.Equals(outputPath + ".plan.json", basePath) ||
++                    pathComparer.Equals(outputPath + ".plan.json", targetPath))
++                    throw new ArgumentException("Diff output and its sidecar must not replace either input archive.");
++                var result = NapOverlayBuilder.BuildDiff(
++                    NapArchive.Open(basePath), NapArchive.Open(targetPath), args[4], outputPath);
++                var plan = new
++                {
++                    schemaVersion = 1,
++                    packageGuid = result.PackageGuid,
++                    basePackageId = result.BasePackageId,
++                    dependencies = new[] { result.BasePackageId },
++                    overrides = new[] { result.BasePackageId },
++                    contentVersion = result.ContentVersion,
++                    changedFiles = result.ChangedFiles,
++                    tombstones = result.Tombstones
++                };
++                WriteJsonAtomically(outputPath + ".plan.json", plan);
++                Console.WriteLine($"Built {outputPath}: {result.ChangedFiles} changed files, {result.Tombstones} tombstones.");
++                Console.WriteLine($"The signed release manifest must declare dependencies/overrides: {result.BasePackageId}.");
++                return 0;
++            }
++        case "compact" when args.Length >= 3 && args.Length <= 7 && (args.Length - 3) % 2 == 0:
++            {
++                ulong version = 1;
++                string? workspaceDirectory = null;
++                for (var i = 3; i < args.Length; i += 2)
++                {
++                    if (args[i] == "--version" && ulong.TryParse(args[i + 1], out var parsedVersion))
++                        version = parsedVersion;
++                    else if (args[i] == "--workspace" && !string.IsNullOrWhiteSpace(args[i + 1]))
++                        workspaceDirectory = Path.GetFullPath(args[i + 1]);
++                    else
++                        return Usage();
++                }
++                var applicationDirectory = Path.GetFullPath(args[1]);
++                var outputPath = Path.GetFullPath(args[2]);
++                var relativeOutput = Path.GetRelativePath(applicationDirectory, outputPath);
++                if (!Path.IsPathRooted(relativeOutput) && relativeOutput != ".." &&
++                    !relativeOutput.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal))
++                    throw new ArgumentException("Compaction output must be outside the active application directory.");
++                var provider = NexusPackageFileProvider.LoadActive(applicationDirectory)
++                    ?? throw new InvalidDataException("Application directory has no active NAP package snapshot.");
++                var fileSystem = new FileSystem(provider);
++                if (workspaceDirectory is not null)
++                {
++                    var relativeWorkspaceOutput = Path.GetRelativePath(workspaceDirectory, outputPath);
++                    if (!Path.IsPathRooted(relativeWorkspaceOutput) && relativeWorkspaceOutput != ".." &&
++                        !relativeWorkspaceOutput.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal))
++                        throw new ArgumentException("Compaction output must be outside the editor workspace.");
++                    fileSystem.FileProviders.Add(new NexusPackageWorkspaceFileProvider(workspaceDirectory, provider));
++                }
++                var packageGuid = NapOverlayBuilder.Compact(fileSystem, outputPath, version);
++                Console.WriteLine($"Compacted the effective package tree to {outputPath} (package {packageGuid:D}).");
++                return 0;
++            }
++        default:
++            return Usage();
++    }
++}
++catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException or InvalidDataException or OverflowException or InvalidOperationException)
++{
++    Console.Error.WriteLine($"nexus-pack: {exception.Message}");
++    return 1;
++}
++
++static void WriteJsonAtomically<T>(string outputPath, T value)
++{
++    var path = Path.GetFullPath(outputPath);
++    var directory = Path.GetDirectoryName(path)!;
++    Directory.CreateDirectory(directory);
++    var temporary = Path.Combine(directory, "." + Path.GetFileName(path) + "." + Guid.NewGuid().ToString("N") + ".tmp");
++    try
++    {
++        using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None,
++                   4096, FileOptions.WriteThrough))
++        {
++            JsonSerializer.Serialize(output, value, new JsonSerializerOptions(JsonSerializerDefaults.Web));
++            output.Flush(flushToDisk: true);
++        }
++        File.Move(temporary, path, overwrite: true);
++    }
++    finally
++    {
++        if (File.Exists(temporary)) File.Delete(temporary);
++    }
++}
+
+diff --git a/src/Editor/LancerEdit/Utf/UtfTab.cs b/src/Editor/LancerEdit/Utf/UtfTab.cs
+--- a/src/Editor/LancerEdit/Utf/UtfTab.cs
++++ b/src/Editor/LancerEdit/Utf/UtfTab.cs
+@@ -41,6 +41,7 @@
+ 
+         public GameResourceManager DetachedResources;
+         public int DetachedResourceCount;
++        private bool detachedHasGameData;
+ 
+         // Track ImGui expanded/collapsed state
+         Dictionary<LUtfNode, bool> nodeOpenState = new();
+@@ -184,6 +185,119 @@
+             res.AddResources(Utf.Export(), Unique.ToString());
+         }
+ 
++        private GameResourceManager GetPreviewResources()
++        {
++            var dataContext = main.OpenDataContext;
++            if (dataContext == null)
++                return DetachedResources ?? main.Resources;
++
++            if (DetachedResources == null || !detachedHasGameData)
++            {
++                if (DetachedResources != null)
++                {
++                    // Existing viewers still hold this manager. Keep their resources
++                    // alive and refresh the data-backed copy after they close.
++                    if (DetachedResourceCount > 1)
++                        return DetachedResources;
++                    DetachedResources.Dispose();
++                }
++                else
++                {
++                    main.Resources.RemoveResourcesForId(Unique.ToString());
++                }
++
++                DetachedResources = new GameResourceManager(dataContext.Resources);
++                DetachedResources.AddResources(Utf.Export(), Unique.ToString());
++                detachedHasGameData = true;
++            }
++
++            return DetachedResources;
++        }
++
++        private void LoadShipArchetypeLibraries(GameResourceManager resources)
++        {
++            var dataContext = main.OpenDataContext;
++            if (dataContext?.GameData == null || string.IsNullOrWhiteSpace(FilePath))
++                return;
++
++            string modelPath;
++            try
++            {
++                modelPath = NormalizeGamePath(Path.GetRelativePath(dataContext.Folder, FilePath));
++            }
++            catch (ArgumentException)
++            {
++                return;
++            }
++
++            FLLog.Debug("Editor", $"Resolving ship materials for '{modelPath}'");
++
++            var exact = new List<LibreLancer.Data.GameData.Ship>();
++            var suffix = new List<LibreLancer.Data.GameData.Ship>();
++            foreach (var ship in dataContext.GameData.Items.Ships)
++            {
++                var resolvedModel = ship.ModelFile;
++                if (resolvedModel?.ModelFile == null)
++                    continue;
++
++                var candidate = NormalizeGamePath(resolvedModel.ModelFile);
++                if (candidate.Equals(modelPath, StringComparison.OrdinalIgnoreCase))
++                    exact.Add(ship);
++                else if (modelPath.EndsWith("\\" + candidate, StringComparison.OrdinalIgnoreCase))
++                    suffix.Add(ship);
++            }
++
++            var matches = exact.Count > 0 ? exact : suffix;
++            if (matches.Count == 0)
++            {
++                FLLog.Debug("Editor", "Ship material lookup found no matching archetypes");
++                return;
++            }
++
++            var modelNickname = Path.GetFileNameWithoutExtension(modelPath.Replace('\\', Path.DirectorySeparatorChar));
++            var namedMatches = matches.Where(ship => ship.Nickname.Equals(modelNickname, StringComparison.OrdinalIgnoreCase)).ToList();
++            if (namedMatches.Count == 1)
++                matches = namedMatches;
++
++            var librarySets = matches.Select(ship => string.Join("\0",
++                    (ship.ModelFile!.LibraryFiles ?? Array.Empty<string>())
++                    .Select(NormalizeGamePath)
++                    .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)))
++                .Distinct(StringComparer.OrdinalIgnoreCase)
++                .ToArray();
++            if (librarySets.Length != 1)
++            {
++                FLLog.Debug("Editor", $"Ship material lookup is ambiguous across {matches.Count} model archetypes");
++                return;
++            }
++
++            var libraries = matches.SelectMany(ship => ship.ModelFile!.LibraryFiles ?? Array.Empty<string>())
++                .Distinct(StringComparer.OrdinalIgnoreCase);
++            foreach (var library in libraries)
++            {
++                FLLog.Debug("Editor", $"Loading ship material library '{library}' for {matches.Count} matching archetypes");
++                resources.LoadResourceFile(library);
++            }
++        }
++
++        private static string NormalizeGamePath(string path)
++        {
++            var segments = new List<string>();
++            foreach (var segment in path.Replace('/', '\\').Split('\\', StringSplitOptions.RemoveEmptyEntries))
++            {
++                if (segment == ".")
++                    continue;
++                if (segment == "..")
++                {
++                    if (segments.Count > 0)
++                        segments.RemoveAt(segments.Count - 1);
++                    continue;
++                }
++                segments.Add(segment);
++            }
++            return string.Join('\\', segments);
++        }
++
+         public override void OnHotkey(Hotkeys hk, bool shiftPressed)
+         {
+             if (selectedNode == null)
+@@ -275,7 +389,9 @@
+                     hpn.RootNode = Utf.Root;
+                     try
+                     {
+-                        drawable = LibreLancer.Utf.UtfLoader.GetDrawable(Utf.Export(), main.Resources);
++                        var previewResources = GetPreviewResources();
++                        LoadShipArchetypeLibraries(previewResources);
++                        drawable = LibreLancer.Utf.UtfLoader.GetDrawable(Utf.Export(), previewResources);
+                         if (Utf.Root.Children.Any((x) => x.Name.Equals("cmpnd", StringComparison.OrdinalIgnoreCase)))
+                         {
+                             foreach (var child in Utf.Root.Children.Where((x) => x.Name.EndsWith(".3db", StringComparison.OrdinalIgnoreCase)))
+@@ -349,8 +465,10 @@
+                 {
+                     TabColor = TabColor.Alternate;
+                     main.Resources.RemoveResourcesForId(Unique.ToString());
+-                    DetachedResources = new GameResourceManager(main.Resources);
++                    var sourceResources = main.OpenDataContext?.Resources ?? main.Resources;
++                    DetachedResources = new GameResourceManager(sourceResources);
+                     DetachedResources.AddResources(Utf.Export(), Unique.ToString());
++                    detachedHasGameData = main.OpenDataContext != null;
+                 }
+             }
+ 
+diff --git a/src/Editor/LancerEdit/Model/ModelViewer.cs b/src/Editor/LancerEdit/Model/ModelViewer.cs
+index 93f3437fb..cec0590d5 100644
+--- a/src/Editor/LancerEdit/Model/ModelViewer.cs
++++ b/src/Editor/LancerEdit/Model/ModelViewer.cs
+@@ -1104,6 +1104,21 @@ namespace LancerEdit
+         FileDialogFilters pngFilters = new FileDialogFilters(new FileFilter("PNG Files", "png"));
+         unsafe void RenderPanel()
+         {
++            ImGui.Separator();
++            ImGui.Text("Surface Map Preview");
++            bool surfaceNormalMapsEnabled = res.SurfaceNormalMapsEnabled;
++            if (ImGui.Checkbox("Surface normal maps", ref surfaceNormalMapsEnabled))
++                res.SurfaceNormalMapsEnabled = surfaceNormalMapsEnabled;
++            bool generatedTangentsEnabled = res.SurfaceGeneratedTangentsEnabled;
++            ImGui.BeginDisabled(!surfaceNormalMapsEnabled);
++            if (ImGui.Checkbox("Generate missing tangents", ref generatedTangentsEnabled))
++                res.SurfaceGeneratedTangentsEnabled = generatedTangentsEnabled;
++            ImGui.EndDisabled();
++            if (res.SurfaceMaps == null)
++                ImGui.TextDisabled("Load game data to use Surface Maps.");
++            else
++                ImGui.TextDisabled("Toggles apply immediately to the model preview.");
++            ImGui.Separator();
+             ImGui.Text("Render to Image");
+             ImGui.Checkbox("Background?", ref renderBackground);
+             ImGui.InputInt("Width", ref imageWidth);

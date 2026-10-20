@@ -6,14 +6,11 @@ using LibreLancer.Data.GameData.Items;
 
 namespace LibreLancer.Data.GameData;
 
-public record struct BaseSoldGood(
-    int Rank,
-    ResolvedGood Good,
-    float Rep,
-    ulong Price,
-    bool ForSale,
-    string SourceFile,
-    int Min,
-    int Max,
-    bool Preserve,
-    float Multiplier);
+public struct BaseSoldGood
+{
+    public required int Rank;
+    public required ResolvedGood Good;
+    public required float Rep;
+    public required ulong Price;
+    public required bool ForSale;
+}

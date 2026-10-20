@@ -103,8 +103,6 @@ public class FreelancerIni
         if (IsLibrelancer)
         {
             DacomPath = null;
-            NewPlayerPath = "newplayer.fl";
-            MpNewCharacterPath = "mpnewcharacter.fl";
         }
 
         EquipmentPaths = [];

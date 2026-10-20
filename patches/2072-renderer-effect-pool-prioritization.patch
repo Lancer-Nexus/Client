@@ -1,0 +1,755 @@
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -234,6 +234,10 @@
+   - `--render-nebulae=on|off` → `render_nebulae`.
+   - `--render-starsphere=on|off` → `render_starsphere`.
+   - `--render-sun-lens-glow=on|off` → `render_sun_lens_glow`.
++  - `--render-projectile-beams=on|off` → `render_projectile_beams` (only hides `vis_beam`; simulation and projectile particle effects remain active).
++  - `--render-particle-effects=on|off` → `render_particle_effects` (suppresses particle geometry while effect timing and simulation continue).
++  - `--render-transient-effect-lights=on|off` → `render_transient_effect_lights` (controls short-lived `lgt_effect` lights independently of other dynamic lights).
++  - `--render-weapon-muzzle-lights=on|off` → `render_weapon_muzzle_lights` (controls weapon `light_anim` muzzle lights independently of transient effect lights).
+   - `--render-antialias=none|smaa-low|smaa-medium|smaa-high|smaa-ultra|msaa-2x|msaa-4x|msaa-8x` → `antialias`.
+   - `--render-anisotropy=0|2|4|8|16` → `anisotropy`.
+ - Boolean controls accept only `on` or `off`. Surface profile selects the
+--- a/docs/beam-and-explosion-effects-audit.md
++++ b/docs/beam-and-explosion-effects-audit.md
+@@ -17,9 +17,14 @@
+   behalten den bisherigen Vollintensitäts-Default.
+ - `flash_size` wird von LibreLancer im Beam-Renderer aktuell nicht ausgewertet.
+ - `BeamsBuffer` begrenzt Bolt- und Spear-Geometrie jeweils auf 500 Elemente pro
+-  Buffer. Zusätzliche sichtbare Elemente werden derzeit verworfen. Das Limit
+-  und sein Verhalten bei hoher Projektilzahl gehören in die spätere
+-  Performance-/Überlastprüfung.
++  Buffer. Beams außerhalb des Kamerafrustums belegen keinen Slot. Bei voller
++  Liste ersetzt ein sichtbarer Beam mit höherer Nähewirkung den bisher
++  schwächsten Kandidaten; die Priorität nutzt eine konservative Kugel um die
++  Geometrie. Ein Min-Heap hält den schwächsten Slot verfügbar und reduziert
++  die Ersetzungsauswahl auf logarithmische CPU-Arbeit. GPU-Puffer und feste
++  Obergrenze bleiben bestehen. GPU-Zeit und
++  Bildqualität bei Überlast müssen noch in reproduzierbaren Szenen gemessen
++  werden.
+ 
+ Der NAP-Eingang `Data/NAP/Effects/fx/BeamEffects.ini` enthält 55 Definitionen:
+ 51 `BeamSpear` und 4 `BeamBolt`. Alle haben `flash_size`; 47 Werte sind `3`,
+@@ -42,8 +47,39 @@
+   Ergebnis von `FUN_0054bc80()`. Der Wert ersetzt in diesem Zweig den zuvor aus
+   `core_width` gelesenen Wert und fließt in die Berechnung von Beam-Vertex-
+   Positionen ein, unter anderem zusammen mit `head_width` und `tip_length`.
+-- Damit ist ein Retail-Geometrieverbrauch nachgewiesen. Die Bedeutung von
+-  `param_3`, Flag-Bit `8` und `FUN_0054bc80()` sowie der genaue sichtbare Zustand
++- Der Vergleichswert für `param_3` liegt bei `0x005c7474` und ist im Retail-
++  PE `0.0`. Ein Aufrufer bei `0x004fa258` übergibt explizit `0.0` an
++  `FUN_004fa270`; der anschließende Zweig bei `0x004fa2a5` prüft zusätzlich
++  Flag-Bit `8` und ruft `FUN_0054bc80()` auf. Dessen disassemblierter Körper
++  vergleicht einen globalen Zustand mit `0x00678ba4`; der fachliche Name dieses
++  Zustands und die Bedeutung des Flags sind nicht belegt. Damit ist die
++  `flash_size`-Nutzung an einen konkreten Null-Parameter-Aufruf gebunden, aber
++  noch keinem bekannten Gameplay- oder Beam-Modus zuzuordnen.
++- Der Wrapper `FUN_004fa0a0` zeigt, wo dieser Parameter entsteht: Er setzt
++  zunächst Bit `0` seines Flags zurück und berechnet einen Geometriefaktor aus
++  den Werten an `this+0x78` und `this+0x80` (Quotient, wenn der Zähler kleiner
++  ist, sonst `1.0`). Bei gesetzter Bitmaske `2` in `this+0x70` oder einem
++  Faktor von null ruft er den Renderer mit `param_3 = 0` auf. Archetypwert `0`
++  führt zu `FUN_004fa270`, Wert `1` zu `FUN_004fb1e0`. Das grenzt den
++  Aufrufpfad ein, benennt aber weder das Flag noch die Bedeutung der beiden
++  Faktorwerte.
++  [Wrapper-Decompilierung und Metadaten](/home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-15-flash-size-trace/Freelancer-beam-wrapper-004fa0a0.md)
++  dokumentieren den erzwungenen Funktionsanfang bei `0x004fa0a0`; Ghidra hatte
++  dort zuvor Instruktionen, aber keinen Funktionsdatensatz.
++- Die Statusprüfung ist jetzt weiter eingegrenzt: `FUN_0054bc80()` liefert
++  genau dann `true`, wenn der globale aktive Objektzeiger `DAT_006164dc` auf
++  `&DAT_00678ba4` zeigt. `FUN_00549bc0()` ersetzt diesen Zeiger beim Umschalten
++  des aktiven Objekts; `FUN_00549e70()` wählt dabei benannte Modi wie `player`,
++  `first_person` und `third_person`. Der `flash_size`-Zweig hängt damit von der
++  aktiven View-/Controller-Instanz ab. Welche konkrete Instanz `DAT_00678ba4`
++  ist und welche Rolle Flagmaske `8` dabei spielt, bleibt offen. Die
++  Referenz- und Decompiler-Auszüge zu [aktivem Zeiger](/home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-15-flash-size-trace/Freelancer-state-global-006164dc.md),
++  [Umschalter](/home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-15-flash-size-trace/Freelancer-state-switcher-00549bc0.md)
++  und [Sonderinstanz](/home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-15-flash-size-trace/Freelancer-sentinel-00678ba4.md)
++  enthalten die Herkunft.
++- Damit ist ein Retail-Geometrieverbrauch nachgewiesen. Die Erzeugung und
++  Null-Aufrufbedingung von `param_3` sind eingegrenzt; die fachliche Bedeutung
++  des Faktors, Flag-Bit `8`, `FUN_0054bc80()` und der genaue sichtbare Zustand
+   sind noch offen. `flash_size` pauschal als Mündungsblitz zu interpretieren
+   wäre weiterhin unbelegt.
+ - Die Parser- und Renderer-Auszüge mit Decompiler-Ausgabe liegen lokal in der
+@@ -66,11 +102,17 @@
+ 
+ ## Nächste Arbeit
+ 
+-1. `param_3`, Flag-Bit `8` und `FUN_0054bc80()` im Retail-Aufrufpfad verfolgen,
+-   damit der Zustand feststeht, in dem `flash_size` die Beam-Geometrie ändert.
+-2. Danach den belegten Zweig im Beam-Renderer umsetzen und Tests für Null-,
+-   Grenz- und typische NAP-Werte ergänzen.
+-3. Beam- und Explosionseffekte mit NAP-only-Containern visuell vergleichen;
++1. [x] `FUN_004fa0a0` als Aufrufer verfolgen: Der Geometriefaktor wird aus zwei
++   Objektwerten berechnet und bei Flagmaske `2` oder Faktor `0` als `param_3=0`
++   weitergegeben. Der Archetyp verzweigt zu den Spear-/Bolt-Renderern.
++2. [ ] Die genaue Identität der Sonderinstanz `DAT_00678ba4`, die Bedeutung
++   von Flagmaske `8` und den Geometriefaktor ermitteln. Die State-Trace belegt,
++   dass `FUN_0054bc80()` die aktive View-/Controller-Instanz mit dieser
++   Sonderinstanz vergleicht; der genaue Beam-Modus bleibt offen. Erst dann ist
++   der `flash_size`-Sonderzweig eindeutig genug für eine Runtime-Änderung.
++3. [ ] Den belegten Zweig im Beam-Renderer umsetzen und Null-, Grenz- sowie
++   typische NAP-Werte abdecken.
++4. [ ] Beam- und Explosionseffekte mit NAP-only-Containern visuell vergleichen;
+    Originalwerte und Timing als Referenz erhalten.
+-4. Erst nach diesen Vergleichen den übergeordneten Effekt-Todo-Punkt als
++5. [ ] Erst nach diesen Vergleichen den übergeordneten Effekt-Todo-Punkt als
+    abgeschlossen markieren.
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -508,13 +508,19 @@
+   Transparenz und bestehende Freelancer-Nebelparameter erhalten.
+ - [ ] Gerichtete Schatten zuerst mit Kaskaden/PCF, anschließend zusätzliche
+   Lichttypen; Shadow-Depth-Targets und Comparison-Sampler abstrahieren.
+-- [ ] Kurzlebige Effektlichter vervollständigen und messen: Mündungslichter aus `Gun.light_anim` sowie Explosionslichter aus `lgt_effect`/`lgt_radius` und `lgt_time_scale` sind vorhanden. Per-Objekt-Auswahl und Frame-Pool priorisieren nach geschätztem attenuiertem Lichtbeitrag; der Frame-Pool verwirft Quellen außerhalb ihrer Reichweite und ohne positiven Beitrag, bevor sie einen der 32 transienten Slots belegen. Offen sind `lgt_range_scale`, explizite Lichtdaten und hardpointgebundene Lebenszyklen für persistentes Feuer, allgemeine Sichtbarkeits-/Occlusion-Priorisierung, Qualitätsbudgets und reproduzierbare NAP-Szenenmessungen. Der Effektpool begrenzt aktive Ereignisse auf 128. Siehe [Feuerinventar](evidence/effect-fire-light-input-inventory-20261014.json).
++- [ ] Kurzlebige Effektlichter vervollständigen und messen: Mündungslichter aus `Gun.light_anim` sowie Explosionslichter aus `lgt_effect`/`lgt_radius` und `lgt_time_scale` sind vorhanden. Per-Objekt-Auswahl und Frame-Pool priorisieren nach geschätztem attenuiertem Lichtbeitrag; der Frame-Pool verwirft Quellen außerhalb ihrer Reichweite und ohne positiven Beitrag, bevor sie einen der 32 transienten Slots belegen. Bei voller 128er-Ereignisliste ersetzt ein stärker beitragendes neues Licht den derzeit schwächsten aktiven Kandidaten; die Animation wird für beide zum aktuellen Zeitpunkt bewertet. Offen sind `lgt_range_scale`, explizite Lichtdaten und hardpointgebundene Lebenszyklen für persistentes Feuer, allgemeine Sichtbarkeits-/Occlusion-Priorisierung, Qualitätsbudgets und reproduzierbare NAP-Szenenmessungen. Siehe [Feuerinventar](evidence/effect-fire-light-input-inventory-20261014.json).
+   - [x] Negative oder nichtendliche Frame-Deltas werden in `SystemRenderer.Update` auf null normalisiert, bevor Nebel, Partikeleffekte und transiente Lichter aktualisiert werden.
+ - [ ] Danach Laser-, Projektil- und Explosionseffekte überarbeiten: Beam- und Trefferdarstellung, Trails, Partikel, Farbverläufe sowie Größen-/Zeitverhalten aufeinander abstimmen und mit dynamischer Beleuchtung integrieren. Originaleffekte und einzeln abschaltbare Qualitätsoptionen erhalten; NAP-Referenzszenen mit Vergleichsbildern und CPU-/GPU-Zeit abnehmen.
+   - [x] `vis_beam`-Querschnittsbasis bleibt bei vertikaler oder ungültiger Richtung endlich und orthonormal; Zugriffe auf den Beam-Puffer sind auf seine Kapazität begrenzt. Vier fokussierte Tests bestehen.
+   - [x] Partikel-/Beam-Schreibzugriffe bleiben im 30.000-Einträge-GPU-Pool; leere Beam-Chunks erzeugen keinen ungültigen Draw. Vier Grenztests bestehen.
+   - [x] `head_brightness` und `trail_brightness` steuern Beam-Alpha; nicht angegebene Werte erhalten zur Legacy-Kompatibilität volle Intensität. Parser-/Farbtests decken `BeamSpear` und `BeamBolt` ab.
++  - [x] `BeamsBuffer` verwirft Geometrie außerhalb des Kamerafrustums und priorisiert bei 500 Elementen pro Typ sichtbare Kandidaten nach Nähe zur konservativen Beam-Bounds-Kugel. Ein Min-Heap hält den schwächsten Slot verfügbar; Nachrücken kostet logarithmische CPU-Arbeit. Bildqualität und GPU-Zeit bei Überlast bleiben offen.
++  - [x] Projektil-Beams separat per `render_projectile_beams` und `--render-projectile-beams=on|off` schaltbar machen; Projektilsimulation und Partikeleffekte bleiben davon unabhängig.
++  - [x] Partikelgeometrie separat per `render_particle_effects` und `--render-particle-effects=on|off` schaltbar machen; Update und Lebensdauer der Effekte laufen weiter.
++  - [x] Kurzlebige `lgt_effect`-Lichter unabhängig von anderen dynamischen Lichtern per `render_transient_effect_lights` / `--render-transient-effect-lights=on|off` schaltbar machen.
++  - [x] Waffen-Mündungslichter aus `Gun.light_anim` unabhängig per `render_weapon_muzzle_lights` / `--render-weapon-muzzle-lights=on|off` schaltbar machen.
+   - [ ] Sichtprüfung der Beam-/Explosiondarstellung, Timing-/Partikelabstimmung und einzeln schaltbare Qualitätsoptionen anhand von NAP-Referenzszenen.
++- [ ] Sprungtor-Effekt implementieren; der Client übernimmt `jump_effect` nur in `SystemObject`, wertet es nicht aus und startet in den lokalen/Cluster-Jump-Callbacks noch keine Tunnelanimation. Der Übergang muss die asynchrone Transferbestätigung und Fehlerpfade berücksichtigen; Quellcodebefund siehe [Renderer-Roadmap](renderer-roadmap.md).
+ - [ ] SSAO mit Geometrie-/Nebelmasken und Forward+ mit vielen Lichtquellen
+   implementieren; die feste Lichtgrenze erst nach Messung ersetzen.
+ - [ ] Instancing/Batching für Asteroiden, Partikel und wiederholte Objekte
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -126,6 +126,7 @@
+ - [ ] HDR-Zwischenpuffer, Belichtung und Tonemapping als zusammenhängenden Farbmanagement-Schritt entwerfen; sRGB-Ein-/Ausgabe und UI-Komposition berücksichtigen.
+ - [ ] Bloom als nachgelagerten Effekt mit Threshold, Downsampling-Pyramide und konfigurierbarer Intensität untersuchen.
+ - [ ] Sonnen-Lens-Glow anhand reproduzierbarer NAP-Szenen visuell abnehmen; `lens_flare` und die Stern-Intensitäts-/Zonen-Fades bleiben separate offene Datenpfade ([Parser-/Laufzeitabgleich](data-client-plan.md)).
++  - [x] `lens_flare`-Datenpfad auditiert: `StararchIni` und `Star` parsen Profile/Referenzen, aber `GameItemDb.InitStars` übernimmt nur StarGlow, LensGlow und Spines; `Sun` und `SunRenderer` haben keinen Flare-Pfad. Retail-Funktion `FUN_00511248` ruft beim Einlesen eines Star-`lens_flare`-Verweises `FUN_0050f3a0` auf und wertet deren Rückgabewert für den Parse-Status aus. Der Parser liest Shape, Min-/Max-Radius und sechs Floatwerte je Bead. `Data/NAP/World/solar/StarArch.ini` enthält 7 Profile mit 61 Beads, auf die 38 Sterne verweisen. Die Bedeutung der Bead-Komponenten und der Retail-Zeichnung ist noch nicht nachgewiesen; siehe [Retail-Stringtrace](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-15-lens-flare-trace/Freelancer-lens-flare.md>) und [Parser-Aufrufer](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-15-lens-flare-trace/Freelancer-lens-flare-loader-caller.md>).
+   - [x] `lens_glow`-Form, Farbe und Radius aus `StarArch.ini` bis zum `SunRenderer` durchreichen und über `render_sun_lens_glow` / `--render-sun-lens-glow=on|off` einzeln schaltbar machen.
+   - [x] Lens-Glow-Farben wie `StarGlow` als Floatfarben 0–1 parsen; Retail und NAP liefern für alle 14 RGB-Farbwerte 0–1. Die vorherige 255er-Normierung machte die Farben zu dunkel.
+   - [x] `glow_fade_in_seconds` / `glow_fade_out_seconds` übernehmen und beim Eintritt in bzw. Austritt aus dem Kamerafrustum anwenden.
+@@ -142,6 +143,7 @@
+ ### 5. Effektüberarbeitung nach Renderer und dynamischer Beleuchtung
+ 
+ - [ ] Den fehlenden Sprungtor-Übergangseffekt anhand von `Freelancer.ini` (`jump_effect`), `fx/Jumpeffect.ini`, `fx/Effects.ini` und `fx/GateTunnel.ini` im Client-Laufzeitpfad ergänzen: Toranimation, Tunnel/Innenansicht und Ein-/Austrittssequenz datengetreu abbilden, mit reproduzierbaren NAP-Szenen vergleichen und separat abschaltbar halten.
++  - [x] Integrationspfad geprüft: `Universe.SystemObject.jump_effect` wird in `GameData.World.SystemObject.JumpEffect` kopiert, aber im Client nicht konsumiert. `DockAction.Tunnel` wird serialisiert, hat jedoch keinen Renderer-Verbraucher. `IClientPlayer.StartLocalJumpTunnel` und `StartJumpTunnel` schalten derzeit nur den Tradelane-Zustand ab; keiner startet eine sichtbare Übergangssequenz. Der lokale Callback liegt vor dem Systemwechsel, der Cluster-Callback vor dem asynchronen Gateway-Transfer. Die Implementierung muss beide Abläufe und Fehler/Abbruch sauber abdecken.
+ - [ ] Tradelane-Reiseeffekt gegen das Original vergleichen und die vereinfachte Darstellung korrigieren. Der Client hängt `PlayerTravel` als `ParticleEffectRenderer` an; anhand von `basic_tl_player_travel`/`EFT_LANE_SHIP_TRAVEL` und `tradelaneinship01` prüfen, welche ALE-Geometrie, Partikel, Bewegung, Skalierung oder Schichtung für die originale Tunnelansicht fehlen. Mit NAP-Referenzbildern für Eintritt, Fahrt und Austritt abnehmen.
+ - [ ] Laser-, Projektil- und Explosionseffekte visuell überarbeiten: Beam- und Trefferdarstellung, Trails, Partikel, Farbverläufe, Größen- und Zeitverhalten sowie Zusammenspiel mit dynamischem Licht. Originale Freelancer-Effekte müssen weiter funktionieren; neue Qualitätseinstellungen sollen einzeln abschaltbar bleiben. Mit reproduzierbaren NAP-Kampfszenen, Vergleichsbildern und GPU-/CPU-Messungen abnehmen.
+   - [x] `vis_beam`-Geometrie gegen parallele/degenerierte Richtungen absichern und Schreibzugriffe auf den 500-Beam-Streamingpuffer begrenzen; vier Geometrietests bestehen.
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -45,6 +45,7 @@
+ | 2069 | Guard sun lens-glow fades against invalid durations and frame deltas |
+ | 2070 | Normalize invalid system-renderer frame deltas before effect updates |
+ | 2071 | Parse star lens-glow colors as normalized float RGB values |
++| 2072 | Prioritize transient effect lights and visible beam geometry within fixed pools; add independent beam, particle, transient-light, and weapon-muzzle-light toggles; document retail flash_size evidence |
+ | 2011 (`lancerdecode`) | Native Vorbis EOF/reset handling |
+ | 2012 (`blurgtext`) | System FreeType without OT-SVG hooks |
+ 
+--- a/patches/series
++++ b/patches/series
+@@ -71,3 +71,4 @@
+ client 2069-sun-lens-glow-guards.patch
+ client 2070-system-renderer-delta-guard.patch
+ client 2071-lens-glow-float-colors.patch
++client 2072-renderer-effect-pool-prioritization.patch
+--- a/src/LibreLancer/GameSettings.cs
++++ b/src/LibreLancer/GameSettings.cs
+@@ -51,6 +51,14 @@
+         public bool RenderStarsphere = true;
+         [Entry("render_sun_lens_glow")]
+         public bool RenderSunLensGlow = true;
++        [Entry("render_projectile_beams")]
++        public bool RenderProjectileBeams = true;
++        [Entry("render_particle_effects")]
++        public bool RenderParticleEffects = true;
++        [Entry("render_transient_effect_lights")]
++        public bool RenderTransientEffectLights = true;
++        [Entry("render_weapon_muzzle_lights")]
++        public bool RenderWeaponMuzzleLights = true;
+ 
+         [WattleScriptHidden]
+         public SurfaceMapProfile SurfaceProfile = SurfaceMapProfile.Original;
+@@ -92,6 +100,10 @@
+         bool IRendererSettings.RenderNebulae => RenderNebulae;
+         bool IRendererSettings.RenderStarsphere => RenderStarsphere;
+         bool IRendererSettings.RenderSunLensGlow => RenderSunLensGlow;
++        bool IRendererSettings.RenderProjectileBeams => RenderProjectileBeams;
++        bool IRendererSettings.RenderParticleEffects => RenderParticleEffects;
++        bool IRendererSettings.RenderTransientEffectLights => RenderTransientEffectLights;
++        bool IRendererSettings.RenderWeaponMuzzleLights => RenderWeaponMuzzleLights;
+ 
+         int IRendererSettings.SelectedAnisotropy => Anisotropy;
+         TextureFiltering IRendererSettings.SelectedFiltering =>
+@@ -130,6 +142,10 @@
+             writer.WriteLine($"render_nebulae = {(RenderNebulae ? "true" : "false")}");
+             writer.WriteLine($"render_starsphere = {(RenderStarsphere ? "true" : "false")}");
+             writer.WriteLine($"render_sun_lens_glow = {RenderSunLensGlow.ToString().ToLowerInvariant()}");
++            writer.WriteLine($"render_projectile_beams = {RenderProjectileBeams.ToString().ToLowerInvariant()}");
++            writer.WriteLine($"render_particle_effects = {RenderParticleEffects.ToString().ToLowerInvariant()}");
++            writer.WriteLine($"render_transient_effect_lights = {RenderTransientEffectLights.ToString().ToLowerInvariant()}");
++            writer.WriteLine($"render_weapon_muzzle_lights = {RenderWeaponMuzzleLights.ToString().ToLowerInvariant()}");
+         }
+ 
+         [WattleScriptHidden]
+@@ -161,7 +177,11 @@
+                 DynamicLighting = DynamicLighting,
+                 RenderNebulae = RenderNebulae,
+                 RenderStarsphere = RenderStarsphere,
+-                RenderSunLensGlow = RenderSunLensGlow
++                RenderSunLensGlow = RenderSunLensGlow,
++                RenderProjectileBeams = RenderProjectileBeams,
++                RenderParticleEffects = RenderParticleEffects,
++                RenderTransientEffectLights = RenderTransientEffectLights,
++                RenderWeaponMuzzleLights = RenderWeaponMuzzleLights
+             };
+ 
+             return gs;
+@@ -192,6 +212,10 @@
+             RenderNebulae = other.RenderNebulae;
+             RenderStarsphere = other.RenderStarsphere;
+             RenderSunLensGlow = other.RenderSunLensGlow;
++            RenderProjectileBeams = other.RenderProjectileBeams;
++            RenderParticleEffects = other.RenderParticleEffects;
++            RenderTransientEffectLights = other.RenderTransientEffectLights;
++            RenderWeaponMuzzleLights = other.RenderWeaponMuzzleLights;
+         }
+ 
+         public void Validate()
+--- a/src/LibreLancer/Render/BeamsBuffer.cs
++++ b/src/LibreLancer/Render/BeamsBuffer.cs
+@@ -141,14 +141,110 @@
+         private int boltCount = 0;
+         private int spearCount = 0;
+         private bool begun = false;
++        private ICamera camera = null!;
++        private readonly float[] boltPriorities = new float[MAX_BEAMS];
++        private readonly float[] spearPriorities = new float[MAX_BEAMS];
++        private readonly int[] boltPriorityHeap = new int[MAX_BEAMS];
++        private readonly int[] spearPriorityHeap = new int[MAX_BEAMS];
+         public void Begin(CommandBuffer commands, ResourceManager res, ICamera cam)
+         {
+             if(begun) throw new InvalidOperationException();
+             this.commands = commands;
+             this.res = res;
++            camera = cam;
+             verticesSpear = (VertexPositionColorTexture*)bufferSpear.BeginStreaming();
+             verticesBolt = (VertexPositionColorTexture*) bufferBolt.BeginStreaming();
+             begun = true;
++        }
++
++        private int SelectBeamSlot(float[] priorities, int[] priorityHeap, int count, float priority)
++        {
++            if (!float.IsFinite(priority) || priority <= 0)
++                return -1;
++
++            if (count < MAX_BEAMS)
++                return count;
++
++            var lowestIndex = priorityHeap[0];
++            return priority > priorities[lowestIndex] ? lowestIndex : -1;
++        }
++
++        private static void SiftUp(int[] heap, float[] priorities, int index)
++        {
++            while (index > 0)
++            {
++                var parent = (index - 1) / 2;
++                if (priorities[heap[parent]] <= priorities[heap[index]])
++                    break;
++                (heap[parent], heap[index]) = (heap[index], heap[parent]);
++                index = parent;
++            }
++        }
++
++        private static void SiftDown(int[] heap, float[] priorities, int count, int index)
++        {
++            while (true)
++            {
++                var left = (index * 2) + 1;
++                if (left >= count)
++                    return;
++                var right = left + 1;
++                var smallest = right < count && priorities[heap[right]] < priorities[heap[left]]
++                    ? right
++                    : left;
++                if (priorities[heap[index]] <= priorities[heap[smallest]])
++                    return;
++                (heap[index], heap[smallest]) = (heap[smallest], heap[index]);
++                index = smallest;
++            }
++        }
++
++        private static void CommitBeamSlot(float[] priorities, int[] priorityHeap, int count,
++            int slot, float priority)
++        {
++            priorities[slot] = priority;
++            if (count < MAX_BEAMS)
++            {
++                priorityHeap[count] = slot;
++                SiftUp(priorityHeap, priorities, count);
++            }
++            else
++            {
++                SiftDown(priorityHeap, priorities, count, 0);
++            }
++        }
++
++        private float CalculateBeamPriority(Vector3 position, Vector3 direction,
++            float backwardLength, float forwardLength, float radialRadius)
++        {
++            if (!float.IsFinite(position.X) || !float.IsFinite(position.Y) || !float.IsFinite(position.Z) ||
++                !float.IsFinite(direction.X) || !float.IsFinite(direction.Y) || !float.IsFinite(direction.Z) ||
++                !float.IsFinite(backwardLength) || !float.IsFinite(forwardLength) ||
++                !float.IsFinite(radialRadius))
++                return 0;
++
++            var directionLength = direction.LengthSquared();
++            direction = directionLength > 1e-12f && float.IsFinite(directionLength)
++                ? direction / MathF.Sqrt(directionLength)
++                : Vector3.UnitZ;
++
++            backwardLength = MathF.Abs(backwardLength);
++            forwardLength = MathF.Abs(forwardLength);
++            radialRadius = MathF.Abs(radialRadius);
++            var center = position + direction * ((forwardLength - backwardLength) * 0.5f);
++            var radius = ((forwardLength + backwardLength) * 0.5f) + radialRadius;
++            if (!float.IsFinite(center.X) || !float.IsFinite(center.Y) || !float.IsFinite(center.Z) ||
++                !float.IsFinite(radius) || radius < 0)
++                return 0;
++
++            if (!camera.FrustumCheck(new BoundingSphere(center, radius)))
++                return 0;
++
++            var distance = Vector3.Distance(camera.Position, center);
++            if (!float.IsFinite(distance))
++                return 0;
++
++            return 1f / (1f + MathF.Max(0, distance - radius));
+         }
+ 
+         private static Texture2D? code_beam;
+@@ -181,7 +277,16 @@
+         public void AddBeamBolt(Vector3 p, Vector3 normal, BeamBolt bolt, float maxTrailLen)
+         {
+             if (!begun) throw new InvalidOperationException();
+-            if (boltCount >= MAX_BEAMS) return;
++            var coreLen = Math.Min(maxTrailLen, bolt.CoreLength);
++            var tailLength = Math.Min(maxTrailLen, bolt.TailLength + bolt.CoreLength);
++            var radialRadius = Math.Max(Math.Abs(bolt.HeadWidth), Math.Max(Math.Abs(bolt.CoreWidth),
++                Math.Abs(bolt.SecCoreWidth))) * 0.5f;
++            var priority = CalculateBeamPriority(p, normal,
++                Math.Max(Math.Abs(coreLen), Math.Abs(tailLength)), bolt.TipLength, radialRadius);
++            var slot = SelectBeamSlot(boltPriorities, boltPriorityHeap, boltCount, priority);
++            if (slot < 0) return;
++            var isNew = boltCount < MAX_BEAMS;
++            var vertexIndex = slot * 17;
+ 
+             // Head
+             CoordsFromTexture(bolt.HeadTexture!, out var tl, out var tr, out var bl, out var br, out var mid);
+@@ -196,57 +301,63 @@
+             var secondaryCoreColor = ApplyBeamBrightness(bolt.SecCoreColor, bolt.TrailBrightness);
+             var secondaryOuterColor = ApplyBeamBrightness(bolt.SecOuterColor, bolt.TrailBrightness);
+             // Quad Center
+-            verticesBolt[vertexCountBolt++] = new VertexPositionColorTexture(p, headCoreColor, mid);
++            verticesBolt[vertexIndex++] = new VertexPositionColorTexture(p, headCoreColor, mid);
+             // Quad TL
+-            verticesBolt[vertexCountBolt++] = new VertexPositionColorTexture(p + (up * hRad) - (right * hRad), headOuterColor, tl);
++            verticesBolt[vertexIndex++] = new VertexPositionColorTexture(p + (up * hRad) - (right * hRad), headOuterColor, tl);
+             // Quad TR
+-            verticesBolt[vertexCountBolt++] = new VertexPositionColorTexture(p + (up * hRad) + (right * hRad), headOuterColor, tr);
++            verticesBolt[vertexIndex++] = new VertexPositionColorTexture(p + (up * hRad) + (right * hRad), headOuterColor, tr);
+             // Quad BL
+-            verticesBolt[vertexCountBolt++] = new VertexPositionColorTexture(p - (up * hRad) - (right * hRad), headOuterColor, bl);
++            verticesBolt[vertexIndex++] = new VertexPositionColorTexture(p - (up * hRad) - (right * hRad), headOuterColor, bl);
+             // Quad BR
+-            verticesBolt[vertexCountBolt++] = new VertexPositionColorTexture(p - (up * hRad) + (right * hRad), headOuterColor, br);
++            verticesBolt[vertexIndex++] = new VertexPositionColorTexture(p - (up * hRad) + (right * hRad), headOuterColor, br);
+             // Tip and trail
+             CoordsFromTexture(bolt.TrailTexture!, out tl, out tr, out bl, out br, out mid);
+             // Mid-Mid
+-            verticesBolt[vertexCountBolt++] = new VertexPositionColorTexture(p, trailCoreColor, bl);
++            verticesBolt[vertexIndex++] = new VertexPositionColorTexture(p, trailCoreColor, bl);
+             // Mid-Top
+-            verticesBolt[vertexCountBolt++] = new VertexPositionColorTexture(p + (up * cRad), trailOuterColor, br);
++            verticesBolt[vertexIndex++] = new VertexPositionColorTexture(p + (up * cRad), trailOuterColor, br);
+             // Mid-Bottom
+-            verticesBolt[vertexCountBolt++] = new VertexPositionColorTexture(p - (up * cRad), trailOuterColor, br);
++            verticesBolt[vertexIndex++] = new VertexPositionColorTexture(p - (up * cRad), trailOuterColor, br);
+             // Mid-Left
+-            verticesBolt[vertexCountBolt++] = new VertexPositionColorTexture(p -(right * cRad), trailOuterColor, br);
++            verticesBolt[vertexIndex++] = new VertexPositionColorTexture(p -(right * cRad), trailOuterColor, br);
+             // Mid-Right
+-            verticesBolt[vertexCountBolt++] = new VertexPositionColorTexture(p + (right * cRad), trailOuterColor, br);
++            verticesBolt[vertexIndex++] = new VertexPositionColorTexture(p + (right * cRad), trailOuterColor, br);
+ 
+             // sec
+-            var coreLen = Math.Min(maxTrailLen, bolt.CoreLength);
+             var p2 = p - (normal * coreLen);
+             // Sec-Mid
+-            verticesBolt[vertexCountBolt++] = new VertexPositionColorTexture(p2, secondaryCoreColor, bl);
++            verticesBolt[vertexIndex++] = new VertexPositionColorTexture(p2, secondaryCoreColor, bl);
+             // Sec-Top
+-            verticesBolt[vertexCountBolt++] = new VertexPositionColorTexture(p2 + (up * secRad), secondaryOuterColor, br);
++            verticesBolt[vertexIndex++] = new VertexPositionColorTexture(p2 + (up * secRad), secondaryOuterColor, br);
+             // Sec-Bottom
+-            verticesBolt[vertexCountBolt++] = new VertexPositionColorTexture(p2 - (up * secRad), secondaryOuterColor, br);
++            verticesBolt[vertexIndex++] = new VertexPositionColorTexture(p2 - (up * secRad), secondaryOuterColor, br);
+             // Sec-Left
+-            verticesBolt[vertexCountBolt++] = new VertexPositionColorTexture(p2 -(right * secRad), secondaryOuterColor, br);
++            verticesBolt[vertexIndex++] = new VertexPositionColorTexture(p2 -(right * secRad), secondaryOuterColor, br);
+             // Sec-Right
+-            verticesBolt[vertexCountBolt++] = new VertexPositionColorTexture(p2 + (right * secRad), secondaryOuterColor, br);
++            verticesBolt[vertexIndex++] = new VertexPositionColorTexture(p2 + (right * secRad), secondaryOuterColor, br);
+ 
+             // Tip
+-            verticesBolt[vertexCountBolt++] =
++            verticesBolt[vertexIndex++] =
+                 new VertexPositionColorTexture(p + (normal * bolt.TipLength),
+                     ApplyBeamBrightness(bolt.TipColor, bolt.HeadBrightness), tr);
+             // Trail
+-            var tailLength = Math.Min(maxTrailLen, bolt.TailLength + bolt.CoreLength);
+-            verticesBolt[vertexCountBolt++] =
++            verticesBolt[vertexIndex++] =
+                 new VertexPositionColorTexture(p - (normal * tailLength),
+                     ApplyBeamBrightness(bolt.TailColor, bolt.TrailBrightness), tr);
+-            boltCount++;
++            CommitBeamSlot(boltPriorities, boltPriorityHeap, boltCount, slot, priority);
++            if (isNew) boltCount++;
++            vertexCountBolt = boltCount * 17;
+         }
+         public void AddBeamSpear(Vector3 p, Vector3 normal, BeamSpear spear, float maxTrailLen)
+         {
+             if(!begun) throw new InvalidOperationException();
+-            if (spearCount >= MAX_BEAMS) return;
++            var tailLength = Math.Min(maxTrailLen, spear.TailLength);
++            var radialRadius = Math.Max(Math.Abs(spear.HeadWidth), Math.Abs(spear.CoreWidth)) * 0.5f;
++            var priority = CalculateBeamPriority(p, normal, tailLength, spear.TipLength, radialRadius);
++            var slot = SelectBeamSlot(spearPriorities, spearPriorityHeap, spearCount, priority);
++            if (slot < 0) return;
++            var isNew = spearCount < MAX_BEAMS;
++            var vertexIndex = slot * 12;
+ 
+             // Head
+             CoordsFromTexture(spear.HeadTexture!, out var tl, out var tr, out var bl, out var br, out var mid);
+@@ -258,37 +369,38 @@
+             var trailCoreColor = ApplyBeamBrightness(spear.CoreColor, spear.TrailBrightness);
+             var trailOuterColor = ApplyBeamBrightness(spear.OuterColor, spear.TrailBrightness);
+             // Quad Center
+-            verticesSpear[vertexCountSpear++] = new VertexPositionColorTexture(p, headCoreColor, mid);
++            verticesSpear[vertexIndex++] = new VertexPositionColorTexture(p, headCoreColor, mid);
+             // Quad TL
+-            verticesSpear[vertexCountSpear++] = new VertexPositionColorTexture(p + (up * hRad) - (right * hRad), headOuterColor, tl);
++            verticesSpear[vertexIndex++] = new VertexPositionColorTexture(p + (up * hRad) - (right * hRad), headOuterColor, tl);
+             // Quad TR
+-            verticesSpear[vertexCountSpear++] = new VertexPositionColorTexture(p + (up * hRad) + (right * hRad), headOuterColor, tr);
++            verticesSpear[vertexIndex++] = new VertexPositionColorTexture(p + (up * hRad) + (right * hRad), headOuterColor, tr);
+             // Quad BL
+-            verticesSpear[vertexCountSpear++] = new VertexPositionColorTexture(p - (up * hRad) - (right * hRad), headOuterColor, bl);
++            verticesSpear[vertexIndex++] = new VertexPositionColorTexture(p - (up * hRad) - (right * hRad), headOuterColor, bl);
+             // Quad BR
+-            verticesSpear[vertexCountSpear++] = new VertexPositionColorTexture(p - (up * hRad) + (right * hRad), headOuterColor, br);
++            verticesSpear[vertexIndex++] = new VertexPositionColorTexture(p - (up * hRad) + (right * hRad), headOuterColor, br);
+             // Tip and trail
+             CoordsFromTexture(spear.TrailTexture!, out tl, out tr, out bl, out br, out mid);
+             // Mid-Top
+-            verticesSpear[vertexCountSpear++] = new VertexPositionColorTexture(p + (up * cRad), trailOuterColor, br);
++            verticesSpear[vertexIndex++] = new VertexPositionColorTexture(p + (up * cRad), trailOuterColor, br);
+             // Mid-Bottom
+-            verticesSpear[vertexCountSpear++] = new VertexPositionColorTexture(p - (up * cRad), trailOuterColor, br);
++            verticesSpear[vertexIndex++] = new VertexPositionColorTexture(p - (up * cRad), trailOuterColor, br);
+             // Mid-Left
+-            verticesSpear[vertexCountSpear++] = new VertexPositionColorTexture(p -(right * cRad), trailOuterColor, br);
++            verticesSpear[vertexIndex++] = new VertexPositionColorTexture(p -(right * cRad), trailOuterColor, br);
+             // Mid-Right
+-            verticesSpear[vertexCountSpear++] = new VertexPositionColorTexture(p + (right * cRad), trailOuterColor, br);
++            verticesSpear[vertexIndex++] = new VertexPositionColorTexture(p + (right * cRad), trailOuterColor, br);
+             // Mid-Mid
+-            verticesSpear[vertexCountSpear++] = new VertexPositionColorTexture(p, trailCoreColor, bl);
++            verticesSpear[vertexIndex++] = new VertexPositionColorTexture(p, trailCoreColor, bl);
+             // Tip
+-            verticesSpear[vertexCountSpear++] =
++            verticesSpear[vertexIndex++] =
+                 new VertexPositionColorTexture(p + (normal * spear.TipLength),
+                     ApplyBeamBrightness(spear.TipColor, spear.HeadBrightness), tr);
+             // Trail
+-            var tailLength = Math.Min(maxTrailLen, spear.TailLength);
+-            verticesSpear[vertexCountSpear++] =
++            verticesSpear[vertexIndex++] =
+                 new VertexPositionColorTexture(p - (normal * tailLength),
+                     ApplyBeamBrightness(spear.TailColor, spear.TrailBrightness), tr);
+-            spearCount++;
++            CommitBeamSlot(spearPriorities, spearPriorityHeap, spearCount, slot, priority);
++            if (isNew) spearCount++;
++            vertexCountSpear = spearCount * 12;
+         }
+ 
+         internal static void GetBeamBasis(Vector3 direction, out Vector3 normalized,
+--- a/src/LibreLancer/Render/IRendererSettings.cs
++++ b/src/LibreLancer/Render/IRendererSettings.cs
+@@ -13,4 +13,8 @@
+     bool RenderNebulae => true;
+     bool RenderStarsphere => true;
+     bool RenderSunLensGlow => true;
++    bool RenderProjectileBeams => true;
++    bool RenderParticleEffects => true;
++    bool RenderTransientEffectLights => true;
++    bool RenderWeaponMuzzleLights => true;
+ }
+--- a/src/LibreLancer/Render/ParticleEffectRenderer.cs
++++ b/src/LibreLancer/Render/ParticleEffectRenderer.cs
+@@ -95,7 +95,7 @@
+ 
+ 		public override void Draw(ICamera camera, CommandBuffer commands, SystemLighting lights, NebulaRenderer nr)
+ 		{
+-            if (fx == null)
++            if (fx == null || !sys.Settings.RenderParticleEffects)
+             {
+                 return;
+             }
+--- a/src/LibreLancer/Render/ProjectileRenderer.cs
++++ b/src/LibreLancer/Render/ProjectileRenderer.cs
+@@ -16,6 +16,7 @@
+         private Projectile[] toRender;
+         private int renderCount = 0;
+         private BeamsBuffer beams = null!;
++        private bool renderBeams;
+ 
+         public ProjectileRenderer(ProjectileManager projs)
+         {
+@@ -30,6 +31,7 @@
+         public override bool PrepareRender(ICamera camera, NebulaRenderer nr, SystemRenderer sys, bool forceCull)
+         {
+             beams = sys.Beams;
++            renderBeams = sys.Settings.RenderProjectileBeams;
+             renderCount = 0;
+             foreach (var i in Projectiles.Ids.GetAllocated().Where(i => Projectiles.Projectiles[i].Alive))
+             {
+@@ -66,15 +68,14 @@
+             for (var i = 0; i < renderCount; i++)
+             {
+                 var p = toRender[i];
+-                var currDist = (p.Position - p.Start).Length();
+-                if (p.Data.Munition.ConstEffect_Spear != null)
++                if (renderBeams)
+                 {
+-                    beams.AddBeamSpear(p.Position, p.Normal.Normalized(), p.Data.Munition.ConstEffect_Spear, currDist);
+-                }
++                    var currDist = (p.Position - p.Start).Length();
++                    if (p.Data.Munition.ConstEffect_Spear != null)
++                        beams.AddBeamSpear(p.Position, p.Normal.Normalized(), p.Data.Munition.ConstEffect_Spear, currDist);
+ 
+-                if (p.Data.Munition.ConstEffect_Bolt != null)
+-                {
+-                    beams.AddBeamBolt(p.Position, p.Normal.Normalized(), p.Data.Munition.ConstEffect_Bolt, currDist);
++                    if (p.Data.Munition.ConstEffect_Bolt != null)
++                        beams.AddBeamBolt(p.Position, p.Normal.Normalized(), p.Data.Munition.ConstEffect_Bolt, currDist);
+                 }
+ 
+                 p.Effect?.Draw(Matrix4x4.CreateTranslation(p.Position), 0);
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -303,6 +303,29 @@
+ 
+         private readonly List<TransientEffectLight> transientEffectLights = [];
+ 
++        private RenderLight CreateTransientEffectRenderLight(TransientEffectLight effectLight)
++        {
++            var sample = effectLight.Animation.Sample(effectLight.Age, effectLight.TimeScale);
++            return new RenderLight
++            {
++                Kind = LightKind.PointAttenCurve,
++                Position = effectLight.Position,
++                Attenuation = new Vector3(0, -1, 1),
++                Color = new Color3f(sample.Color) * sample.Intensity,
++                Range = effectLight.Radius
++            };
++        }
++
++        private float GetTransientEffectLightPriority(TransientEffectLight effectLight)
++        {
++            var light = CreateTransientEffectRenderLight(effectLight);
++            var distanceSquared = Vector3.DistanceSquared(camera.Position, light.Position);
++            if (!float.IsFinite(distanceSquared) || distanceSquared > light.Range * light.Range)
++                return 0;
++
++            return RenderHelpers.CalculateLightPriority(light, camera.Position, 0);
++        }
++
+         public void SpawnTempFx(ParticleEffect? fx, Vector3 position,
+             LightAnim? lightAnimation = null, float lightRadius = 0, float lightTimeScale = 1f)
+         {
+@@ -313,10 +336,31 @@
+             };
+ 
+             tempFx.Add(new TemporaryFx(ren, position));
+-            if (lightAnimation is { Duration: > 0 } && lightRadius > 0 &&
+-                transientEffectLights.Count < MaxTransientEffectLights)
+-                transientEffectLights.Add(new TransientEffectLight(lightAnimation, position, lightRadius,
+-                    lightTimeScale));
++            if (lightAnimation is not { Duration: > 0 } || !float.IsFinite(lightRadius) || lightRadius <= 0)
++                return;
++
++            var newLight = new TransientEffectLight(lightAnimation, position, lightRadius, lightTimeScale);
++            if (transientEffectLights.Count < MaxTransientEffectLights)
++            {
++                transientEffectLights.Add(newLight);
++                return;
++            }
++
++            var lowestIndex = -1;
++            var lowestPriority = float.PositiveInfinity;
++            for (var i = 0; i < transientEffectLights.Count; i++)
++            {
++                var priority = GetTransientEffectLightPriority(transientEffectLights[i]);
++                if (priority < lowestPriority)
++                {
++                    lowestIndex = i;
++                    lowestPriority = priority;
++                }
++            }
++
++            var newPriority = GetTransientEffectLightPriority(newLight);
++            if (lowestIndex >= 0 && newPriority > lowestPriority)
++                transientEffectLights[lowestIndex] = newLight;
+         }
+ 
+         public bool ZOverride = false; // Stop Thn Camera from changing Z
+@@ -353,20 +397,15 @@
+             var nr = CheckNebulae(); // are we in a nebula?
+             SystemLighting.DynamicLightsEnabled = Settings.DynamicLighting;
+             SystemLighting.BeginFrame(camera.Position);
+-            foreach (var effectLight in transientEffectLights)
+-            {
+-                var sample = effectLight.Animation.Sample(effectLight.Age, effectLight.TimeScale);
+-                effectLight.Light.LightGroup = 0;
+-                effectLight.Light.Active = true;
+-                effectLight.Light.Light = new RenderLight
+-                {
+-                    Kind = LightKind.PointAttenCurve,
+-                    Position = effectLight.Position,
+-                    Attenuation = new Vector3(0, -1, 1),
+-                    Color = new Color3f(sample.Color) * sample.Intensity,
+-                    Range = effectLight.Radius
+-                };
+-                SystemLighting.AddFrameLight(effectLight.Light);
++            if (Settings.RenderTransientEffectLights)
++            {
++                foreach (var effectLight in transientEffectLights)
++                {
++                    effectLight.Light.LightGroup = 0;
++                    effectLight.Light.Active = true;
++                    effectLight.Light.Light = CreateTransientEffectRenderLight(effectLight);
++                    SystemLighting.AddFrameLight(effectLight.Light);
++                }
+             }
+             rstate.SetCamera(camera);
+             Commands.Camera = camera;
+--- a/src/LibreLancer/World/Equipments/AbstractWeapon.cs
++++ b/src/LibreLancer/World/Equipments/AbstractWeapon.cs
+@@ -93,7 +93,7 @@
+             fx.PrepareRender(camera, nr, sys, parentCull);
+         }
+ 
+-        if (parentCull || muzzleLightAge < 0 || muzzleLightAnimation == null)
++        if (parentCull || !sys.Settings.RenderWeaponMuzzleLights || muzzleLightAge < 0 || muzzleLightAnimation == null)
+             return;
+ 
+         var sample = muzzleLightAnimation.Sample(muzzleLightAge);
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -30,6 +30,10 @@
+             Console.WriteLine("         --render-nebulae=on|off");
+             Console.WriteLine("         --render-starsphere=on|off");
+             Console.WriteLine("         --render-sun-lens-glow=on|off");
++            Console.WriteLine("         --render-projectile-beams=on|off");
++            Console.WriteLine("         --render-particle-effects=on|off");
++            Console.WriteLine("         --render-transient-effect-lights=on|off");
++            Console.WriteLine("         --render-weapon-muzzle-lights=on|off");
+             Console.WriteLine("         --render-antialias=none|smaa-low|smaa-medium|smaa-high|smaa-ultra|msaa-2x|msaa-4x|msaa-8x");
+             Console.WriteLine("         --render-anisotropy=0|2|4|8|16");
+ #if DEBUG
+@@ -177,6 +181,10 @@
+         private bool? nebulae;
+         private bool? starsphere;
+         private bool? sunLensGlow;
++        private bool? projectileBeams;
++        private bool? particleEffects;
++        private bool? transientEffectLights;
++        private bool? weaponMuzzleLights;
+         private AntialiasMode? antialias;
+         private int? anisotropy;
+ 
+@@ -240,6 +248,22 @@
+                 case "--render-sun-lens-glow":
+                     if (!ParseToggle(out var drawSunLensGlow)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
+                     sunLensGlow = drawSunLensGlow;
++                    return true;
++                case "--render-projectile-beams":
++                    if (!ParseToggle(out var drawProjectileBeams)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
++                    projectileBeams = drawProjectileBeams;
++                    return true;
++                case "--render-particle-effects":
++                    if (!ParseToggle(out var drawParticleEffects)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
++                    particleEffects = drawParticleEffects;
++                    return true;
++                case "--render-transient-effect-lights":
++                    if (!ParseToggle(out var drawTransientEffectLights)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
++                    transientEffectLights = drawTransientEffectLights;
++                    return true;
++                case "--render-weapon-muzzle-lights":
++                    if (!ParseToggle(out var drawWeaponMuzzleLights)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
++                    weaponMuzzleLights = drawWeaponMuzzleLights;
+                     return true;
+                 case "--render-surface-profile":
+                     if (Enum.TryParse(value, true, out SurfaceMapProfile profile) && Enum.IsDefined(profile))
+@@ -284,6 +308,10 @@
+             if (nebulae.HasValue) settings.RenderNebulae = nebulae.Value;
+             if (starsphere.HasValue) settings.RenderStarsphere = starsphere.Value;
+             if (sunLensGlow.HasValue) settings.RenderSunLensGlow = sunLensGlow.Value;
++            if (projectileBeams.HasValue) settings.RenderProjectileBeams = projectileBeams.Value;
++            if (particleEffects.HasValue) settings.RenderParticleEffects = particleEffects.Value;
++            if (transientEffectLights.HasValue) settings.RenderTransientEffectLights = transientEffectLights.Value;
++            if (weaponMuzzleLights.HasValue) settings.RenderWeaponMuzzleLights = weaponMuzzleLights.Value;
+             if (antialias.HasValue) settings.Antialias = (int)antialias.Value;
+             if (anisotropy.HasValue) settings.Anisotropy = anisotropy.Value;
+         }
+
+diff --git a/docs/evidence/renderer/dfm-pbr-viewer-20261015/nap-package-retest-20261015.md b/docs/evidence/renderer/dfm-pbr-viewer-20261015/nap-package-retest-20261015.md
+new file mode 100644
+index 0000000..0000000
+--- /dev/null
++++ b/docs/evidence/renderer/dfm-pbr-viewer-20261015/nap-package-retest-20261015.md
+@@ -0,0 +1,29 @@
++# DFM PBR NAP package preflight (2026-10-15)
++
++The initial DFM map-toggle comparison was pixel-identical because the selected
++material had no Surface PBR binding. For a follow-up, the existing QA mapping
++was copied into `Data/NAP/Surface/fx/SurfaceMapsDfmQa.ini` before packaging.
++It assigns the existing LI Elite hull roughness/metallic nodes to
++`li_elite_male_1.tga`, with normal strength `0` and factors `0.55`/`0.45`.
++This is a shader-path diagnostic mapping, not character-authored material data.
++
++The temporary Surface package was packed directly from `Data/NAP/Surface`.
++Its 42 archive entries passed `nexus-pack verify`; each path, length and SHA-256
++matched the corresponding source file under `Data/NAP/Surface`. The isolated
++test installation used active manifest
++`lancer-dfm-pbr-data-nap-20261015`; all 13 active packages passed size, SHA-256
++and NAP content verification. No loose `DATA` directory was present.
++
++LancerEdit was started from that isolated installation with the DFM asset from
++`Data/NAP`. The process logged SDL3 and engine initialization but produced no
++further log entries or usable window. `xdpyinfo -display :0` also timed out,
++showing the current Xwayland display was unresponsive. The isolated process was
++stopped. No follow-up screenshot or PBR pixel comparison was obtained, so the
++DFM PBR visual path remains unverified. Retry the same package after the local
++display responds; then capture same-process PBR maps OFF/ON and confirm a
++nonzero viewport delta before assessing material quality.
++
++Temporary package: `/tmp/lancer-renderer-dfm-pbr-qa-20261015/output/surface.nap`
++
++- Size: `1163429462` bytes
++- SHA-256: `b696f5ec93f76c86d322f9fba563d99ce3ff65632827a2da98970674e0bc71af`
+

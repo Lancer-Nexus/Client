@@ -1,0 +1,402 @@
+diff --git a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+--- a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
++++ b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+@@ -10,6 +10,7 @@
+ using System.Threading;
+ using LibreLancer.Graphics;
+ using LibreLancer.Graphics.Backends.SDL3Gpu;
++using LibreLancer.Graphics.Vertices;
+ using LibreLancer;
+ 
+ namespace LibreLancer.Platforms;
+@@ -201,7 +202,8 @@
+         }
+     }
+ 
+-    public static unsafe int AuditProductionGraphicsPipelines()
++    public static unsafe int AuditProductionGraphicsPipelines(
++        Func<string, VertexDeclaration?>? productionLayoutResolver = null)
+     {
+         if (!SDL3.Supported)
+         {
+@@ -266,7 +268,7 @@
+                         var program = SDL3GpuShaderProgramReader.Parse(shaderBytes);
+                         var reflectedAttributes = ReflectVertexAttributes(program.Vertex.Code,
+                             out var reflectedStride);
+-                        var actualLayout = GetProductionVertexInputLayout(field.Name);
++                        var actualLayout = GetProductionVertexInputLayout(field.Name, productionLayoutResolver);
+                         var attributes = actualLayout?.Attributes ?? reflectedAttributes;
+                         var vertexStride = actualLayout?.Stride ?? reflectedStride;
+                         vertexShader = CreateSpirvShader(device, program.Vertex,
+@@ -319,13 +321,12 @@
+         }
+     }
+ 
+-    private static SDL3GpuVertexInputLayout? GetProductionVertexInputLayout(string shaderBundle) =>
+-        shaderBundle switch
+-        {
+-            "Basic_FVF" or "PBR" => SDL3GpuAuditVertexLayouts.FvfWithTangentAndDiffuse,
+-            "Basic_Skinned" or "PBR_Skinned" => SDL3GpuAuditVertexLayouts.DfmSkinnedWithTangent,
+-            _ => null
+-        };
++    private static SDL3GpuVertexInputLayout? GetProductionVertexInputLayout(string shaderBundle,
++        Func<string, VertexDeclaration?>? productionLayoutResolver)
++    {
++        var declaration = productionLayoutResolver?.Invoke(shaderBundle);
++        return declaration is null ? null : SDL3GpuVertexInputLayout.From(declaration);
++    }
+ 
+     private static SDL3.SDL_GPUVertexAttribute[] ReflectVertexAttributes(ReadOnlySpan<byte> spirv, out uint stride)
+     {
+@@ -486,8 +487,9 @@
+         }
+     }
+ 
+-    public static unsafe int Run()
+-    {
++    public static unsafe int Run(Func<VertexDeclaration> freelancerFvfDeclarationProvider)
++    {
++        ArgumentNullException.ThrowIfNull(freelancerFvfDeclarationProvider);
+         if (!SDL3.Supported)
+         {
+             Console.Error.WriteLine("SDL_GPU smoke requires SDL3.");
+@@ -534,6 +536,14 @@
+         bool windowClaimed = false;
+         try
+         {
++            var freelancerFvfLayout = SDL3GpuVertexInputLayout.From(freelancerFvfDeclarationProvider());
++            if (freelancerFvfLayout.Stride != 8 * sizeof(float))
++                throw new InvalidOperationException(
++                    $"The SDL_GPU PBR smoke geometry expects an FVF3 stride of {8 * sizeof(float)} bytes, " +
++                    $"but the production declaration reports {freelancerFvfLayout.Stride}.");
++            Console.WriteLine($"Using production Freelancer FVF input declaration: " +
++                              $"stride={freelancerFvfLayout.Stride}, attributes={freelancerFvfLayout.Attributes.Length}.");
++
+             window = SDL3.SDL_CreateWindow("Lancer Nexus SDL_GPU smoke", 640, 360,
+                 SDL3.SDL_WindowFlags.SDL_WINDOW_RESIZABLE |
+                 SDL3.SDL_WindowFlags.SDL_WINDOW_HIGH_PIXEL_DENSITY);
+@@ -603,11 +613,11 @@
+             if (copyPipeline == IntPtr.Zero)
+                 throw Failure("Creating the SDL_GPU scene-copy graphics pipeline failed");
+             pbrPipeline = CreatePipeline(device, pbrVertexShader, pbrFragmentShader, swapchainFormat,
+-                false, freelancerFvf: true);
++                false, freelancerFvfLayout);
+             if (pbrPipeline == IntPtr.Zero)
+                 throw Failure("Creating an SDL_GPU pipeline for the embedded Freelancer PBR shader failed");
+             shadowPbrPipeline = CreatePipeline(device, shadowPbrVertexShader, shadowPbrFragmentShader,
+-                swapchainFormat, false, freelancerFvf: true);
++                swapchainFormat, false, freelancerFvfLayout);
+             if (shadowPbrPipeline == IntPtr.Zero)
+                 throw Failure("Creating an SDL_GPU pipeline for the embedded Freelancer PBR shadow shader failed");
+             if (SDL3.SDL_GPUTextureFormatTexelBlockSize(swapchainFormat) != 4)
+@@ -1433,36 +1443,55 @@
+     }
+ 
+     private static unsafe IntPtr CreatePipeline(IntPtr device, IntPtr vertexShader, IntPtr fragmentShader,
+-        SDL3.SDL_GPUTextureFormat colorFormat, bool depthTest, bool freelancerFvf = false)
+-    {
+-        var vertexBuffer = new SDL3.SDL_GPUVertexBufferDescription
+-        {
+-            slot = 0,
+-            pitch = 8 * sizeof(float),
+-            input_rate = SDL3.SDL_GPUVertexInputRate.SDL_GPU_VERTEXINPUTRATE_VERTEX,
+-            instance_step_rate = 0
+-        };
+-        SDL3.SDL_GPUVertexAttribute* attributes = stackalloc SDL3.SDL_GPUVertexAttribute[3];
+-        attributes[0] = new SDL3.SDL_GPUVertexAttribute
++        SDL3.SDL_GPUTextureFormat colorFormat, bool depthTest,
++        SDL3GpuVertexInputLayout? vertexLayout = null)
++    {
++        if (vertexLayout is { } declaredLayout)
++        {
++            fixed (SDL3.SDL_GPUVertexAttribute* attributes = declaredLayout.Attributes)
++            {
++                return CreatePipelineWithVertexAttributes(device, vertexShader, fragmentShader,
++                    colorFormat, depthTest, attributes, (uint)declaredLayout.Attributes.Length,
++                    declaredLayout.Stride);
++            }
++        }
++
++        SDL3.SDL_GPUVertexAttribute* smokeAttributes = stackalloc SDL3.SDL_GPUVertexAttribute[3];
++        smokeAttributes[0] = new SDL3.SDL_GPUVertexAttribute
+         {
+             location = 0,
+             buffer_slot = 0,
+             format = SDL3.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3,
+             offset = 0
+         };
+-        attributes[1] = new SDL3.SDL_GPUVertexAttribute
+-        {
+-            location = freelancerFvf ? 2u : 1u,
++        smokeAttributes[1] = new SDL3.SDL_GPUVertexAttribute
++        {
++            location = 1,
+             buffer_slot = 0,
+             format = SDL3.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3,
+             offset = 3 * sizeof(float)
+         };
+-        attributes[2] = new SDL3.SDL_GPUVertexAttribute
+-        {
+-            location = freelancerFvf ? 3u : 2u,
++        smokeAttributes[2] = new SDL3.SDL_GPUVertexAttribute
++        {
++            location = 2,
+             buffer_slot = 0,
+             format = SDL3.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2,
+             offset = 6 * sizeof(float)
++        };
++        return CreatePipelineWithVertexAttributes(device, vertexShader, fragmentShader,
++            colorFormat, depthTest, smokeAttributes, 3, 8 * sizeof(float));
++    }
++
++    private static unsafe IntPtr CreatePipelineWithVertexAttributes(IntPtr device, IntPtr vertexShader,
++        IntPtr fragmentShader, SDL3.SDL_GPUTextureFormat colorFormat, bool depthTest,
++        SDL3.SDL_GPUVertexAttribute* attributes, uint attributeCount, uint vertexStride)
++    {
++        var vertexBuffer = new SDL3.SDL_GPUVertexBufferDescription
++        {
++            slot = 0,
++            pitch = vertexStride,
++            input_rate = SDL3.SDL_GPUVertexInputRate.SDL_GPU_VERTEXINPUTRATE_VERTEX,
++            instance_step_rate = 0
+         };
+         var blend = new SDL3.SDL_GPUColorTargetBlendState
+         {
+@@ -1486,7 +1515,7 @@
+                 vertex_buffer_descriptions = &vertexBuffer,
+                 num_vertex_buffers = 1,
+                 vertex_attributes = attributes,
+-                num_vertex_attributes = 3
++                num_vertex_attributes = attributeCount
+             },
+             primitive_type = SDL3.SDL_GPUPrimitiveType.SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
+             rasterizer_state = new SDL3.SDL_GPURasterizerState
+diff --git a/src/lancer/Program.cs b/src/lancer/Program.cs
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -9,8 +9,11 @@
+ using System.Globalization;
+ using LibreLancer.Data.Schema;
+ using LibreLancer.Graphics;
++using LibreLancer.Graphics.Vertices;
+ using LibreLancer;
+ using LibreLancer.Platforms;
++using LibreLancer.Utf.Dfm;
++using LibreLancer.Utf.Vms;
+ 
+ namespace lancer;
+ 
+@@ -21,7 +24,8 @@
+     {
+         if (args.Length == 1 && args[0] == "--sdl-gpu-smoke")
+         {
+-            Environment.ExitCode = SDL3GpuSmoke.Run();
++            Environment.ExitCode = SDL3GpuSmoke.Run(() => new FVFVertex(
++                D3DFVF.XYZ | D3DFVF.NORMAL | D3DFVF.TEX1).GetVertexDeclaration());
+             return;
+         }
+         if (args.Length == 1 && args[0] == "--sdl-gpu-shader-bundle-audit")
+@@ -36,7 +40,7 @@
+         }
+         if (args.Length == 1 && args[0] == "--sdl-gpu-production-pipeline-audit")
+         {
+-            Environment.ExitCode = SDL3GpuSmoke.AuditProductionGraphicsPipelines();
++            Environment.ExitCode = SDL3GpuSmoke.AuditProductionGraphicsPipelines(ResolveAuditVertexDeclaration);
+             return;
+         }
+         if (args.Length == 1 && args[0] == "--gl-texture-readback-smoke")
+@@ -178,6 +182,14 @@
+         }, () => game?.Crashed());
+     }
+ 
++    private static VertexDeclaration? ResolveAuditVertexDeclaration(string shaderBundle) => shaderBundle switch
++    {
++        "Basic_FVF" or "PBR" => new FVFVertex(
++            D3DFVF.XYZ | D3DFVF.NORMAL | D3DFVF.DIFFUSE | D3DFVF.TEX4).GetVertexDeclaration(),
++        "Basic_Skinned" or "PBR_Skinned" => new DfmTangentVertex().GetVertexDeclaration(),
++        _ => null
++    };
++
+     private static bool TryParseStartupArguments(string[] args, out string[] remainingArgs,
+         out bool startNewGame, out string? loadSavePath, out bool startInvulnerable,
+         out RenderStartupOverrides renderOverrides, out string? error)
+diff --git a/src/LibreLancer.Tests/SDL3GpuVertexInputLayoutTests.cs b/src/LibreLancer.Tests/SDL3GpuVertexInputLayoutTests.cs
+--- a/src/LibreLancer.Tests/SDL3GpuVertexInputLayoutTests.cs
++++ b/src/LibreLancer.Tests/SDL3GpuVertexInputLayoutTests.cs
+@@ -16,11 +16,8 @@
+         var vertexType = new FVFVertex(D3DFVF.XYZ | D3DFVF.NORMAL | D3DFVF.DIFFUSE | D3DFVF.TEX4);
+ 
+         var layout = SDL3GpuVertexInputLayout.From(vertexType);
+-        var auditLayout = SDL3GpuAuditVertexLayouts.FvfWithTangentAndDiffuse;
+ 
+         Assert.Equal(60u, layout.Stride);
+-        Assert.Equal(layout.Stride, auditLayout.Stride);
+-        Assert.Equal(layout.Attributes, auditLayout.Attributes);
+         Assert.Collection(layout.Attributes,
+             attribute => AssertAttribute(attribute, VertexSlots.Position, SDL3.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 0),
+             attribute => AssertAttribute(attribute, VertexSlots.Normal, SDL3.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, 12),
+@@ -35,11 +32,8 @@
+     public void MapsDfmSkinningIdsAsUnsignedIntegerAttributes()
+     {
+         var layout = SDL3GpuVertexInputLayout.From(new DfmTangentVertex());
+-        var auditLayout = SDL3GpuAuditVertexLayouts.DfmSkinnedWithTangent;
+ 
+         Assert.Equal(76u, layout.Stride);
+-        Assert.Equal(layout.Stride, auditLayout.Stride);
+-        Assert.Equal(layout.Attributes, auditLayout.Attributes);
+         var boneIds = Assert.Single(layout.Attributes, x => x.location == VertexSlots.BoneIds);
+         Assert.Equal(SDL3.SDL_GPUVertexElementFormat.SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4, boneIds.format);
+         Assert.Equal(56u, boneIds.offset);
+diff --git a/src/LibreLancer.Base/Graphics/Backends/SDL3/SDL3GpuAuditVertexLayouts.cs b/src/LibreLancer.Base/Graphics/Backends/SDL3/SDL3GpuAuditVertexLayouts.cs
+deleted file mode 100644
+--- a/src/LibreLancer.Base/Graphics/Backends/SDL3/SDL3GpuAuditVertexLayouts.cs
++++ /dev/null
+@@ -1,29 +0,0 @@
+-using LibreLancer.Graphics;
+-using LibreLancer.Graphics.Vertices;
+-
+-namespace LibreLancer.Graphics.Backends.SDL3Gpu;
+-
+-/// <summary>Representative real vertex layouts used by the production pipeline audit.</summary>
+-internal static class SDL3GpuAuditVertexLayouts
+-{
+-    public static SDL3GpuVertexInputLayout FvfWithTangentAndDiffuse =>
+-        SDL3GpuVertexInputLayout.From(new VertexDeclaration(60,
+-            new VertexElement(VertexSlots.Position, 3, VertexElementType.Float, false, 0),
+-            new VertexElement(VertexSlots.Normal, 3, VertexElementType.Float, false, 12),
+-            new VertexElement(VertexSlots.Color, 4, VertexElementType.UnsignedByte, true, 24),
+-            new VertexElement(VertexSlots.Texture1, 2, VertexElementType.Float, false, 28),
+-            new VertexElement(VertexSlots.Texture2, 2, VertexElementType.Float, false, 36),
+-            new VertexElement(VertexSlots.Texture3, 2, VertexElementType.Float, false, 44),
+-            new VertexElement(VertexSlots.Texture4, 2, VertexElementType.Float, false, 52)));
+-
+-    public static SDL3GpuVertexInputLayout DfmSkinnedWithTangent =>
+-        SDL3GpuVertexInputLayout.From(new VertexDeclaration(76,
+-            new VertexElement(VertexSlots.Position, 3, VertexElementType.Float, false, 0),
+-            new VertexElement(VertexSlots.Normal, 3, VertexElementType.Float, false, 12),
+-            new VertexElement(VertexSlots.Texture1, 2, VertexElementType.Float, false, 24),
+-            new VertexElement(VertexSlots.Texture2, 2, VertexElementType.Float, false, 32),
+-            new VertexElement(VertexSlots.BoneWeights, 4, VertexElementType.Float, false, 40),
+-            new VertexElement(VertexSlots.BoneIds, 4, VertexElementType.UnsignedByte, false, 56, integer: true),
+-            new VertexElement(VertexSlots.Texture3, 2, VertexElementType.Float, false, 60),
+-            new VertexElement(VertexSlots.Texture4, 2, VertexElementType.Float, false, 68)));
+-}
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -235,14 +235,17 @@
+    sind weiterhin offen.
+ 6. **Vulkan/SDL_GPU-Spike und Backend.** Der Produktionsshader-Audit erstellt
+    und gibt alle Varianten aus 25 Shader-Bundles frei. Für `Basic_FVF` und
+-   `PBR` werden dabei repräsentative Freelancer-FVF-Layouts, für `Basic_Skinned`
+-   und `PBR_Skinned` ein DFM-Skinning-Layout mit Tangenten verwendet. Als
+-   nächstes echte Mesh- und Materialdaten einschließlich BC4/BC5, Cubemaps,
+-   Skinning, Renderzielen und Präsentation verbinden. Erst nach erfolgreichem
+-   vollständigem Spike den gesamten Spiel- und Editorpfad portieren; OpenGL
+-   bleibt währenddessen die Vergleichs- und Rückfallreferenz. Der Audit auf
+-   Mesa/Vulkan Haswell ist wegen der eingeschränkten Treiberunterstützung kein
+-   GPU-Kompatibilitätsnachweis. Details:
++   `PBR` erhält er die Produktionsdeklaration von `FVFVertex`, für
++   `Basic_Skinned` und `PBR_Skinned` jene von `DfmTangentVertex`. Der
++   Produktions-PBR-Draw-Smoke nutzt ebenfalls das aus der echten
++   `FVFVertex`-Deklaration abgeleitete GPU-Layout. Als nächstes echte VMesh- und
++   DFM-Assets samt Materialbindung laden und zeichnen; BC4/BC5, Cubemaps,
++   Skinning, Renderziele und Präsentation müssen in realen Szenen zusammen
++   geprüft werden. Erst nach erfolgreichem vollständigem Spike den gesamten
++   Spiel- und Editorpfad portieren; OpenGL bleibt währenddessen die Vergleichs-
++   und Rückfallreferenz. Der Audit auf Mesa/Vulkan Haswell ist wegen der
++   eingeschränkten Treiberunterstützung kein GPU-Kompatibilitätsnachweis.
++   Details:
+    [SDL_GPU FVF/DFM-Pipeline-Audit](evidence/renderer/sdl-gpu-real-fvf-input-pipeline-20261019.md).
+ 7. **Stabilität und Performance.** Feste Szenen und Kameras für Intro,
+    Kampf, Nebel, Asteroidenfeld, Basis, Planet und DFM erfassen. CPU/GPU-Zeit,
+diff --git a/docs/evidence/renderer/sdl-gpu-real-fvf-input-pipeline-20261019.md b/docs/evidence/renderer/sdl-gpu-real-fvf-input-pipeline-20261019.md
+--- a/docs/evidence/renderer/sdl-gpu-real-fvf-input-pipeline-20261019.md
++++ b/docs/evidence/renderer/sdl-gpu-real-fvf-input-pipeline-20261019.md
+@@ -4,22 +4,25 @@
+ 
+ ## Scope
+ 
+-The SDL_GPU pipeline audit now supplies typed, stride-checked vertex attributes
+-for the production `Basic_FVF`, `PBR`, `Basic_Skinned`, and `PBR_Skinned` shader
+-bundles. The first two use a representative interleaved Freelancer FVF layout
+-(position, normal, diffuse color and four UV sets). The skinned bundles use a
+-DFM-style layout with two UV sets, float bone weights, unsigned byte bone IDs,
+-and two tangent components. The normal-mapped skinned vertex shader now declares
++The SDL_GPU pipeline audit now receives the real `VertexDeclaration` objects
++from the production `FVFVertex` and `DfmTangentVertex` types. `Basic_FVF` and
++`PBR` use an interleaved Freelancer FVF declaration with position, normal,
++diffuse color and four UV sets. The skinned bundles use the production DFM
++declaration with two UV sets, float bone weights, unsigned byte bone IDs, and
++two tangent components. The normal-mapped skinned vertex shader declares
+ `boneIds` as `uint4`, matching the unsigned integer GPU input. All other bundles
+ continue to use their reflected synthetic audit layout.
+ 
+ This checks SDL_GPU pipeline creation and release with those selected vertex
+-formats. It does not draw production meshes, resolve real materials/textures,
+-exercise the game render graph, or prove visual correctness or runtime
+-performance. The layouts are representative declarations, not extraction from
+-loaded retail mesh buffers. The Vulkan driver on this Intel Haswell test host
+-reported incomplete support, so the result is a pipeline/API check on this host,
+-not a general hardware compatibility claim.
++formats. The separate SDL_GPU smoke also builds its embedded production PBR
++draw pipeline from the actual `FVFVertex` declaration for `XYZ|NORMAL|TEX1`
++(stride 32), executes three production PBR draws and validates the final pixel
++readback. Its triangle vertices, material data and BC5 maps remain synthetic.
++Neither check loads a retail VMesh/DFM asset, resolves a retail material,
++exercises the game render graph, or proves complete visual correctness or
++runtime performance. The Vulkan driver on this Intel Haswell test host reported
++incomplete support, so these are pipeline/API checks on this host, not a general
++hardware compatibility claim.
+ 
+ ## Verification
+ 
+@@ -27,7 +30,7 @@
+ 
+ ```text
+ dotnet build src/lancer/lancer.csproj -c Release --no-restore -p:UseSharedCompilation=false
+-Build succeeded. 0 errors, 168 warnings.
++Build succeeded. 0 errors.
+ ```
+ 
+ Focused vertex-layout tests:
+@@ -44,6 +47,18 @@
+ SDL_GPU production pipeline audit passed: 25 bundles, 3487 pipelines created and released.
+ ```
+ 
++The `lancer` entry point supplies `FVFVertex(XYZ|NORMAL|DIFFUSE|TEX4)` and
++`DfmTangentVertex` declarations to the audit for the four matching bundles.
++The other 21 bundles still use reflected packed audit inputs.
++
++Production PBR draw and pixel readback on the same driver:
++
++```text
++SDL_GPU_DRIVER=vulkan dotnet src/lancer/bin/Release/net10.0/lancer.dll --sdl-gpu-smoke
++Using production Freelancer FVF input declaration: stride=32, attributes=3.
++Presented SDL_GPU BC5 normal-mapped scene through an RGBA16F target and depth-tested pass at 640x360; center pixel (226, 214, 230, 255), production PBR pixel (148, 78, 0, 255), visible-shadow pixel (54, 33, 9, 255), and shadowed PBR pixel (0, 0, 0, 255) passed.
++```
++
+ Mesa printed `Haswell Vulkan support is incomplete`; despite that driver warning,
+-this audit completed successfully. The audit creates and releases pipelines; it
+-does not submit production mesh draws.
++both checks completed successfully. The production draw uses test geometry and
++synthetic material and texture contents; it does not submit retail mesh data.
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 387 Client patches and two native patches. Each
++The active series contains 388 Client patches and two native patches. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -388,3 +388,4 @@
+ client 2388-nomad-gradient-legacy-parity.patch
+ client 2389-compile-all-production-shaders.patch
+ client 2390-sdl-gpu-real-fvf-input-layouts.patch
++client 2391-use-production-vertex-declarations-in-sdl-gpu-smoke.patch

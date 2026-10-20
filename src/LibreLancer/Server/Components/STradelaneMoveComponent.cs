@@ -5,8 +5,6 @@
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
-using System.Linq;
-using LibreLancer.Data.GameData.Items;
 using LibreLancer.Missions;
 using LibreLancer.Net.Protocol;
 using LibreLancer.World;
@@ -32,7 +30,6 @@ namespace LibreLancer.Server.Components
         private float slowdownProgress;
 
         private float manualExitTime;
-        private uint? shipTravelEffectId;
         private float manualStartSpeed;
         private Quaternion manualStartOrientation;
         private Quaternion manualTargetOrientation;
@@ -133,42 +130,12 @@ namespace LibreLancer.Server.Components
             return true;
         }
 
-        public void StartShipTravelEffect(GameWorld world)
-        {
-            var equipment = currenttradelane.SystemObject?.Loadout?.Items
-                .Select(x => x.Equipment)
-                .OfType<TradelaneEquipment>()
-                .FirstOrDefault();
-            if (equipment?.ShipTravel == null)
-                return;
-
-            if (!Parent.TryGetComponent<SFuseRunnerComponent>(out var runner))
-            {
-                runner = new SFuseRunnerComponent(Parent);
-                Parent.AddComponent(runner);
-            }
-
-            shipTravelEffectId = runner.AddNetworkEffect(equipment.ShipTravel.Nickname, []);
-            world.Server?.EffectSpawned(Parent);
-        }
-
-        private void StopShipTravelEffect(GameWorld world)
-        {
-            if (shipTravelEffectId is not { } effectId ||
-                !Parent.TryGetComponent<SFuseRunnerComponent>(out var runner) ||
-                !runner.RemoveNetworkEffect(effectId))
-                return;
-
-            shipTravelEffectId = null;
-            world.Server?.EffectSpawned(Parent);
-        }
-
-        private void DisruptOther(GameObject go, GameWorld world)
+        private void DisruptOther(GameObject go)
         {
             if (go.TryGetComponent<STradelaneMoveComponent>(out var tlmov) &&
                 tlmov.currenttradelane == currenttradelane)
             {
-                tlmov.TradeLaneDisruption(world);
+                tlmov.TradeLaneDisruption();
             }
         }
 
@@ -178,7 +145,7 @@ namespace LibreLancer.Server.Components
 
             if (moveState == TradelaneMoveState.ManualExit)
             {
-                UpdateManualExit(time, world);
+                UpdateManualExit(time);
                 return;
             }
 
@@ -187,7 +154,7 @@ namespace LibreLancer.Server.Components
 
             if (tradelaneComponent is null)
             {
-                ExitTradelane(world);
+                ExitTradelane();
                 return;
             }
 
@@ -200,19 +167,19 @@ namespace LibreLancer.Server.Components
                 {
                     if (Parent.Formation.LeadShip != Parent)
                     {
-                        DisruptOther(Parent.Formation.LeadShip, world);
+                        DisruptOther(Parent.Formation.LeadShip);
                     }
 
                     foreach (var f in Parent.Formation.Followers)
                     {
                         if (f != Parent)
                         {
-                            DisruptOther(f, world);
+                            DisruptOther(f);
                         }
                     }
                 }
 
-                TradeLaneDisruption(world);
+                TradeLaneDisruption();
                 return;
             }
 
@@ -229,7 +196,7 @@ namespace LibreLancer.Server.Components
                 var laneContinues = LaneEntered();
                 if (!laneContinues)
                 {
-                    ExitTradelane(world);
+                    ExitTradelane();
                 }
 
                 return;
@@ -308,13 +275,10 @@ namespace LibreLancer.Server.Components
             body.LinearVelocity = direction * speed;
             body.AngularVelocity = Vector3.Zero;
 
-            if (Parent.TryGetComponent<SEngineComponent>(out var engine))
-            {
-                engine.Speed = MathHelper.Clamp(speed / TradelaneMotion.Speed, 0, 1) * 0.9f;
-            }
+            Parent.CoreEquipment.Engine?.Speed = MathHelper.Clamp(speed / TradelaneMotion.Speed, 0, 1) * 0.9f;
         }
 
-        private void UpdateManualExit(double time, GameWorld world)
+        private void UpdateManualExit(double time)
         {
             manualExitTime += (float)time;
             var turnProgress = MathHelper.Clamp(manualExitTime / TradelaneMotion.ManualTurnDuration, 0, 1);
@@ -328,14 +292,11 @@ namespace LibreLancer.Server.Components
             Parent.PhysicsComponent.Body.LinearVelocity = direction * speed;
             Parent.PhysicsComponent.Body.AngularVelocity = Vector3.Zero;
 
-            if (Parent.TryGetComponent<SEngineComponent>(out var engine))
-            {
-                engine.Speed = MathHelper.Clamp(speed / TradelaneMotion.Speed, 0, 1) * 0.9f;
-            }
+            Parent.CoreEquipment.Engine?.Speed = MathHelper.Clamp(speed / TradelaneMotion.Speed, 0, 1) * 0.9f;
 
             if (manualExitTime >= TradelaneMotion.ManualExitDuration)
             {
-                ExitTradelane(world);
+                ExitTradelane();
             }
         }
 
@@ -345,7 +306,7 @@ namespace LibreLancer.Server.Components
                 ? Parent.Formation.GetShipOffset(Parent)
                 : Vector3.Zero;
 
-            return (tradelane.GetHardpoint(lane)!.TransformNoRotate * tradelane.WorldTransform)
+            return (tradelane.GetHardpoint(lane)!.TransformNoRotate * tradelane.Transform)
                 .Transform(offset);
         }
 
@@ -383,31 +344,29 @@ namespace LibreLancer.Server.Components
         private float NormalThrottleSpeed()
         {
             if (Parent.TryGetComponent<ShipPhysicsComponent>(out var physics) &&
-                Parent.TryGetComponent<SEngineComponent>(out var engine))
+                Parent.CoreEquipment.Engine != null)
             {
-                return TradelaneMotion.NormalThrottleSpeed(physics.Ship, engine.Engine);
+                return TradelaneMotion.NormalThrottleSpeed(physics.Ship, Parent.CoreEquipment.Engine.Equipment);
             }
 
             return TradelaneMotion.Speed;
         }
 
-        private static bool TradelaneDisrupted(float distance, GameObject tradelaneComponent) =>
+        private static bool TradelaneDisrupted(float distance, GameObject tradelane) =>
             distance < 3000 &&
-            tradelaneComponent.TryGetFirstChildComponent<SShieldComponent>(out var comp) &&
-            comp.Health < float.Epsilon;
+            tradelane.CoreEquipment.Shield is { ShieldHealth: < float.Epsilon };
 
-        private void TradeLaneDisruption(GameWorld world)
+        private void TradeLaneDisruption()
         {
-            ExitTradelane(world);
+            ExitTradelane();
             if (Parent!.TryGetComponent<SPlayerComponent>(out var pc))
             {
                 pc.Player.TradelaneDisrupted();
             }
         }
 
-        private void ExitTradelane(GameWorld world)
+        private void ExitTradelane()
         {
-            StopShipTravelEffect(world);
             if (Parent!.TryGetComponent<ShipPhysicsComponent>(out var ctrl))
             {
                 ctrl.Active = true;
@@ -424,8 +383,6 @@ namespace LibreLancer.Server.Components
             if (Parent.TryGetComponent<AutopilotComponent>(out var ap))
             {
                 ap.Cancel();
-                if (Parent.Formation != null && Parent.Formation.LeadShip != Parent)
-                    ap.StartFormation();
             }
 
             if (TryGetMissionRuntime(out var msn, out var isPlayer))

@@ -1,0 +1,247 @@
+--- a/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
++++ b/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
+@@ -38,7 +38,8 @@
+     BloomMediumBlurredColor = 1 << 14,
+     BloomWideHorizontalColor = 1 << 15,
+     BloomWideBlurredColor = 1 << 16,
+-    SampleableSceneDepth = 1 << 17
++    SampleableSceneDepth = 1 << 17,
++    FrameState = 1 << 18
+ }
+ 
+ public enum SystemRenderTargetRole
+@@ -378,13 +379,23 @@
+ 
+     public void AddResourceAction(string name, Action execute, SystemRenderResource reads,
+         SystemRenderResource writes, SystemRenderResource optionalReads,
+-        SystemRenderResource optionalWrites, int priority)
++        SystemRenderResource optionalWrites, int priority) =>
++        AddResourceActionCore(name, execute, reads, writes, optionalReads, optionalWrites, priority, null);
++
++    public void AddResourceAction(string name, Action execute, SystemRenderResource reads,
++        SystemRenderResource writes, SystemRenderResource optionalReads,
++        SystemRenderResource optionalWrites, int priority, string after) =>
++        AddResourceActionCore(name, execute, reads, writes, optionalReads, optionalWrites, priority, after);
++
++    private void AddResourceActionCore(string name, Action execute, SystemRenderResource reads,
++        SystemRenderResource writes, SystemRenderResource optionalReads,
++        SystemRenderResource optionalWrites, int priority, string? after)
+     {
+         if ((optionalReads & ~reads) != SystemRenderResource.None)
+             throw new ArgumentException("Optional graph reads must also be declared as reads.", nameof(optionalReads));
+         if ((optionalWrites & ~writes) != SystemRenderResource.None)
+             throw new ArgumentException("Optional graph writes must also be declared as writes.", nameof(optionalWrites));
+-        Add(name, null, SystemRenderResource.None, execute, null, null, priority,
++        Add(name, null, SystemRenderResource.None, execute, after, null, priority,
+             reads, writes, optionalReads, optionalWrites);
+     }
+ 
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -766,8 +766,13 @@
+ 
+                 framePassGraph.AddPass(SystemRenderPass.FrameClear, frameClearCallback);
+ 
+-                framePassGraph.AddAction(frameSetup, frameSetupCallback, priority: 1,
+-                    SystemRenderPassGraph.Name(SystemRenderPass.FrameClear));
++                framePassGraph.AddResourceAction(frameSetup, frameSetupCallback,
++                    reads: SystemRenderResource.None,
++                    writes: SystemRenderResource.FrameState,
++                    optionalReads: SystemRenderResource.None,
++                    optionalWrites: SystemRenderResource.None,
++                    priority: 1,
++                    after: SystemRenderPassGraph.Name(SystemRenderPass.FrameClear));
+ 
+                 if (sampleableSceneDepth is { } sceneDepthTarget)
+                 {
+@@ -776,42 +781,53 @@
+                         : SystemRenderPass.ParticleDepthPrepass;
+                     frameDepthPass = depthPass;
+                     framePassGraph.AddPass(depthPass, sampleableDepthPassCallback,
+-                        SystemRenderResource.None, frameSetup);
++                        SystemRenderResource.FrameState);
+                 }
+ 
+                 if (Settings.RenderDepthPrepass)
+                 {
+                     framePassGraph.AddPass(SystemRenderPass.DepthPrepass, depthPrepassCallback,
+-                        SystemRenderResource.None, frameSetup);
++                        SystemRenderResource.FrameState);
+                 }
+                 else
+                 {
+-                    framePassGraph.AddAction("Depth state", depthStateCallback, priority: 3, frameSetup);
++                    framePassGraph.AddResourceAction("Depth state", depthStateCallback,
++                        reads: SystemRenderResource.FrameState,
++                        writes: SystemRenderResource.None,
++                        optionalReads: SystemRenderResource.None,
++                        optionalWrites: SystemRenderResource.None,
++                        priority: 3);
+                 }
+ 
+                 if (Settings.RenderShadows)
+                 {
+                     framePassGraph.AddPass(SystemRenderPass.ShadowMap,
+-                        shadowMapCallback, SystemRenderResource.None, frameSetup);
++                        shadowMapCallback, SystemRenderResource.FrameState);
+                 }
+                 else
+                 {
+-                    framePassGraph.AddAction(SystemRenderPassGraph.Name(SystemRenderPass.ShadowMap),
+-                        shadowMapCallback, priority: 6, frameSetup);
++                    framePassGraph.AddResourceAction(SystemRenderPassGraph.Name(SystemRenderPass.ShadowMap),
++                        shadowMapCallback,
++                        reads: SystemRenderResource.FrameState,
++                        writes: SystemRenderResource.None,
++                        optionalReads: SystemRenderResource.None,
++                        optionalWrites: SystemRenderResource.None,
++                        priority: 6);
+                 }
+ 
+                 framePassGraph.AddPass(SystemRenderPass.Opaque, opaquePassCallback,
+-                    SystemRenderResource.None, frameSetup);
++                    SystemRenderResource.FrameState);
+ 
+                 var drawStars = (!transitioned || !DrawNebulae) && DrawStarsphere;
+                 if (drawStars)
+                 {
+                     framePassGraph.AddPass(SystemRenderPass.StarsAndNebula,
+-                        starsAndNebulaPassCallback, SystemRenderResource.None, frameSetup);
++                        starsAndNebulaPassCallback, SystemRenderResource.FrameState);
+                 }
+ 
+                 framePassGraph.AddResourceAction(opaqueHook, opaqueHookCallback,
+-                    reads: SystemRenderResource.SceneColor | SystemRenderResource.SceneDepth,
++                    reads: SystemRenderResource.FrameState | SystemRenderResource.SceneColor |
++                           SystemRenderResource.SceneDepth,
+                     writes: SystemRenderResource.SceneColor | SystemRenderResource.SceneDepth,
+                     optionalReads: SystemRenderResource.SceneDepth,
+                     optionalWrites: SystemRenderResource.SceneDepth,
+@@ -821,19 +837,21 @@
+                     ? SystemRenderResource.SampleableSceneDepth
+                     : SystemRenderResource.None;
+                 framePassGraph.AddPass(SystemRenderPass.Transparent, transparentPassCallback,
+-                    softParticleReads);
++                    SystemRenderResource.FrameState | softParticleReads);
+ 
+                 var physicsHook = "Physics hook";
+                 var debugOverlay = "Debug overlay";
+                 framePassGraph.AddResourceAction(physicsHook, physicsHookCallback,
+-                    reads: SystemRenderResource.SceneColor | SystemRenderResource.SceneDepth,
++                    reads: SystemRenderResource.FrameState | SystemRenderResource.SceneColor |
++                           SystemRenderResource.SceneDepth,
+                     writes: SystemRenderResource.SceneColor,
+                     optionalReads: SystemRenderResource.SceneDepth,
+                     optionalWrites: SystemRenderResource.None,
+                     priority: 13);
+ 
+                 framePassGraph.AddResourceAction(debugOverlay, debugOverlayCallback,
+-                    reads: SystemRenderResource.SceneColor | SystemRenderResource.SceneDepth,
++                    reads: SystemRenderResource.FrameState | SystemRenderResource.SceneColor |
++                           SystemRenderResource.SceneDepth,
+                     writes: SystemRenderResource.SceneColor,
+                     optionalReads: SystemRenderResource.SceneDepth,
+                     optionalWrites: SystemRenderResource.None,
+@@ -842,7 +860,7 @@
+                 if (msaa is { } antialiasTarget)
+                 {
+                     framePassGraph.AddResourceAction("AA resolve", antialiasResolveCallback,
+-                        reads: SystemRenderResource.SceneColor,
++                        reads: SystemRenderResource.FrameState | SystemRenderResource.SceneColor,
+                         writes: SystemRenderResource.PresentationColor,
+                         optionalReads: SystemRenderResource.None,
+                         optionalWrites: SystemRenderResource.None,
+--- a/src/LibreLancer.Tests/SystemRenderPassGraphTests.cs
++++ b/src/LibreLancer.Tests/SystemRenderPassGraphTests.cs
+@@ -38,6 +38,69 @@
+         graph.Execute();
+ 
+         Assert.Equal(new[] { "clear", "resolve", "opaque" }, executionOrder);
++    }
++
++    [Fact]
++    public void FrameStateResourceSchedulesForwardRendererPasses()
++    {
++        var graph = new SystemRenderPassGraph();
++        var executionOrder = new System.Collections.Generic.List<string>();
++
++        graph.AddPass(SystemRenderPass.FrameClear, () => executionOrder.Add("clear"));
++        graph.AddResourceAction("Frame setup", () => executionOrder.Add("setup"),
++            reads: SystemRenderResource.None,
++            writes: SystemRenderResource.FrameState,
++            optionalReads: SystemRenderResource.None,
++            optionalWrites: SystemRenderResource.None,
++            priority: 1,
++            after: SystemRenderPassGraph.Name(SystemRenderPass.FrameClear));
++        graph.AddPass(SystemRenderPass.SsaoDepthPrepass, () => executionOrder.Add("sampleable depth"),
++            SystemRenderResource.FrameState);
++        graph.AddPass(SystemRenderPass.DepthPrepass, () => executionOrder.Add("depth"),
++            SystemRenderResource.FrameState);
++        graph.AddPass(SystemRenderPass.ShadowMap, () => executionOrder.Add("shadow"),
++            SystemRenderResource.FrameState);
++        graph.AddPass(SystemRenderPass.Opaque, () => executionOrder.Add("opaque"),
++            SystemRenderResource.FrameState);
++        graph.AddPass(SystemRenderPass.StarsAndNebula, () => executionOrder.Add("stars"),
++            SystemRenderResource.FrameState);
++        graph.AddResourceAction("Opaque hook", () => executionOrder.Add("opaque hook"),
++            reads: SystemRenderResource.FrameState | SystemRenderResource.SceneColor |
++                   SystemRenderResource.SceneDepth,
++            writes: SystemRenderResource.SceneColor | SystemRenderResource.SceneDepth,
++            optionalReads: SystemRenderResource.SceneDepth,
++            optionalWrites: SystemRenderResource.SceneDepth,
++            priority: 11);
++        graph.AddPass(SystemRenderPass.Transparent, () => executionOrder.Add("transparent"),
++            SystemRenderResource.FrameState);
++        graph.AddResourceAction("Physics hook", () => executionOrder.Add("physics"),
++            reads: SystemRenderResource.FrameState | SystemRenderResource.SceneColor |
++                   SystemRenderResource.SceneDepth,
++            writes: SystemRenderResource.SceneColor,
++            optionalReads: SystemRenderResource.SceneDepth,
++            optionalWrites: SystemRenderResource.None,
++            priority: 13);
++        graph.AddResourceAction("Debug overlay", () => executionOrder.Add("debug"),
++            reads: SystemRenderResource.FrameState | SystemRenderResource.SceneColor |
++                   SystemRenderResource.SceneDepth,
++            writes: SystemRenderResource.SceneColor,
++            optionalReads: SystemRenderResource.SceneDepth,
++            optionalWrites: SystemRenderResource.None,
++            priority: 14);
++        graph.AddResourceAction("AA resolve", () => executionOrder.Add("resolve"),
++            reads: SystemRenderResource.FrameState | SystemRenderResource.SceneColor,
++            writes: SystemRenderResource.PresentationColor,
++            optionalReads: SystemRenderResource.None,
++            optionalWrites: SystemRenderResource.None,
++            priority: 15);
++
++        graph.Execute();
++
++        Assert.Equal(new[]
++        {
++            "clear", "setup", "sampleable depth", "depth", "shadow", "opaque", "stars",
++            "opaque hook", "transparent", "physics", "debug", "resolve"
++        }, executionOrder);
+     }
+ }
+ 
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -247,8 +247,10 @@
+    Backend angefordert. Editor-Overlay, Physik-Debuglinien und AA-Auflösung
+    deklarieren ihre Farb-/Tiefenzugriffe jetzt im Graph; dessen Ressourcen-
+    abhängigkeiten ordnen diese Actions auch ohne Namensverkettung ein. Ein
+-   Graph-Test sichert ab, dass ein Lesezugriff vor dem nächsten Writer bleibt,
+-   selbst wenn dessen Priorität den Writer sonst vorziehen würde. Der aktuelle
++   `FrameState`-Token wird vom Frame-Setup erzeugt und von Tiefen-, Schatten-,
++   Opaque-, Sterne- und Transparenzpass gelesen; dadurch folgen diese Pässe dem
++   Setup über einen Ressourcenvertrag. Graph-Tests decken sowohl den vollständigen
++   Forward-Pass-Ablauf als auch Lesezugriffe vor dem nächsten Writer ab. Der aktuelle
+    Systemrenderer enthält keine direkten
+    GL-Aufrufe; seine Pass-Callbacks setzen jedoch sofort Zustand und Ressourcen
+    über den konkreten `RenderContext`, dessen Laufzeitfabrik weiterhin das
+--- a/patches/series
++++ b/patches/series
+@@ -432,3 +432,4 @@
+ client 2438-cache-transparent-sort-comparer.patch
+ client 2439-fix-hdr-nap-profile-version-in-roadmap.patch
+ client 2440-declare-system-render-hook-resources.patch
++client 2441-declare-frame-setup-resource.patch

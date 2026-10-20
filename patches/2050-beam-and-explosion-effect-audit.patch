@@ -1,0 +1,107 @@
+diff --git a/docs/data-client-todo.md b/docs/data-client-todo.md
+--- a/docs/data-client-todo.md
++++ b/docs/data-client-todo.md
+@@ -326,11 +326,24 @@
+ ### Waffen- und Explosionseffekte
+ 
+ - [ ] Nach Renderer- und Lichtarbeiten Laser-/Waffenstrahlen, Treffer und
+   Explosionen gestalterisch und technisch überarbeiten. Bestehende Effekt-
+   Definitionen, Partikel, Materialien, Timing und dynamische Lichtanbindung
+   inventarisieren; repräsentative Effekte vergleichen und anschließend gezielt
+   modernisieren, ohne Originaleffekte oder Gameplay-Timing unbeabsichtigt zu
+   verändern.
++- [x] Beam- und Explosionseffektpfade inventarisiert; siehe
++  [Effekt-Audit](beam-and-explosion-effects-audit.md). `flash_size` wird zwar
++  aus den Beam-INIs gelesen, aber derzeit nicht gerendert. Seine genaue
++  Bedeutung muss vor einer visuellen Umsetzung anhand belastbarer
++  Retail-Beobachtung oder Engine-Referenz geklärt werden.
++
++### Vollständige INI-Parameterabdeckung
++
++- [ ] In einer späteren systematischen Prüfung die von der Client-Laufzeit
++  geladenen INI-Dateien und ihre Parameter vom Parser über Datenmodelle und
++  Zuordnung bis zum C#-Verbrauch verfolgen. Fehlende, ignorierte oder nur
++  teilweise verwendete Werte inventarisieren und mit Beispielen und Tests
++  planen.
+ 
+ ### NPC-Wegefindung (nach Renderer und dynamischen Lichtern)
+ 
+diff --git a/docs/beam-and-explosion-effects-audit.md b/docs/beam-and-explosion-effects-audit.md
+new file mode 100644
+--- /dev/null
++++ b/docs/beam-and-explosion-effects-audit.md
+@@ -0,0 +1,54 @@
++# Audit: Beam- und Explosionseffekte
++
++Stand: 2026-10-14. Dieses Audit verfolgt die derzeitigen Runtimepfade und den
++lokalen NAP-Eingabebestand. Es nimmt keine Änderung an Effektgeometrie,
++Gameplay-Timing oder Originalwerten vor.
++
++## Beam-Effekte
++
++- `FreelancerData` parst `BeamBolt` und `BeamSpear` aus
++  `DATA/FX/BeamEffects.ini`. Die Felder `head_brightness`, `trail_brightness`
++  und `flash_size` sind im Schema vorhanden.
++- `ProjectileRenderer.Draw()` reicht aktive Projektile an
++  `BeamsBuffer.AddBeamBolt()` oder `AddBeamSpear()` weiter. Der Buffer erzeugt
++  dynamische Geometrie und reicht sie als `ProjectileMaterial`-Draw-Call ein.
++- `head_brightness` und `trail_brightness` werden auf die Vertex-Alpha der
++  jeweiligen Kopf- und Trailbereiche angewendet. Fehlende Helligkeitswerte
++  behalten den bisherigen Vollintensitäts-Default.
++- `flash_size` wird im Runtimepfad aktuell nicht gelesen. Der Feldname allein
++  belegt nicht, ob damit ein Mündungsblitz, die Projektilspitze oder ein
++  weiteres Beam-Element gemeint ist. Eine Implementierung ohne Retail-Abgleich
++  könnte daher den falschen Ort oder die falsche Lebensdauer verändern.
++- `BeamsBuffer` begrenzt Bolt- und Spear-Geometrie jeweils auf 500 Elemente pro
++  Buffer. Zusätzliche sichtbare Elemente werden derzeit verworfen. Das Limit
++  und sein Verhalten bei hoher Projektilzahl gehören in die spätere
++  Performance-/Überlastprüfung.
++
++Der NAP-Eingang `Data/NAP/Effects/fx/BeamEffects.ini` enthält 55 Definitionen:
++51 `BeamSpear` und 4 `BeamBolt`. Alle haben `flash_size`; 47 Werte sind `3`,
++6 sind `9`, einer ist `8` und einer ist `4`. Die INI-Daten belegen damit die
++breite Nutzung des Parameters, aber nicht seine Laufzeitsemantik.
++
++## Treffer und Explosionen
++
++- Projektiltreffer rufen `GameWorld.SpawnTempFx()` mit dem konfigurierten
++  Hit-Effekt auf.
++- Munitions-, Schiffs-, Minen- und Asteroidenexplosionen sowie CMP-Abtrennung
++  nutzen ebenfalls temporäre Effekte. Die zuvor erstellte
++  [Lichtprüfung](dynamic-lighting-audit.md) verfolgt diese Anbindung an
++  kurzlebige dynamische Effektlichter.
++- Die Partikeleffekte werden über `ResolvedFx`/`ParticleEffectInstance`
++  abgespielt. Für eine visuelle Überarbeitung müssen repräsentative Treffer,
++  kleine Schiffe, große Schiffe und Minen aus dem NAP-Bestand ausgewählt und
++  mit unveränderten Timings verglichen werden.
++
++## Nächste Arbeit
++
++1. `flash_size` mit einer kontrollierten Retail-Szene oder einer belastbaren
++   Engine-Referenz semantisch bestimmen.
++2. Danach die passende Geometrie/Textur im Beam-Renderer umsetzen und Tests für
++   Null-, Grenz- und typische NAP-Werte ergänzen.
++3. Beam- und Explosionseffekte mit NAP-only-Containern visuell vergleichen;
++   Originalwerte und Timing als Referenz erhalten.
++4. Erst nach diesen Vergleichen den übergeordneten Effekt-Todo-Punkt als
++   abgeschlossen markieren.
+diff --git a/src/LibreLancer/Render/BeamsBuffer.cs b/src/LibreLancer/Render/BeamsBuffer.cs
+--- a/src/LibreLancer/Render/BeamsBuffer.cs
++++ b/src/LibreLancer/Render/BeamsBuffer.cs
+@@ -100,7 +100,7 @@
+             10,13,16,
+             10,14,16
+         ];
+-        // TODO: Implement flash_size muzzle flashes and visually validate BeamBolt layering.
++        // TODO: Verify flash_size semantics before adding geometry; visually validate BeamBolt layering.
+         private static ushort[] ConstructIndices(ushort[] source, int vcount, int count)
+         {
+             var indices = new ushort[source.Length * count];
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -49,3 +49,4 @@
+ client 2047-beam-effect-safety.patch
+ client 2048-particle-beam-pool-capacity.patch
+ client 2049-beam-brightness-rendering.patch
++client 2050-beam-and-explosion-effect-audit.patch

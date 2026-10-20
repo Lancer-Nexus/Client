@@ -1,0 +1,150 @@
+diff --git a/src/LibreLancer/Render/Materials/NomadMaterial.cs b/src/LibreLancer/Render/Materials/NomadMaterial.cs
+--- a/src/LibreLancer/Render/Materials/NomadMaterial.cs
++++ b/src/LibreLancer/Render/Materials/NomadMaterial.cs
+@@ -44,6 +44,16 @@
+ 
+         public override bool DisableCull => true;
+ 
++        internal static (string Sampler, SamplerFlags Flags) ResolveGradientSampler(
++            string? btSampler, SamplerFlags btFlags, string? ntSampler, SamplerFlags ntFlags)
++        {
++            if (!string.IsNullOrWhiteSpace(btSampler))
++                return (btSampler, btFlags);
++            if (!string.IsNullOrWhiteSpace(ntSampler))
++                return (ntSampler, ntFlags);
++            return ("NomadRGB1_NomadAlpha1", ntFlags);
++        }
++
+         public override void Use(RenderContext rstate, IVertexType vertextype, ref Lighting lights, int userData)
+ 		{
+ 			rstate.BlendMode = BlendMode.Normal;
+@@ -55,10 +65,9 @@
+             // Dc unused in shader rn (investigate)
+ 			// Dt
+ 			BindTexture(rstate, 0, DtSampler, 0, DtFlags);
+-			// Nt
+-			BindTexture(rstate, 1, NtSampler ?? "NomadRGB1_NomadAlpha1", 1, NtFlags);
+-			// Bt
+-            // not implemented
++			// The legacy Nomad shader samples its facing gradient from BT.
++			var gradient = ResolveGradientSampler(BtSampler, BtFlags, NtSampler, NtFlags);
++			BindTexture(rstate, 1, gradient.Sampler, 1, gradient.Flags);
+             // materialanim needs check for impl?
+             rstate.Shader = shader;
+         }
+diff --git a/src/LibreLancer/Shaders/Nomad.frag.hlsl b/src/LibreLancer/Shaders/Nomad.frag.hlsl
+--- a/src/LibreLancer/Shaders/Nomad.frag.hlsl
++++ b/src/LibreLancer/Shaders/Nomad.frag.hlsl
+@@ -3,8 +3,8 @@
+ Texture2D<float4> DtTexture : register(t0, TEXTURE_SPACE);
+ SamplerState DtSampler : register(s0, TEXTURE_SPACE);
+ 
+-Texture2D<float4> NtTexture : register(t1, TEXTURE_SPACE);
+-SamplerState NtSampler : register(s1, TEXTURE_SPACE);
++Texture2D<float4> GradientTexture : register(t1, TEXTURE_SPACE);
++SamplerState GradientSampler : register(s1, TEXTURE_SPACE);
+ 
+ struct Input
+ {
+@@ -24,7 +24,7 @@
+     // gradient sample instead of remapping the full signed range.
+     float ratio = clamp(dot(normalize(input.V), normalize(input.N)), 0.0, 1.0);
+ 
+-    float4 nt = NtTexture.Sample(NtSampler, float2(ratio, 0.0));
++    float4 nt = GradientTexture.Sample(GradientSampler, float2(ratio, 0.0));
+     float4 dt = DtTexture.Sample(DtSampler, input.texCoord);
+     float3 color = LinearizeLegacyInput(dt.rgb) + LinearizeLegacyInput(nt.rgb);
+ 
+diff --git a/src/LibreLancer.Tests/NomadMaterialTests.cs b/src/LibreLancer.Tests/NomadMaterialTests.cs
+new file mode 100644
+index 0000000..1f2d457
+--- /dev/null
++++ b/src/LibreLancer.Tests/NomadMaterialTests.cs
+@@ -0,0 +1,41 @@
++using LibreLancer.Render.Materials;
++using LibreLancer.Utf.Mat;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class NomadMaterialTests
++{
++    [Fact]
++    public void BtSamplerSuppliesLegacyNomadFacingGradient()
++    {
++        var btFlags = SamplerFlags.ClampToEdgeU | SamplerFlags.SecondUV;
++        var result = NomadMaterial.ResolveGradientSampler(
++            "legacy_bt_gradient", btFlags, "nt_fallback", SamplerFlags.MirrorRepeatV);
++
++        Assert.Equal("legacy_bt_gradient", result.Sampler);
++        Assert.Equal(btFlags, result.Flags);
++    }
++
++    [Fact]
++    public void NtSamplerIsUsedWhenLegacyBtSamplerIsAbsent()
++    {
++        var ntFlags = SamplerFlags.ClampToEdgeV;
++        var result = NomadMaterial.ResolveGradientSampler(
++            null, SamplerFlags.None, "nt_gradient", ntFlags);
++
++        Assert.Equal("nt_gradient", result.Sampler);
++        Assert.Equal(ntFlags, result.Flags);
++    }
++
++    [Fact]
++    public void DefaultGradientIsUsedWhenNeitherSamplerIsSpecified()
++    {
++        var ntFlags = SamplerFlags.MirrorRepeatU;
++        var result = NomadMaterial.ResolveGradientSampler(
++            null, SamplerFlags.None, null, ntFlags);
++
++        Assert.Equal("NomadRGB1_NomadAlpha1", result.Sampler);
++        Assert.Equal(ntFlags, result.Flags);
++    }
++}
+diff --git a/docs/evidence/renderer/nomad-gradient-legacy-parity-20261018.md b/docs/evidence/renderer/nomad-gradient-legacy-parity-20261018.md
+--- a/docs/evidence/renderer/nomad-gradient-legacy-parity-20261018.md
++++ b/docs/evidence/renderer/nomad-gradient-legacy-parity-20261018.md
+@@ -13,6 +13,14 @@
+ das belegte Verhalten zurück. Damit wird der Nomad-Gradient im Backface-Bereich
+ am ersten Sample begrenzt, statt über den halben Gradient zu laufen.
+ 
++Beim Abgleich des Materialpfads mit dem historischen Renderer wurde außerdem
++festgestellt, dass die HLSL-Portierung `NtSampler` an den Gradient-Slot band,
++während der Legacy-Renderer den MAT-`BtSampler` verwendete. `NomadMaterial`
++bindet jetzt `BtSampler` mit seinen Flags vorrangig; `NtSampler` und der
++historische `NomadRGB1_NomadAlpha1`-Fallback bleiben verfügbar, wenn BT fehlt.
++`NomadMaterialTests` decken die drei Auswahlfälle ab. Das korrigiert die
++Quellcode-Parität, belegt jedoch noch keine visuelle Übereinstimmung im Spiel.
++
+ Die Überprüfung belegt Quellcode-Parität und erfolgreiche Shader-Kompilierung,
+ nicht die visuelle Übereinstimmung mit dem Retail-Spiel. Ein fester
+ Nomad-Schiff-A/B-Lauf mit verifiziertem Retail-NAP und einer Hardware-GPU bleibt
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -24,7 +24,7 @@
+ | Temporäre Effekte | `SystemRenderer.SpawnTempFx` reiht keine fehlenden ParticleEffects ein; `ParticleEffectRenderer(null)` gilt sofort als beendet und bleibt auch nach `Restart()` beendet. Der Partikel-Cull verwendet die vorhandene vorberechnete Distanzkonstante statt `Math.Pow` pro Effekt und Frame. Kurzlebige Effektlichter akkumulieren nur endliche Framezeiten und sättigen ihr Animationsalter, bevor es nicht-endlich werden kann. Über `SpawnTempFx` erzeugte Partikeleffekte simulieren außerhalb der Distanzgrenze weiter und können regulär auslaufen; dauerhafte Effekte bleiben gecullt. | Ein Regressionstest deckt den Null-Effekt-Lebenszyklus ab. Fehlende oder nicht auflösbare ALE-Effekte bleiben als mögliche Ursache unsichtbarer Einzel-Explosionen gesondert zu diagnostizieren. |
+ | Antialiasing | SMAA-Pässe und MSAA-Auflösung; HDR/LDR-Kombinationen sowie Resize und Minimize/Restore wurden auf OpenGL/Mesa geprüft. | Andere Backends/Treiber, wiederholte Lifecycle-Zyklen und Fehler-Injektion stehen aus. |
+ | GPU-Subpass-Abbruch | Postprocess-, Bloom-, SMAA-, SSAO- und MSAA-Subpasses melden `Begin`, `End` oder `Abort`. Nur ein erfolgreich beendeter Subpass veröffentlicht seine geschriebenen Ressourcen für nachfolgende Pässe. | Zwei Regressionstests prüfen, dass abgebrochene Ausgaben nicht verfügbar werden und erfolgreiche Ausgaben weitergereicht werden. Fehler-Injektion im nativen Backend bleibt offen. Siehe Patch `2407-render-subpass-abort-contract.patch`. |
+-| Nomad-Gradient | Der HLSL-Shader begrenzt den View-/Normal-Dot-Product nun wie der frühere LibreLancer-Shader auf `[0, 1]`, anstatt den gesamten signierten Bereich auf `[0, 1]` umzurechnen. | Produktionsshader-Build und gezielter Nomad-Schiff-A/B mit Retail-NAP-Daten stehen aus. Quellvergleich: `docs/evidence/renderer/nomad-gradient-legacy-parity-20261018.md`. |
++| Nomad-Gradient | Der HLSL-Shader begrenzt den View-/Normal-Dot-Product wie der frühere LibreLancer-Shader auf `[0, 1]` und bindet MAT-`BtSampler` als Legacy-Facing-Gradient; `NtSampler` bleibt Rückfall, falls BT fehlt. | Auswahlfälle sind regressionsgeprüft und der Shader wird im Release-Build kompiliert. Gezielter Nomad-Schiff-A/B mit Retail-NAP-Daten und Hardware-GPU steht aus. Quellvergleich: `docs/evidence/renderer/nomad-gradient-legacy-parity-20261018.md`. |
+ | GPU-Readback | Asynchrones OpenGL-Textur-Readback verwendet PBO und Fence. Synchron liest Desktop-GL die angeforderte Mip-Ebene mit `glGetTexImage` und kopiert die Region in den Zielbereich; GLES verwendet ein temporäres FBO und `ReadPixels`. Pack-Alignment und PBO-Bindung werden wiederhergestellt. | Ein Release-Runtime-Probe mit Mip 1, Teilrechteck und Zieloffset besteht auf Mesa/OpenGL mit Intel HD 4600. Komprimierte Formate werden ausdrücklich abgelehnt. GLES-Lauf, Fehler-Injektion und Editor-Export bleiben offen. Siehe `docs/evidence/renderer/gl-texture-readback-smoke-20261018.md` und `docs/evidence/renderer/gl-texture-async-readback-lifecycle-20261018/`. |
+ | Postprocess-Lifecycle | Postprocess-Pässe werden in umgekehrter Ausführungsreihenfolge entsorgt; bei einem Fehler läuft die Freigabe aller übrigen Pässe weiter. Der Plan ist idempotent entsorgbar und meldet Fehler gebündelt. | Regressionstests decken Reihenfolge, Fehlerfortsetzung und wiederholtes Dispose ab. Fehler im eigentlichen Backend-Ressourcenfreigabepfad und Kontextverlust sind weiter offen. |
+ | Systemrenderer-Lifecycle | `SystemRenderer.Dispose()` versucht die Freigabe aller Frame-/Effekt-/Target-Ressourcen und GPU-Timerabfragen auch dann, wenn einzelne Freigaben fehlschlagen; Fehler werden gebündelt. Wiederholtes Dispose ist wirkungslos. | Fehlerfortsetzung der allgemeinen Bereinigungsroutine ist unit-getestet. Native GL-Fehlerinjektion und Kontextverlust bleiben offen. Siehe `docs/evidence/renderer/system-renderer-cleanup-20261018/`. |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -450,3 +450,4 @@
+ client 2456-correct-atmosphere-fade-comment.patch
+ client 2457-cover-mat-normal-routing-for-detail-materials.patch
+ client 2458-preserve-lod-fade-in-pbr-materials.patch
++client 2459-use-nomad-bt-gradient.patch
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -388,3 +388,4 @@
+ | 2456 | Remove unsupported Atmosphere Fade behavior speculation and record binary scan limits |
+ | 2457 | Cover MAT normal-map PBR routing for all specialized detail-map materials |
+ | 2458 | Preserve asteroid LOD fades in PBR draws and reset per-command material fade state |
++| 2459 | Bind the legacy Nomad BT facing-gradient sampler with compatibility fallbacks |

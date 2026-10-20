@@ -1,0 +1,138 @@
+--- a/src/LibreLancer/Render/RenderHelpers.cs
++++ b/src/LibreLancer/Render/RenderHelpers.cs
+@@ -220,6 +220,13 @@
+         private static Color3f DecodeSrgb(Color3f color) => new(
+             DecodeSrgbChannel(color.R), DecodeSrgbChannel(color.G), DecodeSrgbChannel(color.B));
+ 
++        internal static Color4 PrepareSceneClearColor(Color4 color, bool hdrOutput)
++        {
++            if (!hdrOutput) return color;
++            return new Color4(DecodeSrgbChannel(color.R), DecodeSrgbChannel(color.G),
++                DecodeSrgbChannel(color.B), color.A);
++        }
++
+         private static Color3f EncodeSrgb(Color3f color) => new(
+             EncodeSrgbChannel(color.R), EncodeSrgbChannel(color.G), EncodeSrgbChannel(color.B));
+ 
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -1063,10 +1063,13 @@
+ 
+         private void ClearFrameAttachments()
+         {
++            Color4 authoredClearColor;
+             if (frameClearTransitioned)
+-                rstate.ClearColor = frameClearNebula!.Nebula.FogColor;
++                authoredClearColor = frameClearNebula!.Nebula.FogColor;
+             else
+-                rstate.ClearColor = BackgroundOverride ?? starSystem?.BackgroundColor ?? NullColor;
++                authoredClearColor = BackgroundOverride ?? starSystem?.BackgroundColor ?? NullColor;
++            rstate.ClearColor = RenderHelpers.PrepareSceneClearColor(authoredClearColor,
++                msaa?.HdrOutputEnabled == true);
+             rstate.ClearAll();
+         }
+ 
+--- /dev/null
++++ b/src/LibreLancer.Tests/RendererColorSpaceTests.cs
+@@ -0,0 +1,30 @@
++using LibreLancer.Render;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class RendererColorSpaceTests
++{
++    [Fact]
++    public void HdrSceneClearColorDecodesSrgbAndPreservesAlpha()
++    {
++        var color = new Color4(0.5f, 0.04045f, 1f, 0.25f);
++
++        var result = RenderHelpers.PrepareSceneClearColor(color, hdrOutput: true);
++
++        Assert.Equal(0.21404114f, result.R, 6);
++        Assert.Equal(0.0031308f, result.G, 6);
++        Assert.Equal(1f, result.B, 6);
++        Assert.Equal(color.A, result.A);
++    }
++
++    [Fact]
++    public void LdrSceneClearColorRemainsUnchanged()
++    {
++        var color = new Color4(0.5f, 0.04045f, 1f, 0.25f);
++
++        var result = RenderHelpers.PrepareSceneClearColor(color, hdrOutput: false);
++
++        Assert.Equal(color, result);
++    }
++}
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -507,6 +507,11 @@
+   Shader- und RenderContext-Verknüpfung ist in
+   [HDR-Linear-Ausgabe](evidence/renderer/hdr-linear-output-implementation-20261016.md)
+   dokumentiert. Ein visueller NAP-Lauf war mangels NAP-Archiven nicht möglich.
++- [x] Die System- und Nebel-Hintergrundfarbe wird vor dem HDR-Framebuffer-Clear
++  mit derselben sRGB-EOTF linearisiert wie die Fog-Farbe im Materialshader.
++  Alpha und der gesamte LDR-Clear-Pfad bleiben unverändert. Die reine
++  Konvertierung ist getestet; ein kalibrierter Ingame-HDR/LDR-Hintergrundvergleich
++  fehlt weiterhin. Siehe [HDR-Clear-Farbvertrag](evidence/renderer/hdr-clear-color-contract-20261018.md).
+ - [x] Im opt-in HDR-Pfad diffuse Texturen, MAT-/Materialfarben, Vertexfarben,
+   diffuse/ambient Lichtfarben und Fog-Farbe vor der Beleuchtungs- und
+   Fogberechnung linear behandeln. Der gemeinsame Pfad umfasst Basic,
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -13,7 +13,7 @@
+ | Metallic/Roughness | Ergänzende Karten sind in Materialauflösung und PBR-Shader eingebunden; DFM besitzt einen skinned PBR-Pfad. | Kartenwirkung ist asset- und materialabhängig. Vollständige Asset-Abdeckung und systematische Spielabnahme fehlen. |
+ | Cubemaps / Reflexion | PBR bindet GGX-vorgefilterte Specular-Cubes und cosine-konvolvierte diffuse Irradiance. DDS-Cubemaps unterstützen zusätzlich lineare DX10-RGBA16F-Daten für HDR-Werte über 1. Die drei erzeugten Umwelt-Cubes und Metadaten liegen in `Data/NAP/Surface/` und `Data/SDK/fx/SurfaceMaps.ini`. | Lancer und LancerEdit bauen. Der NAP-only-Datenstart erreicht `Finished loading game data`; ein sichtbarer HDR-Cube-Lade- und Bildvergleich bleibt offen. Retail-Orientierung, Materialkalibrierung und breite Spielabnahme bleiben offen. Siehe `docs/evidence/renderer/pbr-world-reflection-20261017/` und `docs/evidence/renderer/pbr-environment-20261014/`. |
+ | Legacy-Environment-Maps | Bestehende Freelancer-Cubemap-Reflexionen lassen sich unabhängig vom PBR-IBL per Einstellung oder `--render-legacy-environment-maps=on|off` umschalten. Der Standard bleibt `on`, damit ältere Materialien ihr bisheriges Verhalten behalten. | Beide Startwerte laden bis ins Intro. Der gleiche Kamera-A/B-Bildvergleich fehlt noch; externe Bildschirmaufnahmen waren in der letzten Sitzung schwarz. |
+-| HDR und Tonemapping | Linearisiertes Scene-Target, ACES-Tonemapping, linearisierte PBR-Albedo-/Licht-/Emissionswerte und exakte sRGB-Ausgabe im PBR-LDR-Pfad. PBR nutzt denselben piecewise sRGB-zu-linear-Helper wie die übrigen Farbpfade. | Der Farbvertrag für Legacy-Vertexfarben, Transparenz, Fog und zusammengesetzte Effekte ist noch nicht für alle Pfade visuell abgenommen. Ein HDR/LDR-Vergleich ist unter `docs/evidence/renderer/postprocess-four-mode-ab-20261017/` dokumentiert. |
++| HDR und Tonemapping | Linearisiertes Scene-Target, ACES-Tonemapping, linearisierte PBR-Albedo-/Licht-/Emissionswerte und exakte sRGB-Ausgabe im PBR-LDR-Pfad. System- und Nebel-Clearfarben werden ebenfalls vor dem HDR-Clear linearisiert; LDR bleibt unverändert. | Der sRGB-Vertrag für Retail-INI-Farben ist durch Konvertierungstests, aber noch nicht durch kalibrierte Retail-Bildvergleiche abgenommen. Legacy-Vertexfarben, Transparenz, Fog und zusammengesetzte Effekte benötigen weiterhin eine visuelle Gesamtprüfung. HDR/LDR-Vergleich: `docs/evidence/renderer/postprocess-four-mode-ab-20261017/`; Clear-Farbvertrag: `docs/evidence/renderer/hdr-clear-color-contract-20261018.md`. |
+ | Bloom | HDR-Extraktion mittelt jetzt ein vollständiges 4×4-Quellfenster in Viertelauflösung; aufrundende Zielmaße behalten Randpixel bei ungeraden Fenstergrößen. Basis-, mittlere und breite Blur-Stufen sowie Schwelle, Radius, Auflösung und Kernel sind konfigurierbar. | Die Extraktion beseitigt das bisherige Unterabtasten der zentralen vier Texel. Der Code führt alle drei Stufen aus. Die vorhandene Bloom-Pyramidenaufnahme nennt ein Laufzeitpaket/Manifest vom 18.10. und gilt am Dokumentstand 17.10. nicht als verifizierter NAP-Lauf. Laufzeitabnahme, Halo-Kalibrierung und GPU-Kosten bleiben offen. |
+ | Antialiasing | SMAA-Pässe und MSAA-Auflösung; HDR/LDR-Kombinationen sowie Resize und Minimize/Restore wurden auf OpenGL/Mesa geprüft. | Andere Backends/Treiber, wiederholte Lifecycle-Zyklen und Fehler-Injektion stehen aus. |
+ | Dynamische Lichter und Schatten | Persistente und kurzlebige Lichter werden priorisiert; ein ausgewähltes Richtungslicht läuft durch Shadow-Map-Pass und 3×3-PCF. Alpha-Test-Texturen werden auch in PBR-Depth-/Shadow-Pässen anhand eines Material-Uniforms ausgeschnitten; dafür entstehen keine zusätzlichen Shader-Varianten. Blendtransparente Materialien werfen keine Schatten. Quelle und Ein/Aus-Schaltung sind konfigurierbar. | Hi02 belegt Pass, Lichtauswahl und Live-Schaltung auf einer OpenGL-GPU. Bias, Caster-Abdeckung und Bildqualität über weitere Materialien/Szenen brauchen kontrollierte Vergleiche. Siehe `docs/evidence/renderer/shadow-map-hi02-live-toggle-20261017/`. |
+--- /dev/null
++++ b/docs/evidence/renderer/hdr-clear-color-contract-20261018.md
+@@ -0,0 +1,20 @@
++# HDR frame clear color contract (2026-10-18)
++
++`SystemRenderer.ClearFrameAttachments` clears the active scene target either
++with the current system background color or, during a nebula transition, the
++nebula fog color. The HDR scene target is a linear `HdrBlendable` target and is
++later ACES tone mapped. The legacy material shaders convert those same
++INI-derived RGB colors with `LinearizeLegacyInput` before shading. Passing the
++raw normalized INI color directly to the HDR clear therefore skipped the
++conversion applied to the drawn fog and background-adjacent geometry.
++
++The frame clear now decodes RGB with the same piecewise sRGB EOTF used by the
++shader path only when `AntialiasTarget.HdrOutputEnabled` is true. Alpha is
++preserved. LDR clears are returned unchanged, including when HDR target
++allocation falls back to LDR.
++
++`RendererColorSpaceTests` checks a mid-range channel, the sRGB breakpoint, the
++white point, alpha preservation and the LDR identity path. This proves the
++conversion function and its intended mode behavior; it does not independently
++prove that all retail INI colors were authored in sRGB or provide an in-game
++visual comparison. That asset/color-space calibration remains open.
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 310 Client bundles and two native bundles. Each
++The active series contains 311 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -269,3 +269,5 @@
+ | 2310 | Blend sun-tinted system ambient in linear space for HDR output |
+ 
+ | 2311 | Sample full bloom downsample footprints and retain odd image edges |
++
++| 2312 | Linearize system and nebula frame-clear colors for HDR targets |
+--- a/patches/series
++++ b/patches/series
+@@ -311,3 +311,4 @@
+ client 2309-account-aliased-ibl-cubes.patch
+ client 2310-sunambient-linear-hdr-mix.patch
+ client 2311-bloom-extraction-downsample-footprint.patch
++client 2312-linearize-hdr-frame-clear-colors.patch

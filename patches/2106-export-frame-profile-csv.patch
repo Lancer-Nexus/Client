@@ -1,0 +1,126 @@
+diff --git a/src/LibreLancer/Interface/DebugView.cs b/src/LibreLancer/Interface/DebugView.cs
+--- a/src/LibreLancer/Interface/DebugView.cs
++++ b/src/LibreLancer/Interface/DebugView.cs
+@@ -4,7 +4,10 @@
+ 
+ using System;
+ using System.Collections.Generic;
++using System.Globalization;
++using System.IO;
+ using System.Numerics;
++using System.Text;
+ using ImGuiNET;
+ using LibreLancer.ImUI;
+ using LibreLancer.Missions;
+@@ -24,6 +27,7 @@
+         private double nextPerformancePercentileTime;
+         private double[] frameWorkPercentiles = new double[3];
+         private double[] frameIntervalPercentiles = new double[3];
++        private string? profileExportMessage;
+         private FreelancerGame game;
+         private ImGuiHelper igrender;
+ 
+@@ -149,6 +153,21 @@
+                     ImGui.Text($"Update + draw ms p50/p95/p99 (n={performanceSamplesRecorded}/{PerformanceSampleCount}): {frameWorkPercentiles[0] * 1000:F2} / {frameWorkPercentiles[1] * 1000:F2} / {frameWorkPercentiles[2] * 1000:F2}");
+                     ImGui.Text($"Frame interval ms p50/p95/p99: {frameIntervalPercentiles[0] * 1000:F2} / {frameIntervalPercentiles[1] * 1000:F2} / {frameIntervalPercentiles[2] * 1000:F2}");
+                 }
++                ImGui.BeginDisabled(performanceSamplesRecorded == 0);
++                if (ImGui.Button("Export recent frame profile (CSV)"))
++                {
++                    try
++                    {
++                        profileExportMessage = ExportFrameProfile();
++                    }
++                    catch (Exception e) when (e is IOException or UnauthorizedAccessException)
++                    {
++                        profileExportMessage = $"Frame profile export failed: {e.Message}";
++                    }
++                }
++                ImGui.EndDisabled();
++                if (!string.IsNullOrEmpty(profileExportMessage))
++                    ImGui.TextWrapped(profileExportMessage);
+                 debugWindow?.Invoke();
+                 CaptureMouse = ImGui.IsWindowHovered();
+                 ImGui.End();
+@@ -173,5 +192,36 @@
+ 
+         private static int PercentileIndex(int count, double percentile) =>
+             (int)Math.Ceiling((count - 1) * percentile);
++
++        private string ExportFrameProfile()
++        {
++            var directory = Path.Combine(
++                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
++                "LancerNexus",
++                "profiles");
++            Directory.CreateDirectory(directory);
++            var timestamp = DateTimeOffset.UtcNow.ToString("yyyyMMdd-HHmmss-fff", CultureInfo.InvariantCulture);
++            var filename = $"frame-profile-{timestamp}.csv";
++            var path = Path.Combine(directory, filename);
++            var csv = new StringBuilder();
++            csv.AppendLine("frame,renderer,width,height,update_draw_ms,frame_interval_ms,fps");
++            var start = (performanceSampleIndex - performanceSamplesRecorded + PerformanceSampleCount) % PerformanceSampleCount;
++            for (var i = 0; i < performanceSamplesRecorded; i++)
++            {
++                var index = (start + i) % PerformanceSampleCount;
++                var workMs = frameWorkSamples[index] * 1000;
++                var intervalMs = frameIntervalSamples[index] * 1000;
++                var fps = frameIntervalSamples[index] > 0 ? 1 / frameIntervalSamples[index] : 0;
++                csv.Append(i.ToString(CultureInfo.InvariantCulture)).Append(',')
++                    .Append(game.Renderer ?? "unknown").Append(',')
++                    .Append(game.Width.ToString(CultureInfo.InvariantCulture)).Append(',')
++                    .Append(game.Height.ToString(CultureInfo.InvariantCulture)).Append(',')
++                    .Append(workMs.ToString("F4", CultureInfo.InvariantCulture)).Append(',')
++                    .Append(intervalMs.ToString("F4", CultureInfo.InvariantCulture)).Append(',')
++                    .AppendLine(fps.ToString("F2", CultureInfo.InvariantCulture));
++            }
++            File.WriteAllText(path, csv.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
++            return $"Saved {performanceSamplesRecorded} frames: {path}";
++        }
+     }
+ }
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -39,7 +39,7 @@
+ 
+ ### 1. Render-Pipeline und Profiling
+ 
+-- [x] Ersten CPU-/Frame-Pacing-Messpunkt bereitstellen: Das Debugfenster zeigt gleitende p50/p95/p99-Werte über 300 Frames für die Update-/Draw-/EndFrame-Wandzeit und das Frame-Intervall einschließlich Swap/VSync. Die Messung läuft in SDL2, SDL3 und dem Null-Backend. Sie ist nur eine Diagnosegrundlage; GPU-Zeit, Speicher und reproduzierbare Szenenmessungen sind nicht enthalten.
++- [x] Ersten CPU-/Frame-Pacing-Messpunkt bereitstellen: Das Debugfenster zeigt gleitende p50/p95/p99-Werte über 300 Frames für die Update-/Draw-/EndFrame-Wandzeit und das Frame-Intervall einschließlich Swap/VSync. Die Messung läuft in SDL2, SDL3 und dem Null-Backend. Die letzten bis zu 300 Samples lassen sich als CSV mit Backend, Fenstermaß, Update-/Draw-Wandzeit und Frameintervall exportieren. Die Arbeitszeit kann Treiberwartezeit enthalten; GPU-Zeit, Speicher und reproduzierbare Szenenmessungen bleiben offen.
+ - [ ] Systemweite Stabilität und Laufzeitleistung auf Referenzhardware messen und verbessern: FPS sowie CPU-/GPU-Framezeiten (p50/p95/p99), Speicherverbrauch und Frame-Pacing in festen Raum-, Basis-, System-, Kampf- und UI-Szenen erfassen; Langzeitläufe, Szenenwechsel, Resize, Minimieren/Wiederherstellen und Gerätefehler auf Hänger, Abstürze und Ressourcenlecks prüfen. Erst Messungen gegen einen dokumentierten Ausgangswert gelten als Optimierungsnachweis.
+ - [ ] Render-Passes mit klaren Ein-/Ausgaben und expliziter Farb-/Tiefenpufferverwaltung vorbereiten.
+   - [x] Bestehende Forward-Aufrufreihenfolge, Opaque-/Transparent-Kommandos, Sterne, Nebel und AA-Resolve im Quellcode erfasst; ein formaler Ressourcenvertrag fehlt weiterhin. Siehe [Pass-Reihenfolge-Audit](evidence/renderer/forward-pass-order-audit-20261015.md).
+diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -152,9 +152,10 @@
+ sowie das gesamte Frame-Intervall einschließlich Swap/VSync. Die Werte werden
+ viermal pro Sekunde neu berechnet. SDL2, SDL3 und Null stellen die Messwerte
+ bereit. Die erste Messung ist CPU-seitige Wandzeit und kann Treiberwartezeit
+-enthalten; sie ist kein GPU-Timer. Das Overlay erfasst außerdem keine
+-Speicherstände und schreibt keine Messreihen in Dateien. Vorher/Nachher-Baselines
+-für die festen Szenen sowie GPU-Zeit und Ressourcenmessung bleiben offen.
++enthalten; sie ist kein GPU-Timer. Die letzten bis zu 300 Samples lassen sich
++aus dem Debugfenster als CSV mit Backend und Fenstermaß exportieren. GPU-Zeit und
++Ressourcenmessung sowie dokumentierte Vorher/Nachher-Baselines für feste Szenen
++bleiben offen.
+ 
+ ## Verifizierter Ausgangspunkt
+ 
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -107,3 +107,4 @@
+ jump-gate route.
+ | 2104 | Update transient-light tests for the configurable per-instance frame budget |
+ | 2105 | Keep dynamic light emitters behind geometry from leaking unshadowed light |
++| 2106 | Export recent CPU frame-pacing samples from the Debug overlay as CSV |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -105,3 +105,4 @@
+ client 2103-light-equipment-emission-visibility.patch
+ client 2104-transient-light-budget-test-fix.patch
+ client 2105-light-equipment-occlusion-gating.patch
++client 2106-export-frame-profile-csv.patch

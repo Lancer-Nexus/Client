@@ -1,0 +1,111 @@
+diff --git a/src/LibreLancer.Base/Graphics/AntialiasTarget.cs b/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
+--- a/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
++++ b/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
+@@ -148,10 +148,12 @@
+ 
+     private void ValidateAttachmentContracts()
+     {
++        var expectedSceneFormat = HdrOutputEnabled ? SurfaceFormat.HdrBlendable : SurfaceFormat.Bgra8;
+         if (Mode == AntialiasMode.None)
+         {
+             if (msaa != null || (HdrOutputEnabled && hdrScene?.Texture.Format != SurfaceFormat.HdrBlendable) ||
+-                (!HdrOutputEnabled && (!SsaoEnabled || ldrScene?.Texture.Format != SurfaceFormat.Bgra8)))
++                (!HdrOutputEnabled && (!SsaoEnabled || ldrScene?.Texture.Format != SurfaceFormat.Bgra8)) ||
++                !ActiveTargetMatches(expectedSceneFormat))
+                 throw new InvalidOperationException("HDR scene target does not satisfy its attachment contract.");
+             return;
+         }
+@@ -179,6 +181,9 @@
+                 (HdrOutputEnabled && hdrResolve?.Texture.Format != SurfaceFormat.HdrBlendable) ||
+                 (SsaoEnabled && (ssaoDepth?.Texture.Format != SurfaceFormat.Depth ||
+                     (!HdrOutputEnabled && ldrResolve?.Texture.Format != SurfaceFormat.Bgra8))) ||
++                !msaa.HasColor || !msaa.HasDepth ||
++                (msaa.ColorFormat is { } actualMsaaFormat && actualMsaaFormat != expectedSceneFormat) ||
++                !ActiveTargetMatches(expectedSceneFormat) ||
+                 msaa.RequestedDepthBits != 24 ||
+                 msaa.Samples != expectedSamples || msaa.Width != Width || msaa.Height != Height ||
+                 msaa.HasStencil)
+@@ -197,6 +202,9 @@
+             smaaEdges.Texture.Format != SurfaceFormat.Bgra8 ||
+             smaaBlend.Texture.Format != SurfaceFormat.Bgra8 ||
+             smaa.Texture.Format != (HdrOutputEnabled ? SurfaceFormat.HdrBlendable : SurfaceFormat.Bgra8) ||
++            !smaaEdges.HasColor || !smaaEdges.HasDepth || !smaaEdges.HasStencil ||
++            !smaaBlend.HasColor || !smaaBlend.HasDepth || !smaaBlend.HasStencil ||
++            !ActiveTargetMatches(expectedSceneFormat) ||
+             (HdrOutputEnabled && ldrToneMapped?.Texture.Format != SurfaceFormat.Bgra8) ||
+             smaaEdges.Width != Width || smaaEdges.Height != Height ||
+             smaaBlend.Width != Width || smaaBlend.Height != Height ||
+@@ -204,6 +212,10 @@
+             !ReferenceEquals(smaaBlend.DepthBuffer, depthStencil) || !depthStencil.HasStencil)
+             throw new InvalidOperationException("SMAA targets do not satisfy their attachment contracts.");
+     }
++
++    private bool ActiveTargetMatches(SurfaceFormat expectedColorFormat) =>
++        Target is { HasColor: true, HasDepth: true } activeTarget &&
++        (activeTarget.ColorFormat == null || activeTarget.ColorFormat == expectedColorFormat);
+ 
+     private void BeginGpuSubpass(SystemRenderSubpass pass) => GpuSubpassMarker?.Invoke(pass, true);
+     private void EndGpuSubpass(SystemRenderSubpass pass) => GpuSubpassMarker?.Invoke(pass, false);
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -62,6 +62,7 @@
+   - [x] Samplebare Tiefentextur als eigenen Graph-Ressourcentyp vom aktiven Szenen-Tiefenattachment getrennt. SSAO und Soft Particles deklarieren und validieren den DepthTexture-Passausgang beim realen Target-Binding; SSAO deklariert dieselbe Ressource als Quelle. Der restliche Main-Pass-Ablauf ist weiterhin manuell gesteuert.
+   - [x] Laufzeitvalidierung an die tatsächlichen Hauptpass-Aufrufe gebunden: pro Frame werden Reihenfolge, doppelte/fehlende Begin-End-Paare und Pflichtressourcen geprüft; optionale Szene-Tiefe und Schatten bleiben ausdrücklich optional. Der wiederverwendete Validator speichert ausgeführte Pässe als Bitmaske. Render-Befehle und Targetwechsel werden weiterhin manuell ausgeführt, also noch kein ausführbarer Render Graph.
+   - [x] Gebundene Backend-Renderziele stellen Farb-/Tiefen-/Stencil-Präsenz und ein bekanntes Farbformat bereit. `SystemRenderer` weist Wrapperziele ohne Farbe oder Tiefe zurück; GL-MSAA meldet das Farbformat nur für bekannte sized-Formate. Swapchainformat und Desktop-GLs unsized-MSAA-Storage bleiben unbekannt.
++  - [x] `AntialiasTarget` prüft beim Erzeugen die tatsächlichen aktiven Farb-/Tiefenattachments und für SMAA auch Stencil an Kanten- und Gewichtsziel; bekannte Zielformate müssen dem gewählten LDR-/HDR-Pfad entsprechen. Unbekanntes Desktop-MSAA-Format bleibt zulässig und wird nicht geraten.
+ - [ ] Render-Target-Resize, minimierte Fenster, Scissor-/Viewport-Wechsel und Geräteverlust für zusätzliche Pässe absichern.
+   - [x] `AntialiasTarget` registriert alle während des Aufbaus erzeugten GPU-Ressourcen in einem idempotenten `RenderResourceScope`. Teilaufbauten werden auch bei Konstruktionsfehlern in umgekehrter Erzeugungsreihenfolge abgebaut; die Postprocess-Pässe werden vor den von ihnen geliehenen Szenen-/SMAA-Zielen freigegeben. Fehler beim Freigeben einer Ressource verhindern die Freigabe der übrigen nicht. Der `SystemRenderer`-Pfad wurde mit HDR/Bloom/SSAO/SMAA unter OpenGL auf 960×540 → 1280×720 sowie Minimize/Restore geprüft; siehe [Resize-Laufzeitnachweis](evidence/renderer/postprocess-window-resize-20261017/README.md). Editor-/Offscreen-Targets, Fehler-Injektion, Geräteverlust und Cross-Backend-Wiederherstellung bleiben offen.
+   - [x] `SystemRenderer.Draw()` überspringt Frames mit Breite/Höhe 0. Bei geändertem Rendermaß oder AA-Modus gibt es das vorhandene MSAA-Target frei und erstellt es neu. Das belegt nur diesen System-Renderer-Pfad; Editor-/Offscreen-Targets, Wiederherstellungstests und Geräteverlust bleiben offen.
+diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -488,8 +488,11 @@
+   Farbresolve getrennt ab. Die Hauptphasen prüfen ihre Szenenziel-Bindung; SMAA
+   prüft Zielrollen und angeforderte Stencil-Attachments. Beim Anlegen des AA-
+   Ziels werden SMAA-Formate/Maße/Stencil sowie MSAA-Samplezahl/Maße geprüft.
+-  Caller-Formate, die vom Treiber gewählte sized-MSAA-Storage, API-Laufzeit-
+-  validierung und Render-Graph-Ausführung stehen aus. Zusätzlich leert SMAA jetzt vor dem stencil-maskierten
++  Die API-Abfrage des Caller-/Swapchainformats, das vom Treiber gewählte
++  Desktop-MSAA-Format, Load-/Store-Abgleich gegen echte API-Aufrufe und
++  Render-Graph-Ausführung stehen aus. `AntialiasTarget` prüft inzwischen auch
++  die Farb-/Tiefen-/Stencil-Präsenz seiner tatsächlich gebundenen Backends.
++  Zusätzlich leert SMAA jetzt vor dem stencil-maskierten
+   Gewichtspass das Gewichtsziel auf transparent schwarz, um veraltete Pixel aus
+   vorherigen Frames auszuschließen.
+   Details im [Target-Attachment-Audit](evidence/renderer/render-target-attachment-contract-20261016.md).
+diff --git a/docs/evidence/renderer/render-target-attachment-contract-20261016.md b/docs/evidence/renderer/render-target-attachment-contract-20261016.md
+--- a/docs/evidence/renderer/render-target-attachment-contract-20261016.md
++++ b/docs/evidence/renderer/render-target-attachment-contract-20261016.md
+@@ -83,7 +83,12 @@
+ 
+ `SystemRenderer` prüft bei jeder Szenephase, dass ein gebundenes Wrapperziel
+ Farbe und Tiefe besitzt. Das deckt `RenderTarget2D` und die darunterliegende
+-AA-Zielkette ab. Die Swapchain (`RenderTarget == null`) bleibt außerhalb dieser
++AA-Zielkette ab. Zusätzlich gleicht `AntialiasTarget` beim Erzeugen die
++aktiven Farb-/Tiefenattachments mit dem LDR-/HDR-Pfad ab und prüft bei SMAA
++die tatsächlich angehängten Stencil-Puffer der Kanten- und Gewichtsziel-
++Framebuffer. Ein vom Desktop-Treiber implementation-defined angelegtes
++MSAA-Farbformat bleibt unbekannt und wird nicht aus dem angeforderten Format
++abgeleitet. Die Swapchain (`RenderTarget == null`) bleibt außerhalb dieser
+ Abfrage; ihr tatsächliches Format und ihre Depth-/Stencilattachments sind
+ weiterhin nicht portabel abfragbar.
+ 
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,5 +1,5 @@
+ # Client patch groups
+ 
+-The active series contains 257 Client bundles and two native bundles. Each
++The active series contains 258 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -257,3 +257,4 @@ client 2255-soft-particles.patch
+ client 2256-separate-sampleable-scene-depth-contract.patch
+ client 2257-runtime-system-pass-validation.patch
+ client 2258-render-target-attachment-runtime-query.patch
++client 2259-validate-active-aa-target-attachments.patch

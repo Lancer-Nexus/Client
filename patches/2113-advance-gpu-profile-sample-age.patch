@@ -1,0 +1,121 @@
+--- a/src/LibreLancer/Render/GpuPassProfile.cs
++++ b/src/LibreLancer/Render/GpuPassProfile.cs
+@@ -9,16 +9,31 @@
+ {
+     private static readonly string[] Names = ["Depth", "Opaque", "Stars / nebula", "Transparent", "AA resolve"];
+     private static readonly GpuPassSample?[] Samples = new GpuPassSample?[Names.Length];
++    private static readonly long[] SampleFrames = new long[Names.Length];
+ 
+     public static int Count => Names.Length;
+     public static string GetName(int index) => Names[index];
+     public static GpuPassSample? GetSample(int index) => Samples[index];
+ 
+-    internal static void SetSample(int index, double milliseconds, long ageFrames) =>
+-        Samples[index] = new GpuPassSample(Names[index], milliseconds, ageFrames);
++    internal static void SetSample(int index, double milliseconds, long sampleFrame, long currentFrame)
++    {
++        SampleFrames[index] = sampleFrame;
++        Samples[index] = new GpuPassSample(Names[index], milliseconds,
++            Math.Max(0, currentFrame - sampleFrame));
++    }
++
++    internal static void UpdateAges(long currentFrame)
++    {
++        for (var i = 0; i < Samples.Length; i++)
++        {
++            if (Samples[i] is { } sample)
++                Samples[i] = sample with { AgeFrames = Math.Max(0, currentFrame - SampleFrames[i]) };
++        }
++    }
+ 
+     internal static void Clear()
+     {
+         Array.Clear(Samples);
++        Array.Clear(SampleFrames);
+     }
+ }
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -729,6 +729,8 @@
+                 return;
+             }
+ 
++            GpuPassProfile.UpdateAges(currentFrame);
++
+             if (gpuPassQueries == null && rstate.SupportsGpuTimerQueries)
+             {
+                 gpuPassQueries = new IGpuTimerQuery?[GpuPassProfile.Count];
+@@ -743,7 +745,7 @@
+             {
+                 if (gpuPassQueries[i]!.TryGetResult(out var nanoseconds, out var frameNumber))
+                     GpuPassProfile.SetSample(i, nanoseconds / 1_000_000.0,
+-                        Math.Max(0, currentFrame - frameNumber));
++                        frameNumber, currentFrame);
+             }
+         }
+ 
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Tests/GpuPassProfileTests.cs
+@@ -0,0 +1,28 @@
++using LibreLancer.Render;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class GpuPassProfileTests
++{
++    [Fact]
++    public void SampleAgeAdvancesWithRenderedFrameSequence()
++    {
++        GpuPassProfile.Clear();
++        try
++        {
++            GpuPassProfile.SetSample(0, 2.5, 10, 10);
++            Assert.Equal(0, GpuPassProfile.GetSample(0)!.Value.AgeFrames);
++
++            GpuPassProfile.UpdateAges(11);
++            Assert.Equal(1, GpuPassProfile.GetSample(0)!.Value.AgeFrames);
++
++            GpuPassProfile.UpdateAges(14);
++            Assert.Equal(4, GpuPassProfile.GetSample(0)!.Value.AgeFrames);
++        }
++        finally
++        {
++            GpuPassProfile.Clear();
++        }
++    }
++}
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -48,7 +48,7 @@
+   - [x] `SystemRenderer.Draw()` und `AntialiasTarget.SMAABlit()` stellen RenderTarget, Viewport-/Scissor-Stacks und ihre geänderten RenderContext-Zustände in `finally` wieder her. `SystemRenderer` stellt auch `ThnCamera.DefaultZ()` zurück und leert die Frame-Objektliste nach Fehlern. Fehler-Injektion und reguläre Resize-/Minimize-/Restore-Läufe bleiben als Laufzeitprüfung offen. Details im [Fehlerpfad-Audit](evidence/renderer/render-target-exception-path-audit-20261015.md).
+ - [ ] GPU-Zeit und Speicherverbrauch pro Pass messbar machen; Effekte müssen einzeln abschaltbar und nach Hardwareprofil skalierbar sein.
+   - [x] Bereitschaftsaudit abgeschlossen: Timer-Query-API und Query-Aufruf fehlen in OpenGL-/RenderContext-Abstraktion; die lokale Mesa-Laufzeit meldet `GL_ARB_timer_query`. Passgrenzen und eine nicht blockierende Abfragefolge sind dokumentiert. Speicherwerte sind noch nicht als Messung verfügbar. Siehe [GPU-Timer-Query-Audit](evidence/renderer/gpu-timer-query-readiness-audit-20261015.md).
+-  - [x] OpenGL-Timer-Queries für Depth, Opaque, Sterne/Nebel, Transparenz und AA-Resolve eingebaut. Vier Query-Slots pro Pass werden ohne blockierendes Ergebnis-Polling wiederverwendet; das Debug-Overlay zeigt Messwert und Sample-Alter. CSV-Zeilen erfassen den zuletzt verfügbaren GPU-Messwert samt Alter; nicht verfügbare Samples bleiben leer. Das Alter zählt Aufrufe von `SystemRenderer.Draw()` und hängt nicht von `RenderContext.FrameNumber`/`ClearAll()` ab. Die Abfrage läuft nur bei geöffnetem Debug-Overlay. Null und OpenGL ohne Timer-Query melden keine Unterstützung. Hardwarelauf, Vergleich der GPU-Zeit gegen Treiberprofiling sowie Speicherbuchhaltung bleiben offen.
++  - [x] OpenGL-Timer-Queries für Depth, Opaque, Sterne/Nebel, Transparenz und AA-Resolve eingebaut. Vier Query-Slots pro Pass werden ohne blockierendes Ergebnis-Polling wiederverwendet; das Debug-Overlay zeigt Messwert und Sample-Alter. CSV-Zeilen erfassen den zuletzt verfügbaren GPU-Messwert samt fortlaufend aktualisiertem Alter; nicht verfügbare Samples bleiben leer. Das Alter zählt Aufrufe von `SystemRenderer.Draw()` und hängt nicht von `RenderContext.FrameNumber`/`ClearAll()` ab; ein Regressionstest prüft das Weiterzählen. Die Abfrage läuft nur bei geöffnetem Debug-Overlay. Null und OpenGL ohne Timer-Query melden keine Unterstützung. Hardwarelauf, Vergleich der GPU-Zeit gegen Treiberprofiling sowie Speicherbuchhaltung bleiben offen.
+ - [ ] Referenzszenen und feste Screenshots für Raum, Basis, Sternensystem, Nebel, Partikel und LancerEdit-Vorschau festlegen.
+ 
+ ### 2. Bumpmapping / Normalmaps vervollständigen
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 111 Client bundles and two native bundles. Each
++The active series contains 112 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -114,3 +114,4 @@
+ | 2110 | Include asynchronous GPU pass samples in frame profile CSV |
+ | 2111 | Log built-in shader compilation wall time per bundle and in total |
+ | 2112 | Count asynchronous GPU sample age by rendered system frame |
++| 2113 | Advance asynchronous GPU sample age on every rendered system frame |
+--- a/patches/series
++++ b/patches/series
+@@ -112,3 +112,4 @@
+ client 2110-export-gpu-pass-profile-csv.patch
+ client 2111-shader-compilation-timing.patch
+ client 2112-gpu-profile-render-frame-age.patch
++client 2113-advance-gpu-profile-sample-age.patch

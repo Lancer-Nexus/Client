@@ -1,0 +1,82 @@
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -88,6 +88,7 @@
+         private readonly Action antialiasResolveCallback;
+         private readonly Action depthStateCallback;
+         private readonly Action shadowMapCallback;
++        private readonly Action shadowDepthDrawCallback;
+         private readonly Action opaqueHookCallback;
+         private readonly Action physicsHookCallback;
+         private readonly Action debugOverlayCallback;
+@@ -164,6 +165,7 @@
+             antialiasResolveCallback = ResolveAntialiasPass;
+             depthStateCallback = SetDepthStatePass;
+             shadowMapCallback = DrawShadowMapPass;
++            shadowDepthDrawCallback = DrawShadowDepthContent;
+             opaqueHookCallback = InvokeOpaqueHookPass;
+             physicsHookCallback = InvokePhysicsHookPass;
+             debugOverlayCallback = DrawDebugOverlayPass;
+@@ -1397,11 +1399,7 @@
+                 rstate.SetCamera(shadowCamera);
+                 Commands.Camera = shadowCamera;
+                 Commands.DepthOnlyPass = true;
+-                ExecuteGpuPass(SystemRenderPass.ShadowMap, null, () =>
+-                {
+-                    foreach (var model in shadowCasters)
+-                        model.ShadowDepthPrepass(shadowCamera, camera, Commands);
+-                });
++                ExecuteGpuPass(SystemRenderPass.ShadowMap, null, shadowDepthDrawCallback);
+             }
+             finally
+             {
+@@ -1432,6 +1430,13 @@
+                               $"Y={selectedLightPriority:F3}";
+             return true;
+         }
++
++        private void DrawShadowDepthContent()
++        {
++            foreach (var model in shadowCasters)
++                model.ShadowDepthPrepass(shadowCamera, camera, Commands);
++        }
++
+         private void EndGpuPass(SystemRenderPass pass)
+         {
+             try
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -67,7 +67,7 @@
+   - [x] Statische Passvertrag-Prüfung verlangt pro Attachment genau eine Ressource und gleicht Store/Resolve-Verhalten mit den deklarierten Writes ab; Resolve ist nur für Color erlaubt. Source-Attachments bleiben Read-Verträge. Die Metadaten steuern weiterhin nicht selbst die API-Aufrufe.
+   - [x] Die statische Passfolgenprüfung wertet optionale Reads wie die Laufzeitprüfung aus und verlangt sie nicht als zwingende Eingaben; so sind sequenzielle Prüfläufe auch ohne optionalen Schatten- oder Tiefenpuffer gültig.
+   - [x] Die Hauptpass-Ausführungsreihenfolge steht in den typisierten Passdeskriptoren und wird von Laufzeitprüfung sowie Scheduler daraus gelesen; der separate Pass-zu-Order-Switch ist entfernt. Der Graph führt die Passcallbacks aus.
+-  - [x] `SystemRenderPassGraph` topologisch sortiert und führt Hauptpässe, Physics-Hook, Debug-Overlay und optionalen AA-/HDR-Resolve anhand deklarierter Read-/Write-Ressourcen und expliziter Abhängigkeiten aus. Derselbe Scheduler kompiliert und führt den Postprocess-Plan aus. Ressourcenproduzenten dürfen unabhängig von ihrer Registrierungsreihenfolge stehen; Read-after-write, Write-after-read und Write-after-write werden eingeordnet. Pflicht-Reads ohne Producer, fehlende explizite Vorgänger und Zyklen werden vor Ausführung der Callbacks abgewiesen. Knoten und Abhängigkeitspuffer werden zwischen Frames wiederverwendet; bei gleicher exakter Passstruktur und denselben externen Ressourcen wird auch die topologische Ausführungsfolge wiederverwendet. Eine Strukturänderung löst eine erneute Kompilierung aus. Targetwechsel und Attachments bleiben in den Passcallbacks. Die Abhängigkeitsauflösung nutzt keine pro Kompilierung erzeugten lokalen Closure-Helfer mehr. Sämtliche `SystemRenderer`-Framegraph-Callbacks (Setup, Clear, Depth, Opaque, Sterne/Nebel, Transparent, Hooks, Debug und AA-Resolve) verwenden langlebige Delegates; die Callback-Registrierung des Hauptgraphs erzeugt keine pro Frame eingefangenen Lambdas mehr. Weitere Renderhilfen außerhalb dieses Graphs, insbesondere der Shadow-Map-Zeichenpfad, sind davon nicht erfasst. Laufzeit-/Bildabnahme und Frame-Profiling bleiben offen.
++  - [x] `SystemRenderPassGraph` topologisch sortiert und führt Hauptpässe, Physics-Hook, Debug-Overlay und optionalen AA-/HDR-Resolve anhand deklarierter Read-/Write-Ressourcen und expliziter Abhängigkeiten aus. Derselbe Scheduler kompiliert und führt den Postprocess-Plan aus. Ressourcenproduzenten dürfen unabhängig von ihrer Registrierungsreihenfolge stehen; Read-after-write, Write-after-read und Write-after-write werden eingeordnet. Pflicht-Reads ohne Producer, fehlende explizite Vorgänger und Zyklen werden vor Ausführung der Callbacks abgewiesen. Knoten und Abhängigkeitspuffer werden zwischen Frames wiederverwendet; bei gleicher exakter Passstruktur und denselben externen Ressourcen wird auch die topologische Ausführungsfolge wiederverwendet. Eine Strukturänderung löst eine erneute Kompilierung aus. Targetwechsel und Attachments bleiben in den Passcallbacks. Die Abhängigkeitsauflösung nutzt keine pro Kompilierung erzeugten lokalen Closure-Helfer mehr. Sämtliche `SystemRenderer`-Framegraph-Callbacks (Setup, Clear, Depth, Opaque, Sterne/Nebel, Transparent, Hooks, Debug und AA-Resolve) sowie der Shadow-Map-Zeichencallback verwenden langlebige Delegates; die Callback-Registrierung dieser GPU-Pässe erzeugt keine pro Frame eingefangenen Lambdas mehr. Laufzeit-/Bildabnahme und Frame-Profiling bleiben offen.
+   - [x] Der Hauptpass-Tracker veröffentlicht nach erfolgreichem Draw nur deklarierte Writes, deren optionale Attachments am konkreten Target vorhanden sind. Fehlende oder unbekannte optionale Anhänge werden nicht als verfügbare Frame-Ressourcen ausgegeben. Die Passplanung erfolgt im Graphen; Targetwechsel bleiben in den jeweiligen Callbacks.
+   - [x] Gebundene Backend-Renderziele stellen Farb-/Tiefen-/Stencil-Präsenz und ein bekanntes Farbformat bereit. `SystemRenderer` weist Ziele zurück, denen laut Passvertrag zwingende Anhänge fehlen; GL-MSAA meldet das Farbformat nur für bekannte sized-Formate. Swapchainformat und Desktop-GLs unsized-MSAA-Storage bleiben unbekannt.
+   - [x] `AntialiasTarget` prüft beim Erzeugen die tatsächlichen aktiven Farb-/Tiefenattachments und für SMAA auch Stencil an Kanten- und Gewichtsziel; bekannte Zielformate müssen dem gewählten LDR-/HDR-Pfad entsprechen. Unbekanntes Desktop-MSAA-Format bleibt zulässig und wird nicht geraten.
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 284 Client bundles and two native bundles. Each
++The active series contains 285 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -247,3 +247,4 @@
+ | 2283 | Reuse opaque and transparent SystemRenderer callbacks across frames |
+ | 2284 | Reuse SystemRenderer star and nebula callbacks across frames |
+ | 2285 | Reuse the SystemRenderer antialias resolve callback |
++| 2286 | Reuse the SystemRenderer shadow depth callback |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -285,3 +285,4 @@
+ client 2283-cache-opaque-transparent-pass-callbacks.patch
+ client 2284-cache-stars-nebula-pass-callbacks.patch
+ client 2285-cache-antialias-resolve-callback.patch
++client 2286-cache-shadow-depth-callback.patch

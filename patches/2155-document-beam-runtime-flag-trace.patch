@@ -1,0 +1,172 @@
+--- a/docs/beam-and-explosion-effects-audit.md
++++ b/docs/beam-and-explosion-effects-audit.md
+@@ -26,10 +26,10 @@
+   Bildqualität bei Überlast müssen noch in reproduzierbaren Szenen gemessen
+   werden.
+ 
+-Der NAP-Eingang `Data/NAP/Effects/fx/BeamEffects.ini` enthält 55 Definitionen:
+-51 `BeamSpear` und 4 `BeamBolt`. Alle haben `flash_size`; 47 Werte sind `3`,
+-6 sind `9`, einer ist `8` und einer ist `4`. Die INI-Daten belegen damit die
+-breite Nutzung des Parameters, aber nicht seine Laufzeitsemantik.
++Der aktuelle NAP-Eingang `Data/NAP/Effects/fx/BeamEffects.ini` enthält 55
++Definitionen: 51 `BeamSpear` und 4 `BeamBolt`. Alle haben `flash_size`; 47 Werte
++sind `3`, 6 sind `9`, einer ist `8` und einer ist `4`. Die INI-Daten belegen
++damit die breite Nutzung des Parameters, aber nicht seine Laufzeitsemantik.
+ 
+ ## Retail-Parserbefund
+ 
+@@ -55,31 +55,61 @@
+   Zustands und die Bedeutung des Flags sind nicht belegt. Damit ist die
+   `flash_size`-Nutzung an einen konkreten Null-Parameter-Aufruf gebunden, aber
+   noch keinem bekannten Gameplay- oder Beam-Modus zuzuordnen.
+-- Der Wrapper `FUN_004fa0a0` zeigt, wo dieser Parameter entsteht: Er setzt
+-  zunächst Bit `0` seines Flags zurück und berechnet einen Geometriefaktor aus
+-  den Werten an `this+0x78` und `this+0x80` (Quotient, wenn der Zähler kleiner
+-  ist, sonst `1.0`). Bei gesetzter Bitmaske `2` in `this+0x70` oder einem
+-  Faktor von null ruft er den Renderer mit `param_3 = 0` auf. Archetypwert `0`
+-  führt zu `FUN_004fa270`, Wert `1` zu `FUN_004fb1e0`. Das grenzt den
+-  Aufrufpfad ein, benennt aber weder das Flag noch die Bedeutung der beiden
+-  Faktorwerte.
++- Der Wrapper `FUN_004fa0a0` berechnet einen Geometriefaktor aus
++  `this+0x78` und `this+0x80`: solange der erste Wert kleiner ist, wird der
++  Quotient verwendet, danach `1.0`. `FUN_004f9c20` addiert sein Updateargument
++  auf `this+0x78`. `FUN_004fc8b0` setzt `this+0x80` aus `core_length`,
++  `tail_length`, einer Konstante und dem Betrag eines vom Besitzer gelieferten
++  Vektors. Das sieht nach einer zeitlichen Beam-Normierung aus; die genaue
++  Bedeutung des Vektors bleibt unbestätigt. Bei Bit `0x02` oder Faktor `0`
++  ruft der Wrapper den Renderer mit `param_3 = 0` auf. Archetypwert `0`
++  führt zu `FUN_004fa270`, Wert `1` zu `FUN_004fb1e0`. Bei Bit `0x02` oder
++  Faktor `0` erhält der Renderer also `param_3=0`; die genaue Semantik des
++  Besitzer-Vektors im Normierungswert ist noch nicht bestätigt.
+   [Wrapper-Decompilierung und Metadaten](/home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-15-flash-size-trace/Freelancer-beam-wrapper-004fa0a0.md)
+   dokumentieren den erzwungenen Funktionsanfang bei `0x004fa0a0`; Ghidra hatte
+   dort zuvor Instruktionen, aber keinen Funktionsdatensatz.
+-- Die Statusprüfung ist jetzt weiter eingegrenzt: `FUN_0054bc80()` liefert
+-  genau dann `true`, wenn der globale aktive Objektzeiger `DAT_006164dc` auf
+-  `&DAT_00678ba4` zeigt. `FUN_00549bc0()` ersetzt diesen Zeiger beim Umschalten
+-  des aktiven Objekts; `FUN_00549e70()` wählt dabei benannte Modi wie `player`,
+-  `first_person` und `third_person`. Der `flash_size`-Zweig hängt damit von der
+-  aktiven View-/Controller-Instanz ab. Welche konkrete Instanz `DAT_00678ba4`
+-  ist und welche Rolle Flagmaske `8` dabei spielt, bleibt offen. Die
++- MSVC-RTTI bestätigt `BeamEffect : Effect`; sein Vftable-Kandidat beginnt bei
++  `005d9dac`, Slot `+0x1c` ist `FUN_004fa0a0`. Der BeamEffect-Konstruktor
++  `FUN_004f9540` setzt dieses Vftable und initialisiert `this+0x70` auf null.
++  Der zuvor zugeordnete Konstruktor `FUN_004f8d00` gehört laut RTTI zu
++  `CameraParticles : Effect` und setzt dessen separate Vftable `005d9d84`.
++  Die BeamEffect-Methoden prüfen Bits `0x01`/`0x02`; `FUN_004fa270` prüft
++  zusätzlich `0x08`. `flash_size` greift damit nur, wenn dieser Aufrufpfad
++  `param_3=0` liefert, Bit `0x08` gesetzt und `FUN_0054bc80()` false ist.
++  Der Writer von Bit `0x02` (`FUN_004fc8f0`) ändert Bits `0x02` und `0x04`,
++  aber Ghidra fand weder direkte Codeaufrufe noch gespeicherte Funktionspointer
++  auf diesen Helper. Ein indirekter oder dynamischer Aufruf ist damit nicht
++  ausgeschlossen. Der Writer von Bit `0x08` liegt außerhalb der virtuellen BeamEffect-
++  Methoden: `FUN_0053f340` übernimmt sein Bit `0x08` aus `param_3` und schreibt
++  es auf den erzeugten BeamEffect. `FUN_0052dde0` setzt den Parameter auf `1`,
++  wenn `[ESI+8]` dem von `FUN_0054baf0()` gelieferten Spieler-Schiffobjekt
++  entspricht; dieser Zweig nutzt `ComputeProjectilePosAndVelocity_OneBarrel`.
++  Die genaue View-Bedingung für `flash_size` bleibt separat offen. Details:
++  [Runtimeklassen-Trace](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/Freelancer-beam-runtime-class.md>), [Writer-Kontext](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/Freelancer-beam-flag-writer-context.md>) und [Aufrufer-Trace](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/Freelancer-beam-effect-factory-references.md>).
++- Die Statusprüfung ist weiter eingegrenzt: `FUN_0054bc80()` liefert genau dann
++  `true`, wenn der aktive Pointer aus `FUN_0040f130()` auf `&DAT_00678ba4` zeigt.
++  Ghidra ordnet `00678ba4` dem initialisierten `.data`-Block zu; das erste
++  DWORD ist null. Die Getter `FUN_0054bc30/40/50` liefern drei solche
++  nullgefüllten Speicheradressen (`00678ba4`, `00678d48`, `00678f60`), die in
++  `FUN_0050c330`/`FUN_005134c0` per Pointergleichheit verglichen werden. Das
++  spricht für statische View-/Controller-Marker, nicht für eine nachgewiesene
++  polymorphe Singleton-Klasse. `FUN_00549bc0()` ersetzt den aktiven Pointer beim
++  Umschalten; `FUN_00549e70()` wählt benannte Modi wie `player`, `first_person`
++  und `third_person`. `FUN_0054b900()` reagiert auf denselben Marker `00678ba4`
++  an einem separaten aktuellen Pointer mit einem Wechsel zu `third_person`; ob
++  diese Variable dieselbe Rolle wie `DAT_006164dc` hat, ist nicht belegt. Der
++  `flash_size`-Zweig hängt damit nachweislich von Pointer-/Viewzustand ab, aber
++  der konkrete Modus sowie die Bedeutung von Flagbit `8` bleiben offen. Der
++  Storage-Befund und seine Grenzen stehen im
++  [Marker-Storage-Trace](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-view-state-trace/Freelancer-view-state-marker-storage.md>). Die
+   Referenz- und Decompiler-Auszüge zu [aktivem Zeiger](/home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-15-flash-size-trace/Freelancer-state-global-006164dc.md),
+   [Umschalter](/home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-15-flash-size-trace/Freelancer-state-switcher-00549bc0.md)
+   und [Sonderinstanz](/home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-15-flash-size-trace/Freelancer-sentinel-00678ba4.md)
+   enthalten die Herkunft.
+ - Damit ist ein Retail-Geometrieverbrauch nachgewiesen. Die Erzeugung und
+   Null-Aufrufbedingung von `param_3` sind eingegrenzt; die fachliche Bedeutung
+-  des Faktors, Flag-Bit `8`, `FUN_0054bc80()` und der genaue sichtbare Zustand
++  des Faktors, Flag-Bit `8` und der genaue sichtbare Zustand
+   sind noch offen. `flash_size` pauschal als Mündungsblitz zu interpretieren
+   wäre weiterhin unbelegt.
+ - Die Parser- und Renderer-Auszüge mit Decompiler-Ausgabe liegen lokal in der
+@@ -100,19 +130,60 @@
+   kleine Schiffe, große Schiffe und Minen aus dem NAP-Bestand ausgewählt und
+   mit unveränderten Timings verglichen werden.
+ 
++### Codepfadprüfung 2026-10-16
++
++Die Client-Aufrufer für Projektiltreffer (`World/ProjectileManager.cs`),
++Munitionszerstörung und CMP-Abtrennung (`Client/CGameSession.Space.cs`),
++Schiffs- und Ausrüstungszerstörung (`GameStates/SpaceGameplay.cs`) sowie
++Asteroidenzerstörung (`World/Components/AsteroidFieldComponent.cs`) übergeben
++`ResolvedFx` an `GameWorld.SpawnTempFx()`. Dieser zentrale Pfad löst das ALE aus
++und reicht `DynamicLightAnimation`, Lichtreichweite, Zeit-/Reichweitenfaktor
++und Sound an den Renderer beziehungsweise SoundManager weiter. Der Aufrufpfad
++ist damit statisch verbunden; diese Prüfung bestätigt keine visuelle Darstellung
++für jeden Effekt. Die NAP-only-Release-Laufzeitbelege vom 16.10. prüfen die
++M01A-Basisexplosion und eine QA-ausgelöste LI-Jägerzerstörung; die letztere
++zeigt eine sichtbare mehrteilige ALE-Explosion. Transientlicht-A/B,
++Großschiff-Fuse-Ereignisse, Minen und abgetrennte Ausrüstung bleiben offen.
++Ein ergänzender NAP-Inventarlauf fand für 69 Schiff-Archetypen keine fehlenden
++Explosion-Arch-, Effektprofil- oder ALE-Dateien. 17 Archetypen haben laut INI
++keinen direkten Effekt; fünf weitere nutzen ein Effektprofil ohne `vis_effect`.
++Großschiffe starten sichtbare Sequenzen zusätzlich über netzwerkübertragene
++Fuse-Effekte. Einzelheiten und Grenzen: [NAP-Explosionsinventar](evidence/renderer/explosion-nap-profile-inventory-20261016.md).
++
++Noch separat visuell abzunehmen sind mindestens:
++
++- Treffer-/Munitionsblitz und Projektil-Aufschlag;
++- kleine Schiffszerstörung sowie große Schiffs-/Stationszerstörung;
++- Minenexplosion;
++- zerstörte Ausrüstung und CMP-Abtrennung;
++- sichtbarer Lichtbeitrag bei aktiviertem `render_transient_effect_lights` und
++  Kontrolllauf mit ausgeschalteter Option.
++
+ ## Nächste Arbeit
+ 
+ 1. [x] `FUN_004fa0a0` als Aufrufer verfolgen: Der Geometriefaktor wird aus zwei
+    Objektwerten berechnet und bei Flagmaske `2` oder Faktor `0` als `param_3=0`
+    weitergegeben. Der Archetyp verzweigt zu den Spear-/Bolt-Renderern.
+-2. [ ] Die genaue Identität der Sonderinstanz `DAT_00678ba4`, die Bedeutung
+-   von Flagmaske `8` und den Geometriefaktor ermitteln. Die State-Trace belegt,
+-   dass `FUN_0054bc80()` die aktive View-/Controller-Instanz mit dieser
+-   Sonderinstanz vergleicht; der genaue Beam-Modus bleibt offen. Erst dann ist
+-   der `flash_size`-Sonderzweig eindeutig genug für eine Runtime-Änderung.
+-3. [ ] Den belegten Zweig im Beam-Renderer umsetzen und Null-, Grenz- sowie
+-   typische NAP-Werte abdecken.
+-4. [ ] Beam- und Explosionseffekte mit NAP-only-Containern visuell vergleichen;
++2. [x] Speicherart des Zustandsmarkers bestimmen: `DAT_00678ba4` liegt als
++   nullgefüllte statische Adresse im `.data`-Block, ohne bekannte VTable. Zwei
++   weitere Getter liefern gleichartige Marker. Das belegt Pointer-Token, aber
++   keinen benannten View-Modus. Details: [Marker-Storage-Trace](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-view-state-trace/Freelancer-view-state-marker-storage.md>).
++3. [x] Writerbedingung zuordnen: `FUN_0052dde0` setzt den Parameter für
++   `FUN_0053f340` im Zweig, in dem `[ESI+8]` dem von `FUN_0054baf0()` gelieferten
++   Spieler-Schiffobjekt entspricht. Dieser Zweig berechnet die
++   Projektiltransformation über `ComputeProjectilePosAndVelocity_OneBarrel`.
++   Quellen: [Dispatcher-Instruktionen](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/Freelancer-beam-effect-dispatch-instructions.md>), [Spielerobjekt-Getter](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/Freelancer-beam-view-marker-0054baf0.md>) und [Watcher-Referenzen](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-16-beam-runtime-class-trace/Freelancer-beam-global-00679744.md>).
++4. [ ] Den konkreten View-/Controller-Modus hinter Marker `DAT_00678ba4` und
++   den Kamera-/View-Zustand hinter `FUN_0054bc80()` zuordnen. Der Geometriefaktor
++   ist als Verhältnis von Updatewert `this+0x78` zu Normierungswert `this+0x80`
++   eingegrenzt; der Vektor für den Normierungswert ist noch nicht identifiziert.
++   Der Marker ist ein Null-DWORD im `.data`-Bereich; ein separater Pfad wechselt
++   bei Gleichheit zu `third_person`, benennt den Marker aber nicht. Den Helper
++   für Flag `0x02` und seine Aufrufer weiterverfolgen.
++5. [ ] Den belegten Zweig im Beam-Renderer entsprechend Spieler-Schiff,
++   Viewzustand und Startfaktor umsetzen; Null-, Grenz- sowie typische NAP-Werte
++   abdecken.
++6. [ ] Beam- und Explosionseffekte mit NAP-only-Containern visuell vergleichen;
+    Originalwerte und Timing als Referenz erhalten.
+-5. [ ] Erst nach diesen Vergleichen den übergeordneten Effekt-Todo-Punkt als
++7. [ ] Erst nach diesen Vergleichen den übergeordneten Effekt-Todo-Punkt als
+    abgeschlossen markieren.
+--- a/patches/series
++++ b/patches/series
+@@ -154,3 +154,4 @@
+ client 2152-verify-normalmap-tangent-edge-cases.patch
+ client 2153-record-sun-ambient-luminance-ab.patch
+ client 2154-preserve-sun-ambient-option-on-return.patch
++client 2155-document-beam-runtime-flag-trace.patch

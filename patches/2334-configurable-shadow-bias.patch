@@ -1,0 +1,194 @@
+--- a/src/LibreLancer/Render/IRendererSettings.cs
++++ b/src/LibreLancer/Render/IRendererSettings.cs
+@@ -23,6 +23,7 @@
+     bool RenderDepthPrepass => false;
+     bool RenderShadows => false;
+     string RenderShadowSource => "auto";
++    float RenderShadowBias => 0.0015f;
+     bool RenderSsao => false;
+     bool RenderSoftParticles => false;
+     float SoftParticleDistance => 2f;
+--- a/src/LibreLancer/GameSettings.cs
++++ b/src/LibreLancer/GameSettings.cs
+@@ -71,6 +71,8 @@
+         public bool RenderShadows = false;
+         [Entry("render_shadow_source")]
+         public string RenderShadowSource = "auto";
++        [Entry("render_shadow_bias")]
++        public float RenderShadowBias = 0.0015f;
+         [Entry("render_ssao")]
+         public bool RenderSsao = false;
+         [Entry("render_soft_particles")]
+@@ -160,6 +162,7 @@
+         bool IRendererSettings.RenderDepthPrepass => RenderDepthPrepass;
+         bool IRendererSettings.RenderShadows => RenderShadows;
+         string IRendererSettings.RenderShadowSource => RenderShadowSource;
++        float IRendererSettings.RenderShadowBias => RenderShadowBias;
+         bool IRendererSettings.RenderSsao => RenderSsao;
+         bool IRendererSettings.RenderSoftParticles => RenderSoftParticles;
+         float IRendererSettings.SoftParticleDistance => SoftParticleDistance;
+@@ -225,6 +228,7 @@
+             writer.WriteLine($"render_depth_prepass = {RenderDepthPrepass.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_shadows = {RenderShadows.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_shadow_source = {RenderShadowSource}");
++            writer.WriteLine($"render_shadow_bias = {RenderShadowBias.ToString("G9", CultureInfo.InvariantCulture)}");
+             writer.WriteLine($"render_ssao = {RenderSsao.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_soft_particles = {RenderSoftParticles.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_soft_particle_distance = {Fmt(SoftParticleDistance)}");
+@@ -285,6 +289,7 @@
+                 RenderDepthPrepass = RenderDepthPrepass,
+                 RenderShadows = RenderShadows,
+                 RenderShadowSource = RenderShadowSource,
++                RenderShadowBias = RenderShadowBias,
+                 RenderSsao = RenderSsao,
+                 RenderSoftParticles = RenderSoftParticles,
+                 SoftParticleDistance = SoftParticleDistance,
+@@ -343,6 +348,7 @@
+             RenderDepthPrepass = other.RenderDepthPrepass;
+             RenderShadows = other.RenderShadows;
+             RenderShadowSource = other.RenderShadowSource;
++            RenderShadowBias = other.RenderShadowBias;
+             RenderSsao = other.RenderSsao;
+             RenderSoftParticles = other.RenderSoftParticles;
+             SoftParticleDistance = other.SoftParticleDistance;
+@@ -363,6 +369,11 @@
+ 
+         public void Validate()
+         {
++            if (!float.IsFinite(RenderShadowBias) || RenderShadowBias is < 0f or > 0.02f)
++            {
++                FLLog.Info("Config", $"Shadow bias {RenderShadowBias} is unsupported; using 0.0015.");
++                RenderShadowBias = 0.0015f;
++            }
+             RenderShadowSource = string.IsNullOrWhiteSpace(RenderShadowSource)
+                 ? "auto"
+                 : RenderShadowSource.Trim();
+--- a/src/LibreLancer/Render/RenderMaterial.cs
++++ b/src/LibreLancer/Render/RenderMaterial.cs
+@@ -24,6 +24,7 @@
+         public static Texture2D? ShadowDepthTexture;
+         public static Matrix4x4 ShadowViewProjection;
+         public static float ShadowMapTexelSize;
++        public static float ShadowBias = 0.0015f;
+         public static Texture2D? ParticleSceneDepthTexture;
+         public static float ParticleSoftness;
+ 
+@@ -215,7 +216,7 @@
+             var parameters = new ShadowParameters
+             {
+                 ViewProjection = ShadowViewProjection,
+-                Values = new Vector4(0.0015f, ShadowMapTexelSize, 0, 0)
++                Values = new Vector4(ShadowBias, ShadowMapTexelSize, 0, 0)
+             };
+             shader.SetUniformBlock(7, ref parameters);
+             context.Textures[6] = ShadowDepthTexture;
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -1428,6 +1428,7 @@
+             RenderMaterial.ShadowDepthTexture = shadowTarget.Texture;
+             RenderMaterial.ShadowViewProjection = shadowCamera.ViewProjection;
+             RenderMaterial.ShadowMapTexelSize = 1f / ShadowMapResolution;
++            RenderMaterial.ShadowBias = Settings.RenderShadowBias;
+             ShadowMapStatus = $"active '{selectedLight.SourceNickname ?? "<unnamed>"}' " +
+                               $"dir rgb=({selectedLight.Light.Color.R:F3}," +
+                               $"{selectedLight.Light.Color.G:F3},{selectedLight.Light.Color.B:F3}) " +
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -44,6 +44,7 @@
+             Console.WriteLine("         --render-bloom=on|off");
+             Console.WriteLine("         --render-depth-prepass=on|off");
+             Console.WriteLine("         --render-shadow-source=auto|<light-nickname>");
++            Console.WriteLine("         --render-shadow-bias=0..0.02");
+             Console.WriteLine("         --render-ssao=on|off");
+             Console.WriteLine("         --render-soft-particles=on|off");
+             Console.WriteLine("         --render-soft-particle-distance=0.05..20");
+@@ -249,6 +250,7 @@
+         private bool? depthPrepass;
+         private bool? shadows;
+         private string? shadowSource;
++        private float? shadowBias;
+         private bool? ssao;
+         private bool? softParticles;
+         private float? softParticleDistance;
+@@ -363,6 +365,15 @@
+                     if (!ParseToggle(out var shadowsEnabled)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
+                     shadows = shadowsEnabled;
+                     return true;
++                case "--render-shadow-bias":
++                    if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var shadowBiasValue) &&
++                        float.IsFinite(shadowBiasValue) && shadowBiasValue is >= 0f and <= 0.02f)
++                    {
++                        shadowBias = shadowBiasValue;
++                        return true;
++                    }
++                    error = $"{name} accepts a finite number from 0 through 0.02.";
++                    return false;
+                 case "--render-shadow-source":
+                     if (string.IsNullOrWhiteSpace(value) || value.Length > 128 || value.Any(char.IsControl))
+                     {
+@@ -563,6 +574,7 @@
+             if (depthPrepass.HasValue) settings.RenderDepthPrepass = depthPrepass.Value;
+             if (shadows.HasValue) settings.RenderShadows = shadows.Value;
+             if (shadowSource is not null) settings.RenderShadowSource = shadowSource;
++            if (shadowBias.HasValue) settings.RenderShadowBias = shadowBias.Value;
+             if (ssao.HasValue) settings.RenderSsao = ssao.Value;
+             if (softParticles.HasValue) settings.RenderSoftParticles = softParticles.Value;
+             if (softParticleDistance.HasValue) settings.SoftParticleDistance = softParticleDistance.Value;
+--- a/src/LibreLancer.Tests/SurfaceMapProfileTests.cs
++++ b/src/LibreLancer.Tests/SurfaceMapProfileTests.cs
+@@ -62,6 +62,25 @@
+         Assert.Equal(SurfaceMapProfile.Standard, roundTrip!.SurfaceProfile);
+     }
+     [Theory]
++    [InlineData(0f)]
++    [InlineData(0.0015f)]
++    [InlineData(0.02f)]
++    public void ShadowBiasSurvivesCopyApplyAndReload(float bias)
++    {
++        var settings = new GameSettings { RenderShadowBias = bias };
++        var copy = settings.MakeCopy();
++        Assert.Equal(bias, copy.RenderShadowBias);
++        var applied = new GameSettings { RenderShadowBias = 0.01f };
++        applied.Apply(copy);
++        Assert.Equal(bias, applied.RenderShadowBias);
++        using var writer = new StringWriter();
++        applied.Write(writer);
++        using var stream = new MemoryStream(Encoding.UTF8.GetBytes(writer.ToString()));
++        Assert.True(GameSettings.TryParse(Assert.Single(IniFile.ParseFile("settings.ini", stream)), out var loaded));
++        Assert.Equal(bias, loaded!.RenderShadowBias);
++    }
++
++    [Theory]
+     [InlineData(true)]
+     [InlineData(false)]
+     public void SurfaceNormalMapToggleSurvivesCopyApplyAndReload(bool enabled)
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -132,7 +132,12 @@
+    Messwerte stehen in den Berichten zu [LI Elite PBR](evidence/renderer/pbr-live-ab-nap-20261017/README.md)
+    und [HDR cubemap live A/B](evidence/renderer/hdr-cubemap-live-ab-20261018/README.md).
+ 3. **Schattenqualität abnehmen.** Der dominante Richtungslichtpfad einschließlich
+-   Shadow-Target, Frustum-Culling und 3×3-PCF ist integriert. Bias, Caster-Abdeckung,
++   Shadow-Target, Frustum-Culling und 3×3-PCF ist integriert. `render_shadow_bias`
++   (0 bis 0,02; Standard 0,0015) ist jetzt als INI-Wert und
++   `--render-shadow-bias`-Startparameter einstellbar. INI-Serialisierung und
++   Copy/Apply erhalten den Wert; die Laufzeitvalidierung weist Werte außerhalb
++   dieses Bereichs zurück. Das ermöglicht reproduzierbare Kalibrierungen, ersetzt
++   aber keine Szenenabnahme. Bias, Caster-Abdeckung,
+    Alphamaterialien, Detailflimmern und GPU-Kosten in festen Schiffs-/Basisszenen
+    vergleichen; Cascades und weitere Schattenlichter bleiben Erweiterungen.
+ 4. **Atmosphären und Effekte vervollständigen.** `AtmosphereMaterial.Fade` wird
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -279,3 +279,4 @@
+ | 2315 | Use scaled mesh bounds for model visibility and shadow culling |
+ 
+ | 2333 | Render SSAO intermediate targets at local origin |
++| 2334 | Make directional shadow bias configurable and validated |
+--- a/patches/series
++++ b/patches/series
+@@ -333,3 +333,4 @@
+ client 2331-hdr-shader-color-contract-audit.patch
+ client 2332-fp7-hdr-nap-runtime-evidence.patch
+ client 2333-ssao-offscreen-local-viewport.patch
++client 2334-configurable-shadow-bias.patch

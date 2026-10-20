@@ -1,0 +1,344 @@
+diff --git a/src/LibreLancer/GameConfig.cs b/src/LibreLancer/GameConfig.cs
+--- a/src/LibreLancer/GameConfig.cs
++++ b/src/LibreLancer/GameConfig.cs
+@@ -4,6 +4,7 @@
+ 
+ using LibreLancer.Exceptions;
+ using System;
++using System.Collections.Generic;
+ using System.IO;
+ using System.Linq;
+ using System.Xml.Serialization;
+@@ -33,6 +34,10 @@
+         [Entry("cluster_region")]
+         public string ClusterRegion = "eu";
+ 
++        internal HashSet<string> ExplicitSettings { get; } = new(StringComparer.OrdinalIgnoreCase);
++
++        public void MarkRendererOptionExplicit(string name) => ExplicitSettings.Add(name);
++
+         [XmlIgnore]
+ 		public Func<FreelancerGame, GameState>? CustomState;
+ 
+@@ -91,6 +96,29 @@
+             throw new InvalidFreelancerDirectory(FreelancerPath);
+         }
+ 
++        internal void ApplyFreelancerRendererOptions(Data.IO.FileSystem vfs)
++        {
++            const string path = @"EXE\Freelancer.ini";
++            if (!vfs.FileExists(path))
++            {
++                FLLog.Info("Config", $"No {path} found for renderer defaults.");
++                return;
++            }
++
++            var sectionFound = false;
++            foreach (var section in IniFile.ParseFile(path, vfs))
++            {
++                if (section.Name.Equals("LancerNexusRender", StringComparison.OrdinalIgnoreCase))
++                {
++                    sectionFound = true;
++                    Settings.ApplyFreelancerRendererOptions(section, ExplicitSettings);
++                    FLLog.Info("Config", $"Read {section.Count} renderer defaults from {vfs.GetBackingFileName(path) ?? path}; explicit local and startup settings take precedence.");
++                }
++            }
++            if (!sectionFound)
++                FLLog.Info("Config", $"No [LancerNexusRender] section found in {path}.");
++        }
++
+         public void Validate()
+         {
+             _ = CreateFreelancerFileSystem();
+@@ -124,6 +152,8 @@
+                 {
+                     GameSettings.TryParse(set, out var settings);
+                     cfg.Settings = settings ?? new();
++                    foreach (var entry in set)
++                        cfg.ExplicitSettings.Add(entry.Name);
+                 }
+ 
+                 if (cfg.UUID == Guid.Empty)
+diff --git a/src/LibreLancer/GameSettings.cs b/src/LibreLancer/GameSettings.cs
+--- a/src/LibreLancer/GameSettings.cs
++++ b/src/LibreLancer/GameSettings.cs
+@@ -4,6 +4,9 @@
+ 
+ using System;
+ using System.Globalization;
++using System.Collections.Generic;
++using System.Linq;
++using System.Reflection;
+ using LibreLancer.Data.Schema;
+ using System.IO;
+ using LibreLancer.Data.Ini;
+@@ -148,6 +151,41 @@
+             SurfaceProfile = (SurfaceMapProfile)value;
+         }
+ 
++        private static readonly Dictionary<string, FieldInfo> FreelancerRendererFields =
++            typeof(GameSettings).GetFields(BindingFlags.Instance | BindingFlags.Public)
++                .SelectMany(field => field.GetCustomAttributes<EntryAttribute>()
++                    .Where(attribute => IsFreelancerRendererOption(attribute.Name))
++                    .Select(attribute => (attribute.Name, Field: field)))
++                .ToDictionary(item => item.Name, item => item.Field, StringComparer.OrdinalIgnoreCase);
++
++        private static bool IsFreelancerRendererOption(string name) =>
++            name.StartsWith("render_", StringComparison.OrdinalIgnoreCase) ||
++            name.StartsWith("surface_", StringComparison.OrdinalIgnoreCase) ||
++            name.StartsWith("pbr_", StringComparison.OrdinalIgnoreCase) ||
++            name is "anisotropy" or "antialias" or "lod_multiplier" or "per_pixel_lighting" or
++                "dynamic_lighting" or "dynamic_light_budget" or "transient_effect_light_budget";
++
++        public void ApplyFreelancerRendererOptions(Section section, ISet<string>? explicitLocalSettings = null)
++        {
++            if (!TryParse(section, out var parsed) || parsed == null)
++                return;
++
++            foreach (var entry in section)
++            {
++                if (explicitLocalSettings?.Contains(entry.Name) == true)
++                    continue;
++
++                if (string.Equals(entry.Name, "surface_profile", StringComparison.OrdinalIgnoreCase))
++                {
++                    SurfaceProfile = parsed.SurfaceProfile;
++                    continue;
++                }
++
++                if (FreelancerRendererFields.TryGetValue(entry.Name, out var field))
++                    field.SetValue(this, field.GetValue(parsed));
++            }
++        }
++
+         float IRendererSettings.LodMultiplier => LodMultiplier;
+         bool IRendererSettings.PerPixelLighting => PerPixelLighting;
+         bool IRendererSettings.DynamicLighting => DynamicLighting;
+diff --git a/src/LibreLancer/FreelancerGame.cs b/src/LibreLancer/FreelancerGame.cs
+--- a/src/LibreLancer/FreelancerGame.cs
++++ b/src/LibreLancer/FreelancerGame.cs
+@@ -105,10 +105,11 @@
+             });
+ 			// Move to stop _TSGetMainThread error on OSX
+ 			MinimumWindowSize = new Point(640, 480);
+-			SetFullScreen(Config.Settings.FullScreen);
+-            SetVSync(Config.Settings.VSync);
+             Config.Settings.RenderContext = RenderContext;
+             var vfs = _cfg.CreateFreelancerFileSystem();
++            _cfg.ApplyFreelancerRendererOptions(vfs);
++            SetFullScreen(Config.Settings.FullScreen);
++            SetVSync(Config.Settings.VSync);
+             Config.Settings.Validate();
+             // Cache
+ 			ResourceManager = new GameResourceManager(this, vfs);
+diff --git a/src/LibreLancer.Tests/SurfaceMapProfileTests.cs b/src/LibreLancer.Tests/SurfaceMapProfileTests.cs
+--- a/src/LibreLancer.Tests/SurfaceMapProfileTests.cs
++++ b/src/LibreLancer.Tests/SurfaceMapProfileTests.cs
+@@ -1,4 +1,5 @@
+ using System;
++using System.Collections.Generic;
+ using System.IO;
+ using System.Linq;
+ using System.Text;
+@@ -80,6 +81,65 @@
+         Assert.Equal(bias, loaded!.RenderShadowBias);
+     }
+ 
++    [Fact]
++    public void FreelancerIniRendererOptionsApplyUnlessLocallyOverridden()
++    {
++        const string ini = "[LancerNexusRender]\nrender_hdr = true\nrender_bloom = true\nsurface_profile = full\nmaster_volume = 0.2\n";
++        using var stream = new MemoryStream(Encoding.UTF8.GetBytes(ini));
++        var section = Assert.Single(IniFile.ParseFile("freelancer.ini", stream));
++        var settings = new GameSettings();
++
++        settings.ApplyFreelancerRendererOptions(section, new HashSet<string>(StringComparer.OrdinalIgnoreCase)
++        {
++            "render_bloom"
++        });
++
++        Assert.True(settings.RenderHdr);
++        Assert.False(settings.RenderBloom);
++        Assert.Equal(SurfaceMapProfile.Full, settings.SurfaceProfile);
++        Assert.Equal(1f, settings.MasterVolume);
++    }
++
++    [Fact]
++    public void FreelancerIniRendererOptionsCanBeAppliedWithoutLocalOverrides()
++    {
++        const string ini = "[LancerNexusRender]\nrender_shadows = true\nrender_shadow_bias = 0.01\n";
++        using var stream = new MemoryStream(Encoding.UTF8.GetBytes(ini));
++        var section = Assert.Single(IniFile.ParseFile("freelancer.ini", stream));
++        var settings = new GameSettings();
++
++        settings.ApplyFreelancerRendererOptions(section);
++
++        Assert.True(settings.RenderShadows);
++        Assert.Equal(0.01f, settings.RenderShadowBias);
++    }
++
++    [Fact]
++    public void FreelancerIniLoadsGlobalRendererOptionsWithLocalOverrides()
++    {
++        var directory = Path.Combine(Path.GetTempPath(), "lancer-render-options-" + Guid.NewGuid().ToString("N"));
++        var exeDirectory = Path.Combine(directory, "EXE");
++        Directory.CreateDirectory(exeDirectory);
++        try
++        {
++            File.WriteAllText(Path.Combine(exeDirectory, "Freelancer.ini"),
++                "[Freelancer]\ndata path = ..\\DATA\\\n\n" +
++                "[LancerNexusRender]\nrender_hdr = true\nrender_bloom = true\n");
++            var vfs = LibreLancer.Data.IO.FileSystem.FromPath(directory);
++            var config = new GameConfig();
++            config.ExplicitSettings.Add("render_bloom");
++
++            config.ApplyFreelancerRendererOptions(vfs);
++
++            Assert.True(config.Settings.RenderHdr);
++            Assert.False(config.Settings.RenderBloom);
++        }
++        finally
++        {
++            Directory.Delete(directory, true);
++        }
++    }
++
+     [Theory]
+     [InlineData(true)]
+     [InlineData(false)]
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -487,3 +487,4 @@
+ client 2493-retail-transient-effect-light-runtime-evidence.patch
+ client 2494-retail-weapon-muzzle-light-asset-audit.patch
+ client 2495-weapon-muzzle-light-budget-diagnostics.patch
++client 2496-freelancer-ini-renderer-options.patch
+diff --git a/docs/renderer-options.md b/docs/renderer-options.md
+new file mode 100644
+--- /dev/null
++++ b/docs/renderer-options.md
+@@ -0,0 +1,70 @@
++# Rendereroptionen in `EXE/Freelancer.ini`
++
++Engine- und Materialoptionen können für eine Installation zusätzlich zur
++Benutzerkonfiguration in einem eigenen Abschnitt der Freelancer-Konfiguration
++stehen. Die Werte aus `[LancerNexusRender]` dienen als globale Vorgabe. Ein
++explizit gesetzter gleichnamiger Eintrag in `[Settings]` der
++`librelancer.ini` hat Vorrang. Ebenso haben passende Kommandozeilenparameter
++Vorrang. Dadurch bleiben lokale Benutzerwahl, Einstellungen aus dem Optionsmenü
++und gezielte Startprofile wirksam. Nicht angegebene Schlüssel behalten ihren
++bisherigen Standardwert.
++
++```ini
++[LancerNexusRender]
++; Oberflächen und Beleuchtung
++surface_profile = standard
++surface_normal_maps = true
++surface_pbr_maps = true
++surface_generated_tangents = true
++pbr_environment_maps = true
++pbr_diffuse_ibl = true
++render_legacy_environment_maps = true
++per_pixel_lighting = true
++dynamic_lighting = true
++dynamic_light_budget = 32
++transient_effect_light_budget = 128
++
++; Szene und Licht
++render_nebulae = true
++render_starsphere = true
++render_sun_lens_glow = true
++render_sun_ambient = true
++render_sun_ambient_strength = 0.25
++render_transient_effect_lights = true
++render_weapon_muzzle_lights = true
++
++; Schatten, Ambient Occlusion und HDR
++render_shadows = true
++render_shadow_source = auto
++render_shadow_bias = 0.0015
++render_ssao = true
++render_ssao_radius = 3.0
++render_ssao_strength = 1.1
++render_ssao_bias = 0.025
++render_hdr = true
++render_hdr_exposure = 0.0
++render_bloom = true
++render_bloom_threshold = 1.0
++render_bloom_strength = 0.18
++render_bloom_radius = 1.0
++render_bloom_resolution_scale = 1.0
++render_bloom_kernel_pairs = 2
++
++; Geometrie und Effekte
++render_depth_prepass = true
++render_soft_particles = true
++render_soft_particle_distance = 2.0
++render_projectile_beams = true
++render_particle_effects = true
++render_jump_gate_effects = true
++
++; Filter und Detailstufen
++antialias = 0
++anisotropy = 0
++lod_multiplier = 1.3
++```
++
++Der Abschnitt ist optional und ändert die originale Freelancer-Konfiguration
++nicht automatisch. Renderoptionen, die nur zur Laufzeit oder über die
++Kommandozeile verfügbar sind (zum Beispiel Renderprofil-Aufzeichnung und
++Start-up-Testparameter), sind nicht Teil dieses INI-Abschnitts.
+
+diff --git a/src/lancer/Program.cs b/src/lancer/Program.cs
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -1410,3 +1410,28 @@
+             if (anisotropy.HasValue) settings.Anisotropy = anisotropy.Value;
++
++            foreach (var option in seen)
++            {
++                var key = option switch
++                {
++                    "--render-normal-maps" => "surface_normal_maps",
++                    "--render-surface-pbr-maps" => "surface_pbr_maps",
++                    "--render-pbr-environment-maps" => "pbr_environment_maps",
++                    "--render-pbr-diffuse-ibl" => "pbr_diffuse_ibl",
++                    "--render-generated-tangents" => "surface_generated_tangents",
++                    "--render-per-pixel-lighting" => "per_pixel_lighting",
++                    "--render-dynamic-lighting" => "dynamic_lighting",
++                    "--render-dynamic-light-budget" => "dynamic_light_budget",
++                    "--render-transient-effect-light-budget" => "transient_effect_light_budget",
++                    "--render-surface-profile" => "surface_profile",
++                    "--render-antialias" => "antialias",
++                    "--render-anisotropy" => "anisotropy",
++                    "--render-profile-capture" => null,
++                    _ when option.StartsWith("--render-", StringComparison.Ordinal) =>
++                        option[2..].Replace('-', '_'),
++                    _ => null
++                };
++                if (key is not null)
++                    config.MarkRendererOptionExplicit(key);
++            }
+         }
+     }
+
+
+diff --git a/src/lancer/Program.cs b/src/lancer/Program.cs
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -862,5 +862,5 @@
+             Func<string>? filePath = configPath is null ? null : () => configPath;
+             var cfg = GameConfig.Create(true, filePath);
+-            renderOverrides.Apply(cfg.Settings);
++            renderOverrides.Apply(cfg);
+             if ((startNewGame || loadSavePath is not null) &&
+                 !string.IsNullOrWhiteSpace(cfg.ClusterGatewayUrl))
+@@ -1365,5 +1365,6 @@
+-        public void Apply(GameSettings settings)
++        public void Apply(GameConfig config)
+         {
++            var settings = config.Settings;
+             if (normalMaps.HasValue) settings.SurfaceNormalMapsEnabled = normalMaps.Value;
+             if (surfacePbrMaps.HasValue) settings.SurfacePbrMapsEnabled = surfacePbrMaps.Value;
+             if (pbrEnvironmentMaps.HasValue) settings.PbrEnvironmentMapsEnabled = pbrEnvironmentMaps.Value;

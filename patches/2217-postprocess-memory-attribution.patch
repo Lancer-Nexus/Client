@@ -1,0 +1,82 @@
+--- a/src/LibreLancer.Base/Graphics/PostProcessPipeline.cs
++++ b/src/LibreLancer.Base/Graphics/PostProcessPipeline.cs
+@@ -33,6 +33,9 @@
+ internal sealed class PostProcessPipeline : IDisposable
+ {
+     private readonly IPostProcessPass[] passes;
++    private readonly BloomPass bloomPass;
++
++    public long BloomMemoryBytes => bloomPass.EstimatedMemoryBytes;
+ 
+     public long EstimatedMemoryBytes
+     {
+@@ -47,7 +50,8 @@
+ 
+     public PostProcessPipeline(RenderContext graphics)
+     {
+-        passes = [new BloomPass(graphics), new ToneMapPostProcessPass()];
++        bloomPass = new BloomPass(graphics);
++        passes = [bloomPass, new ToneMapPostProcessPass()];
+     }
+ 
+     public void Execute(ref PostProcessContext context)
+--- a/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
++++ b/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
+@@ -41,6 +41,8 @@
+         (ldrToneMapped?.EstimatedMemoryBytes ?? 0) +
+         (smaa?.DepthBuffer?.EstimatedMemoryBytes ?? 0) +
+         (depthStencil?.EstimatedMemoryBytes ?? 0);
++    public long EstimatedBloomPassMemoryBytes => postProcess?.BloomMemoryBytes ?? 0;
++    public long EstimatedToneMapOutputMemoryBytes => ldrToneMapped?.EstimatedMemoryBytes ?? 0;
+ 
+     private IMultisampleTarget? msaa;
+     private RenderTarget2D? smaa;
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -289,6 +289,8 @@
+ 
+         private AntialiasTarget? msaa;
+         public long EstimatedAAMemoryBytes => msaa?.EstimatedMemoryBytes ?? 0;
++        public long EstimatedBloomPassMemoryBytes => msaa?.EstimatedBloomPassMemoryBytes ?? 0;
++        public long EstimatedToneMapOutputMemoryBytes => msaa?.EstimatedToneMapOutputMemoryBytes ?? 0;
+         private int _mwidth = -1, _mheight = -1;
+         private AntialiasMode _mAaMode = (AntialiasMode)(-1);
+         private bool _mHdrRequested;
+--- a/src/LibreLancer/GameStates/SpaceGameplay.Debug.cs
++++ b/src/LibreLancer/GameStates/SpaceGameplay.Debug.cs
+@@ -57,6 +57,8 @@
+             ImGui.Text($"Active effect lights: {sysrender.ActiveTransientEffectLightCount}/{sysrender.Settings.TransientEffectLightBudget}");
+             ImGui.Text($"Shadow map: {sysrender.ShadowMapStatus}");
+             ImGui.Text($"Active scene AA target estimate: {sysrender.EstimatedAAMemoryBytes / (1024.0 * 1024.0):F1} MiB");
++            ImGui.Text($"Bloom pass targets estimate: {sysrender.EstimatedBloomPassMemoryBytes / (1024.0 * 1024.0):F1} MiB");
++            ImGui.Text($"Tone-map output target estimate: {sysrender.EstimatedToneMapOutputMemoryBytes / (1024.0 * 1024.0):F1} MiB");
+             ImGui.Text($"Player Position: {player.Transform.Position}");
+             ImGui.Text($"PredictionErrorPos: {player.PhysicsComponent!.PredictionErrorPos}");
+             ImGui.Text($"PredictionErrorQuat: {player.PhysicsComponent!.PredictionErrorQuat} ({MathHelper.QuatError(
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -68,6 +68,7 @@
+   - [x] OpenGL-Timer-Queries für Depth, Opaque, Sterne/Nebel, Transparenz und AA-Resolve eingebaut. Vier Query-Slots pro Pass werden ohne blockierendes Ergebnis-Polling wiederverwendet; das Debug-Overlay zeigt Messwert und Sample-Alter. CSV-Zeilen erfassen den zuletzt verfügbaren GPU-Messwert samt fortlaufend aktualisiertem Alter; nicht verfügbare Samples bleiben leer. Das Alter zählt Aufrufe von `SystemRenderer.Draw()` und hängt nicht von `RenderContext.FrameNumber`/`ClearAll()` ab; ein Regressionstest prüft das Weiterzählen. Die Abfrage läuft nur bei geöffnetem Debug-Overlay. Null und OpenGL ohne Timer-Query melden keine Unterstützung. Das Debug-Overlay zeigt geschätzte geladene Texturbytes, Surface-Map- und Tangentenbytes; das Spiel-Debugfenster zusätzlich die geschätzten Bytes des aktiven System-AA-Ziels. Diese Werte sind unvollständig und keiner Render-Pass-Attribution zugeordnet; Editor-/Offscreen-Targets, beliebige Buffer und Treiberallokationen bleiben offen.
+   - [x] AA-Zeitmessung in SMAA Edge Detection, Blend Weights, Neighborhood Blend oder MSAA Color Resolve aufgeteilt. Der angezeigte `AA resolve`-Wert bleibt als Summe der drei SMAA-Unterpässe beziehungsweise als MSAA-Resolve-Zeit erhalten. CSV-Spaltennamen folgen jetzt den Passnamen einschließlich Frame-Clear und AA-Unterpässen. Ein NAP-only OpenGL-Profil bestätigt alle drei SMAA-Samples in einer M01A-Intro-Szene; die kontrollierte A/B- und Mehrhardware-Abnahme bleibt offen. Rohdaten: [SMAA-Unterpass-Profil](evidence/renderer/gpu-timer-aa-subpasses-20261016/README.md).
+   - [x] HDR-Nachbearbeitung besitzt eigene GPU-Timer-Unterpässe für Bloom-Extraktion, horizontalen Blur, vertikalen Blur und Tonemapping. Der MSAA-Timer endet vor dem Tonemapping, damit OpenGL-Zeitqueries nicht verschachtelt laufen. Laufzeitmessungen und FPS-Vergleich bleiben offen.
++  - [x] Der Debug-Overlay weist den geschätzten Speicher für Bloom-Extraktion/Blur-Targets sowie das dedizierte Tonemap-Ausgabeziel getrennt aus. Es sind Zielgrößen-Schätzungen ohne Treiberallokationen, nicht pro GPU-Pass gemessener Speicher; Speicher für Shader, Buffer und interne Treiberressourcen bleibt im Gesamttotal unvollständig.
+ - [ ] Referenzszenen und feste Screenshots für Raum, Basis, Sternensystem, Nebel, Partikel und LancerEdit-Vorschau festlegen.
+ 
+ ### 2. Bumpmapping / Normalmaps vervollständigen
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -124,6 +124,7 @@
+ | 2214 | Add configurable bilinear Gaussian kernel width for Bloom blur |
+ | 2215 | Add HDR exposure compensation to tone mapping, settings, CLI and Effects options |
+ | 2216 | Use linear Rec. 709 luminance for the Bloom extraction threshold |
++| 2217 | Show estimated Bloom and tone-map target memory separately in the debug overlay |
+ | 2116 | Estimate active SMAA and MSAA render-target memory |
+ | 2117 | Record the M01A dark station and ship lighting report |
+ | 2118 | Apply THN ambient and dynamic lights to shared gameplay lighting, then remove them on cleanup |
+--- a/patches/series
++++ b/patches/series
+@@ -216,3 +216,4 @@
+ client 2214-variable-bloom-gaussian-kernel.patch
+ client 2215-hdr-exposure-control.patch
+ client 2216-bloom-rec709-luminance-threshold.patch
++client 2217-postprocess-memory-attribution.patch

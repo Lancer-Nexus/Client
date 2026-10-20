@@ -1,0 +1,182 @@
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -16,6 +16,7 @@
+ | HDR und Tonemapping | Linearisiertes Scene-Target, ACES-Tonemapping, linearisierte PBR-Albedo-/Licht-/Emissionswerte und exakte sRGB-Ausgabe im PBR-LDR-Pfad. System- und Nebel-Clearfarben werden ebenfalls vor dem HDR-Clear linearisiert; LDR bleibt unverändert. Ein Source-Audit hat alle 19 Ingame-Fragmentshader und den Postprocess-Ausgang geprüft; 2 Farbraum- und 21 Ambientlicht-Regressionstests bestehen. | Retail-Farbannahmen, visuelle Gleichheit zwischen Legacy/PBR, transparente Effekte, Fog und zusammengesetzte Ingame-Szenen brauchen weiterhin feste Bildvergleiche, Original-Client-Referenz und Hardware-GPU-Abnahme. HDR/LDR-Vergleiche: `docs/evidence/renderer/postprocess-four-mode-ab-20261017/` und der same-session-Hi02-Lauf `docs/evidence/renderer/hdr-ldr-hi02-live-ab-20261018/`; letzterer zeigt in dieser Legacy-Szene nur geringe Pixelabweichung und ersetzt keine Material-/Emissions-Referenz. Shaderaudit: `docs/evidence/renderer/hdr-shader-color-contract-audit-20261018.md`; Clear-Farbvertrag: `docs/evidence/renderer/hdr-clear-color-contract-20261018.md`. |
+ | Bloom | HDR-Extraktion mittelt jetzt ein vollständiges 4×4-Quellfenster in Viertelauflösung; aufrundende Zielmaße behalten Randpixel bei ungeraden Fenstergrößen. Basis-, mittlere und breite Blur-Stufen sowie Schwelle, Radius, Auflösung und Kernel sind konfigurierbar. | Die Extraktion beseitigt das bisherige Unterabtasten der zentralen vier Texel. Der Code führt alle drei Stufen aus. NAP-only M01A-Läufe am 19.10. vergleichen Bloom ein/aus und schalten in einem dritten Lauf zusätzlich Partikeleffekte aus. Der große Ring verschwindet mit den Explosionspartikeln; NAP-Fuse- und ALE-Daten verknüpfen ihn mit dem `planetflare`-Flashbang der Freeport-7-Explosion und grenzen ihn von Bloom ab. Die bewegten Frames sind nicht pixelgenau, die einzelne Flashbang-Instanz bleibt offen. Siehe [`NAP M01A Bloom-/Partikelmatrix`](evidence/renderer/nap-full-runtime-20261019/README.md). GPU-Kosten bleiben offen. |
+ | Partikelpuffer | `ParticleBuffer.RemoveAt` verschiebt beim Entfernen die kürzere Seite des Ringpuffers und bewahrt dabei die Reihenfolge. | Der maximale Verschiebeaufwand sinkt von der gesamten Restlänge auf `min(prefix, suffix)`; tatsächliche FPS-/GPU-Wirkung muss in festen Partikelszenen gemessen werden. |
++| Transparente Draw-Commands | Transparent-Commands und Sortierindizes wachsen bei Bedarf geometrisch über die bisherige 16.384-Grenze hinaus; beide Arrays behalten dieselbe Kapazität. | Unit-Tests prüfen geometrisches Wachstum und fügen 16.385 Commands ein, um die gemeinsame Vergrößerung beider Puffer zu belegen. Dichte Ingame-Szenen müssen die höhere Kapazität und ihren Speicherbedarf noch prüfen. |
+ | Objektlicht-Bindung | `RenderHelpers.ApplyLights` übergibt die nach Priorität ausgewählten Quellindizes kompakt. `RenderMaterial.SetLights` verarbeitet so direkt höchstens acht Lichtindizes pro Materialdraw statt bis zu 128 Frame-Einträge erneut zu durchsuchen; manuell gebaute Lighting-Werte behalten den Bitset-Fallback. | Auswahl-/Bitset-Übereinstimmung ist im `TransientLightTests`-Pfad geprüft. Der CPU- und FPS-Gewinn muss mit derselben festen Szene vor/nach der Änderung gemessen werden. |
+ | LOD-/Modell-Culling | Die größte Archetyp- oder Mesh-LOD-Distanz wird ohne LINQ-Iteratoren ermittelt und pro Renderer gecacht, bis sich Modell oder Override-Array ändern. Leere Modelldistanzen blenden das Modell nicht mehr fälschlich aus; Mesh-eigene LOD-Distanzen aktivieren den frühen Distanz-Cull auch ohne Archetypwerte. | Vermeidet wiederholte Scans aller Modellteile im frühen Draw-Cull und erhält gültige Mesh-LODs. Der tatsächliche CPU-/FPS-Gewinn muss in festen Schiff-, Stations- und Asteroiden-Szenen gemessen werden. |
+ | Asteroidenfeld-Culling | Asteroidenwürfel und Billboards vergleichen ihre quadrierten Distanzen gegen die jeweiligen Reichweiten; die innere Kandidatenprüfung vermeidet damit wiederholte Quadratwurzeln. | Der Cull-Grenzwert bleibt mathematisch äquivalent für endliche, nichtnegative Reichweiten. Der CPU-Gewinn und Sichtbarkeit an Grenzfällen müssen in dichten NAP-Asteroidenfeldern gemessen werden. |
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -367,3 +367,4 @@
+ | 2426 | Resolve diffuse textures from embedded CMP libraries in SDL_GPU diagnostics |
+ | 2427 | Cover ambient-only material lighting without a source-light owner |
+ | 2428 | Pass selected light indices directly to material shader binding |
++| 2429 | Grow transparent command and sort buffers past the fixed scene limit |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -420,3 +420,4 @@
+ client 2426-sdl-gpu-cmp-embedded-texture-lookup.patch
+ client 2427-ambient-only-material-lighting-regression-test.patch
+ client 2428-compact-object-light-bindings.patch
++client 2429-grow-transparent-command-buffers.patch
+diff --git a/src/LibreLancer.Tests/RenderCommandBufferCapacityTests.cs b/src/LibreLancer.Tests/RenderCommandBufferCapacityTests.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Tests/RenderCommandBufferCapacityTests.cs
+@@ -0,0 +1,64 @@
++using System;
++using System.Numerics;
++using LibreLancer;
++using LibreLancer.Graphics;
++using LibreLancer.Graphics.Vertices;
++using LibreLancer.Render;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class RenderCommandBufferCapacityTests
++{
++    private sealed class HeadlessGame : Game
++    {
++        public HeadlessGame() : base(64, 64, false, GameConfiguration.HeadlessTest()) { }
++    }
++
++    private sealed class TransparentMaterial : RenderMaterial
++    {
++        public TransparentMaterial() : base(null) { }
++        public override bool IsTransparent => true;
++        public override void Use(RenderContext context, IVertexType vertexType, ref Lighting lights, int userData) =>
++            throw new InvalidOperationException("Transparent material should not draw during command insertion");
++    }
++
++    [Theory]
++    [InlineData(0, 1, 16)]
++    [InlineData(16384, 16385, 32768)]
++    [InlineData(32768, 65537, 131072)]
++    public void CapacityGrowsGeometrically(int current, int required, int expected)
++    {
++        Assert.Equal(expected, CommandBuffer.GetExpandedCapacity(current, required));
++    }
++
++    [Fact]
++    public void CapacityDoesNotShrinkWhenCurrentAllocationIsEnough()
++    {
++        Assert.Equal(32768, CommandBuffer.GetExpandedCapacity(32768, 16385));
++    }
++
++    [Fact]
++    public void AddingCommandsPastOriginalLimitGrowsCommandAndSortBuffers()
++    {
++        var context = new HeadlessGame().RenderContext;
++        try
++        {
++            using var commands = new CommandBuffer(context);
++            var material = new TransparentMaterial();
++            for (var i = 0; i < 16385; i++)
++            {
++                commands.AddCommandFade(material, default, Lighting.Empty, null!,
++                    PrimitiveTypes.TriangleList, -1, 0, 3, 0, Vector2.Zero);
++            }
++
++            Assert.Equal(16385, commands.TransparentCommandCount);
++            Assert.Equal(32768, commands.TransparentCommandCapacity);
++            Assert.Equal(commands.TransparentCommandCapacity, commands.TransparentSortCapacity);
++        }
++        finally
++        {
++            context.DisposeShaders();
++        }
++    }
++}
+diff --git a/src/LibreLancer/Render/CommandBuffer.cs b/src/LibreLancer/Render/CommandBuffer.cs
+--- a/src/LibreLancer/Render/CommandBuffer.cs
++++ b/src/LibreLancer/Render/CommandBuffer.cs
+@@ -13,12 +13,11 @@
+ {
+ 	public class CommandBuffer : IDisposable
+ 	{
+-        private const int MAX_COMMANDS = 16384;
+-        private const int MAX_TRANSPARENT_COMMANDS = 16384;
++        private const int INITIAL_TRANSPARENT_COMMANDS = 16384;
+ 
+ 		// public List<RenderCommand> Commands = new List<RenderCommand>();
+ 		// RenderCommand[] Commands = new RenderCommand[MAX_COMMANDS];
+-        private RenderCommand[] Transparents = new RenderCommand[MAX_TRANSPARENT_COMMANDS];
++        private RenderCommand[] Transparents = new RenderCommand[INITIAL_TRANSPARENT_COMMANDS];
+         private int currentCommand = 0;
+         private int transparentCommand = 0;
+         private RenderContext rstate;
+@@ -67,6 +66,7 @@
+             }
+ 			if (material.IsTransparent || opacity < 1)
+ 			{
++				ReserveTransparentCommand();
+ 				Transparents[transparentCommand++] = new RenderCommand()
+ 				{
+                     Key = RenderCommand.MakeKey(RenderType.Transparent, material.Key, layer, z, offset),
+@@ -138,6 +138,7 @@
+             int userData = 0,
+             MaterialAnim? anim = null)
+ 		{
++			ReserveTransparentCommand();
+ 			Transparents[transparentCommand++] = new RenderCommand()
+ 			{
+                 Key = RenderCommand.MakeKey(RenderType.Transparent, material.Key, layer, z, offset),
+@@ -158,6 +159,7 @@
+ 
+         public void AddCommand(Billboards billboards, int hash, int index, int sortLayer, float z)
+ 		{
++			ReserveTransparentCommand();
+ 			Transparents[transparentCommand++] = new RenderCommand()
+ 			{
+                 Key = RenderCommand.MakeKey(RenderType.Transparent, 0, sortLayer, z, 0),
+@@ -204,8 +206,42 @@
+ 			}
+ 		}
+ 
+-        private int[] cmdptr = new int[MAX_COMMANDS];
++        private int[] cmdptr = new int[INITIAL_TRANSPARENT_COMMANDS];
+         private int transparentCount = 0;
++		internal int TransparentCommandCount => transparentCommand;
++		internal int TransparentCommandCapacity => Transparents.Length;
++		internal int TransparentSortCapacity => cmdptr.Length;
++		private void ReserveTransparentCommand()
++		{
++			if (transparentCommand == int.MaxValue)
++				throw new InvalidOperationException("Transparent render-command limit was exceeded");
++			var required = transparentCommand + 1;
++			if (required <= Transparents.Length)
++				return;
++			var capacity = GetExpandedCapacity(Transparents.Length, required);
++			Array.Resize(ref Transparents, capacity);
++			Array.Resize(ref cmdptr, capacity);
++		}
++
++		internal static int GetExpandedCapacity(int currentCapacity, int requiredCapacity)
++		{
++			if (currentCapacity < 0)
++				throw new ArgumentOutOfRangeException(nameof(currentCapacity));
++			if (requiredCapacity < 0)
++				throw new ArgumentOutOfRangeException(nameof(requiredCapacity));
++			if (requiredCapacity <= currentCapacity)
++				return currentCapacity;
++
++			var capacity = Math.Max(currentCapacity, 16);
++			while (capacity < requiredCapacity)
++			{
++				if (capacity > int.MaxValue / 2)
++					return requiredCapacity;
++				capacity *= 2;
++			}
++			return capacity;
++		}
++
+ 		public void DrawTransparent(RenderContext context)
+ 		{
+ 		  	Billboards? lastbb = null;

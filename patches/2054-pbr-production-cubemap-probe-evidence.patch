@@ -1,0 +1,789 @@
+diff --git a/docs/evidence/renderer/pbr-environment-20261014/cubemap-assets-and-binding-audit.md b/docs/evidence/renderer/pbr-environment-20261014/cubemap-assets-and-binding-audit.md
+--- a/docs/evidence/renderer/pbr-environment-20261014/cubemap-assets-and-binding-audit.md
++++ b/docs/evidence/renderer/pbr-environment-20261014/cubemap-assets-and-binding-audit.md
+@@ -1,8 +1,9 @@
+ # PBR-Cubemap: Asset- und Bindungspfad-Audit
+ 
+ Stand: 2026-10-14. Dieses Audit verfolgt den vorhandenen `LI_ELITE`-PBR-Cubemap-
+-Pfad bis zu den NAP-Quellen. Es belegt Assetstruktur und Codeauswahl, aber keine
+-GPU-Texturbindung oder sichtbare Reflexion.
++Pfad bis zu den NAP-Quellen. Der kontrollierte Produktionsshader- und MAT/DDS-
++Probe ist inzwischen ergänzt; ein sichtbarer Effekt im echten LI_ELITE-Draw ist
++weiterhin nicht bestätigt.
+ 
+ ## Befund
+ 
+@@ -48,7 +49,7 @@
+ | `BasicMaterial.cs` | `bc4438ec45c780c102bfe8acca1773542cc46271ae10895bcb9f1baa62305cdf` | PBR wählt das Archetyp-`EnvMap` und bindet Cube an Slot 5 |
+ | `PBR.frag.hlsl` | `b56d7687b5a654c31fe9b9453e424adc3d9fbe006651ada67705f4aaf4deda6d` | `EnvTexture` ist `t5`; PBR berechnet Reflexionsrichtung und Mip |
+ 
+-## Nächster verifizierbarer Schritt
++## Ursprüngliche offene Schritte (vor GPU-Proben)
+ 
+ 1. In einer RenderDoc-Aufnahme desselben `LI_ELITE`-Draws prüfen, ob Slot 5 eine
+    nicht-schwarze `TextureCube`-Ressource mit sechs Flächen enthält und welcher
+@@ -60,8 +61,7 @@
+    die Umgebungsauswahl festlegen und `strength` mit einem klaren Default
+    anwenden. Die existierenden Oberflächenkarten bleiben dabei opt-in.
+ 
+-Noch offen: RenderDoc-Pipelinezustand, visuelle Ausgabe, Cube-Orientierung,
+-Reflexionsstärke und Zuordnung der drei Karten zu Archetypen oder Systemen.
++Diese Liste wurde durch die nachfolgenden GPU-Proben teilweise erledigt.
+ 
+ ## Statische Slot- und Feature-Prüfung (2026-10-14)
+ 
+@@ -75,3 +75,65 @@
+ an. Damit ist die Zuordnung im C#- und Shader-Quelltext konsistent. Das beweist
+ weder die tatsächliche GPU-Ressource im LI_ELITE-Draw noch den Samplewert und
+ ersetzt nicht den RenderDoc- oder synthetischen Farbflächen-Probe.
++
++## Synthetischer OpenGL-Probe (2026-10-14)
++
++Der zuvor offene Farbflächen-Probe ist jetzt mit SDL3s Offscreen-Treiber auf
++Intel HD Graphics 4600 / Mesa 23.2 gelaufen. Ein eigener HLSL-Testshader mit
++`TextureCube` an `t5` und `SamplerState` an `s5` hat alle sechs Richtungen aus
++einem künstlichen Cube korrekt zurückgelesen. Die Samples entsprechen den
++jeweils hochgeladenen Farben für +X, -X, +Y, -Y, +Z und -Z. Bild und Messwerte
++stehen in [synthetic-cubemap-slot5-20261014.md](synthetic-cubemap-slot5-20261014.md).
++Damit sind generischer GL-Cube-Upload, Slot 5, Sample und RenderTarget-Readback
++auf diesem Gerät bestätigt. Das ist kein Lauf des produktiven PBR-Fragments
++und kein Test des `envmapbasic`-DDS-Uploads.
++
++Außerdem war der Regressionstest für den C#-PBR-Uniform-Block veraltet: Er
++erwartete 48 statt 64 Byte, obwohl `EnvMipCount` bei Offset 48 ergänzt wurde.
++Die Erwartung ist im Patch `2009-client-regression-tests.patch` auf 64 Byte
++korrigiert; ein zusätzlicher Test prüft `EnvMipCount` an Offset 48. Die fokussierte
++Suite besteht nun 8/8. Die Patchserie rekonstruiert anschließend 530 Dateien.
++
++Der noch offene Laufzeitpunkt ist die unveränderte LI_ELITE-ModelViewer-A/B:
++deren ROI bleibt bei null Bildänderung. Die kontrollierten Tests unten grenzen
++das Problem auf die echte Material-/Mesh-/Draw-Konfiguration oder die zu geringe
++sichtbare Reflexionsstärke ein.
++
++## Kontrollierter Produktions-PBR- und MAT/DDS-Probe (2026-10-14)
++
++Ein isolierter SDL3-Offscreen-Draw verwendete den eingebetteten
++`PBR.bin`-Shaderbundle aus dem gebauten Client, die `ENVMAP`-Variante (Feature
++64), einen einfachen FVF-Dreiecksdraw und denselben Slot `t5/s5`. Die Cube-Maps
++wurden nicht künstlich erzeugt: `UtfLoader.LoadResourceFile` las MAT-Dateien
++aus `Data/NAP/`, `TextureData.Initialize` führte den eingebetteten CUBE-DDS
++durch `DDS.FromStream`, und der erhaltene `TextureCube` wurde direkt dem
++Produktions-PBR-Shader übergeben.
++
++Die vier MATs wurden erfolgreich geladen. `envmapbasic` hat eine Mipstufe;
++`envcube_space`, `envcube_sun` und `envcube_nebula` haben jeweils neun. Für die
++drei 9-Mip-Cubes wurde mit Roughness 0,25 Mip-Level 2 abgetastet. Kamera,
++Geometrie, Weiß-Diffuse, Metallic 1, Licht aus und die Reflexionsrichtung waren
++für alle vier Läufe identisch. Die gemessenen RGB-Mittelwerte des Mittelpixels:
++
++| Cube aus NAP | Mips | RGB-Readback |
++|---|---:|---:|
++| `Material/fx/envmapbasic.mat` | 1 | (126, 126, 126) |
++| `Surface/fx/envcube_space.mat` | 9 | (13, 14, 22) |
++| `Surface/fx/envcube_sun.mat` | 9 | (17, 17, 21) |
++| `Surface/fx/envcube_nebula.mat` | 9 | (23, 18, 25) |
++
++![Produktions-PBR-Shader mit den vier Cube-MATs](production-pbr-mat-cubemaps-20261014.png)
++
++Das bestätigt auf Intel HD Graphics 4600 / Mesa 23.2 den tatsächlichen
++Produktions-PBR-Shader, seine ENVMAP-Variante, Cube-Slotbindung und den
++MAT→UTF-Texture-Library→DDS→TextureCube-Ladepfad einschließlich Mip-Sampling.
++Die Quell-Hashes stimmen mit den oben dokumentierten NAP-/Shaderdateien
++überein. Die ausführbare Probe und ihr Build liegen temporär unter
++`/tmp/lancer-cubemap-gpu-probe/`; die Laufzeitinputs stammen ausschließlich
++aus `Data/NAP/`.
++
++Das beweist noch keine korrekte Reflexion auf einem Retail-Schiff: Der Probe
++verwendet eine einfache Testgeometrie und kontrollierte Kamerauniformen. Die
++LI_ELITE-A/B-ROI bleibt unverändert. Cube-Orientierung auf Retail-Meshes,
++Reflexionsstärke, Auswahl anhand von Umgebung/System sowie `[CubeMap] strength`
++und eine GGX-prefiltered IBL bleiben offen.
+diff --git a/docs/evidence/renderer/pbr-environment-20261014/pbr-environment-ab-20261014.json b/docs/evidence/renderer/pbr-environment-20261014/pbr-environment-ab-20261014.json
+--- a/docs/evidence/renderer/pbr-environment-20261014/pbr-environment-ab-20261014.json
++++ b/docs/evidence/renderer/pbr-environment-20261014/pbr-environment-ab-20261014.json
+@@ -49,7 +49,7 @@
+       "rmse": 0.0
+     }
+   },
+-  "interpretation": "The material selects the PBR ENVMAP shader variant and resolves a TextureCube. The normal toggle A/B still changes 0 model pixels. A temporary shader probe that directly outputs the +X cube sample was black; this narrows the next check to cube-face content/orientation or GPU sampling/binding, but does not distinguish them. Other directions and scenes remain unverified.",
++  "interpretation": "The LI_ELITE ModelViewer A/B still changes 0 model pixels. A later controlled offscreen probe sampled all six synthetic cube faces through t5/s5, then drew the production PBR ENVMAP variant with envmapbasic and all three real 9-mip Surface cube MAT/DDS assets. The production shader and MAT-to-DDS upload path work in the controlled draw. This shifts the remaining issue toward Retail mesh/material parameters, reflection strength/orientation, or the ModelViewer draw configuration; it does not prove visible reflection on LI_ELITE.",
+   "diagnostic_followup": {
+     "time_local": "2026-10-14 12:38",
+     "pbr_branch_selected": true,
+@@ -58,9 +58,33 @@
+     "environment_variant": true,
+     "roughness_surface_map_file": "EXE\\..\\data/fx\\normalmaps_ships.txm",
+     "metallic_surface_map_file": "EXE\\..\\data/fx\\normalmaps_ships.txm",
+-    "shader_probe": "Temporarily returned the direct EnvTexture sample for direction +X at mip 0; visible output was black.",
++    "shader_probe": "The earlier direct +X debug output was black. Later production GPU probes sampled six synthetic directions correctly and rendered the real MAT/DDS cube textures through the PBR ENVMAP shader.",
+     "probe_screenshot": "li-elite-env-fixed-positive-x-debug.png",
+     "probe_sha256": "551308f3bf6d7b391c1576e77b0e820b8c7ba0645b572653c8449e3be001ea2c",
+-    "limits": "Only the +X direction was sampled. Other cube faces, runtime GPU binding, and face orientation remain unverified."
++    "limits": "This was a diagnostic alteration of the ModelViewer path; the normal LI_ELITE screenshot A/B still has 0 changed pixels. The later controlled PBR probes do not reproduce the Retail mesh/material draw."
++  },
++  "production_gpu_probe": {
++    "date": "2026-10-14",
++    "renderer": "SDL3 offscreen OpenGL 4.6 Core, Mesa 23.2.1, Intel HD Graphics 4600",
++    "shader": "Built Client PBR.bin embedded resource, ENVMAP feature 64",
++    "asset_path": "Data/NAP MAT -> UtfLoader texture library -> TextureData.Initialize -> DDS.FromStream -> TextureCube -> production PBR draw, slot t5/s5",
++    "inputs": [
++      {"file":"Material/fx/envmapbasic.mat","sha256":"18c30f383fc451dcb5e596668770fcbc517cb88dadf7ea64c685a01c2a2432bc","mip_levels":1,"center_rgb":[126,126,126]},
++      {"file":"Surface/fx/envcube_space.mat","sha256":"c0b9908383e7e6837bf61d7c9f256636bf16cb455f800e3ebe9a10ebe3eba9db","mip_levels":9,"center_rgb":[13,14,22]},
++      {"file":"Surface/fx/envcube_sun.mat","sha256":"862be2bc062cf6d636c998b88c6fb9ca36434c7d5ff862544d0a78eba0b2b70f","mip_levels":9,"center_rgb":[17,17,21]},
++      {"file":"Surface/fx/envcube_nebula.mat","sha256":"c360f2222aea189f6bf0c62d37ff2ba2bd2d82c8bde4a14cb110abd0a30af0eb","mip_levels":9,"center_rgb":[23,18,25]}
++    ],
++    "six_direction_mip0_rgb": {
++      "envmapbasic": [[127,127,127],[127,127,127],[255,255,255],[127,127,127],[127,127,127],[127,127,127]],
++      "envcube_space": [[8,9,20],[3,4,10],[8,10,21],[7,8,18],[7,8,17],[5,6,14]],
++      "envcube_sun": [[4,5,6],[8,9,12],[4,5,6],[6,7,9],[7,6,7],[9,10,13]],
++      "envcube_nebula": [[54,27,63],[4,4,4],[62,29,73],[23,14,26],[24,14,27],[15,9,17]]
++    },
++    "six_direction_order": ["+X","-X","+Y","-Y","+Z","-Z"],
++    "six_direction_image": "production-pbr-cube-six-faces-20261014.png",
++    "material_parameters": {"roughness":0.25,"metallic":1,"diffuse":"white","ambient":"black","sampled_mip_for_9_level_cubes":2},
++    "image": "production-pbr-mat-cubemaps-20261014.png",
++    "image_sha256": "48a1e737e05969f374a78d4527bae39c80fa52368cbea86bd40e16ebe2c14ead",
++    "limits": "Controlled test triangle and camera uniforms. A separate axis-probe shader sampled all six mip-0 directions for the real MATs. These do not prove the LI_ELITE ModelViewer or in-game visual result, environment selection, Retail mesh orientation, or reflection-strength acceptance."
+   }
+ }
+diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -357,19 +357,24 @@
+ 
+ ### P3 – Cubemaps und PBR
+ 
+-Stand 2026-10-14: Ein opt-in PBR-Cubemap-Prototyp bindet das vom
+-Archetyp verwendete `envmap_material` über Shader-Slot 5. Der LancerEdit-Viewer
+-reicht den Archetypwert in CMP-Draws durch; `LI_ELITE` löst `envmapbasic` als
+-`TextureCube` auf. Das kontrollierte Lit-A/B mit aktivierten Roughness- und
+-Metallic-Maps zeigt im Modell-ROI dennoch 0 geänderte Pixel. Der Preview-Pfad
+-ist integriert, eine sichtbare PBR-Reflexion damit nicht nachgewiesen. Details
+-und Bilder stehen in der [Renderer-Galerie](renderer-comparison-gallery.md).
+-Die bestehende CubeMap-Stärke, helles Umgebungslicht und weitere Archetypen
+-bleiben Prüfschritte.
+-
+-- [ ] `envcube_space`, `envcube_sun`, `envcube_nebula` über Archetypwerte und
+-  Surface-Katalog binden; sechs Achsen, Cube-Orientierung, Mips und
+-  Reflexionsstärke im Basic-/PBR-Pfad testen.
++Stand 2026-10-14: Ein opt-in PBR-Cubemap-Prototyp bindet `envmap_material`
++über Slot 5. Ein SDL3/OpenGL-Offscreen-Probe hat die echte Produktions-
++PBR-ENVMAP-Variante mit `envmapbasic` und den drei 9-Mip-Cubes aus `Data/NAP`
++durch den MAT/UTF/DDS-Loader gezeichnet und unterschiedliche Readbacks
++bestätigt. Das belegt Shader-, Bindungs-, Asset- und Mip-Pfad in einer
++kontrollierten Testgeometrie. Das LI_ELITE-ModelViewer-A/B zeigt im Modell-ROI
++weiterhin 0 geänderte Pixel; die sichtbare Retail-Reflexion ist nicht
++abgenommen. Bilder und Messwerte stehen im
++[PBR-Cubemap-Probebericht](evidence/renderer/pbr-environment-20261014/cubemap-assets-and-binding-audit.md).
++CubeMap-Auswahl im Spiel, Stärke, Retail-Orientierung, GGX-IBL und Performance
++bleiben offen.
++
++- [x] Den Produktions-PBR-ENVMAP-Shader mit synthetischem Cube an allen sechs
++  Richtungen und mit echten `envmapbasic`, `envcube_space`, `envcube_sun` und
++  `envcube_nebula` MAT/DDS-Assets im OpenGL-Offscreen-Draw prüfen.
++- [ ] `envcube_space`, `envcube_sun`, `envcube_nebula` anhand des Surface-Katalogs
++  im Spiel auswählen; Cube-Orientierung auf Retail-Meshes, `[CubeMap] strength`
++  und sichtbare Reflexionsstärke abnehmen.
+ - [ ] Im PBR-Pfad eine kollisionsfreie Bindung vorsehen: vorhandene Dt/Et/Nm/
+   Mt/Rt-Slots 0–4, Specular-Cube/Irradiance/BRDF-LUT auf 5–7 als Entwurf.
+   Ressourcen je Shader reflektieren; tatsächliche Backendgrenzen prüfen.
+diff --git a/docs/surface-maps.md b/docs/surface-maps.md
+--- a/docs/surface-maps.md
++++ b/docs/surface-maps.md
+@@ -3,7 +3,7 @@
+ Die aktuelle Umsetzungsreihenfolge und Abnahme stehen im
+ [Grafik-Umsetzungsplan](graphics-implementation-plan.md).
+ 
+-**Status:** Parser, Profile, VFS- und CPU-/GPU-Residency sowie opt-in Normalmap-Bindungen für authored FVF3/FVF4, generierte VMesh-/DFM-Tangenten und QuadSphere sind umgesetzt. Ergänzende Roughness-/Metallic-Sampler sind über `surface_pbr_maps` angebunden. Ein kontrollierter LI_ELITE-A/B im LancerEdit ModelViewer bestätigt eine sichtbare Änderung. Im In-Game-A/B des vollständigen Profils bleiben nach Erhalt der Room-Vertex-Beleuchtung und korrekter Behandlung von Backface-Normalen die Stadtfassaden sichtbar beleuchtet; der zuvor beobachtete großflächige Schwarzeffekt tritt nicht mehr auf. Der Surface-Map-Lease-Absturz in Cutscenes ist ebenfalls behoben. Ein opt-in PBR-Cubemap-Prototyp über `envmap_material` ist implementiert; `LI_ELITE` löst `envmapbasic` als `TextureCube` auf, doch das getestete OFF/ON-Paar ändert keine Modellpixel. Sichtbare Cubemap-Wirkung und IBL bleiben daher offen. Vergleichsbilder und Messdaten liegen in der [Renderer-Galerie](renderer-comparison-gallery.md). Materialqualität in weiteren Szenen und Leistungskosten bleiben offen. **Stand:** 2026-10-14.
++**Status:** Parser, Profile, VFS- und CPU-/GPU-Residency sowie opt-in Normalmap-Bindungen für authored FVF3/FVF4, generierte VMesh-/DFM-Tangenten und QuadSphere sind umgesetzt. Ergänzende Roughness-/Metallic-Sampler sind über `surface_pbr_maps` angebunden. Ein kontrollierter LI_ELITE-A/B im LancerEdit ModelViewer bestätigt eine sichtbare Änderung. Im In-Game-A/B des vollständigen Profils bleiben nach Erhalt der Room-Vertex-Beleuchtung und korrekter Behandlung von Backface-Normalen die Stadtfassaden sichtbar beleuchtet; der zuvor beobachtete großflächige Schwarzeffekt tritt nicht mehr auf. Der Surface-Map-Lease-Absturz in Cutscenes ist ebenfalls behoben. Der opt-in PBR-Cubemap-Pfad besteht nun kontrollierte OpenGL-Proben mit dem Produktionsshader und den echten `envmapbasic`-/Surface-Cube-MATs aus `Data/NAP`; Mip-Sampling ist für die drei neuen Karten bestätigt. Der echte LI_ELITE-ModelViewer-A/B ändert trotzdem keine Modellpixel. In-Game-Reflexionen, Cube-Auswahl nach Umgebung, `[CubeMap] strength`, IBL-Qualität und Leistung bleiben offen. Vergleichsbilder und Messdaten liegen in der [Renderer-Galerie](renderer-comparison-gallery.md) und im [PBR-Cubemap-Probebericht](evidence/renderer/pbr-environment-20261014/cubemap-assets-and-binding-audit.md). Materialqualität in weiteren Szenen bleibt offen. **Stand:** 2026-10-14.
+ **Datenseite:** Repository `LN-Data` (`tools/make_surface_maps.py`, `SDK/fx/SurfaceMaps.ini`, `TODO-surface-maps.md`).
+ Engine-Änderungen bleiben gemäß `AGENTS.md` patch-only unter `patches/series`.
+ 
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -53,3 +53,4 @@
+ client 2051-configurable-modding-parameters-todo.patch
+ client 2052-retail-beam-parser-audit.patch
+ client 2053-nap-ignore-gitkeep-placeholders.patch
++client 2054-pbr-production-cubemap-probe-evidence.patch
+diff --git a/docs/evidence/renderer/pbr-environment-20261014/production-pbr-mat-cubemaps-20261014.md b/docs/evidence/renderer/pbr-environment-20261014/production-pbr-mat-cubemaps-20261014.md
+new file mode 100644
+index 000000000..bac371e8f
+--- /dev/null
++++ b/docs/evidence/renderer/pbr-environment-20261014/production-pbr-mat-cubemaps-20261014.md
+@@ -0,0 +1,68 @@
++# Produktions-PBR und echte Cubemap-MATs
++
++Datum: 2026-10-14
++
++## Probeaufbau
++
++- SDL3-Offscreen-Kontext mit OpenGL 4.6 Core auf Intel HD Graphics 4600 / Mesa
++  23.2.1.
++- Eingebettetes `PBR.bin` aus dem gebauten Client, Shaderfeature `ENVMAP`
++  (Featuremaske 64), Produktions-PBR-Fragment und reguläre FVF-Vertexpipeline.
++- Testdreieck mit Weiß-Diffuse, Metallwert 1, Roughness 0,25, schwarzem
++  Umgebungslicht und fester Kamera-/Weltmatrix. Die Reflexionsrichtung ergibt
++  für diesen Draw −Z.
++- Die vier Eingaben stammen aus `Data/NAP/`. `UtfLoader.LoadResourceFile`
++  liest die MAT-Texture-Library; `TextureData.Initialize` führt das enthaltene
++  CUBE-DDS durch `DDS.FromStream` und liefert eine `TextureCube`. Diese wird
++  über die Produktionseinheit `t5/s5` gebunden.
++- Bei neun Mipstufen wird Roughness 0,25 mit `EnvMipCount = 8` auf Level 2
++  abgebildet. `envmapbasic` hat nur eine Mipstufe und bleibt auf Level 0.
++
++## Ergebnis
++
++| Eingabe | SHA-256 | Mips | Mittelpixel RGB |
++|---|---|---:|---|
++| `Material/fx/envmapbasic.mat` | `18c30f383fc451dcb5e596668770fcbc517cb88dadf7ea64c685a01c2a2432bc` | 1 | (126, 126, 126) |
++| `Surface/fx/envcube_space.mat` | `c0b9908383e7e6837bf61d7c9f256636bf16cb455f800e3ebe9a10ebe3eba9db` | 9 | (13, 14, 22) |
++| `Surface/fx/envcube_sun.mat` | `862be2bc062cf6d636c998b88c6fb9ca36434c7d5ff862544d0a78eba0b2b70f` | 9 | (17, 17, 21) |
++| `Surface/fx/envcube_nebula.mat` | `c360f2222aea189f6bf0c62d37ff2ba2bd2d82c8bde4a14cb110abd0a30af0eb` | 9 | (23, 18, 25) |
++
++![Vier echte Cubemap-MATs im Produktions-PBR-Shader](production-pbr-mat-cubemaps-20261014.png)
++
++Alle vier Läufe endeten erfolgreich und lieferten unterschiedliche, nicht
++schwarze Cube-Proben. Das belegt für diese GPU die Produktions-PBR-ENVMAP-
++Variante, die Slotbindung, den MAT→UTF→DDS→TextureCube-Ladeweg und die
++roughnessbasierte Auswahl einer vorhandenen Mipstufe. Der sechsfarbige
++synthetische Richtungsprobe ist separat unter
++[synthetic-cubemap-slot5-20261014.md](synthetic-cubemap-slot5-20261014.md)
++dokumentiert.
++
++Danach sampelte ein zweiter Offscreen-Draw dieselben vier geladenen MAT-Cubes
++mit einem Richtungs-Probe an den sechs Achsen auf Mip 0. Die RGB-Mittelpixel
++pro Richtung lauten:
++
++| Cube | +X | −X | +Y | −Y | +Z | −Z |
++|---|---:|---:|---:|---:|---:|---:|
++| `envmapbasic` | (127,127,127) | (127,127,127) | (255,255,255) | (127,127,127) | (127,127,127) | (127,127,127) |
++| `envcube_space` | (8,9,20) | (3,4,10) | (8,10,21) | (7,8,18) | (7,8,17) | (5,6,14) |
++| `envcube_sun` | (4,5,6) | (8,9,12) | (4,5,6) | (6,7,9) | (7,6,7) | (9,10,13) |
++| `envcube_nebula` | (54,27,63) | (4,4,4) | (62,29,73) | (23,14,26) | (24,14,27) | (15,9,17) |
++
++![Sechs Richtungsproben je echter Cube-MAT, Mip 0](production-pbr-cube-six-faces-20261014.png)
++
++Damit sind DDS-Flächenfolge und GPU-Richtungssampling für die tatsächlichen
++NAP-Cubes belegt. Dieser Zusatz nutzt einen kleinen Achsen-Probe-Shader; er
++beweist weder die Retail-Orientierung im PBR-Mesh noch die Cube-Auswahl pro
++Umgebung.
++
++## Grenzen und nächste Arbeit
++
++Der kontrollierte Draw verwendet Testgeometrie und vorgegebene Uniforms. Er
++beweist keine korrekte Reflexionsrichtung auf LI_ELITE, keine sichtbare
++In-Game-Qualität und keine GPU-Bindung im ModelViewer-Draw. Dessen bisheriges
++OFF/ON-ROI bleibt bei 0 geänderten Pixeln.
++
++Offen bleiben die Auswahl der `envcube_*` über den `[CubeMap]`-Katalog anhand
++der aktiven Umgebung, die Einbindung von `[CubeMap] strength`, visuelle
++Orientierungs-/Stärkeabnahme auf echten Schiffen und Stationen sowie eine
++GGX-vorgefilterte IBL-Pipeline. Normale DDS-Mipmaps ersetzen kein GGX-Filtering.
+diff --git a/docs/evidence/renderer/pbr-environment-20261014/production-pbr-mat-cubemaps-20261014.png b/docs/evidence/renderer/pbr-environment-20261014/production-pbr-mat-cubemaps-20261014.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..2234142fe743b83726d85d08e9cfabe8612fcdfc
+GIT binary patch
+literal 22419
+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
+T9cKG4b5~E>Nb8fPWBC67_<Ba=
+
+literal 0
+HcmV?d00001
+
+diff --git a/docs/evidence/renderer/pbr-environment-20261014/production-pbr-cube-six-faces-20261014.png b/docs/evidence/renderer/pbr-environment-20261014/production-pbr-cube-six-faces-20261014.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..7e6052c0b3be4a2b53d78b533808d75ae05ed51a
+GIT binary patch
+literal 2967
+zcmeAS@N?(olHy`uVBq!ia0y~yU<NXo8911Ll+5GlHyIeX<2+p)Ln>~)y|IzEDS*K>
+zFhD^nI{A@Q*)8komv7FBuxeV$tJbt2de5WzkJ--4@A&hIiFI~o5mVz7S5}4q2}TwM
+z4h04VAf?d2z`!EF(7?dNAmG5jz{J7ez`%%Gk{C6Z29Rh8)BsF#h;bz`YOr{d^q?3z
+zt|Szx*aMn`RDomwhk`KSRD`4+DQV!ea6-uXYth;)yw3S83%1>sP|TRO&+WuNW;Kpk
+zbN-*=#g}-=i&grD7XumD5EOue-<5;EumA-jy<I7?DDT!eE=S+w|4R!0NGSef-4-FG
+z_>*ady0Xgo{m=JH<13ekYn+1$ZJgO3sffUgtKnOX88MPtIYWz8?4>Ja(4mGa`SoT%
+z*Ru`QQHn3V?U7P^vBh3m@x{ko(uyno{XbF3zgJMp9AC3yG}6(VUxeZbd%2Gqm)O-{
+u#xT883K_0sI>Ew#>2RW|OtLHg1swJY8$;(_e#T<K00f?{elF{r5}E*scM;wI
+
+literal 0
+HcmV?d00001
+
+diff --git a/docs/evidence/renderer/pbr-environment-20261014/synthetic-cubemap-slot5-20261014.md b/docs/evidence/renderer/pbr-environment-20261014/synthetic-cubemap-slot5-20261014.md
+new file mode 100644
+index 000000000..bef4b14cb
+--- /dev/null
++++ b/docs/evidence/renderer/pbr-environment-20261014/synthetic-cubemap-slot5-20261014.md
+@@ -0,0 +1,42 @@
++# Synthetic Cubemap Slot 5 GPU Probe
++
++Date: 2026-10-14
++
++## Setup
++
++- SDL3 hidden OpenGL context with `SDL_VIDEODRIVER=offscreen`.
++- Mesa 23.2.1 on Intel HD Graphics 4600, OpenGL 4.6 Core.
++- A 4x4 `TextureCube` with six constant BGRA faces was uploaded using the
++  production `TextureCube.SetData`/OpenGL backend.
++- A test HLSL shader declared `TextureCube` at `t5` and `SamplerState` at
++  `s5`, matching `PBR.frag.hlsl`. It sampled the six cardinal directions into
++  a 768x192 render target.
++- The shader was compiled by the repository `LLShaderCompiler`; the render
++  target was read back through `Texture2D.GetData`.
++
++## Result
++
++All six center samples matched the uploaded face colors:
++
++| Direction | Expected BGRA | GPU readback BGRA |
++|---|---|---|
++| +X | 0, 0, 255, 255 | 0, 0, 255, 255 |
++| -X | 0, 255, 0, 255 | 0, 255, 0, 255 |
++| +Y | 255, 0, 0, 255 | 255, 0, 0, 255 |
++| -Y | 0, 255, 255, 255 | 0, 255, 255, 255 |
++| +Z | 255, 0, 255, 255 | 255, 0, 255, 255 |
++| -Z | 255, 255, 0, 255 | 255, 255, 0, 255 |
++
++![Six synthetic cube faces sampled through t5/s5](synthetic-cubemap-slot5-20261014.png)
++
++This confirms OpenGL cube allocation, face upload, `t5/s5` binding, directional
++sampling, render-target drawing and readback on this machine. It uses a small
++purpose-built shader and synthetic textures. Follow-up production-shader and
++real MAT/DDS results are documented in
++[production-pbr-mat-cubemaps-20261014.md](production-pbr-mat-cubemaps-20261014.md).
++Neither test proves a visible reflection on `LI_ELITE`.
++
++## Follow-up
++
++The controlled production PBR/MAT test passed; the zero-pixel ModelViewer A/B
++now points to the Retail material/mesh/draw setup or a visually weak reflection.

@@ -14,6 +14,7 @@ using LibreLancer.Infocards;
 using LibreLancer.Server;
 using LibreLancer.World;
 using LibreLancer.World.Components;
+using LibreLancer.World.Equipments;
 using WattleScript.Interpreter;
 
 namespace LibreLancer.Client
@@ -106,23 +107,6 @@ namespace LibreLancer.Client
                     [FormatStat(thruster.Force), FormatStat(thruster.Drain)]);
             }
 
-            var ammunition = equipment switch
-            {
-                MunitionEquip ammo => ammo.Def,
-                MissileEquip missile => missile.Def,
-                _ => null
-            };
-            if (ammunition != null)
-            {
-                return BuildStatsCards(
-                    ["Stats", "Hull Damage Per Shot:", "Shield Damage Per Shot:", "Lifetime:",
-                        "Detonation Distance:", "Seeker Range:", "Seeker Field of View:", "Time to Lock:"],
-                    [FormatStat(ammunition.HullDamage), FormatStat(ammunition.EnergyDamage),
-                        $"{FormatStat(ammunition.Lifetime)} s", $"{FormatStat(ammunition.DetonationDist)} m",
-                        $"{FormatStat(ammunition.SeekerRange)} m", $"{FormatStat(ammunition.SeekerFovDeg)}°",
-                        $"{FormatStat(ammunition.TimeToLock)} s"]);
-            }
-
             var hullDamage = 0f;
             var shieldDamage = 0f;
             var lifetime = 0f;
@@ -130,7 +114,7 @@ namespace LibreLancer.Client
             var refireDelay = 0f;
             var powerUsage = 0f;
             Motor? motor = null;
-            //Do not confuse, this is building the equipment stats infocard line by line here, because its not like ships which are 
+            //Do not confuse, this is building the equipment stats infocard line by line here, because its not like ships which are
             //defined on the dlls, equipment is defined in game data and must be built.
             switch (equipment)
             {
@@ -178,7 +162,7 @@ namespace LibreLancer.Client
                 weaponClass = hpType.Class;
             }
 
-            var range = MissileLauncherComponent.CalculateRange(lifetime, muzzleVelocity, motor);
+            var range = MissileLauncher.CalculateRange(lifetime, muzzleVelocity, motor);
             var labels = new[]
             {
                 "Stats",
@@ -579,13 +563,8 @@ namespace LibreLancer.Client
                 return 0;
             }
             var maxAmount = (int) Math.Floor(session.Credits / item.Price);
-            var canAutoMountSingle = !string.IsNullOrWhiteSpace(item.Equipment.HpType) &&
-                CargoUtilities.CompatibleHardpoints(session.PlayerShip!, session.Game.GameData.Items.Ini.HpTypes,
-                        item.Equipment.HpType)
-                    .Any(hp => !session.Items.Any(x => hp.Equals(x.Hardpoint, StringComparison.OrdinalIgnoreCase)));
-
-            return CargoUtilities.GetPurchaseLimit(
-                session.Items, session.PlayerShip!, item.Equipment, maxAmount, canAutoMountSingle);
+            var holdLimit = CargoUtilities.GetItemLimit(session.Items, session.PlayerShip!, item.Equipment!);
+            return Math.Min(maxAmount, holdLimit);
         }
 
         public float GetHoldSize() => session.PlayerShip?.HoldSize ?? 0;

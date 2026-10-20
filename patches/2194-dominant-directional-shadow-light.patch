@@ -1,0 +1,96 @@
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -891,15 +891,26 @@
+                 return false;
+ 
+             DynamicLight? selectedLight = null;
++            var selectedLightPriority = 0f;
+             foreach (var light in SystemLighting.Lights)
+             {
+-                if (light.Active && light.Light.Kind == LightKind.Directional &&
+-                    float.IsFinite(light.Light.Color.R + light.Light.Color.G + light.Light.Color.B) &&
+-                    light.Light.Color.R + light.Light.Color.G + light.Light.Color.B > 0)
+-                {
+-                    selectedLight = light;
+-                    break;
+-                }
++                if (!light.Active || light.Light.Kind != LightKind.Directional)
++                    continue;
++
++                var color = light.Light.Color;
++                if (!float.IsFinite(color.R) || !float.IsFinite(color.G) || !float.IsFinite(color.B))
++                    continue;
++
++                // One shadow map can represent only one sun. Prefer the brightest
++                // direct source instead of depending on the order of light entries.
++                var priority = Math.Max(0, color.R) * 0.2126f +
++                               Math.Max(0, color.G) * 0.7152f +
++                               Math.Max(0, color.B) * 0.0722f;
++                if (!float.IsFinite(priority) || priority <= selectedLightPriority)
++                    continue;
++
++                selectedLight = light;
++                selectedLightPriority = priority;
+             }
+             if (selectedLight == null ||
+                 !shadowCamera.Fit(camera, selectedLight.Light.Direction, ShadowMaxDistance,
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -207,7 +207,7 @@
+   - [x] Sampleable Depth-only-Renderziele im OpenGL-Backend und no-op-Ziele im Null-Backend bereitgestellt; Release-Build sowie OpenGL-4.6/Mesa-NAP-Smoke für FBO, Clear und Depth-Readback bestanden. GLES, Shader-Sampling und PCF bleiben offen; siehe [Depth-only-Smoke](evidence/renderer/depth-only-target-smoke-20261017/README.md).
+   - [x] `DirectionalShadowCamera` kann den aktiven Kamerafrustum bis zu einer begrenzten Sichtweite in einen Lichtfrustum überführen und die orthografische XY-Projektion auf Shadow-Map-Texel rasten. Der Build prüft die Kompilierung; ein Laufzeit- oder Schattenbildnachweis fehlt. Die Kamera wird noch nicht vom `SystemRenderer` verwendet.
+   - [x] Opake, sichtbare Model-Meshes schreiben optional im Main-Camera-Depth-Prepass mit LOD und World-Matrix; transparente Teile bleiben ausgeschlossen. `render_depth_prepass` und `--render-depth-prepass=on|off` steuern den Pass, der standardmäßig aus ist. Basic/PBR-Materialien verwenden Depth-only-Fragmentvarianten; Alpha-Test wird im Basic-Pfad beibehalten, Normal-/Emissive-/Beleuchtungsarbeit entfällt. Nicht unterstützte Materialtypen nutzen ihren vorhandenen Shader-Fallback. Der Pass wirft keine Schatten; Laufzeit- und FPS-Abnahme stehen aus.
+-  - [x] Erste integrierte OpenGL-Stufe: `render_shadows` / `--render-shadows=on|off` wählt eine aktive gerichtete Systemlichtquelle, zeichnet opake aktive Teile aller vorbereiteten `ModelRenderer` in ein 1024²-Depth-Target und bindet die Lichtmatrix samt 3×3-PCF in Basic- und PBR-Receiver. Shadow-Map-Draws gehen in die GPU-Passzeiten ein; Schatten bleiben standardmäßig aus. Das ist eine einzelne Karte ohne Kaskaden; Modelle außerhalb des Kamerabildes werden als Caster separat gesammelt und gegen das Lichtfrustum geprüft. Der NAP-only-M01A-Smoke auf OpenGL 4.6/Mesa 23.2.1 bestätigt den Passlauf (ein Debug-Sample mit `DEPTH_COMPONENT32F`: 0,184 ms); das Bild belegt keine Schattenqualität oder kontrollierte FPS-Differenz. Siehe [Shadow-map-Laufzeitnachweis](evidence/renderer/shadow-map-runtime-20261017/README.md). Ein NAP-only-GLES-3.2/Mesa-Smoke erreichte dieselbe Intro-Szene nach Wechsel auf `DEPTH_COMPONENT32F`/`FLOAT`; GLES bietet hier keine GPU-Pass-Timer. Siehe [Shadow-map-Laufzeitnachweis](evidence/renderer/shadow-map-runtime-20261017/README.md). Andere GLES-3.1-Treiber und Materialfamilien sind nicht abgedeckt. Der Live-Schalter „DIRECTIONAL SHADOW MAPS (BASIC / PBR)“ ist in den Performance-Optionen ergänzt und im selben NAP-only-M01A-Prozess an/aus sowie über erneutes Öffnen des Menüs geprüft; die ausgeschaltete Einstellung blieb in `render_shadows = false` erhalten. Siehe [Live-Schalter-Laufzeitprüfung](evidence/renderer/shadow-map-live-toggle-20261017/README.md). Ein identischer Szenenvergleich mit Ein/Aus und Bild-/Leistungsmessung steht noch aus.
++  - [x] Erste integrierte OpenGL-Stufe: `render_shadows` / `--render-shadows=on|off` wählt die stärkste aktive gerichtete Systemlichtquelle anhand ihrer Rec.-709-Direkthelligkeit, statt die Reihenfolge der INI-Einträge zu verwenden. Das ist relevant: NAP Hi02 definiert zuerst `Hi02_system_light` mit (232, 80, 0; Y=106,54), danach `Hi02_walkerlight` mit (210, 118, 26; Y=130,92). Eine einzelne Shadow-Map bildet damit die stärkere direkte Quelle ab. Der NAP-only-Lauf mit temporär auf Hi02 gesetztem Spielstand erreichte `SpawnFlow: Initial spawn requested`, verifizierte aber nicht, welche Lichtquelle der Renderer tatsächlich auswählte; die Bildschirmaufnahme war auf der getesteten Intel/Mesa-Konfiguration schwarz. Details und Grenzen im [Hi02-Laufzeitnachweis zur Lichtauswahl](evidence/renderer/shadow-dominant-light-hi02-20261017/README.md). Der Pfad zeichnet opake aktive Teile aller vorbereiteten `ModelRenderer` in ein 1024²-Depth-Target und bindet die Lichtmatrix samt 3×3-PCF in Basic- und PBR-Receiver. Shadow-Map-Draws gehen in die GPU-Passzeiten ein; Schatten bleiben standardmäßig aus. Das ist eine einzelne Karte ohne Kaskaden; Modelle außerhalb des Kamerabildes werden als Caster separat gesammelt und gegen das Lichtfrustum geprüft. Der NAP-only-M01A-Smoke auf OpenGL 4.6/Mesa 23.2.1 bestätigt den Passlauf (ein Debug-Sample mit `DEPTH_COMPONENT32F`: 0,184 ms); das Bild belegt keine Schattenqualität oder kontrollierte FPS-Differenz. Siehe [Shadow-map-Laufzeitnachweis](evidence/renderer/shadow-map-runtime-20261017/README.md). Ein NAP-only-GLES-3.2/Mesa-Smoke erreichte dieselbe Intro-Szene nach Wechsel auf `DEPTH_COMPONENT32F`/`FLOAT`; GLES bietet hier keine GPU-Pass-Timer. Siehe [Shadow-map-Laufzeitnachweis](evidence/renderer/shadow-map-runtime-20261017/README.md). Andere GLES-3.1-Treiber und Materialfamilien sind nicht abgedeckt. Der Live-Schalter „DIRECTIONAL SHADOW MAPS (BASIC / PBR)“ ist in den Performance-Optionen ergänzt und im selben NAP-only-M01A-Prozess an/aus sowie über erneutes Öffnen des Menüs geprüft; die ausgeschaltete Einstellung blieb in `render_shadows = false` erhalten. Siehe [Live-Schalter-Laufzeitprüfung](evidence/renderer/shadow-map-live-toggle-20261017/README.md). Ein identischer Szenenvergleich mit Ein/Aus und Bild-/Leistungsmessung steht noch aus.
+   - [ ] Kontrollierten Same-pose-NAP-A/B für Schiffe und Basen aufnehmen; Bias, Sichtweite und Filterung kalibrieren, GLES auf weiteren Implementierungen und Shader-Sampling visuell prüfen, weitere Materialfamilien anbinden und Kaskaden ergänzen. FPS-Kosten in repräsentativen Szenen gegen dieselbe Szene ohne Schatten messen.
+ - [ ] Screen-Space-Reflections als optionale Ergänzung prüfen; fehlende Bildinformation an Bildschirmrändern und bei verdeckten Objekten muss über den bestehenden PBR-Fallback abgefangen werden.
+ - [ ] Volumetrischen Nebel und volumetrische Lichtstrahlen als eigenständige, skalierbare Qualitätstufe evaluieren; vorhandene Freelancer-Nebelparameter und Transparenzreihenfolge als Referenz verwenden.
+--- a/patches/series
++++ b/patches/series
+@@ -193,3 +193,4 @@
+ client 2191-shadow-map-runtime-evidence.patch
+ client 2192-sized-depth-format-for-gles.patch
+ client 2193-live-shadow-options.patch
++client 2194-dominant-directional-shadow-light.patch
+
+diff --git a/docs/evidence/renderer/shadow-dominant-light-hi02-20261017/README.md b/docs/evidence/renderer/shadow-dominant-light-hi02-20261017/README.md
+new file mode 100644
+--- /dev/null
++++ b/docs/evidence/renderer/shadow-dominant-light-hi02-20261017/README.md
+@@ -0,0 +1,36 @@
++# Hi02-Directional-Light-Laufzeitprüfung
++
++Der Schattenpfad wählt nun die aktive gerichtete Systemlichtquelle mit der
++höchsten endlichen Rec.-709-Direkthelligkeit. Für die Hi02-Daten unter
++`Data/NAP/.runtime-test-stage/package-inputs-20261016/World/universe/systems/hi02/Hi02.ini`
++ergibt die Formel:
++
++| Quelle | INI-Farbe | Y (gerundet) |
++| --- | ---: | ---: |
++| `Hi02_system_light` (steht zuerst) | (232, 80, 0) | 106,54 |
++| `Hi02_walkerlight` | (210, 118, 26) | 130,92 |
++
++Damit bildet die neue Auswahlregel die zweite, hellere direkte Quelle ab. Der
++Lauf benutzte einen temporären Spielstand, dessen `[Player]`-System auf
++`Hi02_system` gesetzt war; die beiden ursprünglichen Spielstände wurden nicht
++verändert. Der Client meldete `Game: Finished loading game data`, `System:
++Hi02` und `SpawnFlow: Initial spawn requested`. Er wurde mit
++`--render-shadows=on` gestartet.
++
++Der Start war NAP-only: die aktive Manifestdatei
++`lancer-renderer-aa-profile-20261016` hatte SHA-256
++`e6d56a0f74095c89712f35f35586bfbe5db19d28f0f106654037a53140fc3ca1`; Größe
++und SHA-256 aller 13 Pakete passten zum Manifest und jedes Archiv bestand
++`nexus-pack verify`. Die Paket-Eingaben lagen unter `Data/NAP/`; das
++Test-Installationsverzeichnis enthielt kein loses `DATA`-Verzeichnis.
++
++## Aussagegrenze
++
++Die Laufzeit erreichte den Spiel-Spawn in Hi02, protokollierte aber weder den
++ausgewählten Lichtnamen noch ein erfolgreich gerendertes Schattenbild. Die
++X11-Aufnahme war auf Intel HD Graphics 4600 mit Mesa 23.2.1 schwarz. Dieser
++Smoke belegt daher Datenladen und Spawn im Mehrlichtsystem, aber keine visuelle
++Schattenwirkung und keine Laufzeitbestätigung der Lichtauswahl. Dafür bleiben
++ein sichtbarer Debug-Nachweis oder ein kontrolliertes Bildpaar auf einer
++funktionierenden Renderkonfiguration sowie ein Ein/Aus-Leistungsvergleich
++offen.

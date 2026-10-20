@@ -1,0 +1,333 @@
+diff --git a/docs/evidence/renderer/sdl-gpu-pbr-uniform-budget-20261018.md b/docs/evidence/renderer/sdl-gpu-pbr-uniform-budget-20261018.md
+new file mode 100644
+index 0000000..3b328f4
+--- /dev/null
++++ b/docs/evidence/renderer/sdl-gpu-pbr-uniform-budget-20261018.md
+@@ -0,0 +1,33 @@
++# SDL_GPU PBR Uniform-Budget
++
++Stand: 2026-10-18. Dieser Nachweis betrifft die PBR-Shaderkompilierung und
++deren serialisierte SDL_GPU-Ressourcenzahlen. Er belegt keine Ausführung der
++Produktionsshader im Spielrenderer.
++
++## Änderung
++
++- PBR-Fragmentshader erhalten den Kamera-zu-Oberfläche-Vektor als interpolierte
++  Vertexausgabe. Damit entfällt der fragmentseitige Kamera-Uniformblock.
++- Die sechs UV-Selektoren liegen als Floatvektoren im bestehenden
++  `PBRParameters`-Block. Damit entfällt der separate `TexCoordSelectors`-Block.
++- Der Client setzt `PBR_VIEW_VECTOR` für alle PBR-Materialvarianten. Schatten-
++  Parameter bleiben im separaten Block.
++
++Die ausgewählten PBR-Fragmentvarianten benötigen dadurch drei Uniformblöcke
++ohne Schatten und höchstens vier mit Schatten, passend zum SDL_GPU-Limit von
++vier Uniformblöcken je Shaderstufe. Die übrigen, nicht vom Client gewählten
++Fallbackpermutationen bleiben im Bundle erhalten.
++
++## Prüfung
++
++- Release-Build von `src/LibreLancer/LibreLancer.csproj`: 21 Projekte, 0 Fehler
++  und 119 Warnungen.
++- Erzeugte Shaderbundles enthalten je 1024 Varianten für `PBR` und
++  `PBR_Skinned`; in beiden Bundles liegen alle 512 Varianten mit
++  `PBR_VIEW_VECTOR` bei höchstens vier Fragment-Uniformblöcken.
++- Die Grenze wurde aus den serialisierten SPIR-V-Ressourcenzahlen der erzeugten
++  Bundlevarianten ausgewertet. 128 andere Fallbackvarianten je Bundle
++  überschreiten weiter vier Blöcke; der Client setzt deren Featurebit nicht.
++
++Offen bleibt die SDL_GPU-Bindung und Ausführung dieser Shader im eigentlichen
++Client-Renderer.
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+index 7aa08b8..d040d00 100644
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -207,7 +207,12 @@ NAP-Paket und Log des bisherigen Laufs liegen in
+    aber keine backendneutralen GPU-Kommandos auf und verwaltet kein Aliasing.
+    SDL_GPU besitzt weiterhin nur einen separaten Diagnosepfad. Eine echte
+    Backend-Ausführung, Ressourcen-Lebenszeiten und Fehlerwiederherstellung
+-   bleiben offen.
++   bleiben offen. Patch 2370 passt die PBR-Fragmentuniforms an SDL GPUs
++   Vier-Block-Limit an: Der View-Vektor kommt aus dem Vertexshader und die
++   UV-Selektoren liegen im PBR-Parameterblock. Der aktive PBR-Pfad benötigt so
++   drei Fragmentuniformblöcke ohne Schatten und vier mit Schatten. Das beseitigt
++   nur diese Shader-Ressourcengrenze; Spielshader-Bindung und Renderer-Ausführung
++   sind weiterhin offen.
+ 6. **Vulkan/SDL_GPU-Spike und Backend.** Zuerst eine echte Pipeline mit
+    Freelancer-FVF, BC4/BC5, Cubemaps, Skinning, Renderzielen und Präsentation
+    kompilieren und auf einer Vulkan-GPU starten. Erst nach erfolgreichem Spike
+@@ -415,11 +420,11 @@ Compilerlauf über alle 41 in Projektdateien registrierten Shaderbeschreibungen
+ und ihre Varianten war erfolgreich. Im PBR-Bundle wurden 512 Permutationen
+ erzeugt; die SPIR-V-Bindungen und serialisierten Slotmaps stimmen überein.
+ Der vorhandene Vulkan-Smoke liest das neue Format und besteht mit dem bekannten
+-RGBA16F-/Depth-/BC5-Readback. Das belegt weiterhin keine Ausführung der echten
+-Spielshader im SDL_GPU-Renderer. Außerdem überschreiten PBR-Fragmentvarianten
+-mit fünf Uniformblöcken das SDL_GPU-Limit von vier pro Stufe. Die Umnummerierung
+-behebt Lücken, reduziert aber nicht die benötigte Blockanzahl; ein Backendpfad
+-für diese Shader bleibt offen.
++RGBA16F-/Depth-/BC5-Readback. Der PBR-Pfad verwendet jetzt einen interpolierten
++View-Vektor und bündelt UV-Selektoren im PBR-Parameterblock. Damit benötigen
++seine Fragmentvarianten drei Uniformblöcke ohne Schatten und vier mit Schatten,
++innerhalb des SDL_GPU-Limits. Das belegt weiterhin keine Ausführung der echten
++Spielshader oder einen Renderer-Bindungspfad im SDL_GPU-Renderer.
+ 
+ ## Backend-Grenzen
+ 
+diff --git a/docs/vulkan-backend-untersuchung.md b/docs/vulkan-backend-untersuchung.md
+index 178a53b..a0b8a03 100644
+--- a/docs/vulkan-backend-untersuchung.md
++++ b/docs/vulkan-backend-untersuchung.md
+@@ -388,7 +388,7 @@ Die Punkte folgen aus der Art, wie der Client die Schnittstellen benutzt.
+ 
+ ### 10.2 Shader
+ 
+-- [ ] Läuft das HLSL ohne Änderung durch den SDL_GPU-Pfad (DXIL, MSL)? Alle 361 Varianten kompilieren sich schon zu SPIR-V; Laufzeitprüfung steht aus.
++- [ ] Läuft das HLSL ohne Änderung durch den SDL_GPU-Pfad (DXIL, MSL)? Die registrierten Shaderbeschreibungen und Varianten kompilieren sich zu SPIR-V; Laufzeitprüfung steht aus.
+ - [ ] `[[vk::location]]`-Zuordnung gegen die SDL_GPU-Vertexattribute (Offset/Format) abgleichen.
+ - [ ] Fließkomma-Genauigkeit und `discard` im Basic-Shader (Alpha-Test-Variante) gegen GL vergleichen.
+ - [ ] Merkmalsnamen (`NORMALMAP` im Code, `NORMAL_MAP` in `Basic_FVF.txt`) abgleichen.
+@@ -536,7 +536,7 @@ Die Reflexion im `LLShaderCompiler` zählt die Ressourcen und prüft nur die **S
+ 
+ **Stand 2026-10-18:** Der Compiler schreibt nun eine SDL_GPU-SPIR-V-Variante mit fortlaufenden Bindungen und speichert je Stufe die Zuordnung `(DescriptorSet, OriginalBinding, SdlBinding)` im Shaderbundle. DXIL-, MSL- und GLSL-Übersetzungen verwenden weiter den Original-SPIR-V-Code. Ein Lauf über alle 41 in den Projektdateien registrierten Shaderbeschreibungen und Varianten gelang; für `PBR.bin` wurden 512 Permutationen erzeugt und die gespeicherten Slotmaps gegen die resultierenden SPIR-V-Dekorationen geprüft. Der SDL_GPU-API-Smoke liest das neue Bundleformat und besteht weiterhin.
+ 
+-Die Slotmap ist noch nicht an einen Spielshader- oder Renderer-Bindungspfad angeschlossen. Sie muss die festen Clientindizes (`SetUniformBlock(2, …)`, `3`, `5`) auf SDL-Slots abbilden. Außerdem enthalten PBR-Fragmentvarianten fünf aktive Uniformblöcke, während SDL_GPU höchstens vier pro Stufe unterstützt; bloße Umnummerierung kann diese Grenze nicht lösen. Die DFM-Storage-Pufferbereiche (`BindTo(9, start, count)`) brauchen zusätzlich weiterhin einen Basisindex im Shader.
++Patch 2370 beseitigt für den ausgewählten PBR-Pfad die Uniformblock-Überzahl: Der View-Vektor wird als Vertexausgabe interpoliert, und UV-Selektoren liegen nun im PBR-Parameterblock. Die PBR-Fragmentshader benötigen damit drei Uniformblöcke ohne Schatten und höchstens vier mit Schatten. Die Slotmap ist jedoch weiterhin nicht an einen Spielshader- oder Renderer-Bindungspfad angeschlossen; feste Clientindizes müssen dort auf SDL-Slots abgebildet werden. Die DFM-Storage-Pufferbereiche (`BindTo(9, start, count)`) brauchen zusätzlich weiterhin einen Basisindex im Shader.
+ 
+ **Weitere Einschränkung der Bindung:** `SDL_BindGPUVertexStorageBuffers` bindet **ganze Puffer** ohne Offset und Länge. Der Client bindet Bereiche (`BindTo(9, start, count)` für Partikel, Strahlen und Bones mit `BufferOffset`, `200` Matrizen). Bei SDL_GPU muss der Anfangsindex als Uniform in den Shader gegeben werden (neuer Uniform-Block oder im Material-Block). Das betrifft `Particle`, `ParticleBeam`, `Basic_Skinned`.
+ 
+@@ -623,7 +623,7 @@ Aus der Dokumentation (3.2.0):
+ - [ ] **Praktisch prüfen:** minimales SDL_GPU-Programm mit den gebündelten Shadern (SPIR-V und DXIL), eine Pipeline für `Basic_FVF`, auf Linux (Mesa/NVIDIA) und Windows (Vulkan und D3D12).
+ - [ ] Ob ein SDL3-Fenster mit `SDL_WINDOW_OPENGL` für SDL_GPU beanspruchbar ist (sonst Fenstererzeugung je Backend).
+ - [x] Compilerformat für die SDL_GPU-SPIR-V-Umnummerierung und Slotmap im Bündel umgesetzt; der OpenGL-Leser akzeptiert Shaderheader-Version 2. Eine tatsächliche Produktionsshader-Bindung ist weiterhin offen.
+-- [ ] Verhalten der D3D12- und Metal-Übersetzungen (DXIL über SPIRV-Cross und DXC, MSL über SPIRV-Cross) bei den 361 Varianten.
++- [ ] Verhalten der D3D12- und Metal-Übersetzungen (DXIL über SPIRV-Cross und DXC, MSL über SPIRV-Cross) bei den registrierten Shaderpermutationen.
+ - [ ] Mindestversion von SDL3 für Linux und macOS und deren Bereitstellung im Paket (heute nur Windows gebündelt).
+ - [ ] Messung: Zeichenaufrufe, Pipeline-Varianten und Uniform-Daten je Frame (10.3), erst damit lässt sich die Größe von Pipeline-Cache und Ringpuffern festlegen.
+ - [ ] Einfluss der 3.4-Funktionen (Features lockern, Geräte-Eigenschaften) auf die Mindestanforderungen unter Android/Raspberry Pi.
+diff --git a/patches/README.md b/patches/README.md
+index e619e7e..4a8b890 100644
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 366 Client patches and two native patches. Each
++The active series contains 367 Client patches and two native patches. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -315,3 +315,4 @@ jump-gate route.
+ | 2367 | Add NAP-only M01A visual A/B evidence for the soft-particle toggle |
+ | 2368 | Remove stale OpenGL imports and refresh the backend boundary audit |
+ | 2369 | Compact SDL_GPU SPIR-V bindings and serialize original-to-SDL slot maps |
++| 2370 | Keep selected PBR shader variants within SDL_GPU's uniform-buffer limit |
+diff --git a/patches/series b/patches/series
+index e6612c3..c9e112c 100644
+--- a/patches/series
++++ b/patches/series
+@@ -367,3 +367,4 @@ client 2366-render-target-resize-runtime-evidence.patch
+ client 2367-soft-particle-m01a-visual-ab.patch
+ client 2368-audit-renderer-gl-boundaries.patch
+ client 2369-compact-sdl-gpu-production-shader-bindings.patch
++client 2370-pbr-sdl-gpu-uniform-budget.patch
+diff --git a/src/LibreLancer/Render/Materials/BasicMaterial.cs b/src/LibreLancer/Render/Materials/BasicMaterial.cs
+index 81e28ca..ff62150 100644
+--- a/src/LibreLancer/Render/Materials/BasicMaterial.cs
++++ b/src/LibreLancer/Render/Materials/BasicMaterial.cs
+@@ -119,7 +119,8 @@ namespace LibreLancer.Render.Materials
+             VERTEX_LIGHTING = (1 << 5),
+             ENVMAP = (1 << 6),
+             DEPTH_ONLY = (1 << 7),
+-            SHADOWMAP = (1 << 8)
++            SHADOWMAP = (1 << 8),
++            PBR_VIEW_VECTOR = (1 << 9)
+         }
+ 
+         private Shader GetPBRShader(IVertexType vertexType, bool useEnvMapping)
+@@ -142,6 +143,7 @@ namespace LibreLancer.Render.Materials
+                 caps |= PBRFeatures.DEPTH_ONLY;
+             if (shadowLightingEnabled)
+                 caps |= PBRFeatures.SHADOWMAP;
++            caps |= PBRFeatures.PBR_VIEW_VECTOR;
+             if (VertexLighting)
+                 caps |= PBRFeatures.VERTEX_LIGHTING;
+             if (useEnvMapping)
+@@ -293,8 +295,13 @@ namespace LibreLancer.Render.Materials
+             public float EnvDiffuseEnabled;
+             public float FeatureFlags;
+             public Vector3 Padding;
++            public Vector4 TexCoordSelectors1;
++            public Vector4 TexCoordSelectors2;
+         }
+ 
++        private static float UvSelector(SamplerFlags flags) =>
++            (flags & SamplerFlags.SecondUV) == SamplerFlags.SecondUV ? 1f : 0f;
++
+ 
+         public override void Use(RenderContext rstate, IVertexType vertextype, ref Lighting lights, int userData)
+         {
+@@ -423,6 +430,15 @@ namespace LibreLancer.Render.Materials
+             var normalFlags = GetNormalMapSamplerFlags(activeSurfaceNormal != null);
+             if (pbr)
+             {
++                var surfaceFlags = SurfaceBinding?.PbrUvChannel == 1
++                    ? SamplerFlags.Default | SamplerFlags.SecondUV
++                    : SamplerFlags.Default & ~SamplerFlags.SecondUV;
++                var metallicFlags = string.IsNullOrEmpty(MtSampler) && activeSurfaceMetallic != null
++                    ? surfaceFlags
++                    : MtFlags;
++                var roughnessFlags = string.IsNullOrEmpty(RtSampler) && activeSurfaceRoughness != null
++                    ? surfaceFlags
++                    : RtFlags;
+                 var param = new PBRParameters()
+                     { Dc = dcValue, Ec = Ec,
+                       Metallic = (Library?.SurfacePbrMapsEnabled == true ? SurfaceBinding?.Metallic : null) ?? Metallic ?? ((!string.IsNullOrWhiteSpace(MtSampler) || activeSurfaceMetallic != null || (Library?.SurfacePbrMapsEnabled == true && SurfaceBinding?.MetallicMap != null)) ? 1.0f : 0.0f),
+@@ -437,7 +453,11 @@ namespace LibreLancer.Render.Materials
+                                      (BtEnabled ? 2.0f : 0.0f),
+                       Padding = new Vector3(AlphaTest || dxt1 ? 1.0f : 0.0f,
+                           pbrEnvironment?.Format == SurfaceFormat.HalfVector4 ? 1.0f : 0.0f,
+-                          pbrDiffuseIrradiance?.Format == SurfaceFormat.HalfVector4 ? 1.0f : 0.0f) };
++                          pbrDiffuseIrradiance?.Format == SurfaceFormat.HalfVector4 ? 1.0f : 0.0f),
++                      TexCoordSelectors1 = new Vector4(
++                          UvSelector(DtFlags), UvSelector(EtFlags), UvSelector(normalFlags), UvSelector(metallicFlags)),
++                      TexCoordSelectors2 = new Vector4(
++                          UvSelector(roughnessFlags), UvSelector(BtFlags), 0, 0) };
+                 shader.SetUniformBlock(3, ref param);
+ 
+                 if (!string.IsNullOrEmpty(MtSampler))
+@@ -467,13 +487,6 @@ namespace LibreLancer.Render.Materials
+                     roughnessTextureBound = true;
+                 }
+ 
+-                var surfaceFlags = SurfaceBinding?.PbrUvChannel == 1
+-                    ? SamplerFlags.Default | SamplerFlags.SecondUV
+-                    : SamplerFlags.Default & ~SamplerFlags.SecondUV;
+-                SetTextureCoordinates(shader, DtFlags, EtFlags, normalFlags,
+-                    string.IsNullOrEmpty(MtSampler) && activeSurfaceMetallic != null ? surfaceFlags : MtFlags,
+-                    string.IsNullOrEmpty(RtSampler) && activeSurfaceRoughness != null ? surfaceFlags : RtFlags,
+-                    BtFlags);
+             }
+             else
+             {
+diff --git a/src/LibreLancer/Shaders/Basic_FVF.vert.hlsl b/src/LibreLancer/Shaders/Basic_FVF.vert.hlsl
+index 843bd51..a162836 100644
+--- a/src/LibreLancer/Shaders/Basic_FVF.vert.hlsl
++++ b/src/LibreLancer/Shaders/Basic_FVF.vert.hlsl
+@@ -15,6 +15,9 @@ struct Output
+ #endif
+     float4 color: TEXCOORD4;
+     float4 viewPosition: TEXCOORD5;
++#ifdef PBR_VIEW_VECTOR
++    float3 cameraToSurface: TEXCOORD11;
++#endif
+ #ifdef VERTEX_LIGHTING
+     float3 diffuseTermFront: TEXCOORD6;
+     float3 diffuseTermBack: TEXCOORD7;
+@@ -57,6 +60,9 @@ Output main(VSInput input)
+     output.position = mul(float4(input.position, 1.0), mul(World, ViewProjection));
+     output.worldPosition = mul(float4(input.position, 1.0), World).xyz;
+     output.viewPosition = mul(float4(input.position, 1.0), mul(World, View));
++#ifdef PBR_VIEW_VECTOR
++    output.cameraToSurface = CameraPosition - output.worldPosition;
++#endif
+ 
+     float3 n = mul(float4(input.normal, 0), NormalMatrix).xyz;
+ 
+diff --git a/src/LibreLancer/Shaders/Basic_Skinned.vert.hlsl b/src/LibreLancer/Shaders/Basic_Skinned.vert.hlsl
+index 3e669c6..4ab5b5f 100644
+--- a/src/LibreLancer/Shaders/Basic_Skinned.vert.hlsl
++++ b/src/LibreLancer/Shaders/Basic_Skinned.vert.hlsl
+@@ -15,6 +15,9 @@ struct Output
+ #endif
+     float4 color: TEXCOORD4;
+     float4 viewPosition: TEXCOORD5;
++#ifdef PBR_VIEW_VECTOR
++    float3 cameraToSurface: TEXCOORD11;
++#endif
+ #ifdef VERTEX_LIGHTING
+     float3 diffuseTermFront: TEXCOORD6;
+     float3 diffuseTermBack: TEXCOORD7;
+@@ -66,6 +69,9 @@ Output main(VSInput input)
+     output.position = mul(float4(skinnedPos, 1.0), mul(World, ViewProjection));
+     output.worldPosition = mul(float4(skinnedPos, 1.0), World).xyz;
+     output.viewPosition = mul(float4(skinnedPos, 1.0), mul(World, View));
++#ifdef PBR_VIEW_VECTOR
++    output.cameraToSurface = CameraPosition - output.worldPosition;
++#endif
+ 
+     float3 n = mul(float4(skinnedNormal, 0.0), NormalMatrix).xyz;
+ 
+diff --git a/src/LibreLancer/Shaders/PBR.frag.hlsl b/src/LibreLancer/Shaders/PBR.frag.hlsl
+index 5d743a7..4e5f9e2 100644
+--- a/src/LibreLancer/Shaders/PBR.frag.hlsl
++++ b/src/LibreLancer/Shaders/PBR.frag.hlsl
+@@ -1,7 +1,9 @@
+ #include "includes/NormalMap.hlsl"
+ #include "includes/Lighting.hlsl"
+ #include "includes/Modulate.hlsl"
++#ifndef PBR_VIEW_VECTOR
+ #include "includes/Camera.hlsl"
++#endif
+ #include "includes/OutputColor.hlsl"
+ 
+ Texture2D<float4> DtTexture : register(t0, TEXTURE_SPACE);
+@@ -43,6 +45,9 @@ struct Input
+ #endif
+     float4 color: TEXCOORD4;
+     float4 viewPosition: TEXCOORD5;
++#ifdef PBR_VIEW_VECTOR
++    float3 cameraToSurface: TEXCOORD11;
++#endif
+ #ifdef VERTEX_LIGHTING
+     float3 diffuseTermFront: TEXCOORD6;
+     float3 diffuseTermBack: TEXCOORD7;
+@@ -66,17 +71,13 @@ cbuffer PBRParameters : register(b3, UNIFORM_SPACE)
+     float EnvDiffuseEnabled;
+     float FeatureFlags;
+     float3 PBRPadding;
+-};
+-
+-cbuffer TexCoordSelectors : register(b5, UNIFORM_SPACE)
+-{
+-    int4 TexCoordSelectors1;
+-    int4 TexCoordSelectors2;
++    float4 TexCoordSelectors1;
++    float4 TexCoordSelectors2;
+ };
+ 
+ float2 GetTexCoord(int index, Input input)
+ {
+-    int selector = index > 3
++    float selector = index > 3
+         ? TexCoordSelectors2[index - 4]
+         : TexCoordSelectors1[index];
+     return selector > 0 ? input.texCoord2 : input.texCoord1;
+@@ -239,7 +240,11 @@ float4 main(Input input) : SV_Target0
+     float3 specularEnvironmentR90 = float3(1.0, 1.0, 1.0) * reflectance90;
+ 
+     float3 color = 0;
++#ifdef PBR_VIEW_VECTOR
++    float3 v = normalize(input.cameraToSurface);
++#else
+     float3 v = normalize(CameraPosition - input.worldPosition);
++#endif
+ 
+     for(int i = 0; i < MAX_LIGHTS; i++)
+     {
+diff --git a/src/LibreLancer/Shaders/PBR.txt b/src/LibreLancer/Shaders/PBR.txt
+index e8e6a3b..c977ffa 100644
+--- a/src/LibreLancer/Shaders/PBR.txt
++++ b/src/LibreLancer/Shaders/PBR.txt
+@@ -9,3 +9,4 @@ feature VERTEX_LIGHTING 6
+ feature ENVMAP 7
+ feature DEPTH_ONLY 8
+ feature SHADOWMAP 9
++feature PBR_VIEW_VECTOR 10
+diff --git a/src/LibreLancer/Shaders/PBR_Skinned.txt b/src/LibreLancer/Shaders/PBR_Skinned.txt
+index 4414354..f207bfd 100644
+--- a/src/LibreLancer/Shaders/PBR_Skinned.txt
++++ b/src/LibreLancer/Shaders/PBR_Skinned.txt
+@@ -9,3 +9,4 @@ feature VERTEX_LIGHTING 6
+ feature ENVMAP 7
+ feature DEPTH_ONLY 8
+ feature SHADOWMAP 9
++feature PBR_VIEW_VECTOR 10

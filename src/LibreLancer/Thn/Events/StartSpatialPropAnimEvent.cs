@@ -139,7 +139,6 @@ namespace LibreLancer.Thn.Events
                         Event = this,
                         HasPos = hasPos,
                         HasQuat = hasQuat,
-                        StartPos = objA.Translate,
                         This = objA,
                         Follow = objB,
                         OriginalRotate = objA.Rotate
@@ -175,7 +174,6 @@ namespace LibreLancer.Thn.Events
                         Event = this,
                         HasPos = hasPos,
                         HasQuat = hasQuat,
-                        StartPos = objA.Translate,
                         EndPos = Pos,
                         EndQuat = quat,
                         This = objA,
@@ -193,7 +191,6 @@ namespace LibreLancer.Thn.Events
             public bool HasQuat;
             public AxisRotation AxisRot;
             public Quaternion OriginalRotate;
-            public Vector3 StartPos;
             public required ThnSceneObject This;
 
             private double time;
@@ -201,16 +198,15 @@ namespace LibreLancer.Thn.Events
             public override bool Run(double delta)
             {
                 time = MathHelper.Clamp(time + delta, 0, Event.Duration);
-                var t = Event.GetT((float)time);
 
                 if (HasPos)
                 {
-                    This.Translate = Vector3.Lerp(StartPos, PosEnd(), t);
+                    This.Translate = GetPosition(delta);
                 }
 
                 if (HasQuat)
                 {
-                    This.Rotate = Quaternion.Slerp(OriginalRotate, QEnd(), t);
+                    This.Rotate = GetOrientation(delta);
                 }
 
                 if ((Event.SetFlags & AnimVars.AxisRot) != AnimVars.AxisRot)
@@ -221,9 +217,45 @@ namespace LibreLancer.Thn.Events
                 var ogAxis = Vector3.Transform(_axisTable[(int) AxisRot.Axis], OriginalRotate);
                 This.Rotate = OriginalRotate *
                               Quaternion.CreateFromAxisAngle(ogAxis,
-                                  AxisRot.GetRads(t));
+                                  AxisRot.GetRads((float) (time / Event.Duration)));
 
                 return time < Event.Duration;
+            }
+
+            protected Vector3 GetPosition(double delta)
+            {
+                var end = PosEnd();
+                if (time >= Event.Duration)
+                {
+                    return end;
+                }
+
+                var len = (end - This.Translate).Length();
+                if (len <= float.Epsilon)
+                {
+                    return end;
+                }
+
+                var dir = (end - This.Translate).Normalized();
+                var pct = (float) (delta / (Event.Duration - time));
+                if (pct > 1)
+                {
+                    pct = 1;
+                }
+
+                return This.Translate + (dir * len * pct);
+            }
+
+            protected Quaternion GetOrientation(double delta)
+            {
+                var end = QEnd();
+                if (time >= Event.Duration)
+                {
+                    return end;
+                }
+
+                var pct = (float) (delta / (Event.Duration - time));
+                return pct >= 1 ? end : Quaternion.Slerp(This.Rotate, end, pct);
             }
 
             protected abstract Quaternion QEnd();

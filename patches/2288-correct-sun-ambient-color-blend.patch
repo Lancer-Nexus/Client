@@ -1,0 +1,133 @@
+diff --git a/src/LibreLancer/Render/RenderHelpers.cs b/src/LibreLancer/Render/RenderHelpers.cs
+--- a/src/LibreLancer/Render/RenderHelpers.cs
++++ b/src/LibreLancer/Render/RenderHelpers.cs
+@@ -188,9 +188,9 @@
+             if (sunColor.R <= 0 && sunColor.G <= 0 && sunColor.B <= 0)
+                 return ambient;
+ 
+-            // Tint the authored ambient while preserving its Rec. 709 luminance.
+-            var sunTintedAmbient = ambient * sunColor;
+-            var tintedAmbient = ambient * (1f - sunTintBlend) + sunTintedAmbient * sunTintBlend;
++            // Blend toward the weighted sun color, then preserve the authored
++            // ambient's Rec. 709 luminance where the output range allows it.
++            var tintedAmbient = ambient * (1f - sunTintBlend) + sunColor * sunTintBlend;
+             var ambientLuminance = GetLuminance(ambient);
+             var tintedLuminance = GetLuminance(tintedAmbient);
+             if (!float.IsFinite(ambientLuminance) || ambientLuminance <= 0 ||
+diff --git a/src/LibreLancer.Tests/TransientLightTests.cs b/src/LibreLancer.Tests/TransientLightTests.cs
+--- a/src/LibreLancer.Tests/TransientLightTests.cs
++++ b/src/LibreLancer.Tests/TransientLightTests.cs
+@@ -92,9 +92,9 @@
+     }
+ 
+     [Theory]
+-    [InlineData(1f, 0f, 0f, 0.25407f, 0.28583f, 0.38111f)]
+-    [InlineData(0f, 1f, 0f, 0.15999f, 0.31997f, 0.31997f)]
+-    [InlineData(1f, 1f, 1f, 0.2f, 0.3f, 0.4f)]
++    [InlineData(1f, 0f, 0f, 0.42741f, 0.24042f, 0.32056f)]
++    [InlineData(0f, 1f, 0f, 0.10907f, 0.34539f, 0.21814f)]
++    [InlineData(1f, 1f, 1f, 0.24627f, 0.29244f, 0.33862f)]
+     public void SunAmbientBlendsLightColorAndPreservesLuminance(float sunR, float sunG, float sunB,
+         float expectedR, float expectedG, float expectedB)
+     {
+@@ -129,6 +129,31 @@
+         Assert.Equal(1f, result.Ambient.R, 5);
+         Assert.Equal(0.75f, result.Ambient.G, 5);
+         Assert.Equal(0.75f, result.Ambient.B, 5);
++    }
++
++    [Fact]
++    public void SunAmbientUsesHdrHeadroomAndClampsLdrOutput()
++    {
++        static Color3f Evaluate(bool hdr)
++        {
++            var lighting = new SystemLighting
++            {
++                Ambient = new Color4(0.8f, 0.8f, 0.8f, 1),
++                SunAmbientEnabled = true,
++                SunAmbientHdr = hdr
++            };
++            lighting.SunAmbientLights.Add(CreateSunAmbientLight(new Color3f(1, 0, 0)));
++            return RenderHelpers.ApplyLights(lighting, 0, Vector3.Zero, 0, null,
++                ldynamic: false).Ambient;
++        }
++
++        var hdr = Evaluate(true);
++        var ldr = Evaluate(false);
++
++        Assert.True(hdr.R > 1f);
++        Assert.InRange(ldr.R, 0f, 1f);
++        Assert.InRange(ldr.G, 0f, 1f);
++        Assert.InRange(ldr.B, 0f, 1f);
+     }
+ 
+     [Fact]
+@@ -149,9 +174,9 @@
+         var result = RenderHelpers.ApplyLights(lighting, 0, Vector3.Zero, 0, null,
+             ldynamic: false);
+ 
+-        Assert.Equal(0.25407f, result.Ambient.R, 5);
+-        Assert.Equal(0.28583f, result.Ambient.G, 5);
+-        Assert.Equal(0.38111f, result.Ambient.B, 5);
++        Assert.Equal(0.42741f, result.Ambient.R, 5);
++        Assert.Equal(0.24042f, result.Ambient.G, 5);
++        Assert.Equal(0.32056f, result.Ambient.B, 5);
+     }
+ 
+     [Fact]
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -225,16 +225,16 @@
+   - [x] LancerEdit-Vorschau: beim Ku-Fighter mit aktiven Surface-Roughness/Metallic-Maps und `envcube_space` als Preview-Override änderte der isolierte Diffuse-IBL-Schalter 6.405 Pixel im Schiffausschnitt; der Hintergrundausschnitt blieb pixelgleich. Das bestätigt den separaten Shaderbeitrag für ein PBR-Material. Es ist keine Retail-Umgebungszuordnung, In-Game-Bildqualitäts- oder GPU-Kostenabnahme. [NAP-Lauf und Bilder](evidence/renderer/pbr-diffuse-ibl-kufighter-20261018/README.md).
+ - [ ] Systemweite Umgebungsbeleuchtung an Farbe und Intensität der jeweiligen Sonne koppeln. Unterschiedliche Sonnenfarben (z. B. grün, rot oder weiß) sollen die diffuse Grundbeleuchtung aller passenden Szenenobjekte konsistent beeinflussen; Datenquelle, Legacy-Fallback und Zusammenspiel mit PBR/IBL anhand reproduzierbarer NAP-Szenen prüfen.
+   - [x] Datenpfad-Audit: Systemambient, persistente `LightSource`-Farben und sichtbare `StarGlow`-Sprites sind getrennt; ein einzelner Farbmittelwert scheitert bei Mehrfachsonnen. Anforderungen und Retail-Gegenproben: [Sonnen-Ambient-Audit](evidence/renderer/sun-colored-ambient-audit-20261015.md).
+-  - [x] Opt-in Sonnenfarbanteil pro Objekt aus persistenten Systemlichtquellen ergänzt. Der lokal nach Attenuation gewichtete Lichtfarbmittelwert färbt das authored Ambient mit 25% Stärke; eine Rec.-709-Skalierung erhält die Ambient-Luminanz, solange der Wert im normalisierten Bereich bleibt. Werte über 1 werden begrenzt, da der aktuelle Forward-Pfad keinen HDR-Lichtpuffer hat. Transiente Effekte bleiben ausgeschlossen. `render_sun_ambient` und `--render-sun-ambient=on|off` schalten ihn separat. Siehe [Datenpfad-Audit](evidence/renderer/sun-colored-ambient-audit-20261015.md).
++  - [x] Opt-in Sonnenfarbanteil pro Objekt aus persistenten Systemlichtquellen ergänzt. Der lokal nach Attenuation gewichtete Lichtfarbmittelwert wird mit 25% Stärke in das authored Ambient überblendet; eine Rec.-709-Skalierung erhält die Ambient-Luminanz, solange der Wertebereich es zulässt. LDR-Werte bleiben auf 1 begrenzt; Half-Float-HDR darf Werte über 1 an die Tonemap-Stufe weitergeben. Transiente Effekte bleiben ausgeschlossen. `render_sun_ambient` und `--render-sun-ambient=on|off` schalten ihn separat. Siehe [Datenpfad-Audit](evidence/renderer/sun-colored-ambient-audit-20261015.md).
+   - [x] Fünf fokussierte Regressionstests für den ausgeschalteten Legacy-Pfad, rote/grüne/weiße Lichtfarben und lokale Mehrfachlicht-Gewichtung bestanden.
+   - [x] Sonnenambient im Effekte-Tab sofort auf die laufende Szene anwenden und dauerhaft speichern, ohne die Pause zu verlassen; dadurch sind A/B-Wechsel bei identischer Szene möglich.
+   - [x] Der Klickpfad aktualisiert den Options-Snapshot `this.opts`. Ein NAP-Rücktest fand dennoch eine Überschreibung in `do_goback()`; Patch 2154 übernimmt dort jetzt den aktuell angewendeten Rendererwert.
+   - [x] NAP-Laufzeitrücktest bestanden: Sonnenambient im pausierten Effekte-Tab ausgeschaltet, zum Spiel zurückgekehrt und Optionen erneut geöffnet; `client.ini` blieb `false` und die Checkbox war weiterhin leer. Der Rückweg übernimmt jetzt den aktuellen Rendererwert statt einen abweichenden Widgetwert. Details: [Option-Persistenzprüfung](evidence/renderer/sun-ambient-option-persistence-20261016/README.md).
+-  - [x] 25%-Farbmischung auf luminanzerhaltendes Tönen umgestellt und den normalisierten Wertebereich begrenzt; rote und grüne Regressionen prüfen die erwarteten RGB-Werte. Der Laufzeiteffekt dieser neuen Formel bleibt offen.
++  - [x] Die 25%-Mischung überblendet das authored Ambient mit dem attenuierten Sonnenfarbmittelwert, statt Ambient und Sonnenfarbe kanalweise zu multiplizieren. Rec.-709-Luminanz wird im möglichen Wertebereich erhalten; LDR wird begrenzt und Half-Float-HDR darf Highlights über 1 behalten. Rot-/Grün-/Weiß-Regressionen und der HDR/LDR-Grenzfall prüfen die Formel; die same-pose Laufzeitkalibrierung bleibt offen.
+   - [x] Erste NAP-only-Laufzeitbilder für BR02 (weiß), HI02 (rot) und zwei EW06-Lichtbereiche (rot/grün) mit an/aus aufgenommen. Archive und `Data/NAP`-Quellen geprüft; die EW06-Ansichten liegen in der Nebelübersteuerung, die getrennten Starts ändern Pose/Frame. Diese Bilder sind explorativ, nicht zur 25%-Kalibrierung geeignet. Details: [Laufzeitbilder und Grenzen](evidence/renderer/sun-colored-ambient-ab-20261015/README.md).
+   - [x] HI02-Livewechsel im selben Prozess: Checkbox und `client.ini` wechseln zwischen aus/an, die Screenshots zeigen denselben Spielstand. Am Schiff ist kein klarer Farbwechsel sichtbar; kurze Bewegungsabschnitte verhindern eine genaue Pixelkalibrierung. Der Livepfad ist belegt, die sichtbare Wirkung nicht.
+   - [x] Sonnenambient-Mischstärke ist jetzt von 0 bis 1 in `client.ini` (`render_sun_ambient_strength`), über `--render-sun-ambient-strength=0..1` und im Effekte-Tab einstellbar. Der Standard bleibt bei 0,25, bis eine ruhige rote/grüne/weiße Vergleichsszene kalibriert ist.
+-  - [x] Die Sonnenambient-Begrenzung folgt nun dem tatsächlich aktiven Ziel: LDR und HDR-Target-Fallback bleiben auf normalisierte Ambientwerte begrenzt; das aktive Half-Float-HDR-Szenenziel darf luminanzerhaltende Ambientkanäle über 1 an die Tonemap-Stufe weitergeben. Visuelle Kalibrierung in roten/grünen Szenen bleibt offen.
++  - [x] Die Sonnenambient-Begrenzung folgt dem tatsächlich aktiven Ziel: LDR und HDR-Target-Fallback bleiben auf normalisierte Ambientwerte begrenzt; das aktive Half-Float-HDR-Szenenziel darf luminanzerhaltende Mischkanäle über 1 an die Tonemap-Stufe weitergeben. Visuelle Kalibrierung in roten/grünen Szenen bleibt offen.
+   - [ ] Den wirksamen Ambient-Beitrag an einem ruhigen, nicht nebelüberschriebenen NAP-Objekt bei gleicher Kamerapose messen und die Standardmischung so abstimmen, dass rote und grüne Lichtfarben sichtbar, aber nicht übersteuert wirken.
+   - [x] Vorherige Quellformel geprüft: normalisierte NAP-Lichtfarben konnten mit dem damaligen 25%-Produktblend keinen Ambient-Kanal aufhellen. Der Messbefund gilt für die BW04-Bilder vor der luminanzerhaltenden Änderung; Details stehen im [Kanalwirkungs-Audit](evidence/renderer/sun-ambient-channel-math-20261016.md).
+   - [x] Teststart geprüft: `--load-save` lädt den kopierten lokalen Autosave NAP-only bis in FP7/Freeport 7. Der Missionsstand verlangt noch „Look for a job in the bar“ und führt nicht in einen freien Weltraumstart; das Bild dokumentiert nur diesen ungeeigneten Ausgangszustand, keine Ambient-Abnahme. Details: [Save-Start-Audit](evidence/renderer/sun-ambient-save-startup-20261016/README.md).
+@@ -242,7 +242,7 @@
+   - [x] Ruhiger BW04-NAP-only-Ein/Aus-Abgleich mit demselben statischen Save erstellt. Der statische Hintergrund ist pixelgleich; im Schiffsausschnitt sinkt der RGB-Mittelwert bei eingeschaltetem Effekt nur leicht. Die getrennten Prozessstarts belegen keinen Same-Frame-Effekt, aber die Änderung bleibt in dieser Szene schwach und kein Kanal wird sichtbar heller. Details und Bilder: [BW04-Laufzeitvergleich](evidence/renderer/sun-colored-ambient-bw04-ab-20261016/README.md).
+   - [x] NAP-only-A/B mit der luminanzerhaltenden Mischung auf demselben BW04-Save durchgeführt. Der Schiffsbereich ändert sich nur geringfügig (mittlere absolute Abweichung 1,07/255); die visuelle Kalibrierung bleibt offen. Details und Bilder: [BW04-A/B nach der Luminanzkorrektur](evidence/renderer/sun-ambient-luminance-bw04-ab-20261016/README.md).
+   - [x] HDR-Laufzeitversuch am 17.10.2026: Beide Starts laden denselben BW04-Save-Klon mit `--render-hdr=on`, einmal mit Sonnenambient an und einmal aus; der Paketmanifest- und NAP-Archivstand wurde geprüft. Zufällige Explosionen und Effekte unterscheiden sich zwischen den Prozessen, deshalb sind die Bilder ausdrücklich kein gültiger A/B-Nachweis und kalibrieren die Ambientwirkung nicht. Start- und Bildgrenzen: [Explorativer BW04-HDR-Lauf](evidence/renderer/sun-colored-ambient-bw04-ab-20261017/README.md).
+-  - [ ] NAP-A/B für weiße, rote, grüne und mehrfach vorhandene Sonnen mit der luminanzerhaltenden Mischung aufnehmen; Effektstärke, Wertebegrenzung und distanzgewichtete Farbmischung visuell kalibrieren. Nebelüberschreibung und Legacy-Ausgabe bei ausgeschaltetem Schalter in der Laufzeit prüfen.
++  - [ ] NAP-A/B für weiße, rote, grüne und mehrfach vorhandene Sonnen mit der überblendenden, luminanzerhaltenden Mischung aufnehmen; Effektstärke und distanzgewichtete Farbmischung visuell kalibrieren. Nebelüberschreibung und Legacy-Ausgabe bei ausgeschaltetem Schalter in der Laufzeit prüfen.
+   - [x] Hi02-Stärkeproben bei 0,25 und 1,0 mit identischem NAP-Save aufgenommen. 1,0 überstrahlt die Sonnen-/Nebelregion sichtbar; wegen unterschiedlicher Prozessframes ist dies keine Same-frame-Kalibrierung. Bilder: [Stärkeproben](evidence/renderer/sun-ambient-strength-probes-20261017/README.md).
+ - [x] SSAO als optionalen Forward-/Post-Processing-Pass mit separat abschaltbarem, sampleablem Depth-Prepass integrieren. Der Shader rekonstruiert View-Space-Positionen aus der inversen Projektion, schätzt Nachbarnormalen depth-adaptiv und gewichtet Okklusion nach Raumabstand. None/SMAA/MSAA und HDR/LDR werden unterstützt; Startparameter und Menüschalter sind vorhanden. Nicht unterstützte Depth-Targets fallen auf den bisherigen Renderer zurück.
+   - [x] Qualitätseinstellungen für Radius, Stärke und Occlusion-Bias ergänzt: INI und Startparameter `--render-ssao-radius`, `--render-ssao-strength` sowie `--render-ssao-bias` verwenden validierte Wertebereiche und behalten die bisherigen Shader-Standardwerte. Ein/Aus bleibt unabhängig steuerbar. Die Performance-Seite bietet Radius-, Stärke- und Occlusion-Bias-Regler, übernimmt sie mit „Zurück“ in die laufenden Einstellungen und speichert sie. NAP-only-Hi02-Lauf zeigt alle Regler bei 1280x720; das SSAO-Kontrollkästchen wurde aktiviert und als `render_ssao = true` gespeichert. Änderungen und Speicherung nicht voreingestellter Reglerwerte sind noch nicht bestätigt. Siehe [Layout- und Toggle-Nachweis](evidence/renderer/ssao-quality-options-layout-20261017/README.md). Bildkalibrierung je Szenentyp bleibt offen.
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 286 Client bundles and two native bundles. Each
++The active series contains 287 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -249,3 +249,4 @@
+ | 2285 | Reuse the SystemRenderer antialias resolve callback |
+ | 2286 | Reuse the SystemRenderer shadow depth callback |
+ | 2287 | Align render-graph tests with validation messages |
++| 2288 | Blend sun color into authored ambient without the dark-only product mix |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -287,3 +287,4 @@
+ client 2285-cache-antialias-resolve-callback.patch
+ client 2286-cache-shadow-depth-callback.patch
+ client 2287-align-render-graph-test-messages.patch
++client 2288-correct-sun-ambient-color-blend.patch

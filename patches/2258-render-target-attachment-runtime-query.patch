@@ -1,0 +1,225 @@
+diff --git a/src/LibreLancer.Base/Graphics/Backends/IRenderTarget.cs b/src/LibreLancer.Base/Graphics/Backends/IRenderTarget.cs
+--- a/src/LibreLancer.Base/Graphics/Backends/IRenderTarget.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/IRenderTarget.cs
+@@ -4,5 +4,8 @@
+ 
+ public interface IRenderTarget : IDisposable
+ {
++    bool HasColor { get; }
++    SurfaceFormat? ColorFormat { get; }
++    bool HasDepth { get; }
+     bool HasStencil { get; }
+ }
+diff --git a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderTarget.cs b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderTarget.cs
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderTarget.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderTarget.cs
+@@ -2,6 +2,9 @@
+ 
+ internal abstract class GLRenderTarget : IRenderTarget
+ {
++    public abstract bool HasColor { get; }
++    public abstract SurfaceFormat? ColorFormat { get; }
++    public abstract bool HasDepth { get; }
+     public abstract bool HasStencil { get; }
+     internal abstract void BindFramebuffer();
+     public abstract void Dispose();
+diff --git a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderTarget2D.cs b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderTarget2D.cs
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderTarget2D.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLRenderTarget2D.cs
+@@ -16,14 +16,19 @@
+ 
+     public int Width => texture.Width;
+     public int Height => texture.Height;
++    public override bool HasColor => texture.Format != SurfaceFormat.Depth;
++    public override SurfaceFormat? ColorFormat => HasColor ? texture.Format : null;
++    public override bool HasDepth => texture.Format == SurfaceFormat.Depth || depthBuffer != null;
+ 
+     private bool isDisposed = false;
+     private bool stencil = false;
++    private GLDepthBuffer? depthBuffer;
+ 
+     public GLRenderTarget2D (GLRenderContext context, GLTexture2D texture, GLDepthBuffer? depth)
+     {
+         this.context = context;
+         this.texture = texture;
++        depthBuffer = depth;
+         //generate the FBO
+         FBO = GL.GenFramebuffer ();
+         try
+diff --git a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLMultisampleTarget.cs b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLMultisampleTarget.cs
+--- a/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLMultisampleTarget.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/OpenGL/GLMultisampleTarget.cs
+@@ -20,6 +20,14 @@
+         (resolveTexID != 0 ? (long)Width * Height *
+             (RequestedColorFormat == MultisampleColorFormat.Rgba16Float ? 8 : 4) : 0));
+     public int Samples { get; }
++    public override bool HasColor => true;
++    public override SurfaceFormat? ColorFormat => RequestedColorFormat switch
++    {
++        MultisampleColorFormat.Rgba16Float => SurfaceFormat.HdrBlendable,
++        MultisampleColorFormat.Rgba8 => SurfaceFormat.Bgra8,
++        _ => null
++    };
++    public override bool HasDepth => depthID != 0;
+ 
+     private GLRenderContext context;
+ 
+diff --git a/src/LibreLancer.Base/Graphics/Backends/Null/NullRenderTarget2D.cs b/src/LibreLancer.Base/Graphics/Backends/Null/NullRenderTarget2D.cs
+--- a/src/LibreLancer.Base/Graphics/Backends/Null/NullRenderTarget2D.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/Null/NullRenderTarget2D.cs
+@@ -4,10 +4,12 @@
+ 
+ internal class NullRenderTarget2D : IRenderTarget2D
+ {
+-    public NullRenderTarget2D(int width, int height)
++    public NullRenderTarget2D(int width, int height, SurfaceFormat colorFormat, bool hasDepth)
+     {
+         Width = width;
+         Height = height;
++        HasColor = colorFormat != SurfaceFormat.Depth;
++        HasDepth = hasDepth;
+     }
+     public void Dispose()
+     {
+@@ -32,6 +34,9 @@
+ 
+     public int Width { get; }
+     public int Height { get; }
++    public bool HasColor { get; }
++    public SurfaceFormat? ColorFormat => null;
++    public bool HasDepth { get; }
+ 
+     public bool HasStencil => false;
+ }
+diff --git a/src/LibreLancer.Base/Graphics/Backends/Null/NullMultisampleTarget.cs b/src/LibreLancer.Base/Graphics/Backends/Null/NullMultisampleTarget.cs
+--- a/src/LibreLancer.Base/Graphics/Backends/Null/NullMultisampleTarget.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/Null/NullMultisampleTarget.cs
+@@ -17,6 +17,9 @@
+     public int Width { get; }
+     public int Height { get; }
+     public int Samples { get; }
++    public bool HasColor => true;
++    public SurfaceFormat? ColorFormat => null;
++    public bool HasDepth => true;
+     public MultisampleColorFormat RequestedColorFormat => MultisampleColorFormat.Unknown;
+     public int RequestedDepthBits => 24;
+     public long EstimatedMemoryBytes => (long)Width * Height * Samples * 8;
+diff --git a/src/LibreLancer.Base/Graphics/Backends/Null/NullRenderContext.cs b/src/LibreLancer.Base/Graphics/Backends/Null/NullRenderContext.cs
+--- a/src/LibreLancer.Base/Graphics/Backends/Null/NullRenderContext.cs
++++ b/src/LibreLancer.Base/Graphics/Backends/Null/NullRenderContext.cs
+@@ -108,7 +108,8 @@
+         new NullDepthBuffer();
+ 
+     public IRenderTarget2D CreateRenderTarget2D(ITexture2D texture, IDepthBuffer? buffer) =>
+-        new NullRenderTarget2D(texture.Width, texture.Height);
++        new NullRenderTarget2D(texture.Width, texture.Height, texture.Format,
++            texture.Format == SurfaceFormat.Depth || buffer != null);
+ 
+     public IMultisampleTarget CreateMultisampleTarget(int width, int height, int samples,
+         SurfaceFormat colorFormat = SurfaceFormat.Bgra8) =>
+diff --git a/src/LibreLancer.Base/Graphics/RenderTarget.cs b/src/LibreLancer.Base/Graphics/RenderTarget.cs
+--- a/src/LibreLancer.Base/Graphics/RenderTarget.cs
++++ b/src/LibreLancer.Base/Graphics/RenderTarget.cs
+@@ -10,5 +10,9 @@
+ public abstract class RenderTarget : IDisposable
+ {
+     internal IRenderTarget? Target;
++    public bool HasColor => Target?.HasColor ?? false;
++    public SurfaceFormat? ColorFormat => Target?.ColorFormat;
++    public bool HasDepth => Target?.HasDepth ?? false;
++    public bool HasStencil => Target?.HasStencil ?? false;
+     public abstract void Dispose();
+ }
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -1051,6 +1051,10 @@
+                 !ReferenceEquals(rstate.RenderTarget, sceneTarget))
+                 throw new InvalidOperationException(
+                     $"Render pass '{descriptor.Name}' is bound to a different target than the scene.");
++            if (descriptor.Target == SystemRenderTargetRole.Scene && sceneTarget != null &&
++                (!sceneTarget.HasColor || !sceneTarget.HasDepth))
++                throw new InvalidOperationException(
++                    $"Render pass '{descriptor.Name}' requires a color target with a depth attachment.");
+             if (descriptor.Target == SystemRenderTargetRole.ShadowMap &&
+                 !ReferenceEquals(rstate.RenderTarget, shadowTarget))
+                 throw new InvalidOperationException(
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -61,6 +61,7 @@
+   - [x] Bestehende Forward-Aufrufreihenfolge, Opaque-/Transparent-Kommandos, Sterne, Nebel und AA-Resolve im Quellcode erfasst. Der Depth-Prepass-Metadatavertrag ist als optional markiert und liest/schreibt nur SceneDepth; er beansprucht keinen Szenenfarb-Read oder Color-Attachment. Die Metadaten sind noch kein ausführbarer Render Graph. Siehe [Pass-Reihenfolge-Audit](evidence/renderer/forward-pass-order-audit-20261015.md).
+   - [x] Samplebare Tiefentextur als eigenen Graph-Ressourcentyp vom aktiven Szenen-Tiefenattachment getrennt. SSAO und Soft Particles deklarieren und validieren den DepthTexture-Passausgang beim realen Target-Binding; SSAO deklariert dieselbe Ressource als Quelle. Der restliche Main-Pass-Ablauf ist weiterhin manuell gesteuert.
+   - [x] Laufzeitvalidierung an die tatsächlichen Hauptpass-Aufrufe gebunden: pro Frame werden Reihenfolge, doppelte/fehlende Begin-End-Paare und Pflichtressourcen geprüft; optionale Szene-Tiefe und Schatten bleiben ausdrücklich optional. Der wiederverwendete Validator speichert ausgeführte Pässe als Bitmaske. Render-Befehle und Targetwechsel werden weiterhin manuell ausgeführt, also noch kein ausführbarer Render Graph.
++  - [x] Gebundene Backend-Renderziele stellen Farb-/Tiefen-/Stencil-Präsenz und ein bekanntes Farbformat bereit. `SystemRenderer` weist Wrapperziele ohne Farbe oder Tiefe zurück; GL-MSAA meldet das Farbformat nur für bekannte sized-Formate. Swapchainformat und Desktop-GLs unsized-MSAA-Storage bleiben unbekannt.
+ - [ ] Render-Target-Resize, minimierte Fenster, Scissor-/Viewport-Wechsel und Geräteverlust für zusätzliche Pässe absichern.
+   - [x] `AntialiasTarget` registriert alle während des Aufbaus erzeugten GPU-Ressourcen in einem idempotenten `RenderResourceScope`. Teilaufbauten werden auch bei Konstruktionsfehlern in umgekehrter Erzeugungsreihenfolge abgebaut; die Postprocess-Pässe werden vor den von ihnen geliehenen Szenen-/SMAA-Zielen freigegeben. Fehler beim Freigeben einer Ressource verhindern die Freigabe der übrigen nicht. Der `SystemRenderer`-Pfad wurde mit HDR/Bloom/SSAO/SMAA unter OpenGL auf 960×540 → 1280×720 sowie Minimize/Restore geprüft; siehe [Resize-Laufzeitnachweis](evidence/renderer/postprocess-window-resize-20261017/README.md). Editor-/Offscreen-Targets, Fehler-Injektion, Geräteverlust und Cross-Backend-Wiederherstellung bleiben offen.
+   - [x] `SystemRenderer.Draw()` überspringt Frames mit Breite/Höhe 0. Bei geändertem Rendermaß oder AA-Modus gibt es das vorhandene MSAA-Target frei und erstellt es neu. Das belegt nur diesen System-Renderer-Pfad; Editor-/Offscreen-Targets, Wiederherstellungstests und Geräteverlust bleiben offen.
+diff --git a/docs/evidence/renderer/render-target-attachment-contract-20261016.md b/docs/evidence/renderer/render-target-attachment-contract-20261016.md
+--- a/docs/evidence/renderer/render-target-attachment-contract-20261016.md
++++ b/docs/evidence/renderer/render-target-attachment-contract-20261016.md
+@@ -70,10 +70,29 @@
+ Variante von Desktop-OpenGLs implementation-defined unsized `GL_RGBA`. Das vom
+ Treiber realisierte sized internal format wird nicht separat abgefragt.
+ 
++## Laufzeitabgleich für gebundene Renderziele
++
++`IRenderTarget` stellt backendneutral `HasColor`, `ColorFormat`, `HasDepth`
++und `HasStencil` bereit. `RenderTarget` gibt diese Angaben auch für ein
++`AntialiasTarget` weiter. OpenGL-2D-Ziele liefern das Farbformat ihrer
++angehängten Textur und die tatsächlich gesetzten Tiefen-/Stencilattachments.
++OpenGL-MSAA liefert ein Farbformat nur für die explizit gewählten RGBA8- und
++RGBA16F-Storageformate; beim Desktop-GL-`GL_RGBA`-Pfad bleibt es unbekannt.
++Null-Ziele bestätigen nur die angeforderte Struktur und melden kein
++GPU-Farbformat.
++
++`SystemRenderer` prüft bei jeder Szenephase, dass ein gebundenes Wrapperziel
++Farbe und Tiefe besitzt. Das deckt `RenderTarget2D` und die darunterliegende
++AA-Zielkette ab. Die Swapchain (`RenderTarget == null`) bleibt außerhalb dieser
++Abfrage; ihr tatsächliches Format und ihre Depth-/Stencilattachments sind
++weiterhin nicht portabel abfragbar.
++
+ ## Offene Architekturpunkte
+ 
+-- Backendneutraler Swapchainformatzugriff fehlt; caller-definierte Ziele bleiben
+-  format-agnostisch. SMAA-Bgra8-Formate werden beim Zielaufbau geprüft. Die
++- Backendneutraler Swapchainformatzugriff fehlt; `RenderTarget2D`-Ziele melden
++  ihr bekanntes Format und die tatsächlichen Depth-/Stencilattachments. Das
++  Format von Desktop-GL-MSAA-Storage und der Swapchain bleibt unbekannt.
++  SMAA-Bgra8-Formate werden beim Zielaufbau geprüft. Die
+   MSAA-Samplezahl ist als `ModeSelected` im Quellattachmentvertrag markiert und
+   gegen den gewählten AA-Modus geprüft; die vom Treiber realisierte Zahl wird
+   nicht separat abgefragt.
+@@ -83,8 +102,9 @@
+   Ressourcenlebensdauer, Sharing/Aliasing und Fehler beim Wechsel sind noch
+   kein Render-Graph-Vertrag.
+ 
+-Offen bleiben der backendneutrale Abgleich caller-definierter Zielformate, eine
+-Abfrage des vom Treiber gewählten MSAA-internal-format, die Prüfung von
+-Load-/Store-Verhalten gegen API-Aufrufe sowie eine vollständige
+-Passreihenfolgevalidierung. Darauf kann später die Render-Graph-Ausführung für
+-Load/Store, Formate, Abhängigkeiten und Resize-Lebensdauer aufbauen.
++Offen bleiben die Swapchain-Format-/Attachmentabfrage, eine Abfrage des vom
++Treiber gewählten Desktop-MSAA-internal-format, die Prüfung von Load-/Store-
++Verhalten gegen API-Aufrufe und die Einbeziehung von Editor-/Offscreen-Zielen.
++Die Szene-Passfolge ist nun laufzeitgeprüft, wird aber nicht durch einen
++Render-Graph-Executor disponiert. Ein Graph müsste zusätzlich Load/Store,
++Formate, Ressourcenlebensdauer und Resize-Abhängigkeiten ausführen.
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,5 +1,5 @@
+ # Client patch groups
+ 
+-The active series contains 256 Client bundles and two native bundles. Each
++The active series contains 257 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -256,3 +256,4 @@ client 2254-record-m01a-ship-light-occlusion-runtime-attempt.patch
+ client 2255-soft-particles.patch
+ client 2256-separate-sampleable-scene-depth-contract.patch
+ client 2257-runtime-system-pass-validation.patch
++client 2258-render-target-attachment-runtime-query.patch

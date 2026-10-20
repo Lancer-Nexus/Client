@@ -1,0 +1,170 @@
+diff --git a/docs/evidence/renderer/gl-texture-readback-smoke-20261018.md b/docs/evidence/renderer/gl-texture-readback-smoke-20261018.md
+new file mode 100644
+--- /dev/null
++++ b/docs/evidence/renderer/gl-texture-readback-smoke-20261018.md
+@@ -0,0 +1,33 @@
++# OpenGL Texture2D readback runtime smoke (2026-10-18)
++
++## Environment
++
++- Release client built with the installed .NET 10 runtime under `/opt/dotnet-10`.
++- Mesa 23.2.1, OpenGL 4.6 Core Profile, Intel HD Graphics 4600 (Haswell GT2).
++- No Freelancer data or NAP package is loaded. The probe creates its 4×4 texture
++  in memory, so package provenance is not part of this graphics-API check.
++
++## Command and result
++
++```sh
++/opt/dotnet-10/dotnet src/lancer/bin/Release/net10.0/lancer.dll \
++  --gl-texture-readback-smoke
++```
++
++Result:
++
++```text
++OpenGL Texture2D.GetData passed mip-level, region, offset/count, bounds, and pixel checks.
++```
++
++The probe uploads four known BGRA8 pixels to mip level 1 of a 4×4 texture. It
++reads the full 2×2 mip into a destination with sentinel elements before and
++after the requested range, then reads a 1×2 subrectangle at a nonzero output
++offset. Pixel values and untouched sentinels are checked. Invalid mip level,
++out-of-bounds rectangle and too-short destination are each required to throw an
++argument exception.
++
++This verifies the desktop `glGetTexImage` branch and mip/region/offset contract
++on the listed Mesa driver. GLES uses a separate framebuffer/`ReadPixels` branch
++and is not covered by this run. Compressed texture decompression and editor PNG
++export are also outside this probe.
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -293,3 +293,4 @@
+ 
+ | 2344 | Add SDL_GPU vertex upload, BC5 normal-map sampling, pipeline and pixel readback smoke |
+ | 2345 | Implement mip and region-aware synchronous OpenGL texture readback |
++| 2346 | Add runtime smoke for OpenGL texture mip and region readback |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -345,3 +345,4 @@
+ client 2343-renderer-readback-contract.patch
+ client 2344-sdl-gpu-swapchain-smoke.patch
+ client 2345-opengl-texture-region-readback.patch
++client 2346-gl-texture-readback-smoke.patch
+diff --git a/src/lancer/GLTextureReadbackSmoke.cs b/src/lancer/GLTextureReadbackSmoke.cs
+new file mode 100644
+--- /dev/null
++++ b/src/lancer/GLTextureReadbackSmoke.cs
+@@ -0,0 +1,90 @@
++using System;
++using LibreLancer;
++using LibreLancer.Graphics;
++using LibreLancer.Platforms;
++
++namespace lancer;
++
++/// <summary>Runtime probe for the OpenGL Texture2D.GetData mip and region contract.</summary>
++internal static class GLTextureReadbackSmoke
++{
++    public static int Run()
++    {
++        try
++        {
++            var game = new ReadbackGame();
++            game.Run();
++            return game.ExitCode;
++        }
++        catch (Exception e)
++        {
++            Console.Error.WriteLine($"OpenGL texture readback smoke failed: {e}");
++            return 1;
++        }
++    }
++
++    private sealed class ReadbackGame() : Game(64, 64, false, GameConfiguration.SDL())
++    {
++        public int ExitCode { get; private set; } = 1;
++
++        protected override void Load()
++        {
++            try
++            {
++                using var texture = new Texture2D(RenderContext, 4, 4, true, SurfaceFormat.Bgra8);
++                Bgra8[] source =
++                [
++                    new(10, 20, 30, 255), new(40, 50, 60, 255),
++                    new(70, 80, 90, 255), new(100, 110, 120, 255)
++                ];
++                var baseLevel = new Bgra8[16];
++                texture.GetData(0, null, baseLevel, 0, baseLevel.Length);
++                texture.SetData(1, null, source, 0, source.Length);
++
++                var sentinel = new Bgra8(3, 5, 7, 11);
++                var full = new Bgra8[6];
++                Array.Fill(full, sentinel);
++                texture.GetData(1, null, full, 1, 4);
++                if (full[0] != sentinel || full[5] != sentinel)
++                    throw new InvalidOperationException("Full-mip readback overwrote data outside the requested destination range.");
++                for (var i = 0; i < source.Length; i++)
++                    if (full[i + 1] != source[i])
++                        throw new InvalidOperationException($"Mip pixel {i} was {full[i + 1]}, expected {source[i]}.");
++
++                var region = new Bgra8[4];
++                Array.Fill(region, sentinel);
++                texture.GetData(1, new Rectangle(1, 0, 1, 2), region, 1, 2);
++                if (region[0] != sentinel || region[3] != sentinel ||
++                    region[1] != source[1] || region[2] != source[3])
++                    throw new InvalidOperationException("Mip-region readback returned incorrect pixels or modified the destination outside start/count.");
++
++                ExpectArgumentFailure(() => texture.GetData(3, null, new Bgra8[1], 0, 1), "mip level");
++                ExpectArgumentFailure(() => texture.GetData(1, new Rectangle(2, 0, 1, 1), new Bgra8[1], 0, 1), "region bounds");
++                ExpectArgumentFailure(() => texture.GetData(1, null, new Bgra8[1], 0, 1), "destination length");
++
++                Console.WriteLine("OpenGL Texture2D.GetData passed mip-level, region, offset/count, bounds, and pixel checks.");
++                ExitCode = 0;
++            }
++            catch (Exception e)
++            {
++                Console.Error.WriteLine($"OpenGL texture readback smoke failed: {e}");
++                ExitCode = 1;
++            }
++        }
++
++        protected override void Update(double elapsed) => Exit();
++
++        private static void ExpectArgumentFailure(Action action, string check)
++        {
++            try
++            {
++                action();
++            }
++            catch (ArgumentException)
++            {
++                return;
++            }
++            throw new InvalidOperationException($"Texture readback did not reject invalid {check}.");
++        }
++    }
++}
+diff --git a/src/lancer/Program.cs b/src/lancer/Program.cs
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -24,11 +24,17 @@
+             Environment.ExitCode = SDL3GpuSmoke.Run();
+             return;
+         }
++        if (args.Length == 1 && args[0] == "--gl-texture-readback-smoke")
++        {
++            Environment.ExitCode = GLTextureReadbackSmoke.Run();
++            return;
++        }
+         if (args.Length == 1 && args[0] is "--help" or "-h")
+         {
+             Console.WriteLine("Usage: lancer [configuration-path] [--new-game | --load-save <savegame.fl>]");
+             Console.WriteLine("       Standalone test option: --invulnerable=on|off (local embedded server only)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-smoke (SDL3 GPU shader, pipeline, draw, and swapchain test)");
++            Console.WriteLine("       Renderer backend diagnostic: --gl-texture-readback-smoke (OpenGL mip/region texture readback test)");
+             Console.WriteLine("       Render overrides (each option is independent):");
+             Console.WriteLine("         --render-normal-maps=on|off");
+             Console.WriteLine("         --render-surface-pbr-maps=on|off");

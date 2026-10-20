@@ -1,0 +1,111 @@
+diff --git a/src/LibreLancer.Base/Graphics/SystemRenderPass.cs b/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
+--- a/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
++++ b/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
+@@ -169,6 +169,14 @@
+         if ((availableWrites & ~descriptor.Writes) != SystemRenderResource.None)
+             throw new InvalidOperationException(
+                 $"Render pass '{descriptor.Name}' published undeclared resources {availableWrites & ~descriptor.Writes}.");
++        var optionalWrites =
++            (descriptor.Color is { Optional: true } color ? color.Resource : SystemRenderResource.None) |
++            (descriptor.Depth is { Optional: true } depth ? depth.Resource : SystemRenderResource.None) |
++            (descriptor.Stencil is { Optional: true } stencil ? stencil.Resource : SystemRenderResource.None);
++        var missingRequiredWrites = descriptor.Writes & ~optionalWrites & ~availableWrites;
++        if (missingRequiredWrites != SystemRenderResource.None)
++            throw new InvalidOperationException(
++                $"Render pass '{descriptor.Name}' did not publish required resources {missingRequiredWrites}.");
+         available |= availableWrites;
+         completedMask |= 1u << (int)pass;
+         activePass = null;
+diff --git a/src/LibreLancer.Tests/SystemRenderPassGraphTests.cs b/src/LibreLancer.Tests/SystemRenderPassGraphTests.cs
+--- a/src/LibreLancer.Tests/SystemRenderPassGraphTests.cs
++++ b/src/LibreLancer.Tests/SystemRenderPassGraphTests.cs
+@@ -1,3 +1,4 @@
++using System;
+ using LibreLancer.Graphics;
+ using Xunit;
+ 
+@@ -19,3 +20,30 @@
+         Assert.Equal(2, executions);
+     }
+ }
++
++public class SystemRenderPassExecutionTests
++{
++    [Fact]
++    public void EndRejectsMissingRequiredColorAttachmentWrite()
++    {
++        var execution = new SystemRenderPassExecution();
++        execution.Begin(SystemRenderPass.FrameClear);
++
++        var error = Assert.Throws<InvalidOperationException>(() =>
++            execution.End(SystemRenderPass.FrameClear,
++                SystemRenderResource.SceneDepth | SystemRenderResource.SceneStencil));
++
++        Assert.Contains("SceneColor", error.Message);
++    }
++
++    [Fact]
++    public void EndAllowsMissingOptionalDepthAndStencilWrites()
++    {
++        var execution = new SystemRenderPassExecution();
++        execution.Begin(SystemRenderPass.FrameClear);
++
++        execution.End(SystemRenderPass.FrameClear, SystemRenderResource.SceneColor);
++
++        Assert.Equal(SystemRenderResource.SceneColor, execution.AvailableResources);
++    }
++}
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -263,7 +263,7 @@
+ | A | Farbvertrag und HDR-Eingänge | Alle Szenen-Shader verwenden dieselben dokumentierten Farbregeln; Material-, Alpha- und Clear-Fixtures bestehen und HDR/LDR-Referenzbilder sind vergleichbar. |
+ | B | IBL und Materialqualität | Metall, Lack und nichtmetallische Flächen auf Schiff, Basis, Planet und DFM visuell geprüft sind; Cubemap-Richtung, Roughness und GPU-Kosten dokumentiert sind. |
+ | C | Schatten und dynamische Effekte | Beleuchtungs- und Effektpfade eine kontrollierte Retail-Szenenmatrix bestehen und die Kostenbudgets bekannt sind. |
+-| D | Render-Graph und Lifecycle | Passverträge mit realen Backend-Operationen übereinstimmen; Resize, Fehler und Wiederherstellung keine Ressourcen- oder Zustandslecks hinterlassen. |
++| D | Render-Graph und Lifecycle | Passverträge mit realen Backend-Operationen übereinstimmen; `SystemRenderPassExecution.End` weist nicht veröffentlichte Pflichtausgaben zurück und lässt optionale Attachments aus; Resize, Fehler und Wiederherstellung hinterlassen keine Ressourcen- oder Zustandslecks. |
+ | E | Vulkan/SDL_GPU | Der vollständige Client- und Editorpfad läuft mit denselben Kernmaterialien; GL/Vulkan-Bild- und Lifecycle-Vergleich ist dokumentiert. |
+ | F | Stabilität/Performance/Release | Linux-/Windows-Matrix, langfristige Profile, Fehlerpfade und NAP-only-Paketprüfung dokumentiert und reproduzierbar sind. |
+ 
+diff --git a/docs/evidence/renderer/render-pass-required-writes-20261018.md b/docs/evidence/renderer/render-pass-required-writes-20261018.md
+new file mode 100644
+--- /dev/null
++++ b/docs/evidence/renderer/render-pass-required-writes-20261018.md
+@@ -0,0 +1,18 @@
++# Render-Pass-Pflichtausgaben
++
++Stand: 2026-10-18
++
++`SystemRenderPassExecution.End` hat zuvor nur abgewiesen, wenn ein Pass
++Ressourcen außerhalb seiner Deklaration veröffentlichte. Ein Pass konnte
++deshalb als erfolgreich abgeschlossen werden, obwohl eine deklarierte
++Pflichtausgabe fehlte.
++
++Patch `2387-render-pass-required-writes.patch` prüft beim Abschluss, dass alle
++deklarierten Schreibressourcen veröffentlicht wurden. Ressourcen optionaler
++Color-, Depth- und Stencil-Attachments bleiben davon ausgenommen.
++
++Die gezielten .NET-10-Tests decken eine fehlende Color-Pflichtausgabe und das
++zulässige Weglassen optionaler Depth-/Stencil-Ausgaben ab: 2 bestanden, 0
++fehlgeschlagen. Der Quellcode wurde kompiliert. Die Prüfung validiert den
++Graph-Vertrag; sie belegt keine backendneutrale GPU-Ausführung, die weiterhin
++offen ist.
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 383 Client patches and two native patches. Each
++The active series contains 384 Client patches and two native patches. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -384,3 +384,4 @@
+ client 2384-reconcile-hdr-cubemap-visual-acceptance.patch
+ client 2385-fx-singular-linked-transform-fallback.patch
+ client 2386-render-context-scoped-shader-cache.patch
++client 2387-render-pass-required-writes.patch

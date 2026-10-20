@@ -1,0 +1,147 @@
+diff --git a/src/LibreLancer/Utf/Dfm/DfmMesh.cs b/src/LibreLancer/Utf/Dfm/DfmMesh.cs
+--- a/src/LibreLancer/Utf/Dfm/DfmMesh.cs
++++ b/src/LibreLancer/Utf/Dfm/DfmMesh.cs
+@@ -60,12 +60,9 @@
+         }
+ 
+         // Called on the render thread after the material library is registered.
+-        private VertexBuffer? TryGetTangentBuffer(FaceGroup group, BasicMaterial material)
++        private VertexBuffer? TryGetTangentBuffer(FaceGroup group, int uv)
+         {
+             if (!res.SurfaceGeneratedTangentsEnabled) return null;
+-            var authored = !string.IsNullOrWhiteSpace(material.NmSampler);
+-            if (!authored && (!res.SurfaceNormalMapsEnabled || material.SurfaceBinding?.Normal == null)) return null;
+-            int uv = material.NormalMapUvChannel;
+             if (uv == 1 && (UV1 == null || UV1Indices == null)) return null;
+             var key = (group, uv);
+             if (!tangentEntries.TryGetValue(key, out var entry))
+@@ -356,7 +353,19 @@
+                     primCount = faceGroup.FaceIndices!.Length / 3;
+                     primType = PrimitiveTypes.TriangleList;
+                 }
+-                var drawBuffer = mat.Render is BasicMaterial basic ? TryGetTangentBuffer(faceGroup, basic) : null;
++                VertexBuffer? drawBuffer = null;
++                if (mat.Render is BasicMaterial basic)
++                {
++                    var hasAuthoredNormalMap = !string.IsNullOrWhiteSpace(basic.NmSampler);
++                    var hasSurfaceNormalMap = res.SurfaceNormalMapsEnabled && basic.SurfaceBinding?.Normal != null;
++                    if (hasAuthoredNormalMap || hasSurfaceNormalMap)
++                        drawBuffer = TryGetTangentBuffer(faceGroup, basic.NormalMapUvChannel);
++                }
++                else if (mat.Render is DetailMapMaterial detail && res.SurfaceNormalMapsEnabled &&
++                         detail.SurfaceBinding?.Normal != null)
++                {
++                    drawBuffer = TryGetTangentBuffer(faceGroup, detail.SurfaceBinding.NormalUvChannel);
++                }
+                 var start = faceGroup.StartIndex;
+                 var baseVertex = 0;
+                 if (drawBuffer != null)
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -9,7 +9,7 @@
+ | Bereich | Stand | Nachweis / Grenze |
+ |---|---|---|
+ | Freelancer-Forward-Renderer | Vorhandener OpenGL-Renderpfad mit Depth-Prepass, opaken Objekten, Sternen/Nebeln, Transparenz und AA-Auflösung. | `SystemRenderer.Draw()` und `docs/evidence/renderer/forward-pass-order-audit-20261015.md`. Der Render-Graph beschreibt Verträge; er ersetzt noch nicht alle direkten Backend-Aufrufe. |
+-| Normalmaps | MAT-Normalmaps und optionale Surface-Zuordnungen für Meshes und DFM; UV-Auswahl, Tangentenaufbau, Cache und Laufzeitoptionen sind vorhanden. | Viewer-A/B für Schiffe, Basen und DFM liegen unter `docs/evidence/renderer/`. Spielbildqualität und Kosten über weitere Szenen bleiben offen. |
++| Normalmaps | MAT-Normalmaps und optionale Surface-Zuordnungen für Meshes und DFM; UV-Auswahl, Tangentenaufbau, Cache und Laufzeitoptionen sind vorhanden. DFM-DetailMap-Materialien wählen für skinned Vertices eine eigene Shader-Variante, binden den Bone-Matrix-Puffer und transformieren generierte Tangenten. | Viewer-A/B für Schiffe, Basen und DFM liegen unter `docs/evidence/renderer/`. Der neue DFM-DetailMap-Pfad ist gebaut, aber visuelle Laufzeitabnahme und Kosten über weitere Szenen bleiben offen. |
+ | Metallic/Roughness | Ergänzende Karten sind in Materialauflösung und PBR-Shader eingebunden; DFM besitzt einen skinned PBR-Pfad. PBR berücksichtigt nun auch lineare Vertex-Tints und `Oc`-Materialopazität. | Kartenwirkung ist asset- und materialabhängig. Tinted/transparent PBR-Materialien, vollständige Asset-Abdeckung und systematische Spielabnahme fehlen noch. |
+ | Cubemaps / Reflexion | PBR bindet GGX-vorgefilterte Specular-Cubes und cosine-konvolvierte diffuse Irradiance. DDS-Cubemaps unterstützen zusätzlich lineare DX10-RGBA16F-Daten für HDR-Werte über 1. Die drei erzeugten Umwelt-Cubes und Metadaten liegen in `Data/NAP/Surface/` und `Data/SDK/fx/SurfaceMaps.ini`. | Ein NAP-only-LancerEdit-A/B lädt `envcube_sun` als `TextureCube`; im LI-Elite-Modellcrop ändern sich 13.492/99.000 Pixel, der Hintergrund bleibt pixelidentisch. Der Effekt ist subtil. Retail-Orientierung, Materialkalibrierung und Ingame-/Hardwareabnahme bleiben offen. Siehe [HDR-Cubemap-Laufzeittest](evidence/renderer/hdr-cubemap-live-ab-20261018/README.md). |
+ | Legacy-Environment-Maps | Bestehende Freelancer-Cubemap-Reflexionen lassen sich unabhängig vom PBR-IBL per Einstellung oder `--render-legacy-environment-maps=on|off` umschalten. Der Standard bleibt `on`, damit ältere Materialien ihr bisheriges Verhalten behalten. | Beide Startwerte laden bis ins Intro. Der gleiche Kamera-A/B-Bildvergleich fehlt noch; externe Bildschirmaufnahmen waren in der letzten Sitzung schwarz. |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -408,3 +408,4 @@
+ client 2408-sdl-gpu-dfm-readback-validation.patch
+ client 2409-temporary-effect-null-lifecycle.patch
+ client 2410-renderer-followup-bundle.patch
++client 2416-dfm-detailmap-normal-tangents.patch
+--- a/src/LibreLancer/Shaders/AllShaders.cs
++++ b/src/LibreLancer/Shaders/AllShaders.cs
+@@ -18,6 +18,7 @@
+     public static ShaderBundle Billboard = null!;
+     public static ShaderBundle DetailMap2Dm1Msk2PassMaterial = null!;
+     public static ShaderBundle DetailMapMaterial = null!;
++    public static ShaderBundle DetailMapMaterial_Skinned = null!;
+     public static ShaderBundle IllumDetailMapMaterial = null!;
+     public static ShaderBundle Masked2DetailMapMaterial = null!;
+     public static ShaderBundle Navmap = null!;
+@@ -65,6 +66,7 @@
+         Billboard = null!;
+         DetailMap2Dm1Msk2PassMaterial = null!;
+         DetailMapMaterial = null!;
++        DetailMapMaterial_Skinned = null!;
+         IllumDetailMapMaterial = null!;
+         Masked2DetailMapMaterial = null!;
+         Navmap = null!;
+@@ -111,6 +113,7 @@
+             Billboard ??= Compile(context, "Billboard");
+             DetailMap2Dm1Msk2PassMaterial ??= Compile(context, "DetailMap2Dm1Msk2PassMaterial");
+             DetailMapMaterial ??= Compile(context, "DetailMapMaterial");
++            DetailMapMaterial_Skinned ??= Compile(context, "DetailMapMaterial_Skinned");
+             IllumDetailMapMaterial ??= Compile(context, "IllumDetailMapMaterial");
+             Masked2DetailMapMaterial ??= Compile(context, "Masked2DetailMapMaterial");
+             Navmap ??= Compile(context, "Navmap");
+--- a/src/LibreLancer/Render/Materials/DetailMapMaterial.cs
++++ b/src/LibreLancer/Render/Materials/DetailMapMaterial.cs
+@@ -81,10 +81,15 @@
+                 features |= 1U;
+             if (activeSurfaceNormal != null && hasTangents)
+                 features |= 2U;
+-            if (vertextype is VertexPositionNormalTextureTangent or DfmTangentVertex ||
++            if (vertextype is VertexPositionNormalTextureTangent or DfmVertex or DfmTangentVertex ||
+                 vertextype is FVFVertex { TexCoords: 2 or 4 })
+                 features |= 4U;
+-            var sh = AllShaders.DetailMapMaterial.Get(features);
++			var skinnedDfm = Bones != null && vertextype is (DfmVertex or DfmTangentVertex);
++			var sh = skinnedDfm
++				? AllShaders.DetailMapMaterial_Skinned.Get(features)
++				: AllShaders.DetailMapMaterial.Get(features);
++			if (skinnedDfm)
++				Bones!.BindTo(9, BufferOffset, 200);
+             SetWorld(sh);
+ 			parameters.NormalStrength = activeSurfaceNormal != null ? activeSurfaceNormalStrength : 1f;
+ 			sh.SetUniformBlock(3, ref parameters);
+--- /dev/null
++++ b/src/LibreLancer/Shaders/DetailMapMaterial_Skinned.txt
+@@ -0,0 +1,5 @@
++vertex Basic_Skinned.vert.hlsl
++fragment DetailMapMaterial.frag.hlsl
++feature VERTEX_LIGHTING 1
++feature NORMALMAP 2
++feature VERTEX_TEXTURE2 4
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -25,7 +25,7 @@
+ | Systemrenderer-Lifecycle | `SystemRenderer.Dispose()` versucht die Freigabe aller Frame-/Effekt-/Target-Ressourcen und GPU-Timerabfragen auch dann, wenn einzelne Freigaben fehlschlagen; Fehler werden gebündelt. Wiederholtes Dispose ist wirkungslos. | Fehlerfortsetzung der allgemeinen Bereinigungsroutine ist unit-getestet. Native GL-Fehlerinjektion und Kontextverlust bleiben offen. Siehe `docs/evidence/renderer/system-renderer-cleanup-20261018/`. |
+ | RenderContext-Lifecycle | SDL2/SDL3 geben den RenderContext vor dem nativen Kontextabbau frei. Nach Abschluss der GPU-Fences werden Shader, SMAA-Texturen, Fullscreen- und Renderer2D-Puffer, Font-Texturen sowie der unmanaged 2D-Pool auch bei Einzel-Fehlern bereinigt. | Headless-Regression prüft Fence-Drain, Wiederholbarkeit und bekannte Kontext-Ressourcen. GL-native Fehlerpfade und Kontextverlust bleiben offen. Siehe `docs/evidence/renderer/render-context-shutdown-20261018/`. |
+ | Shader-Cache über Context-Wechsel | Built-in-Shaderbündel werden je `RenderContext` neu bezogen; `AsteroidBandMaterial` hält keinen globalen Shaderverweis mehr. | Headless-Regression prüft den Wechsel nach dem Schließen des ersten Shader-Scopes. Native GL-Kontextverlust- und Gerätewechselabnahme bleiben offen. Siehe `docs/evidence/renderer/render-context-shader-cache-20261018.md`. |
+-| Shader-Kompilierung | Alle 25 Shader-Bundles und die definierten Feature-Permutationen kompilieren mit dem im Repository enthaltenen DXC. | Belegt den HLSL-/SPIR-V-Compilerpfad, nicht die Pipeline-Erstellung oder das Zeichnen auf realen Treibern. Siehe `docs/evidence/renderer/shader-bundle-dxc-audit-20261018.md`. |
++| Shader-Kompilierung | Alle 26 Shader-Bundles und die definierten Feature-Permutationen kompilieren mit dem im Repository enthaltenen DXC; der Release-Build vom 19.10. bindet zusätzlich den skinned DFM-DetailMap-Shader ein. Der SDL_GPU/Vulkan-Pipeline-Audit erstellte alle 3.495 Produktionspipelines. | Shader- und Pipeline-Erstellung sind belegt, nicht das Zeichnen realer Assets auf unterstützten Treibern. Der Haswell-Vulkan-Treiber meldet unvollständige Unterstützung. Siehe [Pipeline-Audit 2026-10-19](evidence/renderer/sdl-gpu-production-pipeline-audit-20261019.md). |
+ | Dynamische Lichter und Schatten | Persistente und kurzlebige Lichter werden priorisiert; `lgt_effect`-Lichter von fliegenden Projektilen folgen nun dem Projektilalter und seiner Position. Ein ausgewähltes Richtungslicht läuft durch Shadow-Map-Pass und 3×3-PCF. Alpha-Test-Texturen werden auch in PBR-Depth-/Shadow-Pässen anhand eines Material-Uniforms ausgeschnitten; blendtransparente Materialien werfen keine Schatten. Lichtprojektion ist im Licht-XY-Raum verankert und texelgesnappt; Mesh-Cullingradien berücksichtigen `RenderScale`. Der Shadow-Frustum-Fit hält seine acht Ecken in einem Stack-Puffer statt pro Frame ein Array zu allozieren. | Unit-Tests decken Lichtkurvenzeit, Position, Gruppe und ungültige Radien für Projektil-Lichter ab. Hi02 belegt Pass, Lichtauswahl und Live-Schaltung auf einer OpenGL-GPU. Kamera-Fit-/Stabilitäts- und RenderScale-Radiustests bestehen. Ein NAP-only-Hi02-A/B auf Intel HD 4600 bestätigt den aktiven Pass bei Bias 0 und 0,02; der Hull-Unterschied ist subtil und kalibriert keinen empfohlenen Wert. Eine Ingame-Abnahme von Waffenfeuer-/Projektillichtern, Offscreen-Castern, weiteren Materialien/Szenen und GPU-Kosten bleibt offen. Siehe `docs/evidence/renderer/shadow-map-hi02-live-toggle-20261017/`, `docs/evidence/renderer/shadow-camera-stability-20261018.md` und `docs/evidence/renderer/scaled-model-culling-20261018.md`. |
+ | Diagnose | CPU-Framezeitprofile, asynchrone OpenGL-GPU-Passzeiten, Bloom-/Shadow-Passzeiten, Ziel-/Speicherschätzungen und CSV-Ausgabe. Environment-Cubemaps mit mehreren Catalog-Aliasen werden im geschätzten GPU-Texturspeicher nur einmal gezählt und bei Bereinigung auch nur einmal freigegeben. | Langzeitprofile und plattformübergreifende Vergleichsbaselines fehlen. Einzelne asynchrone Samples sind keine FPS-Baseline. |
+ 
+--- /dev/null
++++ b/docs/evidence/renderer/sdl-gpu-production-pipeline-audit-20261019.md
+@@ -0,0 +1,21 @@
++# SDL_GPU production pipeline audit — 2026-10-19
++
++The Release renderer catalog was audited on the active SDL_GPU Vulkan device
++after adding the skinned DFM DetailMap shader bundle.
++
++```text
++SDL_GPU production pipeline audit driver: vulkan
++DetailMapMaterial: 8 production pipelines created.
++DetailMapMaterial_Skinned: 8 production pipelines created.
++SDL_GPU production pipeline audit passed: 26 bundles, 3495 pipelines created and released.
++```
++
++The command completed with exit code 0. It verifies that SDL_GPU accepted
++graphics-pipeline creation for the current production shader permutations,
++including both `DetailMapMaterial` variants with their normal-map and
++vertex-lighting features.
++
++Mesa printed `Haswell Vulkan support is incomplete`. This audit does not draw
++retail DFM vertices, bind game textures or prove material output, animation,
++frame performance, or compatibility on a fully supported Vulkan GPU. The game
++renderer still uses its OpenGL path for scene rendering.

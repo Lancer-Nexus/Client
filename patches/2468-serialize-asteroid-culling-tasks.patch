@@ -1,0 +1,77 @@
+--- a/src/LibreLancer/Render/AsteroidFieldRenderer.cs
++++ b/src/LibreLancer/Render/AsteroidFieldRenderer.cs
+@@ -102,6 +102,13 @@
+ 
+         public void Update(ICamera camera)
+         {
++            // Fixed updates can run more than once before Draw. Complete any cull
++            // that still owns the shared result buffers before reusing them.
++            asteroidsTask?.GetAwaiter().GetResult();
++            billboardTask?.GetAwaiter().GetResult();
++            asteroidsTask = null;
++            billboardTask = null;
++
+             _camera = camera;
+             cameraPos = camera.Position;
+ 
+@@ -161,7 +168,7 @@
+         private AsteroidBillboard[] calculatedBillboards = null!;
+         private AsteroidBillboard[] billboardBuffer = new AsteroidBillboard[9000];
+         private int billboardCount = 0;
+-        private Task billboardTask = null!;
++        private Task? billboardTask;
+         private bool warnedTooManyBillboards = false;
+ 
+         private void CalculateBillboards(ICamera camera)
+@@ -260,7 +267,7 @@
+             }
+         }
+ 
+-        private Task asteroidsTask = null!;
++        private Task? asteroidsTask;
+         private int cubeCount = -1;
+         private CalculatedCube[] cubes;
+ 
+@@ -343,7 +350,7 @@
+                         return;
+                     }
+ 
+-                    asteroidsTask.Wait();
++                    asteroidsTask?.GetAwaiter().GetResult();
+                     var lt = RenderHelpers.ApplyLights(lighting, 0, cameraPos, field.FillDist, nr);
+                     lt.Ambient += field.AmbientIncrease.Rgb;
+                     lt.Ambient *= field.AmbientColor.Rgb;
+@@ -417,7 +424,7 @@
+                         billboardTex = (Texture2D?) res.FindTexture(billboardShape.Texture);
+                     }
+ 
+-                    billboardTask.Wait();
++                    billboardTask?.GetAwaiter().GetResult();
+ 
+                     for (var i = 0; i < billboardCount; i++)
+                     {
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -21,7 +21,7 @@
+ | LOD-/Modell-Culling | Die größte Archetyp- oder Mesh-LOD-Distanz wird ohne LINQ-Iteratoren ermittelt und pro Renderer gecacht, bis sich Modell oder Override-Array ändern. Leere Modelldistanzen blenden das Modell nicht mehr fälschlich aus; Mesh-eigene LOD-Distanzen aktivieren den frühen Distanz-Cull auch ohne Archetypwerte. | Vermeidet wiederholte Scans aller Modellteile im frühen Draw-Cull und erhält gültige Mesh-LODs. Der tatsächliche CPU-/FPS-Gewinn muss in festen Schiff-, Stations- und Asteroiden-Szenen gemessen werden. |
+ | Asteroidenfeld-Culling | Asteroidenwürfel und Billboards vergleichen ihre quadrierten Distanzen gegen die jeweiligen Reichweiten; die innere Kandidatenprüfung vermeidet damit wiederholte Quadratwurzeln. | Der Cull-Grenzwert bleibt mathematisch äquivalent für endliche, nichtnegative Reichweiten. Der CPU-Gewinn und Sichtbarkeit an Grenzfällen müssen in dichten NAP-Asteroidenfeldern gemessen werden. |
+ | Asteroidenfeld-Puffer | Kandidatenpuffer für dynamische Billboards und Asteroidenwürfel wachsen vor dem Einfügen, wenn ein dichtes Feld die bisherige Standardkapazität überschreitet. | Verhindert Indexfehler bei größeren Feldern; Billboard-Endausgabe bleibt weiterhin auf die konfigurierte Zahl begrenzt und nach Distanz sortiert. Speicherkosten bei Extremfeldern müssen noch gemessen werden. |
+-| Asteroidenfeld-Culling | Ausschlusszonen werden ohne LINQ-Iterator geprüft; die Cube-Oberflächenentfernung wird einmal je Cube statt für jeden Material-Drawcall berechnet. | Entfernt pro Kandidat Iterator-Allokationen und vermeidet wiederholte Quadratwurzeln bei mehrteiligen Asteroidenmeshes. Sichtbarkeit bleibt gleich; FPS-Wirkung muss mit festem Asteroidenfeld-Profil gemessen werden. |
++| Asteroidenfeld-Culling | Ausschlusszonen werden ohne LINQ-Iterator geprüft; die Cube-Oberflächenentfernung wird einmal je Cube berechnet. Vor der Wiederverwendung gemeinsamer Cull-Puffer wartet `Update` auf Aufgaben eines vorherigen Fixed-Updates. | Entfernt pro Kandidat Iterator-Allokationen und wiederholte Quadratwurzeln; verhindert parallele Schreibzugriffe, wenn mehrere Fixed-Updates vor `Draw` laufen. FPS-Wirkung und Grenzsichtbarkeit brauchen weiterhin ein festes Asteroidenfeld-Profil. |
+ | Temporäre Effekte | `SystemRenderer.SpawnTempFx` reiht keine fehlenden ParticleEffects ein; `ParticleEffectRenderer(null)` gilt sofort als beendet und bleibt auch nach `Restart()` beendet. Der Partikel-Cull verwendet die vorhandene vorberechnete Distanzkonstante statt `Math.Pow` pro Effekt und Frame. Kurzlebige Effektlichter akkumulieren nur endliche Framezeiten und sättigen ihr Animationsalter, bevor es nicht-endlich werden kann. Über `SpawnTempFx` erzeugte Partikeleffekte simulieren außerhalb der Distanzgrenze weiter und können regulär auslaufen; dauerhafte Effekte bleiben gecullt. | Ein Regressionstest deckt den Null-Effekt-Lebenszyklus ab. Fehlende oder nicht auflösbare ALE-Effekte bleiben als mögliche Ursache unsichtbarer Einzel-Explosionen gesondert zu diagnostizieren. |
+ | Antialiasing | SMAA-Pässe und MSAA-Auflösung; HDR/LDR-Kombinationen sowie Resize und Minimize/Restore wurden auf OpenGL/Mesa geprüft. | Andere Backends/Treiber, wiederholte Lifecycle-Zyklen und Fehler-Injektion stehen aus. |
+ | GPU-Subpass-Abbruch | Postprocess-, Bloom-, SMAA-, SSAO- und MSAA-Subpasses melden `Begin`, `End` oder `Abort`. Nur ein erfolgreich beendeter Subpass veröffentlicht seine geschriebenen Ressourcen für nachfolgende Pässe. | Zwei Regressionstests prüfen, dass abgebrochene Ausgaben nicht verfügbar werden und erfolgreiche Ausgaben weitergereicht werden. Fehler-Injektion im nativen Backend bleibt offen. Siehe Patch `2407-render-subpass-abort-contract.patch`. |
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -400,3 +400,4 @@
+ | 2465 | Record the NAP version mismatch diagnosis and successful current manifest recheck |
+ | 2466 | Record paired Hi02 normal-map option captures and visual limits |
+ | 2467 | Avoid redundant asteroid exclusion-zone and cube-distance work during rendering |
++| 2468 | Serialize asteroid culling tasks before reusing shared result buffers |
+--- a/patches/series
++++ b/patches/series
+@@ -459,3 +459,4 @@
+ client 2465-document-nap-manifest-recheck.patch
+ client 2466-hi02-normalmaps-run-ab-evidence.patch
+ client 2467-asteroid-render-culling-hotpath.patch
++client 2468-serialize-asteroid-culling-tasks.patch

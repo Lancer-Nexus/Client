@@ -1,0 +1,627 @@
+diff --git a/docs/dynamic-lighting-audit.md b/docs/dynamic-lighting-audit.md
+--- a/docs/dynamic-lighting-audit.md
++++ b/docs/dynamic-lighting-audit.md
+@@ -66,10 +66,14 @@
+    Objekt-/Munitions-/Minenexplosionen und CMP-Abtrennungen laufen über den
+    gemeinsamen `GameWorld.SpawnTempFx()`-Pfad. Persistente, hardpointgebundene
+    Fuse-Effekte sind davon abgegrenzt und bleiben mangels Lichtdaten unbeleuchtet.
+-3. Danach datengetriebene
+-   Lichtwerte für weitere Effekte und Feuer definieren. Keine künstlichen
+-   Standardlichter für vorhandene Partikeleffekte einführen, bevor Farbe,
+-   Reichweite und Dauer aus Assets oder einer abgestimmten Konfiguration kommen.
++3. [ ] Datengetriebene Lichtwerte für Feuer und weitere Effekte definieren.
++   [x] Read-only-Inventar der NAP-Feuer- und Lichtfelder erstellt; siehe
++   [Feuerinventar](evidence/effect-fire-light-input-inventory-20261014.json).
++   Der NAP-Bestand liefert derzeit keine expliziten Punktlichtwerte.
++   Vor der Runtime-Anbindung braucht es eine abgestimmte Konfiguration mit
++   Farbverlauf, Reichweite und Dauer. Persistente Fuse-Effekte brauchen zudem
++   ein an Objekt/Hardpoint und `SpawnedEffect`-Lebenszyklus gebundenes Licht;
++   der bestehende positionsbasierte Transient-Pool reicht dafür nicht.
+ 4. Lebensdauer, Ausschalter, Budgetauswahl, Lichtgruppen und deterministische
+    Überlastfälle mit Tests abdecken. Danach typische Kampf- und Stationsszenen
+    messen und mit NAP-Daten visuell abnehmen.
+@@ -113,6 +117,22 @@
+ Effekts nach Nickname, zeigt aber keinen späteren Verbraucher der Lichtfelder.
+ Ein `lgt_range_scale`-Verbrauch bleibt damit unbelegt.
+ 
++## Feuer-Effekt-Datenbestand
++
++Der read-only-Abgleich mit
++[NAP-Effektinventar](evidence/effect-fire-light-input-inventory-20261014.json)
++findet 150 `lgt_*`-Feldeinträge in zwei Dateien: den beiden
++`EffectsExplosion*.ini`-Dateien. `Effects.ini` enthält 25 visuelle
++Engine-Feuer-Effekte; 52 Fuse-INI-Aktionen starten `gf_continuous_fire` an
++Hardpoints. In diesen Feuer- und Fuse-Definitionen fehlen explizite
++Lichtfarbe, Lichtreichweite und Lichtdauer.
++
++`EFT_ENGINE_FIRE` und `EFT_ENGINE_LARGE_FIRE` nennen `radius` 7,5 bzw. 25 und
++`run_time = -1`. LibreLancer parst diese `EffectType`-Felder, verwendet sie aber
++im aktuellen Runtime-Code nicht. Sie belegen daher weder eine Punktlicht-
++Reichweite noch einen Licht-Lebenszyklus. ALE-Partikelfarben und -größen sind
++ebenfalls keine explizite Freigabe, daraus Weltlichter abzuleiten.
++
+ Prüfsummen der verglichenen Quellen:
+ 
+ | Datei | SHA-256 |
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -131,7 +131,7 @@
+ - [ ] Screen-Space-Reflections als optionale Ergänzung prüfen; fehlende Bildinformation an Bildschirmrändern und bei verdeckten Objekten muss über den bestehenden PBR-Fallback abgefangen werden.
+ - [ ] Volumetrischen Nebel und volumetrische Lichtstrahlen als eigenständige, skalierbare Qualitätstufe evaluieren; vorhandene Freelancer-Nebelparameter und Transparenzreihenfolge als Referenz verwenden.
+ - [ ] Forward+/Clustered Lighting gegen die aktuelle Beleuchtungsarchitektur und typische Freelancer-Szenen mit vielen Lichtern benchmarken, bevor ein Renderer-Umbau geplant wird.
+-- [ ] Kurzlebige dynamische Lichter für Effekte, Waffenfeuer/Mündungsblitze, Feuer und Explosionen vervollständigen. Vorhanden sind `Gun.light_anim`-Mündungslichter sowie datengetriebene Explosionslichter aus `lgt_effect`/`lgt_radius` einschließlich `lgt_time_scale`; der Effektpool begrenzt aktive Ereignisse auf 128 und der Frame-Pool lokale Lichtquellen auf 32. Offen bleiben die Bedeutung von `lgt_range_scale`, passende Lichtdaten für Feuer, Sichtbarkeits-/Intensitätspriorisierung, konfigurierbares Qualitätsbudget und visuelle Messungen in typischen NAP-Szenen.
++- [ ] Kurzlebige dynamische Lichter für Effekte, Waffenfeuer/Mündungsblitze, Feuer und Explosionen vervollständigen. Vorhanden sind `Gun.light_anim`-Mündungslichter sowie datengetriebene Explosionslichter aus `lgt_effect`/`lgt_radius` einschließlich `lgt_time_scale`; der Effektpool begrenzt aktive Ereignisse auf 128 und der Frame-Pool lokale Lichtquellen auf 32. Offen bleiben die Bedeutung von `lgt_range_scale`, explizite Lichtdaten und hardpointgebundene Lichtlebenszyklen für persistentes Feuer, Sichtbarkeits-/Intensitätspriorisierung, konfigurierbares Qualitätsbudget und visuelle Messungen in typischen NAP-Szenen ([Feuerinventar](evidence/effect-fire-light-input-inventory-20261014.json)).
+ 
+ ### 5. Weitere Oberflächeneffekte und Renderer-Betrieb
+ 
+diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -439,7 +439,7 @@
+   Transparenz und bestehende Freelancer-Nebelparameter erhalten.
+ - [ ] Gerichtete Schatten zuerst mit Kaskaden/PCF, anschließend zusätzliche
+   Lichttypen; Shadow-Depth-Targets und Comparison-Sampler abstrahieren.
+-- [ ] Kurzlebige Effektlichter vervollständigen und messen: Mündungslichter aus `Gun.light_anim` sowie Explosionslichter aus `lgt_effect`/`lgt_radius` und `lgt_time_scale` sind vorhanden. Offen sind `lgt_range_scale`, Lichtdaten für Feuer, eine an Sichtbarkeit/Intensität ausgerichtete Priorisierung, Qualitätsbudgets und reproduzierbare NAP-Szenenmessungen. Der Effektpool begrenzt aktive Ereignisse auf 128, der Frame-Pool lokale Lichtquellen auf 32.
++- [ ] Kurzlebige Effektlichter vervollständigen und messen: Mündungslichter aus `Gun.light_anim` sowie Explosionslichter aus `lgt_effect`/`lgt_radius` und `lgt_time_scale` sind vorhanden. Offen sind `lgt_range_scale`, explizite Lichtdaten und hardpointgebundene Lebenszyklen für persistentes Feuer, eine an Sichtbarkeit/Intensität ausgerichtete Priorisierung, Qualitätsbudgets und reproduzierbare NAP-Szenenmessungen. Der Effektpool begrenzt aktive Ereignisse auf 128, der Frame-Pool lokale Lichtquellen auf 32. Siehe [Feuerinventar](evidence/effect-fire-light-input-inventory-20261014.json).
+ - [ ] SSAO mit Geometrie-/Nebelmasken und Forward+ mit vielen Lichtquellen
+   implementieren; die feste Lichtgrenze erst nach Messung ersetzen.
+ - [ ] Instancing/Batching für Asteroiden, Partikel und wiederholte Objekte
+diff --git a/docs/evidence/effect-fire-light-input-inventory-20261014.json b/docs/evidence/effect-fire-light-input-inventory-20261014.json
+new file mode 100644
+--- /dev/null
++++ b/docs/evidence/effect-fire-light-input-inventory-20261014.json
+@@ -0,0 +1,545 @@
++{
++  "date": "2026-10-14",
++  "purpose": "Read-only inventory of explicit NAP light data and persistent fire effect inputs.",
++  "source_root": "Data/NAP/Effects/fx",
++  "light_parameter_entries": 150,
++  "light_parameter_files": [
++    "Data/NAP/Effects/fx/EffectsExplosion.ini",
++    "Data/NAP/Effects/fx/EffectsExplosionNew.ini"
++  ],
++  "light_parameter_occurrences_by_file": {
++    "Data/NAP/Effects/fx/EffectsExplosion.ini": 75,
++    "Data/NAP/Effects/fx/EffectsExplosionNew.ini": 75
++  },
++  "engine_fire_effect_sections": [
++    {
++      "section": "Effect",
++      "line": 183,
++      "values": {
++        "nickname": "gf_ci_smallengine01_fire",
++        "effect_type": "EFT_ENGINE_FIRE",
++        "vis_effect": "gf_ci_smallengine01_fire",
++        "vis_generic": "gf_min_smallengine02_fire"
++      }
++    },
++    {
++      "section": "Effect",
++      "line": 195,
++      "values": {
++        "nickname": "gf_ci_smallengine02_fire",
++        "effect_type": "EFT_ENGINE_FIRE",
++        "vis_effect": "gf_ci_smallengine02_fire",
++        "vis_generic": "gf_min_smallengine02_fire"
++      }
++    },
++    {
++      "section": "Effect",
++      "line": 207,
++      "values": {
++        "nickname": "gf_ci_smallengine03_fire",
++        "effect_type": "EFT_ENGINE_FIRE",
++        "vis_effect": "gf_ci_smallengine03_fire",
++        "vis_generic": "gf_min_smallengine02_fire"
++      }
++    },
++    {
++      "section": "Effect",
++      "line": 219,
++      "values": {
++        "nickname": "gf_co_smallengine01_fire",
++        "effect_type": "EFT_ENGINE_FIRE",
++        "vis_effect": "gf_co_smallengine01_fire",
++        "vis_generic": "gf_min_smallengine02_fire"
++      }
++    },
++    {
++      "section": "Effect",
++      "line": 231,
++      "values": {
++        "nickname": "gf_co_smallengine02_fire",
++        "effect_type": "EFT_ENGINE_FIRE",
++        "vis_effect": "gf_co_smallengine02_fire",
++        "vis_generic": "gf_min_smallengine02_fire"
++      }
++    },
++    {
++      "section": "Effect",
++      "line": 243,
++      "values": {
++        "nickname": "gf_co_smallengine03_fire",
++        "effect_type": "EFT_ENGINE_FIRE",
++        "vis_effect": "gf_co_smallengine03_fire",
++        "vis_generic": "gf_min_smallengine02_fire"
++      }
++    },
++    {
++      "section": "Effect",
++      "line": 305,
++      "values": {
++        "nickname": "gf_li_smallengine01_fire",
++        "effect_type": "EFT_ENGINE_FIRE",
++        "vis_effect": "gf_li_smallengine01_fire",
++        "vis_generic": "gf_min_smallengine02_fire"
++      }
++    },
++    {
++      "section": "Effect",
++      "line": 311,
++      "values": {
++        "nickname": "gf_li_smallengine02_fire",
++        "effect_type": "EFT_ENGINE_FIRE",
++        "vis_effect": "gf_li_smallengine02_fire",
++        "vis_generic": "gf_min_smallengine02_fire"
++      }
++    },
++    {
++      "section": "Effect",
++      "line": 323,
++      "values": {
++        "nickname": "gf_li_smallengine03_fire",
++        "effect_type": "EFT_ENGINE_FIRE",
++        "vis_effect": "gf_li_smallengine03_fire",
++        "vis_generic": "gf_min_smallengine02_fire"
++      }
++    },
++    {
++      "section": "Effect",
++      "line": 329,
++      "values": {
++        "nickname": "gf_rh_smallengine01_fire",
++        "effect_type": "EFT_ENGINE_FIRE",
++        "vis_effect": "gf_rh_smallengine01_fire",
++        "vis_generic": "gf_min_smallengine02_fire"
++      }
++    },
++    {
++      "section": "Effect",
++      "line": 335,
++      "values": {
++        "nickname": "gf_rh_smallengine02_fire",
++        "effect_type": "EFT_ENGINE_FIRE",
++        "vis_effect": "gf_rh_smallengine02_fire",
++        "vis_generic": "gf_min_smallengine02_fire"
++      }
++    },
++    {
++      "section": "Effect",
++      "line": 341,
++      "values": {
++        "nickname": "gf_rh_smallengine03_fire",
++        "effect_type": "EFT_ENGINE_FIRE",
++        "vis_effect": "gf_rh_smallengine03_fire",
++        "vis_generic": "gf_min_smallengine02_fire"
++      }
++    },
++    {
++      "section": "Effect",
++      "line": 347,
++      "values": {
++        "nickname": "gf_ku_smallengine01_fire",
++        "effect_type": "EFT_ENGINE_FIRE",
++        "vis_effect": "gf_ku_smallengine01_fire",
++        "vis_generic": "gf_min_smallengine02_fire"
++      }
++    },
++    {
++      "section": "Effect",
++      "line": 353,
++      "values": {
++        "nickname": "gf_ku_smallengine02_fire",
++        "effect_type": "EFT_ENGINE_FIRE",
++        "vis_effect": "gf_ku_smallengine02_fire",
++        "vis_generic": "gf_min_smallengine02_fire"
++      }
++    },
++    {
++      "section": "Effect",
++      "line": 359,
++      "values": {
++        "nickname": "gf_ku_smallengine03_fire",
++        "effect_type": "EFT_ENGINE_FIRE",
++        "vis_effect": "gf_ku_smallengine03_fire",
++        "vis_generic": "gf_min_smallengine02_fire"
++      }
++    },
++    {
++      "section": "Effect",
++      "line": 437,
++      "values": {
++        "nickname": "gf_br_csv_engine01_fire",
++        "effect_type": "EFT_ENGINE_FIRE",
++        "vis_effect": "gf_br_csv_engine01_fire",
++        "vis_generic": "gf_min_smallengine02_fire"
++      }
++    },
++    {
++      "section": "Effect",
++      "line": 443,
++      "values": {
++        "nickname": "gf_br_smallengine01_fire",
++        "effect_type": "EFT_ENGINE_FIRE",
++        "vis_effect": "gf_br_smallengine01_fire",
++        "vis_generic": "gf_min_smallengine02_fire"
++      }
++    },
++    {
++      "section": "Effect",
++      "line": 449,
++      "values": {
++        "nickname": "gf_br_smallengine02_fire",
++        "effect_type": "EFT_ENGINE_FIRE",
++        "vis_effect": "gf_br_smallengine02_fire",
++        "vis_generic": "gf_min_smallengine02_fire"
++      }
++    },
++    {
++      "section": "Effect",
++      "line": 455,
++      "values": {
++        "nickname": "gf_br_smallengine03_fire",
++        "effect_type": "EFT_ENGINE_FIRE",
++        "vis_effect": "gf_br_smallengine03_fire",
++        "vis_generic": "gf_min_smallengine02_fire"
++      }
++    },
++    {
++      "section": "Effect",
++      "line": 461,
++      "values": {
++        "nickname": "gf_no_smallengine01_fire",
++        "effect_type": "EFT_ENGINE_FIRE",
++        "vis_effect": "gf_no_smallengine01_fire",
++        "vis_generic": "gf_min_smallengine02_fire"
++      }
++    },
++    {
++      "section": "Effect",
++      "line": 467,
++      "values": {
++        "nickname": "gf_li_largeengine01_fire",
++        "effect_type": "EFT_ENGINE_LARGE_FIRE",
++        "vis_effect": "gf_li_largeengine01_fire",
++        "vis_generic": "gf_min_smallengine02_fire"
++      }
++    },
++    {
++      "section": "Effect",
++      "line": 505,
++      "values": {
++        "nickname": "gf_br_atransport_engine01_fire",
++        "effect_type": "EFT_ENGINE_FIRE",
++        "vis_effect": "gf_br_atransport_engine01_fire",
++        "vis_generic": "gf_min_smallengine02_fire"
++      }
++    },
++    {
++      "section": "Effect",
++      "line": 517,
++      "values": {
++        "nickname": "gf_br_transport_engine01_fire",
++        "effect_type": "EFT_ENGINE_FIRE",
++        "vis_effect": "gf_br_transport_engine01_fire",
++        "vis_generic": "gf_min_smallengine02_fire"
++      }
++    },
++    {
++      "section": "Effect",
++      "line": 3209,
++      "values": {
++        "nickname": "gf_derelict2_smallfires",
++        "effect_type": "EFT_DAMAGE_SMOKE",
++        "vis_effect": "gf_derelict2_smallfires",
++        "snd_effect": "object_on_fire01"
++      }
++    },
++    {
++      "section": "Effect",
++      "line": 3215,
++      "values": {
++        "nickname": "gf_continuous_fire",
++        "effect_type": "EFT_DAMAGE_SMOKE",
++        "vis_effect": "gf_continuous_fire",
++        "vis_generic": "gf_min_continuous_damage"
++      }
++    }
++  ],
++  "engine_fire_effect_types": [
++    {
++      "section": "EffectType",
++      "line": 298,
++      "values": {
++        "nickname": "EFT_ENGINE_FIRE",
++        "priority": "1.000000",
++        "generic_priority": "1.000000",
++        "lod_type": "EFT_LOD_SMALL_DISTANT",
++        "radius": "7.500000",
++        "visibility": "EXIST_OFFSCREEN",
++        "update": "CULL_UPDATE",
++        "run_time": "-1",
++        "pbubble": "75, 450"
++      }
++    },
++    {
++      "section": "EffectType",
++      "line": 309,
++      "values": {
++        "nickname": "EFT_ENGINE_LARGE_FIRE",
++        "priority": "0.900000",
++        "generic_priority": "1.000000",
++        "lod_type": "EFT_LOD_MEDIUM",
++        "radius": "25",
++        "visibility": "EXIST_OFFSCREEN",
++        "update": "CULL_UPDATE",
++        "run_time": "-1",
++        "pbubble": "1000, 2000"
++      }
++    }
++  ],
++  "continuous_fire_fuse_references": [
++    {
++      "file": "Data/NAP/Effects/fx/Fuse.ini",
++      "line": 65
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseBrBattleship.ini",
++      "line": 783
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseBrBattleship.ini",
++      "line": 813
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseBrBattleship.ini",
++      "line": 841
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseBrBattleship.ini",
++      "line": 865
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseBrDestroyer.ini",
++      "line": 368
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseBrDestroyer.ini",
++      "line": 383
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseBrDestroyer.ini",
++      "line": 408
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseBrDestroyer.ini",
++      "line": 423
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseBrDestroyer.ini",
++      "line": 438
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseBrDestroyer.ini",
++      "line": 463
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseBrDestroyer.ini",
++      "line": 475
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseBrDestroyer.ini",
++      "line": 509
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseBrGunship.ini",
++      "line": 178
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseBrGunship.ini",
++      "line": 198
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseBrGunship.ini",
++      "line": 228
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseBrGunship.ini",
++      "line": 248
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseBrGunship.ini",
++      "line": 268
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseKuBattleship.ini",
++      "line": 977
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseKuBattleship.ini",
++      "line": 994
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseKuBattleship.ini",
++      "line": 1020
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseKuBattleship.ini",
++      "line": 1037
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseKuDestroyer.ini",
++      "line": 367
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseKuDestroyer.ini",
++      "line": 377
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseKuGunship.ini",
++      "line": 238
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseKuGunship.ini",
++      "line": 248
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseLiCruiser.ini",
++      "line": 335
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseLiCruiser.ini",
++      "line": 345
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseLiCruiser.ini",
++      "line": 375
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseLiDreadnought.ini",
++      "line": 899
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseLiDreadnought.ini",
++      "line": 914
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseLiDreadnought.ini",
++      "line": 962
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseLiDreadnought.ini",
++      "line": 974
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseLiDreadnought.ini",
++      "line": 996
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseOrOsiris.ini",
++      "line": 849
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseOrOsiris.ini",
++      "line": 864
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseOrOsiris.ini",
++      "line": 904
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseOrOsiris.ini",
++      "line": 914
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseOrOsiris.ini",
++      "line": 934
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseRhBattleship.ini",
++      "line": 891
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseRhBattleship.ini",
++      "line": 919
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseRhBattleship.ini",
++      "line": 945
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseRhCruiser.ini",
++      "line": 415
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseRhCruiser.ini",
++      "line": 424
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseRhCruiser.ini",
++      "line": 443
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseRhCruiser.ini",
++      "line": 456
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseRhCruiser.ini",
++      "line": 479
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseRhGunship.ini",
++      "line": 141
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseRhGunship.ini",
++      "line": 154
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseRhGunship.ini",
++      "line": 177
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseRhGunship.ini",
++      "line": 190
++    },
++    {
++      "file": "Data/NAP/Effects/fx/FuseRhGunship.ini",
++      "line": 203
++    }
++  ],
++  "continuous_fire_fuse_reference_count": 52,
++  "sha256": {
++    "Data/NAP/Effects/fx/EffectTypes.ini": "72ce36c4969ae74d35a9db0d0180f604f61ae7f63c739db84d4b21a61e0accc5",
++    "Data/NAP/Effects/fx/Effects.ini": "4ee537fc143bf6700a282347f5163188d9cd963b2b3cae037d7c9241b0cd058b",
++    "Data/NAP/Effects/fx/Fuse.ini": "dd59c63d7a3497feb38eaa31737939d56d5806b1ce4d0028a52cb7ffb2ced239",
++    "Data/NAP/Effects/fx/FuseBrBattleship.ini": "5be8d03c6adb12c9592f4e08304d9157c0f9041c94b43151dbd4061198e1d79f",
++    "Data/NAP/Effects/fx/FuseBrDestroyer.ini": "deea75906012f9f9d313257e26c95001c3d342470b14453f5123ae6377fd9ebd",
++    "Data/NAP/Effects/fx/FuseBrGunship.ini": "97b36ff17f80505cce0c3ce7d42b96173c513d09eb60b88af5facf5e4e4bff90",
++    "Data/NAP/Effects/fx/FuseFreeport7.ini": "2637b01dc8740efcdbdbd1ee512397c8cf3102b08f9d1fa55386d60dfd6455db",
++    "Data/NAP/Effects/fx/FuseKuBattleship.ini": "b3d06932baaf3de4c180a6b0b4867d8ba6e02adf80fab90a4da1709b3b572aa1",
++    "Data/NAP/Effects/fx/FuseKuDestroyer.ini": "958391375b08463fbf85ad9801b7f9cef5c1309b6e96cbde93befbeae36f3a29",
++    "Data/NAP/Effects/fx/FuseKuGunship.ini": "a44f89bf995adf876bd511a719f2e1cc5e57a5849315c477e8dcf8912a9bb0f6",
++    "Data/NAP/Effects/fx/FuseLiBattleship.ini": "5bc7f099601aca4b661126e686b3b398ee58019ea1985182ecd43af85feaced8",
++    "Data/NAP/Effects/fx/FuseLiCruiser.ini": "d814c7fbae997bce223e5a9c6ad6f4e25b8226855a176d01829dcafa8579eab5",
++    "Data/NAP/Effects/fx/FuseLiDreadnought.ini": "29b328fc41738cecf26c22dfd524794c4fff3677265a953af94e7353a04697ef",
++    "Data/NAP/Effects/fx/FuseOrOsiris.ini": "abc369ff20a716b8b8c511f9d8e7178d0939465fea77bceb6e88557379220af6",
++    "Data/NAP/Effects/fx/FuseRhBattleship.ini": "b0e273f952f44fdadd1862b18d29c30cec006ae821141e4279ee79d163c2e8a5",
++    "Data/NAP/Effects/fx/FuseRhCruiser.ini": "8cdaa0dcec862b8f1fce69abf9b70207d5df774d5149a50d8a8ae08bd25227dc",
++    "Data/NAP/Effects/fx/FuseRhGunship.ini": "47994d9144a257a8cf1f746ef1d904e5863b8cc96d7da9afddc8518b6f98a7a5",
++    "Data/NAP/Effects/fx/FuseSupriseSolar.ini": "206e29f5111b73166c35d46634b7c63744ddd1cfc082c1f98cc36672dde81be9",
++    "Data/NAP/Effects/fx/FuseTransport.ini": "3f011293ed3590d89cb5c6ff53fc61217b6ee6775e67c0e1d7e27afc4f79ee06"
++  },
++  "runtime_findings": [
++    {
++      "path": "Client/src/LibreLancer/Client/Components/CNetEffectsComponent.cs",
++      "finding": "Persistent network effects are rendered as ParticleEffectRenderer instances attached to Parent or effect hardpoints and removed by SpawnedEffect ID."
++    },
++    {
++      "path": "Client/src/LibreLancer.Data/Schema/Effects/EffectType.cs",
++      "finding": "EffectType parses radius and run_time fields; repository search found no runtime consumer outside this schema declaration."
++    },
++    {
++      "path": "Client/src/LibreLancer/Render/SystemLighting.cs",
++      "finding": "Current transient frame-light path is position-based and bounded; it does not track effect hardpoints."
++    }
++  ],
++  "interpretation_limit": "ALE particle colors and EffectType radius/run_time are not explicit dynamic-light authoring data; do not treat them as world-light color, radius, or lifetime without a separate validated contract."
++}
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -44,3 +44,4 @@
+ client 2042-document-effect-arch-registry-trace.patch
+ client 2043-dynamic-effect-callsite-coverage.patch
+ client 2044-renderer-lighting-status.patch
++client 2045-fire-effect-light-input-audit.patch

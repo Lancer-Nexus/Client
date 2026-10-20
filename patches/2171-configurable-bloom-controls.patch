@@ -1,0 +1,267 @@
+diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -514,7 +514,9 @@
+   `--render-bloom=on|off` und ein Effekte-Schalter steuern sie unabhängig; sie
+   benötigt `render_hdr` und fällt bei nicht verfügbaren Bloom-Zielen auf HDR
+   ohne Bloom zurück. Die aufwendigere mehrstufige Downsample-Pyramide,
+-  Schwellen-/Stärke-Regler und visuelle Kalibrierung bleiben offen.
++  visuelle Kalibrierung und UI-Regler bleiben offen. `render_bloom_threshold`
++  (0–8; Standard 1) und `render_bloom_strength` (0–2; Standard 0,18) lassen
++  sich in der Clientkonfiguration und über gleichnamige CLI-Parameter setzen.
+   UI-Blur, Tiefenunschärfe und Cutscene-Radialblur behalten eigene begrenzte
+   Einsatzfälle und Qualitätsschalter.
+ 
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -172,7 +172,8 @@
+   Reproduktion stehen in [ship-light-occlusion.md](ship-light-occlusion.md).
+ - [x] Opt-in HDR-Ausgabestufe mit Half-Float-Szenenziel, float MSAA/SMAA-Eingang und ACES-Tonemapping; per `render_hdr`, `--render-hdr=on|off` und Effects-Checkbox schaltbar. Alle 18 aktuellen Client-Fragmentshader schreiben im HDR-Ziel lineare RGB-Werte, PBR bleibt nativ linear, und Clear-Farben werden nach sRGB-EOTF dekodiert. Dadurch erfolgt auch transparentes Blending im linearen Ziel. Die UI folgt im Spielzustand nach `SystemRenderer.Draw()` und damit nach dem Tonemapping. Legacy-Lichtberechnung und Farbmultiplikation arbeiten weiterhin teilweise mit kodierten Textur-/Materialwerten; vollständige lineare Beleuchtungsinputs und visuelle Laufzeitabnahme bleiben offen. Details: [HDR-Linear-Ausgabe](evidence/renderer/hdr-linear-output-implementation-20261016.md).
+ - [x] Erste HDR-Bloom-Stufe mit luminanzbasierter Schwelle, Viertelauflösung und horizontalem/vertikalem Gauß-Blur; separat per `render_bloom` und `--render-bloom=on|off` steuerbar, erfordert `render_hdr`.
+-- [ ] Bloom visuell kalibrieren, Stärke/Schwelle konfigurierbar machen und die einfache Viertelauflösung bei Bedarf durch eine mehrstufige Pyramide ersetzen.
++- [x] Schwelle (`render_bloom_threshold`, 0–8, Standard 1) und Stärke (`render_bloom_strength`, 0–2, Standard 0,18) in der Clientkonfiguration und per CLI-Override einstellbar; Werte werden validiert.
++- [ ] Bloom visuell kalibrieren und die einfache Viertelauflösung bei Bedarf durch eine mehrstufige Pyramide ersetzen.
+ - [ ] Sonnen-Lens-Glow anhand reproduzierbarer NAP-Szenen visuell abnehmen; `lens_flare` und die Stern-Intensitäts-/Zonen-Fades bleiben separate offene Datenpfade ([Parser-/Laufzeitabgleich](data-client-plan.md)).
+   - [x] `lens_flare`-Datenpfad auditiert: `StararchIni` und `Star` parsen Profile/Referenzen, aber `GameItemDb.InitStars` übernimmt nur StarGlow, LensGlow und Spines; `Sun` und `SunRenderer` haben keinen Flare-Pfad. Retail-Funktion `FUN_00511248` ruft beim Einlesen eines Star-`lens_flare`-Verweises `FUN_0050f3a0` auf und wertet deren Rückgabewert für den Parse-Status aus. Der Parser liest Shape, Min-/Max-Radius und sechs Floatwerte je Bead. `Data/NAP/World/solar/StarArch.ini` enthält 7 Profile mit 61 Beads, auf die 38 Sterne verweisen. Die Bedeutung der Bead-Komponenten und der Retail-Zeichnung ist noch nicht nachgewiesen; siehe [Retail-Stringtrace](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-15-lens-flare-trace/Freelancer-lens-flare.md>) und [Parser-Aufrufer](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-15-lens-flare-trace/Freelancer-lens-flare-loader-caller.md>).
+   - [x] `lens_glow`-Form, Farbe und Radius aus `StarArch.ini` bis zum `SunRenderer` durchreichen und über `render_sun_lens_glow` / `--render-sun-lens-glow=on|off` einzeln schaltbar machen.
+diff --git a/docs/evidence/renderer/hdr-bloom-stage-20261016.md b/docs/evidence/renderer/hdr-bloom-stage-20261016.md
+--- a/docs/evidence/renderer/hdr-bloom-stage-20261016.md
++++ b/docs/evidence/renderer/hdr-bloom-stage-20261016.md
+@@ -10,9 +10,12 @@
+   Das geblurte Licht wird vor der ACES-Kurve zur linearen Szene addiert.
+ - `render_bloom` ist standardmäßig ausgeschaltet und unabhängig von
+   `render_hdr` gespeichert. Die CLI akzeptiert `--render-bloom=on|off`; der
+-  Effekte-Tab kann den Schalter während des Spiels ändern. Ohne HDR greift die
+-  Einstellung nicht. Bei nicht unterstützten Bloom-Zielen bleibt HDR aktiv und
+-  Bloom wird für den Prozess deaktiviert.
++  Effekte-Tab kann den Schalter während des Spiels ändern. Schwelle und Stärke
++  sind über `render_bloom_threshold` (0–8, Standard 1) und
++  `render_bloom_strength` (0–2, Standard 0,18) konfigurierbar; beide können
++  auch mit `--render-bloom-threshold` und `--render-bloom-strength` überschrieben
++  werden. Ohne HDR greift die Bloom-Einstellung nicht. Bei nicht unterstützten
++  Bloom-Zielen bleibt HDR aktiv und Bloom wird für den Prozess deaktiviert.
+ - Bloom-Targets werden in den geschätzten GPU-Speicher der AA/HDR-Ziele
+   eingerechnet und mit diesen beim Resize/Dispose freigegeben.
+ 
+@@ -26,3 +29,5 @@
+   Performance müssen mit einer gültigen NAP-only-Szene geprüft werden.
+ - Dies ist ein einfacher Viertelauflösungs-Blur und noch keine mehrstufige
+   Bloom-Pyramide. UI-/Cutscene-Blur bleibt davon getrennt.
++- Die Schwellen- und Stärkewerte sind in `client.ini`/CLI parametrierbar, aber
++  noch nicht als Regler im Effekte-Tab verfügbar.
+diff --git a/src/LibreLancer.Base/Graphics/AntialiasTarget.cs b/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
+--- a/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
++++ b/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
+@@ -15,6 +15,8 @@
+     public AntialiasMode Mode { get; private set; }
+     public bool HdrOutputEnabled { get; }
+     public bool BloomEnabled { get; set; }
++    public float BloomThreshold { get; set; } = 1f;
++    public float BloomStrength { get; set; } = 0.18f;
+     public Action<SystemRenderSubpass, bool>? GpuSubpassMarker { get; set; }
+     public int Samples => msaa?.Samples ?? 1;
+     public SystemRenderAttachmentFormat MultisampleStorageFormat => msaa?.RequestedColorFormat switch
+@@ -377,9 +379,9 @@
+ 
+     private void ToneMap(Texture2D source, RenderTarget? target, int width, int height, Point offset)
+     {
+-        var bloomTexture = BloomEnabled && bloom != null ? bloom.Process(source) : null;
++        var bloomTexture = BloomEnabled && bloom != null ? bloom.Process(source, BloomThreshold) : null;
+         TonemapPass.Draw(renderContext, source, target, width, height, offset, bloomTexture,
+-            bloomTexture != null ? 0.18f : 0f);
++            bloomTexture != null ? BloomStrength : 0f);
+     }
+ 
+     public override void Dispose()
+diff --git a/src/LibreLancer.Base/Graphics/BloomPass.cs b/src/LibreLancer.Base/Graphics/BloomPass.cs
+--- a/src/LibreLancer.Base/Graphics/BloomPass.cs
++++ b/src/LibreLancer.Base/Graphics/BloomPass.cs
+@@ -16,7 +16,7 @@
+ 
+     public BloomPass(RenderContext context) => this.context = context;
+ 
+-    public Texture2D? Process(Texture2D source)
++    public Texture2D? Process(Texture2D source, float threshold)
+     {
+         if (failed)
+             return null;
+@@ -45,7 +45,7 @@
+         try
+         {
+             Draw(context.BloomExtractShader, source, extracted!, new Vector4(
+-                1f / source.Width, 1f / source.Height, 1f, 0.5f));
++                1f / source.Width, 1f / source.Height, threshold, 0.5f));
+             Draw(context.BloomBlurShader, extracted!.Texture, horizontal!, new Vector4(1f / width, 0, 0, 0));
+             Draw(context.BloomBlurShader, horizontal!.Texture, blurred!, new Vector4(0, 1f / height, 0, 0));
+         }
+diff --git a/src/LibreLancer/GameSettings.cs b/src/LibreLancer/GameSettings.cs
+--- a/src/LibreLancer/GameSettings.cs
++++ b/src/LibreLancer/GameSettings.cs
+@@ -61,6 +61,10 @@
+         public bool RenderHdr = false;
+         [Entry("render_bloom")]
+         public bool RenderBloom = false;
++        [Entry("render_bloom_threshold")]
++        public float BloomThreshold = 1f;
++        [Entry("render_bloom_strength")]
++        public float BloomStrength = 0.18f;
+         [Entry("render_projectile_beams")]
+         public bool RenderProjectileBeams = true;
+         [Entry("render_particle_effects")]
+@@ -117,6 +121,8 @@
+         bool IRendererSettings.RenderSunAmbient => RenderSunAmbient;
+         bool IRendererSettings.RenderHdr => RenderHdr;
+         bool IRendererSettings.RenderBloom => RenderBloom;
++        float IRendererSettings.BloomThreshold => BloomThreshold;
++        float IRendererSettings.BloomStrength => BloomStrength;
+         bool IRendererSettings.RenderProjectileBeams => RenderProjectileBeams;
+         bool IRendererSettings.RenderParticleEffects => RenderParticleEffects;
+         bool IRendererSettings.RenderTransientEffectLights => RenderTransientEffectLights;
+@@ -164,6 +170,8 @@
+             writer.WriteLine($"render_sun_ambient = {RenderSunAmbient.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_hdr = {RenderHdr.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_bloom = {RenderBloom.ToString().ToLowerInvariant()}");
++            writer.WriteLine($"render_bloom_threshold = {Fmt(BloomThreshold)}");
++            writer.WriteLine($"render_bloom_strength = {Fmt(BloomStrength)}");
+             writer.WriteLine($"render_projectile_beams = {RenderProjectileBeams.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_particle_effects = {RenderParticleEffects.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_jump_gate_effects = {RenderJumpGateEffects.ToString().ToLowerInvariant()}");
+@@ -206,6 +214,8 @@
+                 RenderSunAmbient = RenderSunAmbient,
+                 RenderHdr = RenderHdr,
+                 RenderBloom = RenderBloom,
++                BloomThreshold = BloomThreshold,
++                BloomStrength = BloomStrength,
+                 RenderProjectileBeams = RenderProjectileBeams,
+                 RenderParticleEffects = RenderParticleEffects,
+                 RenderJumpGateEffects = RenderJumpGateEffects,
+@@ -246,6 +256,8 @@
+             RenderSunAmbient = other.RenderSunAmbient;
+             RenderHdr = other.RenderHdr;
+             RenderBloom = other.RenderBloom;
++            BloomThreshold = other.BloomThreshold;
++            BloomStrength = other.BloomStrength;
+             RenderProjectileBeams = other.RenderProjectileBeams;
+             RenderParticleEffects = other.RenderParticleEffects;
+             RenderJumpGateEffects = other.RenderJumpGateEffects;
+@@ -265,6 +277,16 @@
+                 FLLog.Info("Config", $"Transient effect light budget {TransientEffectLightBudget} is unsupported; using 128.");
+                 TransientEffectLightBudget = 128;
+             }
++            if (!float.IsFinite(BloomThreshold) || BloomThreshold is < 0f or > 8f)
++            {
++                FLLog.Info("Config", $"Bloom threshold {BloomThreshold} is unsupported; using 1.");
++                BloomThreshold = 1f;
++            }
++            if (!float.IsFinite(BloomStrength) || BloomStrength is < 0f or > 2f)
++            {
++                FLLog.Info("Config", $"Bloom strength {BloomStrength} is unsupported; using 0.18.");
++                BloomStrength = 0.18f;
++            }
+             var mode = (AntialiasMode)Antialias;
+             if (mode > RenderContext.MaxAntialias)
+             {
+diff --git a/src/LibreLancer/Render/IRendererSettings.cs b/src/LibreLancer/Render/IRendererSettings.cs
+--- a/src/LibreLancer/Render/IRendererSettings.cs
++++ b/src/LibreLancer/Render/IRendererSettings.cs
+@@ -18,6 +18,8 @@
+     bool RenderSunAmbient => false;
+     bool RenderHdr => false;
+     bool RenderBloom => false;
++    float BloomThreshold => 1f;
++    float BloomStrength => 0.18f;
+     bool RenderProjectileBeams => true;
+     bool RenderParticleEffects => true;
+     bool RenderTransientEffectLights => true;
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -474,6 +474,8 @@
+                 if (msaa != null)
+                 {
+                     msaa.BloomEnabled = hdrRequested && Settings.RenderBloom;
++                    msaa.BloomThreshold = Settings.BloomThreshold;
++                    msaa.BloomStrength = Settings.BloomStrength;
+                     rstate.PushViewport(new Rectangle(0, 0, renderWidth, renderHeight));
+                     aaViewportPushed = true;
+                     aaScissorPushed = rstate.PushScissor(new Rectangle(0, 0, renderWidth, renderHeight), false);
+diff --git a/src/lancer/Program.cs b/src/lancer/Program.cs
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -5,6 +5,7 @@
+ using System;
+ using System.Collections.Generic;
+ using System.IO;
++using System.Globalization;
+ using LibreLancer.Data.Schema;
+ using LibreLancer.Graphics;
+ using LibreLancer;
+@@ -36,6 +37,8 @@
+             Console.WriteLine("         --render-sun-ambient=on|off");
+             Console.WriteLine("         --render-hdr=on|off");
+             Console.WriteLine("         --render-bloom=on|off");
++            Console.WriteLine("         --render-bloom-threshold=0..8");
++            Console.WriteLine("         --render-bloom-strength=0..2");
+             Console.WriteLine("         --render-projectile-beams=on|off");
+             Console.WriteLine("         --render-particle-effects=on|off");
+             Console.WriteLine("         --render-transient-effect-lights=on|off");
+@@ -223,6 +226,8 @@
+         private bool? sunAmbient;
+         private bool? hdr;
+         private bool? bloom;
++        private float? bloomThreshold;
++        private float? bloomStrength;
+         private bool? projectileBeams;
+         private bool? particleEffects;
+         private bool? jumpGateEffects;
+@@ -292,6 +297,24 @@
+                     if (!ParseToggle(out var bloomEnabled)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
+                     bloom = bloomEnabled;
+                     return true;
++                case "--render-bloom-threshold":
++                    if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var threshold) &&
++                        float.IsFinite(threshold) && threshold is >= 0f and <= 8f)
++                    {
++                        bloomThreshold = threshold;
++                        return true;
++                    }
++                    error = $"{name} accepts a finite number from 0 through 8.";
++                    return false;
++                case "--render-bloom-strength":
++                    if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var strength) &&
++                        float.IsFinite(strength) && strength is >= 0f and <= 2f)
++                    {
++                        bloomStrength = strength;
++                        return true;
++                    }
++                    error = $"{name} accepts a finite number from 0 through 2.";
++                    return false;
+                 case "--render-dynamic-light-budget":
+                     if (int.TryParse(value, out var lightBudget) && lightBudget is 0 or 8 or 16 or 24 or 32)
+                     {
+@@ -388,6 +411,8 @@
+             if (sunAmbient.HasValue) settings.RenderSunAmbient = sunAmbient.Value;
+             if (hdr.HasValue) settings.RenderHdr = hdr.Value;
+             if (bloom.HasValue) settings.RenderBloom = bloom.Value;
++            if (bloomThreshold.HasValue) settings.BloomThreshold = bloomThreshold.Value;
++            if (bloomStrength.HasValue) settings.BloomStrength = bloomStrength.Value;
+             if (projectileBeams.HasValue) settings.RenderProjectileBeams = projectileBeams.Value;
+             if (particleEffects.HasValue) settings.RenderParticleEffects = particleEffects.Value;
+             if (jumpGateEffects.HasValue) settings.RenderJumpGateEffects = jumpGateEffects.Value;
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -162,3 +162,4 @@
+ | 2168 | Add opt-in HDR scene output and tone mapping across AA paths |
+ | 2169 | Linearize scene shader outputs before HDR blending and tone mapping |
+ | 2170 | Add optional quarter-resolution HDR bloom with separable blur |
++| 2171 | Configure and validate HDR bloom threshold and strength |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -170,3 +170,4 @@
+ client 2168-hdr-tonemapping-scene-output.patch
+ client 2169-linear-hdr-shader-output.patch
+ client 2170-hdr-bloom-first-pass.patch
++client 2171-configurable-bloom-controls.patch

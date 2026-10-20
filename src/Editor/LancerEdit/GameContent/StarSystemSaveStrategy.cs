@@ -59,21 +59,21 @@ public class StarSystemSaveStrategy : ISaveStrategy
 
         if (!ShortestPathWriter.PathInisEqual(allNew, await all))
         {
-            var resolved = WritableDataPath.Resolve(tab.Data.GameData.VFS, fileAll);
+            var resolved = tab.Data.GameData.VFS.GetBackingFileName(fileAll);
             IniWriter.WriteIniFile(resolved, ShortestPathWriter.Serialize(allNew));
             FLLog.Info("Ini", $"Saved to {resolved}");
         }
 
         if (!ShortestPathWriter.PathInisEqual(legalNew, await legal))
         {
-            var resolved = WritableDataPath.Resolve(tab.Data.GameData.VFS, fileLegal);
+            var resolved = tab.Data.GameData.VFS.GetBackingFileName(fileLegal);
             IniWriter.WriteIniFile(resolved, ShortestPathWriter.Serialize(legalNew));
             FLLog.Info("Ini", $"Saved to {resolved}");
         }
 
         if (!ShortestPathWriter.PathInisEqual(illegalNew, await illegal))
         {
-            var resolved = WritableDataPath.Resolve(tab.Data.GameData.VFS, fileIllegal);
+            var resolved = tab.Data.GameData.VFS.GetBackingFileName(fileIllegal);
             IniWriter.WriteIniFile(resolved, ShortestPathWriter.Serialize(illegalNew));
             FLLog.Info("Ini", $"Saved to {resolved}");
         }
@@ -91,14 +91,12 @@ public class StarSystemSaveStrategy : ISaveStrategy
         tab.ResetOriginalObjects();
         var paths = WriteShortestPaths();
 
-        var resolved = WritableDataPath.Resolve(tab.Data.GameData.VFS,
-            tab.Data.UniverseVfsFolder + tab.CurrentSystem.SourceFile);
+        var resolved = tab.Data.GameData.VFS.GetBackingFileName(tab.Data.UniverseVfsFolder + tab.CurrentSystem.SourceFile);
         IniWriter.WriteIniFile(resolved, IniSerializer.SerializeStarSystem(tab.CurrentSystem));
         FLLog.Info("Ini", $"Saved to {resolved}");
         if (writeUniverse)
         {
-            var path = WritableDataPath.Resolve(tab.Data.GameData.VFS,
-                tab.Data.GameData.Items.Ini.Freelancer.UniversePath);
+            var path = tab.Data.GameData.VFS.GetBackingFileName(tab.Data.GameData.Items.Ini.Freelancer.UniversePath);
             IniWriter.WriteIniFile(path, IniSerializer.SerializeUniverse(tab.Data.GameData.Items.Systems, tab.Data.GameData.Items.Bases));
             FLLog.Info("Ini", $"Saved to {path}");
         }

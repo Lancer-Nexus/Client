@@ -1,0 +1,112 @@
+diff --git a/src/LibreLancer/Render/GpuPassProfile.cs b/src/LibreLancer/Render/GpuPassProfile.cs
+--- a/src/LibreLancer/Render/GpuPassProfile.cs
++++ b/src/LibreLancer/Render/GpuPassProfile.cs
+@@ -49,6 +49,17 @@
+             }
+         }
+         return column.ToString().TrimEnd('_');
++    }
++
++    internal static bool TryGetQueryResult(IGpuTimerQuery? query, out ulong nanoseconds, out long frameNumber)
++    {
++        if (query is null)
++        {
++            nanoseconds = 0;
++            frameNumber = 0;
++            return false;
++        }
++        return query.TryGetResult(out nanoseconds, out frameNumber);
+     }
+ 
+     public static GpuPassSample? GetSample(int index) => Samples[index];
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -909,11 +909,7 @@
+             if (!rstate.GpuTimingEnabled)
+             {
+                 if (gpuPassQueries != null)
+-                {
+-                    foreach (var query in gpuPassQueries) query?.Dispose();
+-                    gpuPassQueries = null;
+-                    GpuPassProfile.Clear();
+-                }
++                    DisposeGpuPassQueries();
+                 return;
+             }
+ 
+@@ -931,7 +927,7 @@
+ 
+             for (var i = 0; i < gpuPassQueries.Length; i++)
+             {
+-                if (gpuPassQueries[i]!.TryGetResult(out var nanoseconds, out var frameNumber))
++                if (GpuPassProfile.TryGetQueryResult(gpuPassQueries[i], out var nanoseconds, out var frameNumber))
+                     GpuPassProfile.SetSample(GpuPassProfile.GetProfileIndex(i), nanoseconds / 1_000_000.0,
+                         frameNumber, currentFrame);
+             }
+diff --git a/src/LibreLancer.Tests/GpuPassProfileTests.cs b/src/LibreLancer.Tests/GpuPassProfileTests.cs
+--- a/src/LibreLancer.Tests/GpuPassProfileTests.cs
++++ b/src/LibreLancer.Tests/GpuPassProfileTests.cs
+@@ -1,3 +1,4 @@
++using LibreLancer.Graphics;
+ using LibreLancer.Render;
+ using Xunit;
+ 
+@@ -5,6 +6,37 @@
+ 
+ public class GpuPassProfileTests
+ {
++    [Fact]
++    public void MissingTimerQueryIsIgnored()
++    {
++        Assert.False(GpuPassProfile.TryGetQueryResult(null, out var nanoseconds, out var frameNumber));
++        Assert.Equal(0UL, nanoseconds);
++        Assert.Equal(0L, frameNumber);
++    }
++
++    [Fact]
++    public void TimerQueryResultIsForwarded()
++    {
++        var query = new FakeGpuTimerQuery(12_500_000, 42);
++
++        Assert.True(GpuPassProfile.TryGetQueryResult(query, out var nanoseconds, out var frameNumber));
++        Assert.Equal(12_500_000UL, nanoseconds);
++        Assert.Equal(42L, frameNumber);
++    }
++
++    private sealed class FakeGpuTimerQuery(ulong elapsed, long submittedFrame) : IGpuTimerQuery
++    {
++        public bool Begin(long frameNumber) => false;
++        public void End() { }
++        public bool TryGetResult(out ulong nanoseconds, out long frameNumber)
++        {
++            nanoseconds = elapsed;
++            frameNumber = submittedFrame;
++            return true;
++        }
++        public void Dispose() { }
++    }
++
+     [Fact]
+     public void SampleAgeAdvancesWithRenderedFrameSequence()
+     {
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -32,7 +32,7 @@
+ | Shader-Cache über Context-Wechsel | Built-in-Shaderbündel werden je `RenderContext` neu bezogen; `AsteroidBandMaterial` hält keinen globalen Shaderverweis mehr. | Headless-Regression prüft den Wechsel nach dem Schließen des ersten Shader-Scopes. Native GL-Kontextverlust- und Gerätewechselabnahme bleiben offen. Siehe `docs/evidence/renderer/render-context-shader-cache-20261018.md`. |
+ | Shader-Kompilierung | Alle 26 Shader-Bundles und die definierten Feature-Permutationen kompilieren mit dem im Repository enthaltenen DXC; der Release-Build vom 19.10. bindet zusätzlich den skinned DFM-DetailMap-Shader ein. Der SDL_GPU/Vulkan-Pipeline-Audit erstellte alle 3.495 Produktionspipelines. | Shader- und Pipeline-Erstellung sind belegt, nicht das Zeichnen realer Assets auf unterstützten Treibern. Der Haswell-Vulkan-Treiber meldet unvollständige Unterstützung. Siehe [Pipeline-Audit 2026-10-19](evidence/renderer/sdl-gpu-production-pipeline-audit-20261019.md). |
+ | Dynamische Lichter und Schatten | Persistente und kurzlebige Lichter werden priorisiert; `lgt_effect`-Lichter von fliegenden Projektilen folgen nun dem Projektilalter und seiner Position. Ein ausgewähltes Richtungslicht läuft durch Shadow-Map-Pass und 3×3-PCF. Alpha-Test-Texturen werden auch in PBR-Depth-/Shadow-Pässen anhand eines Material-Uniforms ausgeschnitten; blendtransparente Materialien werfen keine Schatten. Lichtprojektion ist im Licht-XY-Raum verankert und texelgesnappt; Mesh-Cullingradien berücksichtigen `RenderScale`. Der Shadow-Frustum-Fit hält seine acht Ecken in einem Stack-Puffer statt pro Frame ein Array zu allozieren. Die Frame-Lichtaufnahme verwirft jetzt zusätzlich nicht-endliche Positionen, Richtungen, Farben, Attenuation- und Projektionsparameter, bevor Priorisierung oder Shaderbindung sie verwenden. | Unit-Tests decken Lichtkurvenzeit, Position, Gruppe und ungültige Radien für Projektil-Lichter ab. Hi02 belegt Pass, Lichtauswahl und Live-Schaltung auf einer OpenGL-GPU. Kamera-Fit-/Stabilitäts- und RenderScale-Radiustests bestehen. Ein NAP-only-Hi02-A/B auf Intel HD 4600 bestätigt den aktiven Pass bei Bias 0 und 0,02; der Hull-Unterschied ist subtil und kalibriert keinen empfohlenen Wert. Eine Ingame-Abnahme von Waffenfeuer-/Projektillichtern, Offscreen-Castern, weiteren Materialien/Szenen und GPU-Kosten bleibt offen. Siehe `docs/evidence/renderer/shadow-map-hi02-live-toggle-20261017/`, `docs/evidence/renderer/shadow-camera-stability-20261018.md` und `docs/evidence/renderer/scaled-model-culling-20261018.md`. |
+-| Diagnose | CPU-Framezeitprofile, asynchrone OpenGL-GPU-Passzeiten, Bloom-/Shadow-Passzeiten, Ziel-/Speicherschätzungen und CSV-Ausgabe. Environment-Cubemaps mit mehreren Catalog-Aliasen werden im geschätzten GPU-Texturspeicher nur einmal gezählt und bei Bereinigung auch nur einmal freigegeben. | Langzeitprofile und plattformübergreifende Vergleichsbaselines fehlen. Einzelne asynchrone Samples sind keine FPS-Baseline. |
++| Diagnose | CPU-Framezeitprofile, asynchrone OpenGL-GPU-Passzeiten, Bloom-/Shadow-Passzeiten, Ziel-/Speicherschätzungen und CSV-Ausgabe. Environment-Cubemaps mit mehreren Catalog-Aliasen werden im geschätzten GPU-Texturspeicher nur einmal gezählt und bei Bereinigung auch nur einmal freigegeben. Fehlende nullable GPU-Timer-Handles werden beim Polling übersprungen; das Abschalten des Profilings nutzt denselben fehlerfortsetzenden Freigabepfad wie der Systemrenderer-Lifecycle. | Fokustests prüfen fehlende und erfolgreiche Timer-Samples sowie Cleanup-Fehlerfortsetzung. Langzeitprofile und plattformübergreifende Vergleichsbaselines fehlen. Einzelne asynchrone Samples sind keine FPS-Baseline. |
+ 
+ Der Null-Lichtpfad ist mit `RenderLightingTests.SetLightsAcceptsAmbientOnlyLightingWithoutSourceOwner` direkt abgesichert: Ambient-Beleuchtung ohne `SourceLighting`-Besitzer muss gültig bleiben. Der NAP-only-Intro-Smoke in [Intro-Licht-Smoke](evidence/renderer/dynamic-lighting-intro-smoke-20261018/README.md) erreichte FP7 mit dynamischer Beleuchtung an und aus ohne Renderer-Ausnahme. Die visuellen Unterschiede zeigen, dass deaktivierte dynamische Beleuchtung das Intro deutlich abdunkelt; abschließende Kalibrierung und Hardware-Performance sind offen.
+ 
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -435,3 +435,4 @@
+ client 2441-declare-frame-setup-resource.patch
+ client 2442-preserve-sun-spines-when-lens-glow-disabled.patch
+ client 2443-trace-fp7-intro-render-assets.patch
++client 2444-null-safe-gpu-timer-profile.patch

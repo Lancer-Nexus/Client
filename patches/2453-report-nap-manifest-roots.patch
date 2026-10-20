@@ -1,0 +1,93 @@
+diff --git a/src/Nexus.Assets/NexusPackageFileProvider.cs b/src/Nexus.Assets/NexusPackageFileProvider.cs
+--- a/src/Nexus.Assets/NexusPackageFileProvider.cs
++++ b/src/Nexus.Assets/NexusPackageFileProvider.cs
+@@ -13,6 +13,7 @@
+     private sealed record ActiveSnapshot
+     {
+         public int SchemaVersion { get; init; }
++        public string? ManifestId { get; init; }
+         public ActivePackage[]? Packages { get; init; }
+     }
+     private sealed record ActivePackage
+@@ -147,7 +148,9 @@
+             if (item.Version.HasValue && item.Version.Value != archive.ContentVersion)
+                 throw new InvalidDataException(
+                     $"Active NAP package version does not match: {item.Id} " +
+-                    $"(manifest {item.Version.Value}, archive {archive.ContentVersion}).");
++                    $"(manifest '{snapshot.ManifestId ?? "(unspecified)"}', " +
++                    $"expected {item.Version.Value}, archive {archive.ContentVersion}, " +
++                    $"snapshot '{activePath}', package '{packagePath}').");
+             mounts.Add(new NexusPackageMount(item.Id!, archive, item.Priority, item.MountOrder,
+                 new HashSet<string>(item.Overrides ?? [], StringComparer.Ordinal)));
+         }
+diff --git a/src/Nexus.Assets.Tests/NexusPackageFileProviderTests.cs b/src/Nexus.Assets.Tests/NexusPackageFileProviderTests.cs
+--- a/src/Nexus.Assets.Tests/NexusPackageFileProviderTests.cs
++++ b/src/Nexus.Assets.Tests/NexusPackageFileProviderTests.cs
+@@ -116,6 +116,25 @@
+     }
+ 
+     [Fact]
++    public void ActiveSnapshotVersionMismatchReportsManifestAndResolvedPaths()
++    {
++        using var fixture = new Fixture();
++        fixture.WritePackage("asset.dat", [1, 2, 3]);
++        _ = fixture.Pack();
++        fixture.Activate(version: 2, manifestId: "renderer-qa");
++
++        var error = Assert.Throws<InvalidDataException>(
++            () => NexusPackageFileProvider.LoadActive(fixture.ApplicationDirectory));
++
++        Assert.Contains("manifest 'renderer-qa'", error.Message, StringComparison.Ordinal);
++        Assert.Contains("expected 2, archive 1", error.Message, StringComparison.Ordinal);
++        Assert.Contains(Path.Combine(fixture.ApplicationDirectory, "packages", "active.json"),
++            error.Message, StringComparison.Ordinal);
++        Assert.Contains(Path.Combine(fixture.ApplicationDirectory, "packages", "core.nap"),
++            error.Message, StringComparison.Ordinal);
++    }
++
++    [Fact]
+     public void ActiveSnapshotRejectsPackageHashMismatchAndPathTraversal()
+     {
+         using var fixture = new Fixture();
+@@ -180,7 +199,8 @@
+             return output;
+         }
+ 
+-        public void Activate(string relativePackagePath = "core.nap")
++        public void Activate(string relativePackagePath = "core.nap", ulong? version = null,
++            string? manifestId = "test-manifest")
+         {
+             Directory.CreateDirectory(PackagesDirectory);
+             var packagePath = Path.Combine(PackagesDirectory, relativePackagePath);
+@@ -191,6 +211,7 @@
+             var active = new
+             {
+                 schemaVersion = 1,
++                manifestId,
+                 packages = new[]
+                 {
+                     new
+@@ -199,6 +220,7 @@
+                         path = relativePackagePath,
+                         size = metadata.Exists ? metadata.Length : 1,
+                         sha256 = hash,
++                        version,
+                         required = true,
+                         priority = 100,
+                         mountOrder = 1,
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -444,3 +444,4 @@
+ client 2450-illum-detailmap-pbr.patch
+ client 2451-detailmap2-msk2pass-pbr.patch
+ client 2452-update-pbr-pipeline-audit-evidence.patch
++client 2453-report-nap-manifest-roots.patch
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -382,3 +382,4 @@
+ | 2450 | Route IllumDetailMap through PBR while preserving its alpha-weighted illumination layer and feature flags |
+ | 2451 | Route DetailMap2Dm1Msk2Pass through PBR while preserving its diffuse-alpha detail mask |
+ | 2452 | Record current SDL_GPU PBR material pipeline coverage and the OpenGL NAP capture limit |
++| 2453 | Include NAP manifest identity and resolved paths in package version mismatch errors |

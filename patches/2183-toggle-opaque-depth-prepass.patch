@@ -1,0 +1,155 @@
+--- a/src/LibreLancer/Render/IRendererSettings.cs
++++ b/src/LibreLancer/Render/IRendererSettings.cs
+@@ -18,6 +18,7 @@
+     bool RenderSunAmbient => false;
+     bool RenderHdr => false;
+     bool RenderBloom => false;
++    bool RenderDepthPrepass => false;
+     float BloomThreshold => 1f;
+     float BloomStrength => 0.18f;
+     bool RenderProjectileBeams => true;
+--- a/src/LibreLancer/GameSettings.cs
++++ b/src/LibreLancer/GameSettings.cs
+@@ -61,6 +61,8 @@
+         public bool RenderHdr = false;
+         [Entry("render_bloom")]
+         public bool RenderBloom = false;
++        [Entry("render_depth_prepass")]
++        public bool RenderDepthPrepass = false;
+         [Entry("render_bloom_threshold")]
+         public float BloomThreshold = 1f;
+         [Entry("render_bloom_strength")]
+@@ -121,6 +123,7 @@
+         bool IRendererSettings.RenderSunAmbient => RenderSunAmbient;
+         bool IRendererSettings.RenderHdr => RenderHdr;
+         bool IRendererSettings.RenderBloom => RenderBloom;
++        bool IRendererSettings.RenderDepthPrepass => RenderDepthPrepass;
+         float IRendererSettings.BloomThreshold => BloomThreshold;
+         float IRendererSettings.BloomStrength => BloomStrength;
+         bool IRendererSettings.RenderProjectileBeams => RenderProjectileBeams;
+@@ -170,6 +173,7 @@
+             writer.WriteLine($"render_sun_ambient = {RenderSunAmbient.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_hdr = {RenderHdr.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_bloom = {RenderBloom.ToString().ToLowerInvariant()}");
++            writer.WriteLine($"render_depth_prepass = {RenderDepthPrepass.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_bloom_threshold = {Fmt(BloomThreshold)}");
+             writer.WriteLine($"render_bloom_strength = {Fmt(BloomStrength)}");
+             writer.WriteLine($"render_projectile_beams = {RenderProjectileBeams.ToString().ToLowerInvariant()}");
+@@ -214,6 +218,7 @@
+                 RenderSunAmbient = RenderSunAmbient,
+                 RenderHdr = RenderHdr,
+                 RenderBloom = RenderBloom,
++                RenderDepthPrepass = RenderDepthPrepass,
+                 BloomThreshold = BloomThreshold,
+                 BloomStrength = BloomStrength,
+                 RenderProjectileBeams = RenderProjectileBeams,
+@@ -256,6 +261,7 @@
+             RenderSunAmbient = other.RenderSunAmbient;
+             RenderHdr = other.RenderHdr;
+             RenderBloom = other.RenderBloom;
++            RenderDepthPrepass = other.RenderDepthPrepass;
+             BloomThreshold = other.BloomThreshold;
+             BloomStrength = other.BloomStrength;
+             RenderProjectileBeams = other.RenderProjectileBeams;
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -571,17 +571,24 @@
+                 // Clear depth buffer for game objects
+                 billboards.Begin(camera, Commands);
+                 SystemLighting.NumberOfTilesX = -1;
+-                // Optional opaque depth pre-pass
+-                rstate.ColorWrite = false;
+-                rstate.DepthFunction = DepthFunction.Less;
+-                BeginGpuPass(SystemRenderPass.DepthPrepass, sceneTarget);
+-                try
+-                {
+-                    foreach (var obj in objects) obj.DepthPrepass(camera, Commands, SystemLighting, nr!);
+-                }
+-                finally { EndGpuPass(SystemRenderPass.DepthPrepass, sceneTarget); }
+-                rstate.DepthFunction = DepthFunction.LessEqual;
+-                rstate.ColorWrite = true;
++                if (Settings.RenderDepthPrepass)
++                {
++                    rstate.ColorWrite = false;
++                    rstate.DepthFunction = DepthFunction.Less;
++                    BeginGpuPass(SystemRenderPass.DepthPrepass, sceneTarget);
++                    try
++                    {
++                        foreach (var obj in objects) obj.DepthPrepass(camera, Commands, SystemLighting, nr!);
++                    }
++                    finally { EndGpuPass(SystemRenderPass.DepthPrepass, sceneTarget); }
++                    rstate.DepthFunction = DepthFunction.LessEqual;
++                    rstate.ColorWrite = true;
++                }
++                else
++                {
++                    rstate.DepthFunction = DepthFunction.Less;
++                    rstate.ColorWrite = true;
++                }
+                 // Actual Drawing
+ 
+                 BeginGpuPass(SystemRenderPass.Opaque, sceneTarget);
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -37,6 +37,7 @@
+             Console.WriteLine("         --render-sun-ambient=on|off");
+             Console.WriteLine("         --render-hdr=on|off");
+             Console.WriteLine("         --render-bloom=on|off");
++            Console.WriteLine("         --render-depth-prepass=on|off");
+             Console.WriteLine("         --render-bloom-threshold=0..8");
+             Console.WriteLine("         --render-bloom-strength=0..2");
+             Console.WriteLine("         --render-projectile-beams=on|off");
+@@ -226,6 +227,7 @@
+         private bool? sunAmbient;
+         private bool? hdr;
+         private bool? bloom;
++        private bool? depthPrepass;
+         private float? bloomThreshold;
+         private float? bloomStrength;
+         private bool? projectileBeams;
+@@ -296,6 +298,10 @@
+                 case "--render-bloom":
+                     if (!ParseToggle(out var bloomEnabled)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
+                     bloom = bloomEnabled;
++                    return true;
++                case "--render-depth-prepass":
++                    if (!ParseToggle(out var depthPrepassEnabled)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
++                    depthPrepass = depthPrepassEnabled;
+                     return true;
+                 case "--render-bloom-threshold":
+                     if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var threshold) &&
+@@ -411,6 +417,7 @@
+             if (sunAmbient.HasValue) settings.RenderSunAmbient = sunAmbient.Value;
+             if (hdr.HasValue) settings.RenderHdr = hdr.Value;
+             if (bloom.HasValue) settings.RenderBloom = bloom.Value;
++            if (depthPrepass.HasValue) settings.RenderDepthPrepass = depthPrepass.Value;
+             if (bloomThreshold.HasValue) settings.BloomThreshold = bloomThreshold.Value;
+             if (bloomStrength.HasValue) settings.BloomStrength = bloomStrength.Value;
+             if (projectileBeams.HasValue) settings.RenderProjectileBeams = projectileBeams.Value;
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -239,6 +239,7 @@
+   - `--render-sun-ambient=on|off` → `render_sun_ambient` (opt-in 25% diffuse tint from locally weighted persistent system-light colors; off by default).
+   - `--render-hdr=on|off` → `render_hdr` (opt-in float scene target and ACES tone mapping; falls back to LDR when the GPU target is unavailable).
+   - `--render-bloom=on|off` → `render_bloom` (opt-in bloom pass; requires `render_hdr`).
++  - `--render-depth-prepass=on|off` → `render_depth_prepass` (opt-in opaque model depth pass; off by default because it currently reuses full material shaders).
+   - `--render-bloom-threshold=0..8` → `render_bloom_threshold` (finite invariant-culture float; default 1).
+   - `--render-bloom-strength=0..2` → `render_bloom_strength` (finite invariant-culture float; default 0.18).
+   - `--render-projectile-beams=on|off` → `render_projectile_beams` (only hides `vis_beam`; simulation and projectile particle effects remain active).
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -205,7 +205,7 @@
+ - [ ] Screen-Space Ambient Occlusion als optionale Ergänzung bewerten; Geometrie- und Nebelartefakte gegen Vanilla-Szenen abgleichen.
+ - [ ] Echtzeit-Schatten (zunächst gerichtete Lichter, Kaskaden und PCF) anhand vorhandener Freelancer-Lichtdaten und der GPU-Kosten bewerten.
+   - [x] Sampleable Depth-only-Renderziele im OpenGL-Backend und no-op-Ziele im Null-Backend bereitgestellt; Release-Build sowie OpenGL-4.6/Mesa-NAP-Smoke für FBO, Clear und Depth-Readback bestanden. GLES, Shader-Sampling und PCF bleiben offen; siehe [Depth-only-Smoke](evidence/renderer/depth-only-target-smoke-20261017/README.md).
+-  - [x] Opake, sichtbare Model-Meshes schreiben im Main-Camera-Depth-Prepass mit LOD, World-Matrix und Material-Alpha-Test; transparente Teile bleiben ausgeschlossen. Der Pass nutzt vorerst die bestehenden Vollmaterial-Shader bei deaktiviertem Color-Write, kein dedizierter Depth-Shader und kein Schattenwurf. Release-Build und Overlay-Rekonstruktion bestanden.
++  - [x] Opake, sichtbare Model-Meshes schreiben optional im Main-Camera-Depth-Prepass mit LOD, World-Matrix und Material-Alpha-Test; transparente Teile bleiben ausgeschlossen. `render_depth_prepass` und `--render-depth-prepass=on|off` steuern den Pass, der standardmäßig aus ist: Er nutzt vorerst die bestehenden Vollmaterial-Shader bei deaktiviertem Color-Write, hat keinen dedizierten Depth-Shader und wirft keine Schatten. Release-Build und Overlay-Rekonstruktion bestanden.
+   - [ ] GL/GLES-FBO-Laufzeit prüfen, danach Caster-Draws, Lichtmatrizen, PCF und Receiver-Shading in den beleuchteten Materialpfaden implementieren.
+ - [ ] Screen-Space-Reflections als optionale Ergänzung prüfen; fehlende Bildinformation an Bildschirmrändern und bei verdeckten Objekten muss über den bestehenden PBR-Fallback abgefangen werden.
+ - [ ] Volumetrischen Nebel und volumetrische Lichtstrahlen als eigenständige, skalierbare Qualitätstufe evaluieren; vorhandene Freelancer-Nebelparameter und Transparenzreihenfolge als Referenz verwenden.
+--- a/patches/series
++++ b/patches/series
+@@ -183,2 +183,3 @@
+ client 2181-sampleable-depth-only-render-targets.patch
+ client 2182-draw-opaque-models-in-depth-prepass.patch
++client 2183-toggle-opaque-depth-prepass.patch

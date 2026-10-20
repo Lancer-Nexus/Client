@@ -1,0 +1,277 @@
+client 2212-bloom-resolution-control.patch
+diff --git a/AGENTS.md b/AGENTS.md
+index 2010228..81e008d 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -244,6 +244,8 @@ in older audit documents refer to Git history.
+   - `--render-shadows=on|off` → `render_shadows` (opt-in single directional shadow map with opaque model casters and 3×3 PCF receivers in Basic/PBR; off by default).
+   - `--render-bloom-threshold=0..8` → `render_bloom_threshold` (finite invariant-culture float; default 1).
+   - `--render-bloom-strength=0..2` → `render_bloom_strength` (finite invariant-culture float; default 0.18).
++  - `--render-bloom-radius=0.25..4` → `render_bloom_radius` (finite invariant-culture float; default 1).
++  - `--render-bloom-resolution-scale=0.125..1` → `render_bloom_resolution_scale` (finite invariant-culture float; default 1; controls blur-target dimensions and is adjustable in Effects options).
+   - `--render-projectile-beams=on|off` → `render_projectile_beams` (only hides `vis_beam`; simulation and projectile particle effects remain active).
+   - `--render-particle-effects=on|off` → `render_particle_effects` (suppresses particle geometry while effect timing and simulation continue).
+   - `--render-jump-gate-effects=on|off` → `render_jump_gate_effects` (controls the configured jump-tunnel effect renderer).
+diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
+index 7f72bd0..937a7dd 100644
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -534,6 +534,9 @@ offen. Orientierung, Materialqualität, GGX-IBL und Performance bleiben offen.
+   visuelle Kalibrierung bleibt offen. `render_bloom_threshold`
+   (0–8; Standard 1) und `render_bloom_strength` (0–2; Standard 0,18) lassen
+   sich in der Clientkonfiguration und über gleichnamige CLI-Parameter setzen.
++  `render_bloom_radius` (0,25–4; Standard 1) steuert den Blur-Abstand;
++  `render_bloom_resolution_scale` (0,125–1; Standard 1) steuert die Größe der
++  Blur-Ziele und ist per Clientkonfiguration, CLI und Effekte-Regler einstellbar.
+   UI-Blur, Tiefenunschärfe und Cutscene-Radialblur behalten eigene begrenzte
+   Einsatzfälle und Qualitätsschalter.
+ 
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+index 9ed27a4..db6f1bf 100644
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -129,7 +129,7 @@ Diese Liste plant moderne Renderer-Erweiterungen für LibreLancer. Sie ist eine
+ 
+ - [ ] Allgemeine Post-Processing-Pass-Schnittstelle ergänzen; SMAA und bestehende Render-Targets dabei als Referenz für Ressourcenlebensdauer und Skalierung verwenden.
+ - [ ] Separable Gaussian Blur als erster kontrollierter Effekt: variable Kernelbreite, Auflösungs-Skalierung und keine Farb-/Alpha-Halos.
+-  - [x] Den horizontalen/vertikalen 5-Tap-Gauß-Blur als wiederverwendbaren `SeparableGaussianBlurPass` aus Bloom herausgelöst. Der Pass akzeptiert Radius und eine begrenzte Zielauflösung von 1/8 bis 1/1 der Quelle. Bloom verwendet weiterhin Quarter-Resolution-Extraktion und dieselbe feste Kernelbreite; eine Laufzeitoption für Bloom-Skalierung, variable Kernellänge, Halo-Abnahme und GPU-Kostenmessung bleiben offen.
++  - [x] Den horizontalen/vertikalen 5-Tap-Gauß-Blur als wiederverwendbaren `SeparableGaussianBlurPass` aus Bloom herausgelöst. Der Pass akzeptiert Radius und eine begrenzte Zielauflösung von 1/8 bis 1/1 der Quelle. `render_bloom_resolution_scale` sowie `--render-bloom-resolution-scale=0.125..1` und der Regler „BLUR RESOLUTION“ steuern die Blur-Zielauflösung; Bloom-Extraktion bleibt bei Viertelauflösung. Variable Kernellänge, Halo-Abnahme, visuelle Qualitätsabnahme und GPU-Kostenmessung bleiben offen.
+ - [ ] Verwendungsfälle getrennt spezifizieren: weicher UI-/Vorschau-Hintergrund, selektiver Tiefenunschärfe-Effekt und kamerabasierte Bewegungsunschärfe sind unterschiedliche Effekte.
+ - [ ] Für kamerabasierte Motion Blur Bewegungsvektoren und Disocclusion-Artefakte untersuchen; vorhandene Partikel-Motion-Blur nicht als Ersatz behandeln.
+ - [ ] Optionalen Radial-/Zoom-Blur für klar begrenzte Cutscene- oder Effektfälle prüfen.
+diff --git a/patches/README.md b/patches/README.md
+index f10ef40..3917b4a 100644
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 164 Client bundles and two native bundles. Each
++The active series contains 211 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -118,6 +118,8 @@ jump-gate route.
+ | 2113 | Advance asynchronous GPU sample age on every rendered system frame |
+ | 2114 | Track cubemap estimates and expose known GPU memory counters in the Debug overlay |
+ | 2115 | Validate OpenGL framebuffer completeness and release failed allocations |
++| 2211 | Add scaled target resolution to the reusable separable Gaussian blur |
++| 2212 | Expose Bloom blur resolution scale through runtime settings, CLI and Effects options |
+ | 2116 | Estimate active SMAA and MSAA render-target memory |
+ | 2117 | Record the M01A dark station and ship lighting report |
+ | 2118 | Apply THN ambient and dynamic lights to shared gameplay lighting, then remove them on cleanup |
+diff --git a/patches/series b/patches/series
+index b8089d8..21f12c4 100644
+--- a/patches/series
++++ b/patches/series
+@@ -211,3 +211,4 @@ client 2208-particle-vertex-optimization.patch
+ client 2209-reusable-separable-gaussian-blur.patch
+ client 2210-hdr-postprocess-gpu-profile.patch
+ client 2211-configurable-postprocess-resolution.patch
++client 2212-bloom-resolution-control.patch
+diff --git a/src/LibreLancer.Base/Graphics/AntialiasTarget.cs b/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
+index 96442da..fe57226 100644
+--- a/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
++++ b/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
+@@ -18,6 +18,7 @@ public class AntialiasTarget : RenderTarget
+     public float BloomThreshold { get; set; } = 1f;
+     public float BloomStrength { get; set; } = 0.18f;
+     public float BloomRadius { get; set; } = 1f;
++    public float BloomResolutionScale { get; set; } = 1f;
+     public Action<SystemRenderSubpass, bool>? GpuSubpassMarker { get; set; }
+     public int Samples => msaa?.Samples ?? 1;
+     public SystemRenderAttachmentFormat MultisampleStorageFormat => msaa?.RequestedColorFormat switch
+@@ -379,7 +380,9 @@ public class AntialiasTarget : RenderTarget
+     {
+         if (bloom != null)
+             bloom.GpuSubpassMarker = GpuSubpassMarker;
+-        var bloomTexture = BloomEnabled && bloom != null ? bloom.Process(source, BloomThreshold, BloomRadius) : null;
++        var bloomTexture = BloomEnabled && bloom != null
++            ? bloom.Process(source, BloomThreshold, BloomRadius, BloomResolutionScale)
++            : null;
+         BeginGpuSubpass(SystemRenderSubpass.ToneMap);
+         try
+         {
+diff --git a/src/LibreLancer.Base/Graphics/BloomPass.cs b/src/LibreLancer.Base/Graphics/BloomPass.cs
+index ac58958..7de4a9a 100644
+--- a/src/LibreLancer.Base/Graphics/BloomPass.cs
++++ b/src/LibreLancer.Base/Graphics/BloomPass.cs
+@@ -20,7 +20,7 @@ internal sealed class BloomPass : System.IDisposable
+         blur = new SeparableGaussianBlurPass(context);
+     }
+ 
+-    public Texture2D? Process(Texture2D source, float threshold, float radius)
++    public Texture2D? Process(Texture2D source, float threshold, float radius, float resolutionScale)
+     {
+         radius = float.IsFinite(radius) ? System.Math.Clamp(radius, 0.25f, 4f) : 1f;
+         if (failed)
+@@ -65,7 +65,8 @@ internal sealed class BloomPass : System.IDisposable
+             FLLog.Warning("Graphics", $"Bloom rendering failed; continuing without bloom. {ex.Message}");
+             return null;
+         }
+-        return blur.Process(extracted!.Texture, radius, SurfaceFormat.HdrBlendable, GpuSubpassMarker);
++        return blur.Process(extracted!.Texture, radius, SurfaceFormat.HdrBlendable, GpuSubpassMarker,
++            resolutionScale);
+     }
+ 
+     private void Draw(Shader shader, Texture2D source, RenderTarget2D target, Vector4 parameters)
+diff --git a/src/LibreLancer/GameSettings.cs b/src/LibreLancer/GameSettings.cs
+index 6948f00..d678b59 100644
+--- a/src/LibreLancer/GameSettings.cs
++++ b/src/LibreLancer/GameSettings.cs
+@@ -73,6 +73,8 @@ namespace LibreLancer
+         public float BloomStrength = 0.18f;
+         [Entry("render_bloom_radius")]
+         public float BloomRadius = 1f;
++        [Entry("render_bloom_resolution_scale")]
++        public float BloomResolutionScale = 1f;
+         [Entry("render_projectile_beams")]
+         public bool RenderProjectileBeams = true;
+         [Entry("render_particle_effects")]
+@@ -135,6 +137,7 @@ namespace LibreLancer
+         float IRendererSettings.BloomThreshold => BloomThreshold;
+         float IRendererSettings.BloomStrength => BloomStrength;
+         float IRendererSettings.BloomRadius => BloomRadius;
++        float IRendererSettings.BloomResolutionScale => BloomResolutionScale;
+         bool IRendererSettings.RenderProjectileBeams => RenderProjectileBeams;
+         bool IRendererSettings.RenderParticleEffects => RenderParticleEffects;
+         bool IRendererSettings.RenderTransientEffectLights => RenderTransientEffectLights;
+@@ -188,6 +191,7 @@ namespace LibreLancer
+             writer.WriteLine($"render_bloom_threshold = {Fmt(BloomThreshold)}");
+             writer.WriteLine($"render_bloom_strength = {Fmt(BloomStrength)}");
+             writer.WriteLine($"render_bloom_radius = {Fmt(BloomRadius)}");
++            writer.WriteLine($"render_bloom_resolution_scale = {Fmt(BloomResolutionScale)}");
+             writer.WriteLine($"render_projectile_beams = {RenderProjectileBeams.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_particle_effects = {RenderParticleEffects.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_jump_gate_effects = {RenderJumpGateEffects.ToString().ToLowerInvariant()}");
+@@ -236,6 +240,7 @@ namespace LibreLancer
+                 BloomThreshold = BloomThreshold,
+                 BloomStrength = BloomStrength,
+                 BloomRadius = BloomRadius,
++                BloomResolutionScale = BloomResolutionScale,
+                 RenderProjectileBeams = RenderProjectileBeams,
+                 RenderParticleEffects = RenderParticleEffects,
+                 RenderJumpGateEffects = RenderJumpGateEffects,
+@@ -282,6 +287,7 @@ namespace LibreLancer
+             BloomThreshold = other.BloomThreshold;
+             BloomStrength = other.BloomStrength;
+             BloomRadius = other.BloomRadius;
++            BloomResolutionScale = other.BloomResolutionScale;
+             RenderProjectileBeams = other.RenderProjectileBeams;
+             RenderParticleEffects = other.RenderParticleEffects;
+             RenderJumpGateEffects = other.RenderJumpGateEffects;
+@@ -321,6 +327,11 @@ namespace LibreLancer
+                 FLLog.Info("Config", $"Bloom radius {BloomRadius} is unsupported; using 1.");
+                 BloomRadius = 1f;
+             }
++            if (!float.IsFinite(BloomResolutionScale) || BloomResolutionScale is < 0.125f or > 1f)
++            {
++                FLLog.Info("Config", $"Bloom resolution scale {BloomResolutionScale} is unsupported; using 1.");
++                BloomResolutionScale = 1f;
++            }
+             var mode = (AntialiasMode)Antialias;
+             if (mode > RenderContext.MaxAntialias)
+             {
+diff --git a/src/LibreLancer/Render/IRendererSettings.cs b/src/LibreLancer/Render/IRendererSettings.cs
+index 25fbee4..a543a8b 100644
+--- a/src/LibreLancer/Render/IRendererSettings.cs
++++ b/src/LibreLancer/Render/IRendererSettings.cs
+@@ -24,6 +24,7 @@ public interface IRendererSettings
+     float BloomThreshold => 1f;
+     float BloomStrength => 0.18f;
+     float BloomRadius => 1f;
++    float BloomResolutionScale => 1f;
+     bool RenderProjectileBeams => true;
+     bool RenderParticleEffects => true;
+     bool RenderTransientEffectLights => true;
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+index 697c727..3035ef9 100644
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -493,6 +493,7 @@ namespace LibreLancer.Render
+                     msaa.BloomThreshold = Settings.BloomThreshold;
+                     msaa.BloomStrength = Settings.BloomStrength;
+                     msaa.BloomRadius = Settings.BloomRadius;
++                    msaa.BloomResolutionScale = Settings.BloomResolutionScale;
+                     rstate.PushViewport(new Rectangle(0, 0, renderWidth, renderHeight));
+                     aaViewportPushed = true;
+                     aaScissorPushed = rstate.PushScissor(new Rectangle(0, 0, renderWidth, renderHeight), false);
+diff --git a/src/lancer/Program.cs b/src/lancer/Program.cs
+index e2410ed..5d0f6e7 100644
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -42,6 +42,7 @@ internal static class MainClass
+             Console.WriteLine("         --render-bloom-threshold=0..8");
+             Console.WriteLine("         --render-bloom-strength=0..2");
+             Console.WriteLine("         --render-bloom-radius=0.25..4");
++            Console.WriteLine("         --render-bloom-resolution-scale=0.125..1");
+             Console.WriteLine("         --render-projectile-beams=on|off");
+             Console.WriteLine("         --render-particle-effects=on|off");
+             Console.WriteLine("         --render-transient-effect-lights=on|off");
+@@ -235,6 +236,7 @@ internal static class MainClass
+         private float? bloomThreshold;
+         private float? bloomStrength;
+         private float? bloomRadius;
++        private float? bloomResolutionScale;
+         private bool? projectileBeams;
+         private bool? particleEffects;
+         private bool? jumpGateEffects;
+@@ -348,6 +350,15 @@ internal static class MainClass
+                     }
+                     error = $"{name} accepts a finite number from 0.25 through 4.";
+                     return false;
++                case "--render-bloom-resolution-scale":
++                    if (float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var bloomScale) &&
++                        float.IsFinite(bloomScale) && bloomScale is >= 0.125f and <= 1f)
++                    {
++                        bloomResolutionScale = bloomScale;
++                        return true;
++                    }
++                    error = $"{name} accepts a finite number from 0.125 through 1.";
++                    return false;
+                 case "--render-dynamic-light-budget":
+                     if (int.TryParse(value, out var lightBudget) && lightBudget is 0 or 8 or 16 or 24 or 32)
+                     {
+@@ -450,6 +461,7 @@ internal static class MainClass
+             if (bloomThreshold.HasValue) settings.BloomThreshold = bloomThreshold.Value;
+             if (bloomStrength.HasValue) settings.BloomStrength = bloomStrength.Value;
+             if (bloomRadius.HasValue) settings.BloomRadius = bloomRadius.Value;
++            if (bloomResolutionScale.HasValue) settings.BloomResolutionScale = bloomResolutionScale.Value;
+             if (projectileBeams.HasValue) settings.RenderProjectileBeams = projectileBeams.Value;
+             if (particleEffects.HasValue) settings.RenderParticleEffects = particleEffects.Value;
+             if (jumpGateEffects.HasValue) settings.RenderJumpGateEffects = jumpGateEffects.Value;
+diff --git a/uixml/options.lua b/uixml/options.lua
+index 93c62f6..ddec9b7 100644
+--- a/uixml/options.lua
++++ b/uixml/options.lua
+@@ -151,6 +151,9 @@ class options : options_Designer with Modal
+         e.bloom_radius.Min = 0.25
+         e.bloom_radius.Max = 4
+         e.bloom_radius.Value = this.opts.BloomRadius
++        e.bloom_resolution_scale.Min = 0.125
++        e.bloom_resolution_scale.Max = 1
++        e.bloom_resolution_scale.Value = this.opts.BloomResolutionScale
+         e.bloom.OnClick(() => {
+             this.opts.RenderBloom = e.bloom.Selected
+             local settings = Game.GetCurrentSettings()
+@@ -220,6 +223,7 @@ class options : options_Designer with Modal
+         this.opts.BloomThreshold = e.bloom_threshold.Value
+         this.opts.BloomStrength = e.bloom_strength.Value
+         this.opts.BloomRadius = e.bloom_radius.Value
++        this.opts.BloomResolutionScale = e.bloom_resolution_scale.Value
+         this.opts.RenderNebulae = e.nebulae.Selected
+         this.opts.RenderStarsphere = e.starsphere.Selected
+         this.opts.VSync = e.vsync.Selected
+diff --git a/uixml/options.xml b/uixml/options.xml
+index 140cefc..55dd8fd 100644
+--- a/uixml/options.xml
++++ b/uixml/options.xml
+@@ -47,6 +47,8 @@
+                 <HSlider id="bloom_strength" X="200" Y="430" Width="160" Height="12"/>
+                 <TextBlock X="18" Y="456" Width="170" Height="18" Text="BLOOM RADIUS" TextColor="text" TextShadow="black" TextSize="10"/>
+                 <HSlider id="bloom_radius" X="200" Y="458" Width="160" Height="12"/>
++                <TextBlock X="18" Y="474" Width="170" Height="14" Text="BLUR RESOLUTION" TextColor="text" TextShadow="black" TextSize="9"/>
++                <HSlider id="bloom_resolution_scale" X="200" Y="476" Width="160" Height="10"/>
+             </Panel>
+             <Panel Width="390" Height="380" ID="win_audio" Visible="false">
+                 <TextBlock Text="AUDIO OPTIONS" Strid="1679" Width="390" Height="22" Y="-22"  Anchor="TopCenter" TextColor="text" TextShadow="black" TextSize="13"/>

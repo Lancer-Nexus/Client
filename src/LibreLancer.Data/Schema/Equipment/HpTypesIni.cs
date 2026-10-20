@@ -13,9 +13,6 @@ public class HpTypesIni
 {
     private static HpType[] defaults =
     [
-        new("hp_gun", Weapon, 0, 0, 0),
-        new("hp_turret", Weapon, 0, 0, 0),
-        new("hp_cargo_pod", External, 0, 0, 0),
         new("hp_freighter_shield_special_10", External, 10, 1730, 914),
         new("hp_freighter_shield_special_9", External, 9, 1729, 914),
         new("hp_freighter_shield_special_8", External, 8, 1728, 914),

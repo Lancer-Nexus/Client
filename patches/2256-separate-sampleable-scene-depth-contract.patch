@@ -1,0 +1,122 @@
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+index f8bc3c4..804114b 100644
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -59,6 +59,7 @@ Diese Liste plant moderne Renderer-Erweiterungen für LibreLancer. Sie ist eine
+     der Load-/Store-Angaben bleiben offen. Siehe
+     [Target-Attachment-Audit](evidence/renderer/render-target-attachment-contract-20261016.md).
+   - [x] Bestehende Forward-Aufrufreihenfolge, Opaque-/Transparent-Kommandos, Sterne, Nebel und AA-Resolve im Quellcode erfasst. Der Depth-Prepass-Metadatavertrag ist als optional markiert und liest/schreibt nur SceneDepth; er beansprucht keinen Szenenfarb-Read oder Color-Attachment. Die Metadaten sind noch kein ausführbarer Render Graph. Siehe [Pass-Reihenfolge-Audit](evidence/renderer/forward-pass-order-audit-20261015.md).
++  - [x] Samplebare Tiefentextur als eigenen Graph-Ressourcentyp vom aktiven Szenen-Tiefenattachment getrennt. SSAO und Soft Particles deklarieren und validieren den DepthTexture-Passausgang beim realen Target-Binding; SSAO deklariert dieselbe Ressource als Quelle. Der restliche Main-Pass-Ablauf ist weiterhin manuell gesteuert.
+ - [ ] Render-Target-Resize, minimierte Fenster, Scissor-/Viewport-Wechsel und Geräteverlust für zusätzliche Pässe absichern.
+   - [x] `AntialiasTarget` registriert alle während des Aufbaus erzeugten GPU-Ressourcen in einem idempotenten `RenderResourceScope`. Teilaufbauten werden auch bei Konstruktionsfehlern in umgekehrter Erzeugungsreihenfolge abgebaut; die Postprocess-Pässe werden vor den von ihnen geliehenen Szenen-/SMAA-Zielen freigegeben. Fehler beim Freigeben einer Ressource verhindern die Freigabe der übrigen nicht. Der `SystemRenderer`-Pfad wurde mit HDR/Bloom/SSAO/SMAA unter OpenGL auf 960×540 → 1280×720 sowie Minimize/Restore geprüft; siehe [Resize-Laufzeitnachweis](evidence/renderer/postprocess-window-resize-20261017/README.md). Editor-/Offscreen-Targets, Fehler-Injektion, Geräteverlust und Cross-Backend-Wiederherstellung bleiben offen.
+   - [x] `SystemRenderer.Draw()` überspringt Frames mit Breite/Höhe 0. Bei geändertem Rendermaß oder AA-Modus gibt es das vorhandene MSAA-Target frei und erstellt es neu. Das belegt nur diesen System-Renderer-Pfad; Editor-/Offscreen-Targets, Wiederherstellungstests und Geräteverlust bleiben offen.
+diff --git a/patches/README.md b/patches/README.md
+index 5171337..194ba66 100644
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 254 Client bundles and two native bundles. Each
++The active series contains 255 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+diff --git a/patches/series b/patches/series
+index 23d98cf..c02ba50 100644
+--- a/patches/series
++++ b/patches/series
+@@ -255,3 +255,4 @@ client 2252-executable-postprocess-dependency-plan.patch
+ client 2253-structured-opengl-debug-diagnostics.patch
+ client 2254-record-m01a-ship-light-occlusion-runtime-attempt.patch
+ client 2255-soft-particles.patch
++client 2256-separate-sampleable-scene-depth-contract.patch
+diff --git a/src/LibreLancer.Base/Graphics/SystemRenderPass.cs b/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
+index efa335f..8cf25ae 100644
+--- a/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
++++ b/src/LibreLancer.Base/Graphics/SystemRenderPass.cs
+@@ -36,7 +36,8 @@ public enum SystemRenderResource
+     BloomMediumHorizontalColor = 1 << 13,
+     BloomMediumBlurredColor = 1 << 14,
+     BloomWideHorizontalColor = 1 << 15,
+-    BloomWideBlurredColor = 1 << 16
++    BloomWideBlurredColor = 1 << 16,
++    SampleableSceneDepth = 1 << 17
+ }
+ 
+ public enum SystemRenderTargetRole
+@@ -178,15 +179,15 @@ public static class SystemRenderPasses
+                 SystemRenderLoadOperation.Load, SystemRenderStoreOperation.Store), null, null,
+             Conditional: true),
+         new(SystemRenderPass.SsaoDepthPrepass, "SSAO depth prepass",
+-            SystemRenderResource.None, SystemRenderResource.SceneDepth,
++            SystemRenderResource.None, SystemRenderResource.SampleableSceneDepth,
+             SystemRenderTargetRole.PostProcess, null,
+-            new(SystemRenderResource.SceneDepth, SystemRenderAttachmentFormat.DepthTexture,
++            new(SystemRenderResource.SampleableSceneDepth, SystemRenderAttachmentFormat.DepthTexture,
+                 SystemRenderLoadOperation.Clear, SystemRenderStoreOperation.Store), null,
+             Conditional: true),
+         new(SystemRenderPass.ParticleDepthPrepass, "Particle depth prepass",
+-            SystemRenderResource.None, SystemRenderResource.SceneDepth,
++            SystemRenderResource.None, SystemRenderResource.SampleableSceneDepth,
+             SystemRenderTargetRole.PostProcess, null,
+-            new(SystemRenderResource.SceneDepth, SystemRenderAttachmentFormat.DepthTexture,
++            new(SystemRenderResource.SampleableSceneDepth, SystemRenderAttachmentFormat.DepthTexture,
+                 SystemRenderLoadOperation.Clear, SystemRenderStoreOperation.Store), null,
+             Conditional: true)
+     ];
+@@ -291,13 +292,13 @@ public static class SystemRenderPasses
+                 SystemRenderLoadOperation.Load, SystemRenderStoreOperation.None)),
+         new(SystemRenderSubpass.ScreenSpaceAmbientOcclusion, "SSAO",
+             SystemRenderTargetRole.PostProcess,
+-            SystemRenderResource.SceneColor | SystemRenderResource.SceneDepth,
++            SystemRenderResource.SceneColor | SystemRenderResource.SampleableSceneDepth,
+             SystemRenderResource.PresentationColor,
+             new(SystemRenderResource.PresentationColor, SystemRenderAttachmentFormat.CallerDefined,
+                 SystemRenderLoadOperation.DontCare, SystemRenderStoreOperation.Store), null, null,
+             SourceColor: new(SystemRenderResource.SceneColor, SystemRenderAttachmentFormat.CallerDefined,
+                 SystemRenderLoadOperation.Load, SystemRenderStoreOperation.None),
+-            SourceDepth: new(SystemRenderResource.SceneDepth, SystemRenderAttachmentFormat.DepthTexture,
++            SourceDepth: new(SystemRenderResource.SampleableSceneDepth, SystemRenderAttachmentFormat.DepthTexture,
+                 SystemRenderLoadOperation.Load, SystemRenderStoreOperation.None))
+     ];
+ 
+@@ -318,6 +319,8 @@ public static class SystemRenderPasses
+             SystemRenderResource.SmaaLookupTextures);
+         ValidateSequence("MSAA", [Subpasses[3]],
+             SystemRenderResource.SceneColor | SystemRenderResource.PresentationColor);
++        ValidateSequence("SSAO", [Subpasses[(int)SystemRenderSubpass.ScreenSpaceAmbientOcclusion]],
++            SystemRenderResource.SceneColor | SystemRenderResource.SampleableSceneDepth);
+         ValidateSequence("HDR post-processing", [
+             Subpasses[(int)SystemRenderSubpass.BloomExtract],
+             Subpasses[(int)SystemRenderSubpass.BloomHorizontalBlur],
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+index bbf977d..1e1174c 100644
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -715,6 +715,7 @@ namespace LibreLancer.Render
+                         var depthPass = ssaoActive
+                             ? SystemRenderPass.SsaoDepthPrepass
+                             : SystemRenderPass.ParticleDepthPrepass;
++                        ValidateSampleableDepthTarget(depthPass, sceneDepthTarget);
+                         BeginGpuPass(depthPass, sceneDepthTarget);
+                         try
+                         {
+@@ -1049,6 +1050,17 @@ namespace LibreLancer.Render
+                     $"Render pass '{descriptor.Name}' is bound to a different shadow target.");
+         }
+ 
++        private void ValidateSampleableDepthTarget(SystemRenderPass pass, RenderTarget2D depthTarget)
++        {
++            var descriptor = SystemRenderPasses.Get(pass);
++            if ((descriptor.Writes & SystemRenderResource.SampleableSceneDepth) == 0 ||
++                descriptor.Depth?.Format != SystemRenderAttachmentFormat.DepthTexture ||
++                depthTarget.Texture.Format != SurfaceFormat.Depth ||
++                !ReferenceEquals(rstate.RenderTarget, depthTarget))
++                throw new InvalidOperationException(
++                    $"Render pass '{descriptor.Name}' is not bound to its declared sampleable scene-depth target.");
++        }
++
+         private bool DrawShadowMap()
+         {
+             RenderMaterial.ShadowLight = null;

@@ -7,6 +7,7 @@ using System.Linq;
 using System.Net;
 using System.Threading.Tasks;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using static Bullseye.Targets;
 using static BuildLL.Runtime;
 
@@ -25,7 +26,6 @@ namespace BuildLL
         private static bool withWin32 = false;
         private static bool withWin64 = false;
         private static bool withUpdates = true;
-        private static bool withNexusClusterServer = false;
         private static string updateChannel = "daily";
         private static VSVersion vsVersion = VSVersion.Any;
 
@@ -40,7 +40,6 @@ namespace BuildLL
             FlagArg("--with-win32", () => withWin32 = true, "Also build for 32-bit windows");
             FlagArg("--with-win64", () => withWin64 = true, "(Linux only) Also build for 64-bit windows");
             FlagArg("--no-updates", () => withUpdates = false, "Disables built in updater (SDK only)");
-            FlagArg("--nexus-cluster-server", () => withNexusClusterServer = true, "Build LLServer with optional Lancer Nexus Cluster and FLHookCompat integrations");
 
             StringArg("--prefix", x => prefix = x, "Set cmake install prefix");
             StringArg("--assemblyversion", x => versionSetting = x, "Set generated version");
@@ -90,29 +89,20 @@ namespace BuildLL
             var objDir = "./obj/artifacts-headless";
             var binDir = "./bin/librelancer-server-";
             var outdir = binDir + rid;
-            Dotnet.Restore("LibreLancer.sln", rid, objDir, ClusterBuildProperties);
+            Dotnet.Restore("LibreLancer.sln", rid, objDir);
             var settings = new DotnetPublishSettings()
             {
                 Configuration = "Release",
                 OutputDirectory = objDir,
                 Runtime = rid,
                 SelfContained = true,
-                Extra = "-p:DisableShaders=True " + ClusterBuildPropertiesForServer
+                Extra = "-p:DisableShaders=True"
             };
             Dotnet.Publish("src/LLServer/LLServer.csproj", settings);
             await CustomPublish.MergeAndPatch(objDir, binDir + rid, rid, ["LLServer"]);
-            CopyDataOverlay(outdir);
             CopyFile("Credits.txt", outdir);
             CopyFile("LICENSE", outdir);
         }
-
-        private static string ClusterBuildPropertiesForServer => withNexusClusterServer
-            ? "-p:EnableClusterIntegration=true -p:EnableFlHookCompat=true"
-            : string.Empty;
-
-        private static string ClusterBuildProperties => withNexusClusterServer
-            ? ClusterBuildPropertiesForServer
-            : string.Empty;
 
         private static HashSet<string> published = [];
 
@@ -122,7 +112,7 @@ namespace BuildLL
             var objDir = "./obj/artifacts";
             var binDir = sdk ? "./bin/librelancer-sdk-" : "./bin/librelancer-";
             var outdir = binDir + rid;
-            Dotnet.Restore("LibreLancer.sln", rid, objDir, ClusterBuildProperties);
+            Dotnet.Restore("LibreLancer.sln", rid, objDir);
             foreach (var proj in projs)
             {
                 if (!published.Add($"{proj}:{rid}"))
@@ -132,14 +122,12 @@ namespace BuildLL
                     Configuration = "Release",
                     OutputDirectory = objDir,
                     Runtime = rid,
-                    SelfContained = true,
-                    Extra = Path.GetFileNameWithoutExtension(proj) == "LLServer" ? ClusterBuildPropertiesForServer : null
+                    SelfContained = true
                 };
                 Dotnet.Publish(proj, settings);
             }
             await CustomPublish.MergeAndPatch(objDir, binDir + rid, rid,
                 projs.Select(x => Path.GetFileNameWithoutExtension(x)).ToArray());
-            CopyDataOverlay(outdir);
             if (sdk)
             {
                 var docsdir = Path.Combine(outdir, "lib/Docs");
@@ -172,14 +160,6 @@ namespace BuildLL
                 ZipFile.CreateFromDirectory("src/Editor/librelancer_blender_addon", blAddon, CompressionLevel.Optimal,
                     true);
             }
-        }
-
-        static void CopyDataOverlay(string outputDirectory)
-        {
-            var source = new DirectoryInfo("./data");
-            if (source.Exists)
-                CustomPublish.CopyFilesRecursively(source,
-                    new DirectoryInfo(Path.Combine(outputDirectory, "lib", "data")));
         }
 
         static string GetLinuxRid()
@@ -581,8 +561,19 @@ namespace BuildLL
                 }
                 //Timestamp
                 var unixTime = (long)((Invoked - new DateTime(1970, 1, 1, 0, 0, 0)).TotalSeconds);
-                File.WriteAllText("packaging/packages/timestamp", unixTime.ToString());
+                var manifest = new JsonUpdates();
+                manifest.Builds["linux-x64"] =
+                    new("https://librelancer.net/builds/librelancer-sdk-daily-ubuntu-amd64.tar.gz", unixTime);
+                manifest.Builds["win-x64"] =
+                    new("https://librelancer.net/builds/librelancer-sdk-daily-win64.zip", unixTime);
+                File.WriteAllBytes("packaging/packages/daily.json", JsonSerializer.SerializeToUtf8Bytes(manifest));
+                File.WriteAllText("packaging/packages/windows-timestamp.txt", unixTime.ToString());
             });
         }
+    }
+    class JsonUpdates
+    {
+        public record Build(string URL, long Timestamp);
+        public Dictionary<string, Build> Builds { get; set; } = new Dictionary<string, Build>();
     }
 }

@@ -1,0 +1,62 @@
+--- a/src/LibreLancer/Render/RenderHelpers.cs
++++ b/src/LibreLancer/Render/RenderHelpers.cs
+@@ -192,9 +192,9 @@
+             var luminanceScale = ambientLuminance / tintedLuminance;
+             var maximumChannel = Math.Max(tintedAmbient.R,
+                 Math.Max(tintedAmbient.G, tintedAmbient.B));
+-            // Freelancer ambient colors are normalized. Keep the new tint in that range
+-            // because the current forward path has no HDR lighting buffer.
+-            if (maximumChannel * luminanceScale > 1f)
++            // Preserve the legacy LDR range when HDR scene rendering is not active.
++            // The HDR target stores scene-linear values above one for later tone mapping.
++            if (!source.SunAmbientHdr && maximumChannel * luminanceScale > 1f)
+                 luminanceScale = 1f / maximumChannel;
+ 
+             return tintedAmbient * luminanceScale;
+--- a/src/LibreLancer/Render/SystemLighting.cs
++++ b/src/LibreLancer/Render/SystemLighting.cs
+@@ -18,6 +18,7 @@
+ 		public List<DynamicLight> Lights = [];
+ 		public List<DynamicLight> SunAmbientLights = [];
+ 		public bool SunAmbientEnabled;
++        public bool SunAmbientHdr;
+         public float SunAmbientStrength = 0.25f;
+ 		private readonly List<DynamicLight> frameLights = new(64);
+         private readonly List<float> frameLightPriorities = new(64);
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -516,6 +516,7 @@
+                 DrawStarsphere = Settings.RenderStarsphere;
+                 SystemLighting.SunAmbientEnabled = Settings.RenderSunAmbient;
+                 SystemLighting.SunAmbientStrength = Settings.RenderSunAmbientStrength;
++                SystemLighting.SunAmbientHdr = msaa?.HdrOutputEnabled == true;
+                 var nr = CheckNebulae(); // are we in a nebula?
+                 SystemLighting.DynamicLightsEnabled = Settings.DynamicLighting;
+                 SystemLighting.MaxFrameLights = Settings.DynamicLightBudget;
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -205,6 +205,7 @@
+   - [x] Erste NAP-only-Laufzeitbilder für BR02 (weiß), HI02 (rot) und zwei EW06-Lichtbereiche (rot/grün) mit an/aus aufgenommen. Archive und `Data/NAP`-Quellen geprüft; die EW06-Ansichten liegen in der Nebelübersteuerung, die getrennten Starts ändern Pose/Frame. Diese Bilder sind explorativ, nicht zur 25%-Kalibrierung geeignet. Details: [Laufzeitbilder und Grenzen](evidence/renderer/sun-colored-ambient-ab-20261015/README.md).
+   - [x] HI02-Livewechsel im selben Prozess: Checkbox und `client.ini` wechseln zwischen aus/an, die Screenshots zeigen denselben Spielstand. Am Schiff ist kein klarer Farbwechsel sichtbar; kurze Bewegungsabschnitte verhindern eine genaue Pixelkalibrierung. Der Livepfad ist belegt, die sichtbare Wirkung nicht.
+   - [x] Sonnenambient-Mischstärke ist jetzt von 0 bis 1 in `client.ini` (`render_sun_ambient_strength`), über `--render-sun-ambient-strength=0..1` und im Effekte-Tab einstellbar. Der Standard bleibt bei 0,25, bis eine ruhige rote/grüne/weiße Vergleichsszene kalibriert ist.
++  - [x] Die Sonnenambient-Begrenzung folgt nun dem tatsächlich aktiven Ziel: LDR und HDR-Target-Fallback bleiben auf normalisierte Ambientwerte begrenzt; das aktive Half-Float-HDR-Szenenziel darf luminanzerhaltende Ambientkanäle über 1 an die Tonemap-Stufe weitergeben. Visuelle Kalibrierung in roten/grünen Szenen bleibt offen.
+   - [ ] Den wirksamen Ambient-Beitrag an einem ruhigen, nicht nebelüberschriebenen NAP-Objekt bei gleicher Kamerapose messen und die Standardmischung so abstimmen, dass rote und grüne Lichtfarben sichtbar, aber nicht übersteuert wirken.
+   - [x] Vorherige Quellformel geprüft: normalisierte NAP-Lichtfarben konnten mit dem damaligen 25%-Produktblend keinen Ambient-Kanal aufhellen. Der Messbefund gilt für die BW04-Bilder vor der luminanzerhaltenden Änderung; Details stehen im [Kanalwirkungs-Audit](evidence/renderer/sun-ambient-channel-math-20261016.md).
+   - [x] Teststart geprüft: `--load-save` lädt den kopierten lokalen Autosave NAP-only bis in FP7/Freeport 7. Der Missionsstand verlangt noch „Look for a job in the bar“ und führt nicht in einen freien Weltraumstart; das Bild dokumentiert nur diesen ungeeigneten Ausgangszustand, keine Ambient-Abnahme. Details: [Save-Start-Audit](evidence/renderer/sun-ambient-save-startup-20261016/README.md).
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -127,6 +127,7 @@
+ | 2217 | Show estimated Bloom and tone-map target memory separately in the debug overlay |
+ | 2218 | Export per-frame AA, Bloom and tone-map target memory estimates in frame profiles |
+ | 2219 | Retry failed Bloom and blur targets after render-size changes |
++| 2220 | Allow sun-tinted ambient above one only in active HDR scene targets |
+ | 2116 | Estimate active SMAA and MSAA render-target memory |
+ | 2117 | Record the M01A dark station and ship lighting report |
+ | 2118 | Apply THN ambient and dynamic lights to shared gameplay lighting, then remove them on cleanup |
+--- a/patches/series
++++ b/patches/series
+@@ -219,3 +219,4 @@
+ client 2217-postprocess-memory-attribution.patch
+ client 2218-export-postprocess-memory-profile.patch
+ client 2219-retry-postprocess-targets-after-resize.patch
++client 2220-hdr-sun-ambient-range.patch

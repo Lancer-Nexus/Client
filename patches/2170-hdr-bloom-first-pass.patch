@@ -1,0 +1,620 @@
+diff --git a/docs/graphics-implementation-plan.md b/docs/graphics-implementation-plan.md
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -509,9 +509,14 @@
+   Effekte und Übergänge anhand fester NAP-Szenen visuell abnehmen. Die aktuelle
+   Stufe linearisiert Legacy-Shader-Ausgaben für korrektes Zielblending, nicht
+   alle vorhergehenden Farbrechnungen.
+-- [ ] Bloom mit Downsample-Pyramide, konfigurierbaren Schwellen und
+-  separablem Blur liefern. UI-Blur, Tiefenunschärfe und Cutscene-Radialblur
+-  bekommen eigene begrenzte Einsatzfälle und Qualitätsschalter.
++- [x] Erste optionale HDR-Bloom-Stufe mit Helligkeitsschwelle bei 1.0,
++  Viertelauflösung und separablem Gauß-Blur. `render_bloom`,
++  `--render-bloom=on|off` und ein Effekte-Schalter steuern sie unabhängig; sie
++  benötigt `render_hdr` und fällt bei nicht verfügbaren Bloom-Zielen auf HDR
++  ohne Bloom zurück. Die aufwendigere mehrstufige Downsample-Pyramide,
++  Schwellen-/Stärke-Regler und visuelle Kalibrierung bleiben offen.
++  UI-Blur, Tiefenunschärfe und Cutscene-Radialblur behalten eigene begrenzte
++  Einsatzfälle und Qualitätsschalter.
+ 
+ ### P5/P6 – Vulkan über SDL_GPU
+ 
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -171,7 +171,8 @@
+   belegt. Die THN-Kamera folgt `Path_shot1` 35 Sekunden; Details der offenen
+   Reproduktion stehen in [ship-light-occlusion.md](ship-light-occlusion.md).
+ - [x] Opt-in HDR-Ausgabestufe mit Half-Float-Szenenziel, float MSAA/SMAA-Eingang und ACES-Tonemapping; per `render_hdr`, `--render-hdr=on|off` und Effects-Checkbox schaltbar. Alle 18 aktuellen Client-Fragmentshader schreiben im HDR-Ziel lineare RGB-Werte, PBR bleibt nativ linear, und Clear-Farben werden nach sRGB-EOTF dekodiert. Dadurch erfolgt auch transparentes Blending im linearen Ziel. Die UI folgt im Spielzustand nach `SystemRenderer.Draw()` und damit nach dem Tonemapping. Legacy-Lichtberechnung und Farbmultiplikation arbeiten weiterhin teilweise mit kodierten Textur-/Materialwerten; vollständige lineare Beleuchtungsinputs und visuelle Laufzeitabnahme bleiben offen. Details: [HDR-Linear-Ausgabe](evidence/renderer/hdr-linear-output-implementation-20261016.md).
+-- [ ] Bloom als nachgelagerten Effekt mit Threshold, Downsampling-Pyramide und konfigurierbarer Intensität untersuchen.
++- [x] Erste HDR-Bloom-Stufe mit luminanzbasierter Schwelle, Viertelauflösung und horizontalem/vertikalem Gauß-Blur; separat per `render_bloom` und `--render-bloom=on|off` steuerbar, erfordert `render_hdr`.
++- [ ] Bloom visuell kalibrieren, Stärke/Schwelle konfigurierbar machen und die einfache Viertelauflösung bei Bedarf durch eine mehrstufige Pyramide ersetzen.
+ - [ ] Sonnen-Lens-Glow anhand reproduzierbarer NAP-Szenen visuell abnehmen; `lens_flare` und die Stern-Intensitäts-/Zonen-Fades bleiben separate offene Datenpfade ([Parser-/Laufzeitabgleich](data-client-plan.md)).
+   - [x] `lens_flare`-Datenpfad auditiert: `StararchIni` und `Star` parsen Profile/Referenzen, aber `GameItemDb.InitStars` übernimmt nur StarGlow, LensGlow und Spines; `Sun` und `SunRenderer` haben keinen Flare-Pfad. Retail-Funktion `FUN_00511248` ruft beim Einlesen eines Star-`lens_flare`-Verweises `FUN_0050f3a0` auf und wertet deren Rückgabewert für den Parse-Status aus. Der Parser liest Shape, Min-/Max-Radius und sechs Floatwerte je Bead. `Data/NAP/World/solar/StarArch.ini` enthält 7 Profile mit 61 Beads, auf die 38 Sterne verweisen. Die Bedeutung der Bead-Komponenten und der Retail-Zeichnung ist noch nicht nachgewiesen; siehe [Retail-Stringtrace](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-15-lens-flare-trace/Freelancer-lens-flare.md>) und [Parser-Aufrufer](</home/masterbee/Dokumente/FL/reverse-engineering/librelancer/exports/2026-10-15-lens-flare-trace/Freelancer-lens-flare-loader-caller.md>).
+   - [x] `lens_glow`-Form, Farbe und Radius aus `StarArch.ini` bis zum `SunRenderer` durchreichen und über `render_sun_lens_glow` / `--render-sun-lens-glow=on|off` einzeln schaltbar machen.
+diff --git a/src/LibreLancer.Base/Graphics/AntialiasTarget.cs b/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
+--- a/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
++++ b/src/LibreLancer.Base/Graphics/AntialiasTarget.cs
+@@ -14,6 +14,7 @@
+     public int Height { get; private set; }
+     public AntialiasMode Mode { get; private set; }
+     public bool HdrOutputEnabled { get; }
++    public bool BloomEnabled { get; set; }
+     public Action<SystemRenderSubpass, bool>? GpuSubpassMarker { get; set; }
+     public int Samples => msaa?.Samples ?? 1;
+     public SystemRenderAttachmentFormat MultisampleStorageFormat => msaa?.RequestedColorFormat switch
+@@ -26,6 +27,7 @@
+     };
+     public long EstimatedMemoryBytes => (msaa?.EstimatedMemoryBytes ?? 0) +
+         (hdrResolve?.EstimatedMemoryBytes ?? 0) +
++        (bloom?.EstimatedMemoryBytes ?? 0) +
+         (long)(smaa?.Texture.EstimatedTextureMemory ?? 0) +
+         (smaaEdges?.Texture.EstimatedTextureMemory ?? 0) +
+         (smaaBlend?.Texture.EstimatedTextureMemory ?? 0) +
+@@ -42,6 +44,7 @@
+     private RenderTarget2D? hdrScene;
+     private RenderTarget2D? hdrResolve;
+     private RenderTarget2D? ldrToneMapped;
++    private BloomPass? bloom;
+     private DepthBuffer? depthStencil;
+     private RenderContext renderContext;
+ 
+@@ -53,6 +56,8 @@
+         Height = height;
+         Mode = mode;
+         HdrOutputEnabled = hdrOutput;
++        if (hdrOutput)
++            bloom = new BloomPass(renderContext);
+         try
+         {
+             if (mode == AntialiasMode.None && hdrOutput)
+@@ -182,7 +187,7 @@
+             Texture2D sceneColor = smaa.Texture;
+             if (HdrOutputEnabled)
+             {
+-                TonemapPass.Draw(renderContext, sceneColor, ldrToneMapped, Width, Height, Point.Zero);
++                ToneMap(sceneColor, ldrToneMapped, Width, Height, Point.Zero);
+                 sceneColor = ldrToneMapped!.Texture;
+             }
+             renderContext.PushViewport(0, 0, Width, Height);
+@@ -318,7 +323,7 @@
+     {
+         if (Mode == AntialiasMode.None && hdrScene != null)
+         {
+-            TonemapPass.Draw(renderContext, hdrScene.Texture, null, Width, Height, offset);
++            ToneMap(hdrScene.Texture, null, Width, Height, offset);
+             return;
+         }
+         if (msaa != null)
+@@ -329,7 +334,7 @@
+                 if (HdrOutputEnabled)
+                 {
+                     msaa.BlitToRenderTarget(hdrResolve!.Backing);
+-                    TonemapPass.Draw(renderContext, hdrResolve.Texture, null, Width, Height, offset);
++                    ToneMap(hdrResolve.Texture, null, Width, Height, offset);
+                 }
+                 else
+                     msaa.BlitToScreen(offset);
+@@ -346,7 +351,7 @@
+     {
+         if (Mode == AntialiasMode.None && hdrScene != null)
+         {
+-            TonemapPass.Draw(renderContext, hdrScene.Texture, rTarget, Width, Height, Point.Zero);
++            ToneMap(hdrScene.Texture, rTarget, Width, Height, Point.Zero);
+             return;
+         }
+         if (msaa != null)
+@@ -357,7 +362,7 @@
+                 if (HdrOutputEnabled)
+                 {
+                     msaa.BlitToRenderTarget(hdrResolve!.Backing);
+-                    TonemapPass.Draw(renderContext, hdrResolve.Texture, rTarget, Width, Height, Point.Zero);
++                    ToneMap(hdrResolve.Texture, rTarget, Width, Height, Point.Zero);
+                 }
+                 else
+                     msaa.BlitToRenderTarget(rTarget.Backing);
+@@ -368,6 +373,13 @@
+         {
+             SMAABlit(rTarget, Point.Zero);
+         }
++    }
++
++    private void ToneMap(Texture2D source, RenderTarget? target, int width, int height, Point offset)
++    {
++        var bloomTexture = BloomEnabled && bloom != null ? bloom.Process(source) : null;
++        TonemapPass.Draw(renderContext, source, target, width, height, offset, bloomTexture,
++            bloomTexture != null ? 0.18f : 0f);
+     }
+ 
+     public override void Dispose()
+@@ -379,6 +391,7 @@
+         hdrScene?.Dispose();
+         hdrResolve?.Dispose();
+         ldrToneMapped?.Dispose();
++        bloom?.Dispose();
+         depthStencil?.Dispose();
+     }
+ }
+diff --git a/src/LibreLancer.Base/Graphics/BloomPass.cs b/src/LibreLancer.Base/Graphics/BloomPass.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Base/Graphics/BloomPass.cs
+@@ -0,0 +1,122 @@
++using System.Numerics;
++
++namespace LibreLancer.Graphics;
++
++internal sealed class BloomPass : System.IDisposable
++{
++    private readonly RenderContext context;
++    private RenderTarget2D? extracted;
++    private RenderTarget2D? horizontal;
++    private RenderTarget2D? blurred;
++    private int width;
++    private int height;
++    private bool failed;
++    public long EstimatedMemoryBytes => (extracted?.EstimatedMemoryBytes ?? 0) +
++        (horizontal?.EstimatedMemoryBytes ?? 0) + (blurred?.EstimatedMemoryBytes ?? 0);
++
++    public BloomPass(RenderContext context) => this.context = context;
++
++    public Texture2D? Process(Texture2D source)
++    {
++        if (failed)
++            return null;
++        var targetWidth = System.Math.Max(1, source.Width / 4);
++        var targetHeight = System.Math.Max(1, source.Height / 4);
++        if (width != targetWidth || height != targetHeight)
++        {
++            DisposeTargets();
++            width = targetWidth;
++            height = targetHeight;
++            try
++            {
++                extracted = new RenderTarget2D(context, width, height, null, false, SurfaceFormat.HdrBlendable);
++                horizontal = new RenderTarget2D(context, width, height, null, false, SurfaceFormat.HdrBlendable);
++                blurred = new RenderTarget2D(context, width, height, null, false, SurfaceFormat.HdrBlendable);
++            }
++            catch (System.Exception ex) when (ex is System.InvalidOperationException or System.NotSupportedException)
++            {
++                DisposeTargets();
++                failed = true;
++                FLLog.Warning("Graphics", $"Bloom targets are unavailable; continuing without bloom. {ex.Message}");
++                return null;
++            }
++        }
++
++        try
++        {
++            Draw(context.BloomExtractShader, source, extracted!, new Vector4(
++                1f / source.Width, 1f / source.Height, 1f, 0.5f));
++            Draw(context.BloomBlurShader, extracted!.Texture, horizontal!, new Vector4(1f / width, 0, 0, 0));
++            Draw(context.BloomBlurShader, horizontal!.Texture, blurred!, new Vector4(0, 1f / height, 0, 0));
++        }
++        catch (System.Exception ex) when (ex is System.InvalidOperationException or System.NotSupportedException)
++        {
++            DisposeTargets();
++            failed = true;
++            FLLog.Warning("Graphics", $"Bloom rendering failed; continuing without bloom. {ex.Message}");
++            return null;
++        }
++        return blurred!.Texture;
++    }
++
++    private void Draw(Shader shader, Texture2D source, RenderTarget2D target, Vector4 parameters)
++    {
++        var previousTarget = context.RenderTarget;
++        var previousTexture = context.Textures[0];
++        var previousSampler = context.Samplers[0];
++        var previousShader = context.Shader;
++        var previousBlend = context.BlendMode;
++        var previousDepth = context.DepthEnabled;
++        var previousDepthWrite = context.DepthWrite;
++        var previousColorWrite = context.ColorWrite;
++        var previousCull = context.Cull;
++        var previousStencil = context.Stencil;
++        var previousStencilEnabled = context.StencilEnabled;
++        var viewportPushed = false;
++        var scissorPushed = false;
++        try
++        {
++            context.RenderTarget = target;
++            context.PushViewport(0, 0, width, height);
++            viewportPushed = true;
++            scissorPushed = context.PushScissor(new Rectangle(0, 0, width, height), false);
++            context.DepthEnabled = false;
++            context.DepthWrite = false;
++            context.ColorWrite = true;
++            context.Cull = false;
++            context.StencilEnabled = false;
++            context.BlendMode = BlendMode.Opaque;
++            context.Textures[0] = source;
++            context.Samplers[0] = new SamplerState(TextureFiltering.Linear, WrapMode.ClampToEdge, WrapMode.ClampToEdge);
++            shader.SetUniformBlock(3, ref parameters);
++            context.Shader = shader;
++            context.FullScreenTriangle.Draw(PrimitiveTypes.TriangleList, 1);
++        }
++        finally
++        {
++            context.Textures[0] = previousTexture;
++            context.Samplers[0] = previousSampler;
++            context.Shader = previousShader;
++            context.BlendMode = previousBlend;
++            context.DepthEnabled = previousDepth;
++            context.DepthWrite = previousDepthWrite;
++            context.ColorWrite = previousColorWrite;
++            context.Cull = previousCull;
++            context.Stencil = previousStencil;
++            context.StencilEnabled = previousStencilEnabled;
++            if (scissorPushed) context.PopScissor();
++            if (viewportPushed) context.PopViewport();
++            context.RenderTarget = previousTarget;
++        }
++    }
++
++    private void DisposeTargets()
++    {
++        extracted?.Dispose();
++        horizontal?.Dispose();
++        blurred?.Dispose();
++        extracted = horizontal = blurred = null;
++    }
++
++    public void Dispose() => DisposeTargets();
++}
+diff --git a/src/LibreLancer.Base/Graphics/RenderContext.cs b/src/LibreLancer.Base/Graphics/RenderContext.cs
+--- a/src/LibreLancer.Base/Graphics/RenderContext.cs
++++ b/src/LibreLancer.Base/Graphics/RenderContext.cs
+@@ -70,6 +70,8 @@
+     internal ShaderBundle SMAABlendingWeightCalculation;
+     internal ShaderBundle SMAANeighborhoodBlending;
+     internal Shader TonemapShader;
++    internal Shader BloomExtractShader;
++    internal Shader BloomBlurShader;
+     internal VertexBuffer FullScreenTriangle;
+ 
+     internal static RenderContext Instance = null!;
+@@ -282,6 +284,8 @@
+         SMAABlendingWeightCalculation = ShaderBundle.FromResource<RenderContext>(this, "SMAABlendingWeightCalculation.bin");
+         SMAANeighborhoodBlending = ShaderBundle.FromResource<RenderContext>(this, "SMAANeighborhoodBlending.bin");
+         TonemapShader = ShaderBundle.FromResource<RenderContext>(this, "Tonemap.bin").Get(0);
++        BloomExtractShader = ShaderBundle.FromResource<RenderContext>(this, "BloomExtract.bin").Get(0);
++        BloomBlurShader = ShaderBundle.FromResource<RenderContext>(this, "BloomBlur.bin").Get(0);
+         using (var stream = typeof(RenderContext).Assembly.GetManifestResourceStream("LibreLancer.Shaders.AreaTexDX10.dds")!)
+         {
+             SMAAAreaTex = (Texture2D)ImageLib.DDS.FromStream(this, stream);
+diff --git a/src/LibreLancer.Base/Graphics/TonemapPass.cs b/src/LibreLancer.Base/Graphics/TonemapPass.cs
+--- a/src/LibreLancer.Base/Graphics/TonemapPass.cs
++++ b/src/LibreLancer.Base/Graphics/TonemapPass.cs
+@@ -10,14 +10,16 @@
+     }
+ 
+     public static void Draw(RenderContext context, Texture2D source, RenderTarget? target,
+-        int width, int height, Point offset)
++        int width, int height, Point offset, Texture2D? bloom = null, float bloomStrength = 0)
+     {
+         if (width <= 0 || height <= 0)
+             return;
+ 
+         var previousTarget = context.RenderTarget;
+         var previousTexture = context.Textures[0];
++        var previousBloomTexture = context.Textures[1];
+         var previousSampler = context.Samplers[0];
++        var previousBloomSampler = context.Samplers[1];
+         var previousShader = context.Shader;
+         var previousBlend = context.BlendMode;
+         var previousDepth = context.DepthEnabled;
+@@ -41,9 +43,12 @@
+             context.StencilEnabled = false;
+             context.BlendMode = BlendMode.Opaque;
+             context.Textures[0] = source;
++            context.Textures[1] = bloom ?? source;
+             context.Samplers[0] = new SamplerState(TextureFiltering.Linear,
+                 WrapMode.ClampToEdge, WrapMode.ClampToEdge);
+-            var parameters = new Parameters { Values = Vector4.Zero };
++            context.Samplers[1] = new SamplerState(TextureFiltering.Linear,
++                WrapMode.ClampToEdge, WrapMode.ClampToEdge);
++            var parameters = new Parameters { Values = new Vector4(0, bloomStrength, 0, 0) };
+             context.TonemapShader.SetUniformBlock(3, ref parameters);
+             context.Shader = context.TonemapShader;
+             context.FullScreenTriangle.Draw(PrimitiveTypes.TriangleList, 1);
+@@ -51,7 +56,9 @@
+         finally
+         {
+             context.Textures[0] = previousTexture;
++            context.Textures[1] = previousBloomTexture;
+             context.Samplers[0] = previousSampler;
++            context.Samplers[1] = previousBloomSampler;
+             context.Shader = previousShader;
+             context.BlendMode = previousBlend;
+             context.DepthEnabled = previousDepth;
+diff --git a/src/LibreLancer.Base/LibreLancer.Base.csproj b/src/LibreLancer.Base/LibreLancer.Base.csproj
+--- a/src/LibreLancer.Base/LibreLancer.Base.csproj
++++ b/src/LibreLancer.Base/LibreLancer.Base.csproj
+@@ -42,6 +42,8 @@
+     <Shader Include="Shaders\SMAABlendingWeightCalculation.txt"/>
+     <Shader Include="Shaders\SMAANeighborhoodBlending.txt"/>
+     <Shader Include="Shaders\Tonemap.txt"/>
++    <Shader Include="Shaders\BloomExtract.txt" />
++    <Shader Include="Shaders\BloomBlur.txt" />
+   </ItemGroup>
+ 
+   <ItemGroup>
+diff --git a/src/LibreLancer.Base/Shaders/Tonemap.frag.hlsl b/src/LibreLancer.Base/Shaders/Tonemap.frag.hlsl
+--- a/src/LibreLancer.Base/Shaders/Tonemap.frag.hlsl
++++ b/src/LibreLancer.Base/Shaders/Tonemap.frag.hlsl
+@@ -1,5 +1,7 @@
+ Texture2D<float4> SceneTexture : register(t0, TEXTURE_SPACE);
+ SamplerState SceneSampler : register(s0, TEXTURE_SPACE);
++Texture2D<float4> BloomTexture : register(t1, TEXTURE_SPACE);
++SamplerState BloomSampler : register(s1, TEXTURE_SPACE);
+ 
+ cbuffer Parameters : register(b3, UNIFORM_SPACE)
+ {
+@@ -19,7 +21,8 @@
+ float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target0
+ {
+     float4 source = SceneTexture.Sample(SceneSampler, uv);
+-    float3 mapped = AcesFitted(max(source.rgb, 0.0) * exp2(ToneMapParameters.x));
++    float3 bloom = BloomTexture.Sample(BloomSampler, uv).rgb * ToneMapParameters.y;
++    float3 mapped = AcesFitted(max(source.rgb + bloom, 0.0) * exp2(ToneMapParameters.x));
+     float3 displayColor = lerp(mapped * 12.92,
+         1.055 * pow(mapped, 1.0 / 2.4) - 0.055,
+         step(0.0031308, mapped));
+diff --git a/src/LibreLancer.Base/Shaders/BloomExtract.txt b/src/LibreLancer.Base/Shaders/BloomExtract.txt
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Base/Shaders/BloomExtract.txt
+@@ -0,0 +1,2 @@
++vertex BloomExtract.vert.hlsl
++fragment BloomExtract.frag.hlsl
+diff --git a/src/LibreLancer.Base/Shaders/BloomExtract.vert.hlsl b/src/LibreLancer.Base/Shaders/BloomExtract.vert.hlsl
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Base/Shaders/BloomExtract.vert.hlsl
+@@ -0,0 +1,3 @@
++struct Input { float4 Position : POSITION; float2 TexCoord : TEXCOORD0; };
++struct Output { float4 Position : SV_Position; float2 TexCoord : TEXCOORD0; };
++Output main(Input input) { Output output; output.Position = input.Position; output.TexCoord = input.TexCoord; return output; }
+diff --git a/src/LibreLancer.Base/Shaders/BloomExtract.frag.hlsl b/src/LibreLancer.Base/Shaders/BloomExtract.frag.hlsl
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Base/Shaders/BloomExtract.frag.hlsl
+@@ -0,0 +1,21 @@
++Texture2D<float4> SceneTexture : register(t0, TEXTURE_SPACE);
++SamplerState SceneSampler : register(s0, TEXTURE_SPACE);
++cbuffer Parameters : register(b3, UNIFORM_SPACE) { float4 BloomParameters; }
++
++float3 SampleScene(float2 uv) { return SceneTexture.Sample(SceneSampler, uv).rgb; }
++
++float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target0
++{
++    float2 texel = BloomParameters.xy;
++    float3 color = (SampleScene(uv + texel * float2(-0.5, -0.5)) +
++                    SampleScene(uv + texel * float2( 0.5, -0.5)) +
++                    SampleScene(uv + texel * float2(-0.5,  0.5)) +
++                    SampleScene(uv + texel * float2( 0.5,  0.5))) * 0.25;
++    float brightness = max(color.r, max(color.g, color.b));
++    float threshold = BloomParameters.z;
++    float soft = max(BloomParameters.w, 0.0001);
++    float softContribution = clamp(brightness - threshold + soft, 0.0, 2.0 * soft);
++    softContribution = softContribution * softContribution / (4.0 * soft);
++    float contribution = max(brightness - threshold, softContribution);
++    return float4(color * (contribution / max(brightness, 0.0001)), 1.0);
++}
+diff --git a/src/LibreLancer.Base/Shaders/BloomBlur.txt b/src/LibreLancer.Base/Shaders/BloomBlur.txt
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Base/Shaders/BloomBlur.txt
+@@ -0,0 +1,2 @@
++vertex BloomBlur.vert.hlsl
++fragment BloomBlur.frag.hlsl
+diff --git a/src/LibreLancer.Base/Shaders/BloomBlur.vert.hlsl b/src/LibreLancer.Base/Shaders/BloomBlur.vert.hlsl
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Base/Shaders/BloomBlur.vert.hlsl
+@@ -0,0 +1,3 @@
++struct Input { float4 Position : POSITION; float2 TexCoord : TEXCOORD0; };
++struct Output { float4 Position : SV_Position; float2 TexCoord : TEXCOORD0; };
++Output main(Input input) { Output output; output.Position = input.Position; output.TexCoord = input.TexCoord; return output; }
+diff --git a/src/LibreLancer.Base/Shaders/BloomBlur.frag.hlsl b/src/LibreLancer.Base/Shaders/BloomBlur.frag.hlsl
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Base/Shaders/BloomBlur.frag.hlsl
+@@ -0,0 +1,14 @@
++Texture2D<float4> SourceTexture : register(t0, TEXTURE_SPACE);
++SamplerState SourceSampler : register(s0, TEXTURE_SPACE);
++cbuffer Parameters : register(b3, UNIFORM_SPACE) { float4 BlurParameters; }
++
++float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target0
++{
++    float2 stepUv = BlurParameters.xy;
++    float4 color = SourceTexture.Sample(SourceSampler, uv) * 0.2270270270;
++    color += SourceTexture.Sample(SourceSampler, uv + stepUv * 1.3846153846) * 0.3162162162;
++    color += SourceTexture.Sample(SourceSampler, uv - stepUv * 1.3846153846) * 0.3162162162;
++    color += SourceTexture.Sample(SourceSampler, uv + stepUv * 3.2307692308) * 0.0702702703;
++    color += SourceTexture.Sample(SourceSampler, uv - stepUv * 3.2307692308) * 0.0702702703;
++    return color;
++}
+diff --git a/src/LibreLancer/GameSettings.cs b/src/LibreLancer/GameSettings.cs
+--- a/src/LibreLancer/GameSettings.cs
++++ b/src/LibreLancer/GameSettings.cs
+@@ -59,6 +59,8 @@
+         public bool RenderSunAmbient = false;
+         [Entry("render_hdr")]
+         public bool RenderHdr = false;
++        [Entry("render_bloom")]
++        public bool RenderBloom = false;
+         [Entry("render_projectile_beams")]
+         public bool RenderProjectileBeams = true;
+         [Entry("render_particle_effects")]
+@@ -114,6 +116,7 @@
+         bool IRendererSettings.RenderSunLensGlow => RenderSunLensGlow;
+         bool IRendererSettings.RenderSunAmbient => RenderSunAmbient;
+         bool IRendererSettings.RenderHdr => RenderHdr;
++        bool IRendererSettings.RenderBloom => RenderBloom;
+         bool IRendererSettings.RenderProjectileBeams => RenderProjectileBeams;
+         bool IRendererSettings.RenderParticleEffects => RenderParticleEffects;
+         bool IRendererSettings.RenderTransientEffectLights => RenderTransientEffectLights;
+@@ -160,6 +163,7 @@
+             writer.WriteLine($"render_sun_lens_glow = {RenderSunLensGlow.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_sun_ambient = {RenderSunAmbient.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_hdr = {RenderHdr.ToString().ToLowerInvariant()}");
++            writer.WriteLine($"render_bloom = {RenderBloom.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_projectile_beams = {RenderProjectileBeams.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_particle_effects = {RenderParticleEffects.ToString().ToLowerInvariant()}");
+             writer.WriteLine($"render_jump_gate_effects = {RenderJumpGateEffects.ToString().ToLowerInvariant()}");
+@@ -201,6 +205,7 @@
+                 RenderSunLensGlow = RenderSunLensGlow,
+                 RenderSunAmbient = RenderSunAmbient,
+                 RenderHdr = RenderHdr,
++                RenderBloom = RenderBloom,
+                 RenderProjectileBeams = RenderProjectileBeams,
+                 RenderParticleEffects = RenderParticleEffects,
+                 RenderJumpGateEffects = RenderJumpGateEffects,
+@@ -240,6 +245,7 @@
+             RenderSunLensGlow = other.RenderSunLensGlow;
+             RenderSunAmbient = other.RenderSunAmbient;
+             RenderHdr = other.RenderHdr;
++            RenderBloom = other.RenderBloom;
+             RenderProjectileBeams = other.RenderProjectileBeams;
+             RenderParticleEffects = other.RenderParticleEffects;
+             RenderJumpGateEffects = other.RenderJumpGateEffects;
+diff --git a/src/LibreLancer/Render/IRendererSettings.cs b/src/LibreLancer/Render/IRendererSettings.cs
+--- a/src/LibreLancer/Render/IRendererSettings.cs
++++ b/src/LibreLancer/Render/IRendererSettings.cs
+@@ -17,6 +17,7 @@
+     bool RenderSunLensGlow => true;
+     bool RenderSunAmbient => false;
+     bool RenderHdr => false;
++    bool RenderBloom => false;
+     bool RenderProjectileBeams => true;
+     bool RenderParticleEffects => true;
+     bool RenderTransientEffectLights => true;
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -473,6 +473,7 @@
+ 
+                 if (msaa != null)
+                 {
++                    msaa.BloomEnabled = hdrRequested && Settings.RenderBloom;
+                     rstate.PushViewport(new Rectangle(0, 0, renderWidth, renderHeight));
+                     aaViewportPushed = true;
+                     aaScissorPushed = rstate.PushScissor(new Rectangle(0, 0, renderWidth, renderHeight), false);
+diff --git a/src/lancer/Program.cs b/src/lancer/Program.cs
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -35,6 +35,7 @@
+             Console.WriteLine("         --render-sun-lens-glow=on|off");
+             Console.WriteLine("         --render-sun-ambient=on|off");
+             Console.WriteLine("         --render-hdr=on|off");
++            Console.WriteLine("         --render-bloom=on|off");
+             Console.WriteLine("         --render-projectile-beams=on|off");
+             Console.WriteLine("         --render-particle-effects=on|off");
+             Console.WriteLine("         --render-transient-effect-lights=on|off");
+@@ -221,6 +222,7 @@
+         private bool? sunLensGlow;
+         private bool? sunAmbient;
+         private bool? hdr;
++        private bool? bloom;
+         private bool? projectileBeams;
+         private bool? particleEffects;
+         private bool? jumpGateEffects;
+@@ -285,6 +287,10 @@
+                 case "--render-hdr":
+                     if (!ParseToggle(out var hdrEnabled)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
+                     hdr = hdrEnabled;
++                    return true;
++                case "--render-bloom":
++                    if (!ParseToggle(out var bloomEnabled)) { error = $"{name} accepts only 'on' or 'off'."; return false; }
++                    bloom = bloomEnabled;
+                     return true;
+                 case "--render-dynamic-light-budget":
+                     if (int.TryParse(value, out var lightBudget) && lightBudget is 0 or 8 or 16 or 24 or 32)
+@@ -381,6 +387,7 @@
+             if (sunLensGlow.HasValue) settings.RenderSunLensGlow = sunLensGlow.Value;
+             if (sunAmbient.HasValue) settings.RenderSunAmbient = sunAmbient.Value;
+             if (hdr.HasValue) settings.RenderHdr = hdr.Value;
++            if (bloom.HasValue) settings.RenderBloom = bloom.Value;
+             if (projectileBeams.HasValue) settings.RenderProjectileBeams = projectileBeams.Value;
+             if (particleEffects.HasValue) settings.RenderParticleEffects = particleEffects.Value;
+             if (jumpGateEffects.HasValue) settings.RenderJumpGateEffects = jumpGateEffects.Value;
+diff --git a/uixml/options.lua b/uixml/options.lua
+--- a/uixml/options.lua
++++ b/uixml/options.lua
+@@ -135,6 +135,13 @@
+             this.opts.RenderHdr = e.hdr.Selected
+             local settings = Game.GetCurrentSettings()
+             settings.RenderHdr = e.hdr.Selected
++            Game.ApplySettings(settings)
++        })
++        e.bloom.Selected = this.opts.RenderBloom
++        e.bloom.OnClick(() => {
++            this.opts.RenderBloom = e.bloom.Selected
++            local settings = Game.GetCurrentSettings()
++            settings.RenderBloom = e.bloom.Selected
+             Game.ApplySettings(settings)
+         })
+         e.sun_ambient.OnClick(() => {
+diff --git a/uixml/options.xml b/uixml/options.xml
+--- a/uixml/options.xml
++++ b/uixml/options.xml
+@@ -38,7 +38,7 @@
+                 <Checkbox id="starsphere" X="18" Y="276" Width="350" Text="STARSPHERE"/>
+                 <Checkbox id="sun_ambient" X="18" Y="304" Width="350" Text="SUN-COLORED AMBIENT LIGHT"/>
+                 <Checkbox id="hdr" X="18" Y="332" Width="350" Text="HDR TONE MAPPING"/>
+-                <TextBlock X="18" Y="360" Width="350" Height="20" Text="BLOOM, SHADOWS AND SSAO ARE STILL PLANNED" TextColor="text" TextShadow="black" TextSize="9"/>
++                <Checkbox id="bloom" X="18" Y="360" Width="350" Text="HDR BLOOM (REQUIRES HDR)"/>
+             </Panel>
+             <Panel Width="390" Height="380" ID="win_audio" Visible="false">
+                 <TextBlock Text="AUDIO OPTIONS" Strid="1679" Width="390" Height="22" Y="-22"  Anchor="TopCenter" TextColor="text" TextShadow="black" TextSize="13"/>
+diff --git a/docs/evidence/renderer/hdr-bloom-stage-20261016.md b/docs/evidence/renderer/hdr-bloom-stage-20261016.md
+new file mode 100644
+--- /dev/null
++++ b/docs/evidence/renderer/hdr-bloom-stage-20261016.md
+@@ -0,0 +1,28 @@
++# HDR Bloom-Stufe (2026-10-16)
++
++## Umsetzung
++
++- Die optionale Bloom-Stufe filtert lineare HDR-Szenenwerte ab einer
++  luminanzbasierten Max-Kanal-Schwelle von 1.0. Ein weicher Knee von 0.5
++  verhindert einen harten Übergang an der Schwelle.
++- Die Extraktion wird auf ein Viertel der Szenenauflösung heruntergesampelt,
++  danach wird ein separabler 5-Tap-Gauß-Blur horizontal und vertikal ausgeführt.
++  Das geblurte Licht wird vor der ACES-Kurve zur linearen Szene addiert.
++- `render_bloom` ist standardmäßig ausgeschaltet und unabhängig von
++  `render_hdr` gespeichert. Die CLI akzeptiert `--render-bloom=on|off`; der
++  Effekte-Tab kann den Schalter während des Spiels ändern. Ohne HDR greift die
++  Einstellung nicht. Bei nicht unterstützten Bloom-Zielen bleibt HDR aktiv und
++  Bloom wird für den Prozess deaktiviert.
++- Bloom-Targets werden in den geschätzten GPU-Speicher der AA/HDR-Ziele
++  eingerechnet und mit diesen beim Resize/Dispose freigegeben.
++
++## Grenzen und Prüfung
++
++- Release-Build am 2026-10-16 mit .NET 10 erfolgreich; der Shadercompiler hat
++  beide neuen Bloom-Bundles verarbeitet. Der Build meldete vorhandene
++  Codewarnungen, aber keine Fehler.
++- Noch keine Laufzeit- oder Bildabnahme: `Data/NAP/` enthält derzeit keine
++  verwendbaren NAP-Archive. Schwelle, Stärke, Halo-Radius, Farbverhalten und
++  Performance müssen mit einer gültigen NAP-only-Szene geprüft werden.
++- Dies ist ein einfacher Viertelauflösungs-Blur und noch keine mehrstufige
++  Bloom-Pyramide. UI-/Cutscene-Blur bleibt davon getrennt.
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -161,3 +161,4 @@
+ | 2167 | Audit the HDR, tonemapping, linear-color and AA transition requirements |
+ | 2168 | Add opt-in HDR scene output and tone mapping across AA paths |
+ | 2169 | Linearize scene shader outputs before HDR blending and tone mapping |
++| 2170 | Add optional quarter-resolution HDR bloom with separable blur |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -169,3 +169,4 @@
+ client 2167-hdr-tonemapping-transition-audit.patch
+ client 2168-hdr-tonemapping-scene-output.patch
+ client 2169-linear-hdr-shader-output.patch
++client 2170-hdr-bloom-first-pass.patch

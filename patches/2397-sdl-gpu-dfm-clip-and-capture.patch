@@ -1,0 +1,206 @@
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -169,9 +169,13 @@
+         }
+         var center = (min + max) * 0.5f;
+         var extent = max - min;
+-        var scale = 1.55f / MathF.Max(extent.X, MathF.Max(extent.Y, extent.Z));
++        // SDL_GPU uses Vulkan's zero-to-one clip-depth range on the active test
++        // driver. Keep the posed model inside that range as well as the XY clip
++        // volume so coverage probes address rendered pixels.
++        var scale = 0.8f / MathF.Max(extent.X, MathF.Max(extent.Y, extent.Z));
+         if (!float.IsFinite(scale) || scale <= 0) throw new InvalidDataException($"DFM has invalid posed bounds: {path}");
+-        var world = Matrix4x4.CreateScale(scale) * Matrix4x4.CreateTranslation(-center * scale);
++        var world = Matrix4x4.CreateScale(scale) * Matrix4x4.CreateTranslation(
++            new Vector3(-center.X * scale, -center.Y * scale, 0.5f - center.Z * scale));
+         if (!Matrix4x4.Invert(world, out var inverseWorld)) throw new InvalidDataException($"DFM world matrix is singular: {path}");
+         var normalMatrix = Matrix4x4.Transpose(inverseWorld);
+         var coverage = new float[6];
+--- a/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
++++ b/src/LibreLancer.Base/Platforms/SDL3GpuSmoke.cs
+@@ -693,6 +693,7 @@
+             var swapchainFormat = SDL3.SDL_GetGPUSwapchainTextureFormat(device, window);
+             var swapchainIsSrgb = swapchainFormat is SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB or
+                 SDL3.SDL_GPUTextureFormat.SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM_SRGB;
++            var capturePath = Environment.GetEnvironmentVariable("LANCER_SDL_GPU_CAPTURE");
+             depthTexture = CreateDepthTexture(device, width, height);
+             Console.WriteLine($"Created SDL_GPU D32 depth target at {width}x{height}.");
+             shadowDepthTexture = CreateDepthTexture(device, 4, 4, sampleable: true);
+@@ -719,7 +720,7 @@
+             readbackBuffer = SDL3.SDL_CreateGPUTransferBuffer(device, new SDL3.SDL_GPUTransferBufferCreateInfo
+             {
+                 usage = SDL3.SDL_GPUTransferBufferUsage.SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD,
+-                size = 28
++                size = capturePath == null ? 28u : checked(32u + width * height * 4u)
+             });
+             if (readbackBuffer == IntPtr.Zero)
+                 throw Failure("Creating the SDL_GPU pixel readback buffer failed");
+@@ -792,7 +793,7 @@
+                 throw Failure("Beginning the SDL_GPU postprocess pass failed");
+             SDL3.SDL_BindGPUGraphicsPipeline(renderPass, copyPipeline);
+             // The first three vertices are deliberately degenerate so a missing
+-            // VMesh base-vertex offset cannot accidentally draw the smoke triangle.
++            // base-vertex offset cannot accidentally draw a partial copy triangle.
+             vertexBindings[0].buffer = copyVertexBuffer != IntPtr.Zero ? copyVertexBuffer : vertexBuffer;
+             vertexBindings[0].offset = (uint)(3 * 8 * sizeof(float));
+             SDL3.SDL_BindGPUVertexBuffers(renderPass, 0, vertexBindings, 1);
+@@ -819,6 +820,9 @@
+                 realVertexCount: skinnedDfm ? skinnedVertexCount : 0,
+                 worldMatrix: skinnedDfm ? skinnedWorld : null,
+                 normalMatrix: skinnedDfm ? skinnedNormalMatrix : null,
++                viewportX: skinnedDfm ? 0.0f : -1.0f,
++                viewportY: skinnedDfm ? 0.0f : -1.0f,
++                viewportSize: skinnedDfm ? 1.0f : 0.25f,
+                 outputIsSrgb: swapchainIsSrgb);
+             ClearShadowDepth(commandBuffer, shadowDepthTexture, 0.6f);
+             ExecuteProductionPbrDraw(commandBuffer, shadowPbrPipeline, vertexBuffer, diffuseTexture,
+@@ -870,6 +874,29 @@
+                 rows_per_layer = 0
+             };
+             SDL3.SDL_DownloadFromGPUTexture(copyPass, centerPixel, pixelDestination);
++            if (capturePath != null)
++            {
++                var fullFrame = new SDL3.SDL_GPUTextureRegion
++                {
++                    texture = swapchainTexture,
++                    mip_level = 0,
++                    layer = 0,
++                    x = 0,
++                    y = 0,
++                    z = 0,
++                    w = width,
++                    h = height,
++                    d = 1
++                };
++                var fullFrameDestination = new SDL3.SDL_GPUTextureTransferInfo
++                {
++                    transfer_buffer = readbackBuffer,
++                    offset = 32,
++                    pixels_per_row = width,
++                    rows_per_layer = height
++                };
++                SDL3.SDL_DownloadFromGPUTexture(copyPass, fullFrame, fullFrameDestination);
++            }
+             var pbrPixel = centerPixel;
+             var pbrSampleX = 0.165f;
+             var pbrSampleY = 0.165f;
+@@ -881,10 +908,12 @@
+                             realVmeshCoverageTriangle[4]) / 3f;
+                 var ndcY = (realVmeshCoverageTriangle[1] + realVmeshCoverageTriangle[3] +
+                             realVmeshCoverageTriangle[5]) / 3f;
+-                viewportLocalX = (ndcX * 0.5f + 0.5f) * 0.25f;
+-                viewportLocalY = (ndcY * 0.5f + 0.5f) * 0.25f;
+-                pbrSampleX = 0.04f + viewportLocalX;
+-                pbrSampleY = 0.04f + viewportLocalY;
++                var normalizedX = ndcX * 0.5f + 0.5f;
++                var normalizedY = 1.0f - (ndcY * 0.5f + 0.5f);
++                viewportLocalX = normalizedX * 0.25f;
++                viewportLocalY = normalizedY * 0.25f;
++                pbrSampleX = skinnedDfm ? normalizedX : 0.04f + viewportLocalX;
++                pbrSampleY = skinnedDfm ? normalizedY : 0.04f + viewportLocalY;
+             }
+             pbrPixel.x = (uint)(width * pbrSampleX);
+             pbrPixel.y = (uint)(height * pbrSampleY);
+@@ -892,10 +921,12 @@
+             SDL3.SDL_DownloadFromGPUTexture(copyPass, pbrPixel, pixelDestination);
+             var visibleShadowPixel = pbrPixel;
+             visibleShadowPixel.x = (uint)(width * (0.39f + viewportLocalX));
++            visibleShadowPixel.y = (uint)(height * (0.04f + viewportLocalY));
+             pixelDestination.offset = 8;
+             SDL3.SDL_DownloadFromGPUTexture(copyPass, visibleShadowPixel, pixelDestination);
+             var shadowPixel = pbrPixel;
+             shadowPixel.x = (uint)(width * (0.70f + viewportLocalX));
++            shadowPixel.y = (uint)(height * (0.04f + viewportLocalY));
+             pixelDestination.offset = 12;
+             SDL3.SDL_DownloadFromGPUTexture(copyPass, shadowPixel, pixelDestination);
+             if (realVmeshVertices != null || skinnedDfm)
+@@ -917,10 +948,14 @@
+                                        realVmeshVertices[33], realVmeshVertices[40], realVmeshVertices[41]];
+                     var ndcX = triangle[0] * w.X + triangle[2] * w.Y + triangle[4] * w.Z;
+                     var ndcY = triangle[1] * w.X + triangle[3] * w.Y + triangle[5] * w.Z;
++                    var normalizedY = 1.0f - (ndcY * 0.5f + 0.5f);
++                    var probeViewportOriginX = skinnedDfm ? 0.0f : 0.04f;
++                    var probeViewportOriginY = skinnedDfm ? 0.0f : 0.04f;
++                    var probeViewportSize = skinnedDfm ? 1.0f : 0.25f;
+                     var sample = centerPixel;
+-                    sample.x = (uint)Math.Clamp((0.04f + (ndcX * 0.5f + 0.5f) * 0.25f) * width,
++                    sample.x = (uint)Math.Clamp((probeViewportOriginX + (ndcX * 0.5f + 0.5f) * probeViewportSize) * width,
+                         0, width - 1);
+-                    sample.y = (uint)Math.Clamp((0.04f + (ndcY * 0.5f + 0.5f) * 0.25f) * height,
++                    sample.y = (uint)Math.Clamp((probeViewportOriginY + normalizedY * probeViewportSize) * height,
+                         0, height - 1);
+                     pixelDestination.offset = (uint)(16 + i * 4);
+                     SDL3.SDL_DownloadFromGPUTexture(copyPass, sample, pixelDestination);
+@@ -952,6 +987,12 @@
+             var expectedBlue = ToOutputByte(AcesFitted(2.0f * (0.5f + 0.5f * MathF.Sqrt(0.6f))), isSrgb);
+             var red = isBgra ? channel2 : channel0;
+             var blue = isBgra ? channel0 : channel2;
++            if (capturePath != null)
++            {
++                var frame = new byte[checked((int)(width * height * 4))];
++                Marshal.Copy(IntPtr.Add(mappedPixel, 32), frame, 0, frame.Length);
++                WritePpmCapture(capturePath, frame, width, height, isBgra);
++            }
+             if (realVmeshVertices == null && !skinnedDfm)
+             {
+                 if (alpha < 240 || Math.Abs(red - expectedRed) > 24 ||
+@@ -1053,9 +1094,9 @@
+                     throw new InvalidOperationException(
+                         $"SDL_GPU real {(skinnedDfm ? "DFM" : "VMesh")} triangle did not change any interior sample from the scene clear " +
+                         $"({clearRed}, {clearGreen}, {clearBlue}, 255).");
+-                Console.WriteLine($"Real {(skinnedDfm ? "DFM" : "VMesh")} coverage readback: {coveredSamples}/4 interior samples differ from clear.");
++                Console.WriteLine($"Real {(skinnedDfm ? "DFM" : "VMesh")} coverage readback: {coveredSamples}/4 probes (screen center plus three triangle points) differ from clear.");
+                 if (skinnedDfm)
+-                    Console.WriteLine($"DFM production PBR interior samples: {string.Join(' ', sampleDescriptions.ToArray())}.");
++                    Console.WriteLine($"DFM production PBR triangle samples: {string.Join(' ', sampleDescriptions.ToArray())}.");
+             }
+             SDL3.SDL_UnmapGPUTransferBuffer(device, readbackBuffer);
+ 
+@@ -1229,7 +1270,8 @@
+         SDL3GpuBindingRemap[]? samplerBindings = null,
+         IntPtr realIndexBuffer = default, uint realIndexCount = 0, int realBaseVertex = 3,
+         IntPtr boneStorageBuffer = default, uint boneStorageSlot = 0, uint realVertexCount = 0,
+-        Matrix4x4? worldMatrix = null, Matrix4x4? normalMatrix = null, bool outputIsSrgb = false)
++        Matrix4x4? worldMatrix = null, Matrix4x4? normalMatrix = null, float viewportY = -1.0f,
++        float viewportSize = 0.25f, bool outputIsSrgb = false)
+     {
+         Span<byte> transforms = stackalloc byte[128];
+         transforms.Clear();
+@@ -1326,9 +1368,9 @@
+             var viewport = new SDL3.SDL_GPUViewport
+             {
+                 x = width * (viewportX >= 0.0f ? viewportX : shadowed ? 0.70f : 0.04f),
+-                y = height * 0.04f,
+-                w = width * 0.25f,
+-                h = height * 0.25f,
++                y = height * (viewportY >= 0.0f ? viewportY : 0.04f),
++                w = width * viewportSize,
++                h = height * viewportSize,
+                 min_depth = 0.0f,
+                 max_depth = 1.0f
+             };
+@@ -1390,6 +1432,24 @@
+     private static void WriteFloat(Span<byte> destination, int offset, float value) =>
+         BinaryPrimitives.WriteInt32LittleEndian(destination.Slice(offset, sizeof(float)),
+             BitConverter.SingleToInt32Bits(value));
++
++    private static void WritePpmCapture(string path, byte[] rgba, uint width, uint height, bool bgra)
++    {
++        var rgb = new byte[checked((int)(width * height * 3))];
++        for (int source = 0, target = 0; source < rgba.Length; source += 4, target += 3)
++        {
++            rgb[target] = rgba[source + (bgra ? 2 : 0)];
++            rgb[target + 1] = rgba[source + 1];
++            rgb[target + 2] = rgba[source + (bgra ? 0 : 2)];
++        }
++        var directory = Path.GetDirectoryName(path);
++        if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
++        using var output = File.Create(path);
++        var header = Encoding.ASCII.GetBytes($"P6\n{width} {height}\n255\n");
++        output.Write(header);
++        output.Write(rgb);
++        Console.WriteLine($"Captured SDL_GPU framebuffer to {path}.");
++    }
+ 
+     private static void BindPbrSampler(Span<SDL3.SDL_GPUTextureSamplerBinding> textures,
+         SDL3GpuBindingRemap[] samplerBindings, uint originalBinding, IntPtr boundTexture, IntPtr sampler)

@@ -1,0 +1,94 @@
+diff --git a/docs/evidence/renderer/gpu-timer-query-readiness-audit-20261015.md b/docs/evidence/renderer/gpu-timer-query-readiness-audit-20261015.md
+new file mode 100644
+--- /dev/null
++++ b/docs/evidence/renderer/gpu-timer-query-readiness-audit-20261015.md
+@@ -0,0 +1,62 @@
++# GPU-Timer-Query: Bereitschaftsaudit
++
++Stand: 2026-10-15. Quellcode- und Laufzeitbefund zum offenen Roadmap-Punkt
++„GPU-Zeit und Speicherverbrauch pro Pass messbar machen“. Dieses Audit führt
++noch keine GPU-Zeitmessung ein.
++
++## Befund
++
++- `IRenderContext` bietet keine GPU-Timer- oder Query-Schnittstelle. Der
++  OpenGL-Backendcode enthält keine `glGenQueries`, `glBeginQuery`,
++  `glGetQueryObject*`- oder `GL_TIME_ELAPSED`-Nutzung. Die Bindungsspezifikation
++  `src/BindingsGen/GLBindingsGen/GLBindingsGen/bindings.json` enthält ebenfalls
++  keine Timer-Query-Funktionen.
++- Die SDL3/OpenGL-Laufzeitprobe auf Intel HD Graphics 4600 / Mesa 23.2 meldet
++  `GL_ARB_timer_query` und `GL_EXT_timer_query`. Das belegt die Verfügbarkeit auf
++  diesem Gerät, nicht auf allen OpenGL-Zielsystemen. Die Probe und ihr
++  vollständiges Log liegen außerhalb des Repositories unter
++  `/tmp/lancer-nexus-renderer-profile-20261015/offscreen-run.log`.
++- `NullRenderContext` besitzt keinen GPU-Zeitgeber. Die bestehende CPU-Messung
++  (`FrameWorkTime`, `FrameInterval`) ist daher weiterhin die gemeinsame
++  Backenddiagnose. Sie kann Treiberwartezeit enthalten und darf nicht als
++  GPU-Zeit etikettiert werden.
++- Im geprüften Rendererpfad liegen geeignete GPU-Grenzen um den Depth-Prepass,
++  `Commands.DrawOpaque`, den Starsphere-/Nebelübergang, `Commands.DrawTransparent`
++  und den AA-Blit. CPU-seitige Sichtbarkeit, Vorbereitung, Uploads und
++  Command-Erzeugung liegen davor oder zwischen diesen Draw-Aufrufen. Die
++  vorhandene Reihenfolge ist im [Forward-Pass-Audit](forward-pass-order-audit-20261015.md)
++  festgehalten.
++- Es gibt keine einheitliche, backendübergreifende Abfrage für den tatsächlich
++  belegten GPU-Speicher pro Pass. GPU-Allokationen werden von mehreren
++  Ressourcenobjekten und Treiber-/Backendzuständen verwaltet. Eine Schätzung
++  aus Textur-/Buffergrößen wäre Ressourcenbuchhaltung, keine gemessene
++  Treiberbelegung.
++
++## Umsetzungsfolge
++
++1. Eine optionale `IGpuTimer`-Abstraktion mit benannten Messbereichen ergänzen;
++   OpenGL verwendet `GL_TIME_ELAPSED`, Null liefert „nicht unterstützt“.
++2. Query-Ergebnisse nur abfragen, wenn `GL_QUERY_RESULT_AVAILABLE` gesetzt ist.
++   Einen kleinen Ring aus Query-Paaren verwenden und Ergebnisse aus früheren
++   Frames lesen, damit der Renderer nicht auf die GPU wartet. Niemals innerhalb
++   eines aktiven Query-Bereichs einen weiteren Zeitbereich öffnen.
++3. Messbereiche zunächst an tatsächliche GPU-Drawgrenzen setzen: Depth,
++   Opaque, Stars/Nebel, Transparent und AA-Resolve. CPU-Vorbereitung und Upload
++   getrennt als CPU-Zeit ausweisen.
++4. Backend, unterstützte Query-Fähigkeit und Framealter in Debug-Overlay/CSV
++   ausweisen. Fehlende oder verspätete Messwerte als nicht verfügbar behandeln;
++   keine Nullwerte als schnelle GPU-Zeit darstellen.
++5. Speicher später als getrennte Ressourcenbuchhaltung pro Ressourcentyp
++   erfassen und als Schätzung kennzeichnen. Driver-native Memory-Budget-APIs
++   bleiben backend- und plattformspezifische Ergänzungen.
++
++## Abnahmegrenzen
++
++- Query-Fähigkeit auf dem rendernden Kontext prüfen; GL-Version allein nicht als
++  Beleg verwenden.
++- Keine synchronen `GL_QUERY_RESULT`-Reads im laufenden Frame.
++- Bei deaktiviertem Debug-Profiling keine Query-Aufrufe und keine dauerhaften
++  zusätzlichen GPU-Ressourcen.
++- Werte mit bekannten GPU-lastigen und CPU-lastigen Proben plausibilisieren;
++  GPU-Zeit kann die Framezeit wegen Überlappung nicht einfach addiert werden.
++- Null-Backend und fehlende Timer-Query-Unterstützung müssen fehlerfrei bleiben.
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -47,6 +47,7 @@
+   - [x] `SystemRenderer.Draw()` überspringt Frames mit Breite/Höhe 0. Bei geändertem Rendermaß oder AA-Modus gibt es das vorhandene MSAA-Target frei und erstellt es neu. Das belegt nur diesen System-Renderer-Pfad; Editor-/Offscreen-Targets, Wiederherstellungstests und Geräteverlust bleiben offen.
+   - [x] `SystemRenderer.Draw()` und `AntialiasTarget.SMAABlit()` stellen RenderTarget, Viewport-/Scissor-Stacks und ihre geänderten RenderContext-Zustände in `finally` wieder her. `SystemRenderer` stellt auch `ThnCamera.DefaultZ()` zurück und leert die Frame-Objektliste nach Fehlern. Fehler-Injektion und reguläre Resize-/Minimize-/Restore-Läufe bleiben als Laufzeitprüfung offen. Details im [Fehlerpfad-Audit](evidence/renderer/render-target-exception-path-audit-20261015.md).
+ - [ ] GPU-Zeit und Speicherverbrauch pro Pass messbar machen; Effekte müssen einzeln abschaltbar und nach Hardwareprofil skalierbar sein.
++  - [x] Bereitschaftsaudit abgeschlossen: Timer-Query-API und Query-Aufruf fehlen in OpenGL-/RenderContext-Abstraktion; die lokale Mesa-Laufzeit meldet `GL_ARB_timer_query`. Passgrenzen und eine nicht blockierende Abfragefolge sind dokumentiert. Speicherwerte sind noch nicht als Messung verfügbar. Siehe [GPU-Timer-Query-Audit](evidence/renderer/gpu-timer-query-readiness-audit-20261015.md).
+ - [ ] Referenzszenen und feste Screenshots für Raum, Basis, Sternensystem, Nebel, Partikel und LancerEdit-Vorschau festlegen.
+ 
+ ### 2. Bumpmapping / Normalmaps vervollständigen
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -109,3 +109,4 @@
+ | 2105 | Keep dynamic light emitters behind geometry from leaking unshadowed light |
+ | 2106 | Export recent CPU frame-pacing samples from the Debug overlay as CSV |
+ | 2107 | Record renderer and resolution per sample and escape CSV fields |
++| 2108 | Audit nonblocking GPU timer-query readiness and pass boundaries |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -107,3 +107,4 @@
+ client 2105-light-equipment-occlusion-gating.patch
+ client 2106-export-frame-profile-csv.patch
+ client 2107-frame-profile-csv-sample-metadata.patch
++client 2108-gpu-timer-query-readiness-audit.patch

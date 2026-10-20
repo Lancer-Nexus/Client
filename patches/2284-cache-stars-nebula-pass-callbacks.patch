@@ -1,0 +1,179 @@
+diff --git a/src/LibreLancer/Render/SystemRenderer.cs b/src/LibreLancer/Render/SystemRenderer.cs
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -83,6 +83,8 @@
+         private readonly Action opaqueDrawCallback;
+         private readonly Action transparentPassCallback;
+         private readonly Action transparentDrawCallback;
++        private readonly Action starsAndNebulaPassCallback;
++        private readonly Action starsAndNebulaDrawCallback;
+         private readonly Action depthStateCallback;
+         private readonly Action shadowMapCallback;
+         private readonly Action opaqueHookCallback;
+@@ -99,6 +101,7 @@
+         private int frameRenderWidth;
+         private int frameRenderHeight;
+         private bool frameSoftParticlesActive;
++        private bool thnDefaultZActive;
+         private bool subpassResourcesInitialized;
+         private long nextGpuProfileFrame;
+         private long currentGpuProfileFrame;
+@@ -151,6 +154,8 @@
+             opaqueDrawCallback = DrawOpaqueContent;
+             transparentPassCallback = DrawTransparentPass;
+             transparentDrawCallback = DrawTransparentContent;
++            starsAndNebulaPassCallback = DrawStarsAndNebulaPass;
++            starsAndNebulaDrawCallback = DrawStarsAndNebulaContent;
+             depthStateCallback = SetDepthStatePass;
+             shadowMapCallback = DrawShadowMapPass;
+             opaqueHookCallback = InvokeOpaqueHookPass;
+@@ -511,7 +516,7 @@
+             Color4 restoreClearColor = rstate.ClearColor;
+             bool aaViewportPushed = false;
+             bool aaScissorPushed = false;
+-            bool thnDefaultZActive = false;
++            thnDefaultZActive = false;
+             RenderMaterial.ShadowLight = null;
+             RenderMaterial.ShadowDepthTexture = null;
+             RenderMaterial.ParticleSceneDepthTexture = null;
+@@ -780,50 +785,8 @@
+                 var drawStars = (!transitioned || !DrawNebulae) && DrawStarsphere;
+                 if (drawStars)
+                 {
+-                    framePassGraph.AddPass(SystemRenderPass.StarsAndNebula, () =>
+-                    {
+-                        ExecuteGpuPass(SystemRenderPass.StarsAndNebula, sceneTarget, () =>
+-                        {
+-                            rstate.DepthRange = new Vector2(1, 1);
+-                            if (camera is ThnCamera thn && !ZOverride)
+-                            {
+-                                thnDefaultZActive = true;
+-                                thn.DefaultZ();
+-                                rstate.SetCamera(thn);
+-                            }
+-                            for (var i = 0; i < StarSphereModels.Length; i++)
+-                            {
+-                                Matrix4x4 ssworld = Matrix4x4.CreateTranslation(camera.Position);
+-                                if (StarSphereWorlds != null)
+-                                    ssworld = StarSphereWorlds[i] * ssworld;
+-                                var lighting = StarSphereLightings != null
+-                                    ? StarSphereLightings[i]
+-                                    : Lighting.Empty;
+-                                var mdl = StarSphereModels[i];
+-                                foreach (var part in mdl.AllParts)
+-                                {
+-                                    if (!part.Active || part.Mesh == null)
+-                                        continue;
+-                                    var p = part;
+-                                    var w = p.LocalTransform.Matrix() * ssworld;
+-                                    var bsphere = new BoundingSphere(
+-                                        Vector3.Transform(p.Mesh!.Center, w), p.Mesh.Radius);
+-                                    if (camera.FrustumCheck(bsphere))
+-                                        p.Mesh.DrawImmediate(0, resman, rstate, w, ref lighting,
+-                                            mdl.MaterialAnims, BasicMaterial.ForceAlpha);
+-                                }
+-                            }
+-                            if (camera is ThnCamera thn2 && !ZOverride)
+-                            {
+-                                thn2.CameraZ();
+-                                thnDefaultZActive = false;
+-                                rstate.SetCamera(thn2);
+-                            }
+-                            if (nr != null && DrawNebulae)
+-                                nr.RenderFogTransition(rstate);
+-                            rstate.DepthRange = new Vector2(0, 1);
+-                        });
+-                    }, SystemRenderResource.None, frameSetup);
++                    framePassGraph.AddPass(SystemRenderPass.StarsAndNebula,
++                        starsAndNebulaPassCallback, SystemRenderResource.None, frameSetup);
+                 }
+ 
+                 framePassGraph.AddAction(opaqueHook, opaqueHookCallback, priority: 11,
+@@ -1229,6 +1192,51 @@
+ 
+         private void DrawTransparentContent() => Commands.DrawTransparent(rstate);
+ 
++        private void DrawStarsAndNebulaPass() =>
++            ExecuteGpuPass(SystemRenderPass.StarsAndNebula, frameSceneTarget, starsAndNebulaDrawCallback);
++
++        private void DrawStarsAndNebulaContent()
++        {
++            rstate.DepthRange = new Vector2(1, 1);
++            if (camera is ThnCamera thn && !ZOverride)
++            {
++                thnDefaultZActive = true;
++                thn.DefaultZ();
++                rstate.SetCamera(thn);
++            }
++            for (var i = 0; i < StarSphereModels.Length; i++)
++            {
++                Matrix4x4 ssworld = Matrix4x4.CreateTranslation(camera.Position);
++                if (StarSphereWorlds != null)
++                    ssworld = StarSphereWorlds[i] * ssworld;
++                var lighting = StarSphereLightings != null
++                    ? StarSphereLightings[i]
++                    : Lighting.Empty;
++                var mdl = StarSphereModels[i];
++                foreach (var part in mdl.AllParts)
++                {
++                    if (!part.Active || part.Mesh == null)
++                        continue;
++                    var p = part;
++                    var w = p.LocalTransform.Matrix() * ssworld;
++                    var bsphere = new BoundingSphere(
++                        Vector3.Transform(p.Mesh!.Center, w), p.Mesh.Radius);
++                    if (camera.FrustumCheck(bsphere))
++                        p.Mesh.DrawImmediate(0, resman, rstate, w, ref lighting,
++                            mdl.MaterialAnims, BasicMaterial.ForceAlpha);
++                }
++            }
++            if (camera is ThnCamera thn2 && !ZOverride)
++            {
++                thn2.CameraZ();
++                thnDefaultZActive = false;
++                rstate.SetCamera(thn2);
++            }
++            if (frameDepthNebula != null && DrawNebulae)
++                frameDepthNebula.RenderFogTransition(rstate);
++            rstate.DepthRange = new Vector2(0, 1);
++        }
++
+         private void SetDepthStatePass()
+         {
+             rstate.DepthFunction = DepthFunction.Less;
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -67,7 +67,7 @@
+   - [x] Statische Passvertrag-Prüfung verlangt pro Attachment genau eine Ressource und gleicht Store/Resolve-Verhalten mit den deklarierten Writes ab; Resolve ist nur für Color erlaubt. Source-Attachments bleiben Read-Verträge. Die Metadaten steuern weiterhin nicht selbst die API-Aufrufe.
+   - [x] Die statische Passfolgenprüfung wertet optionale Reads wie die Laufzeitprüfung aus und verlangt sie nicht als zwingende Eingaben; so sind sequenzielle Prüfläufe auch ohne optionalen Schatten- oder Tiefenpuffer gültig.
+   - [x] Die Hauptpass-Ausführungsreihenfolge steht in den typisierten Passdeskriptoren und wird von Laufzeitprüfung sowie Scheduler daraus gelesen; der separate Pass-zu-Order-Switch ist entfernt. Der Graph führt die Passcallbacks aus.
+-  - [x] `SystemRenderPassGraph` topologisch sortiert und führt Hauptpässe, Physics-Hook, Debug-Overlay und optionalen AA-/HDR-Resolve anhand deklarierter Read-/Write-Ressourcen und expliziter Abhängigkeiten aus. Derselbe Scheduler kompiliert und führt den Postprocess-Plan aus. Ressourcenproduzenten dürfen unabhängig von ihrer Registrierungsreihenfolge stehen; Read-after-write, Write-after-read und Write-after-write werden eingeordnet. Pflicht-Reads ohne Producer, fehlende explizite Vorgänger und Zyklen werden vor Ausführung der Callbacks abgewiesen. Knoten und Abhängigkeitspuffer werden zwischen Frames wiederverwendet; bei gleicher exakter Passstruktur und denselben externen Ressourcen wird auch die topologische Ausführungsfolge wiederverwendet. Eine Strukturänderung löst eine erneute Kompilierung aus. Targetwechsel und Attachments bleiben in den Passcallbacks. Die Abhängigkeitsauflösung nutzt keine pro Kompilierung erzeugten lokalen Closure-Helfer mehr. Setup-, Clear-, sampleable Depth-, Depth-Prepass-, Opaque-, Transparent-, Depth-State-, Shadow-Status-, Hook- und Debug-Callbacks des `SystemRenderer` verwenden langlebige Delegates. Sterne-/Nebel- und AA-Resolve-Callbacks werden weiterhin pro Frame neu erstellt und können Closure-Allokationen verursachen. Laufzeit-/Bildabnahme und Frame-Profiling bleiben offen.
++  - [x] `SystemRenderPassGraph` topologisch sortiert und führt Hauptpässe, Physics-Hook, Debug-Overlay und optionalen AA-/HDR-Resolve anhand deklarierter Read-/Write-Ressourcen und expliziter Abhängigkeiten aus. Derselbe Scheduler kompiliert und führt den Postprocess-Plan aus. Ressourcenproduzenten dürfen unabhängig von ihrer Registrierungsreihenfolge stehen; Read-after-write, Write-after-read und Write-after-write werden eingeordnet. Pflicht-Reads ohne Producer, fehlende explizite Vorgänger und Zyklen werden vor Ausführung der Callbacks abgewiesen. Knoten und Abhängigkeitspuffer werden zwischen Frames wiederverwendet; bei gleicher exakter Passstruktur und denselben externen Ressourcen wird auch die topologische Ausführungsfolge wiederverwendet. Eine Strukturänderung löst eine erneute Kompilierung aus. Targetwechsel und Attachments bleiben in den Passcallbacks. Die Abhängigkeitsauflösung nutzt keine pro Kompilierung erzeugten lokalen Closure-Helfer mehr. Setup-, Clear-, sampleable Depth-, Depth-Prepass-, Opaque-, Sterne-/Nebel-, Transparent-, Depth-State-, Shadow-Status-, Hook- und Debug-Callbacks des `SystemRenderer` verwenden langlebige Delegates. Nur der optionale AA-Resolve-Callback wird weiterhin pro Frame neu erstellt und kann Closure-Allokationen verursachen. Laufzeit-/Bildabnahme und Frame-Profiling bleiben offen.
+   - [x] Der Hauptpass-Tracker veröffentlicht nach erfolgreichem Draw nur deklarierte Writes, deren optionale Attachments am konkreten Target vorhanden sind. Fehlende oder unbekannte optionale Anhänge werden nicht als verfügbare Frame-Ressourcen ausgegeben. Die Passplanung erfolgt im Graphen; Targetwechsel bleiben in den jeweiligen Callbacks.
+   - [x] Gebundene Backend-Renderziele stellen Farb-/Tiefen-/Stencil-Präsenz und ein bekanntes Farbformat bereit. `SystemRenderer` weist Ziele zurück, denen laut Passvertrag zwingende Anhänge fehlen; GL-MSAA meldet das Farbformat nur für bekannte sized-Formate. Swapchainformat und Desktop-GLs unsized-MSAA-Storage bleiben unbekannt.
+   - [x] `AntialiasTarget` prüft beim Erzeugen die tatsächlichen aktiven Farb-/Tiefenattachments und für SMAA auch Stencil an Kanten- und Gewichtsziel; bekannte Zielformate müssen dem gewählten LDR-/HDR-Pfad entsprechen. Unbekanntes Desktop-MSAA-Format bleibt zulässig und wird nicht geraten.
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 282 Client bundles and two native bundles. Each
++The active series contains 283 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -245,3 +245,4 @@
+ | 2281 | Reuse frame-clear callbacks across SystemRenderer frames |
+ | 2282 | Reuse SystemRenderer depth-prepass callbacks across frames |
+ | 2283 | Reuse opaque and transparent SystemRenderer callbacks across frames |
++| 2284 | Reuse SystemRenderer star and nebula callbacks across frames |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -283,3 +283,4 @@
+ client 2281-cache-frame-clear-callbacks.patch
+ client 2282-cache-depth-prepass-callbacks.patch
+ client 2283-cache-opaque-transparent-pass-callbacks.patch
++client 2284-cache-stars-nebula-pass-callbacks.patch

@@ -51,7 +51,7 @@ public class PlayerCargo
         if (!uint.TryParse(s, out uint hash)) Item = new HashValue(s);
         else Item = hash;
         Count = e[1].ToInt32();
-        if (e.Count > 2 && !string.IsNullOrWhiteSpace(e[2].ToString()))
+        if (e.Count > 2)
             PercentageHealth = e[2].ToSingle();
         if (e.Count > 4)
             IsMissionCargo = e[4].ToBoolean();

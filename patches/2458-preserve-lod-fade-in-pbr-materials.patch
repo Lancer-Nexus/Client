@@ -1,0 +1,200 @@
+diff --git a/src/LibreLancer/Render/RenderMaterial.cs b/src/LibreLancer/Render/RenderMaterial.cs
+--- a/src/LibreLancer/Render/RenderMaterial.cs
++++ b/src/LibreLancer/Render/RenderMaterial.cs
+@@ -46,6 +46,13 @@
+         public float FadeNear = 0;
+         public float FadeFar = 0;
+         public float OpacityMultiplier = 1;
++
++        internal void SetFadeState(bool enabled, float near, float far)
++        {
++            Fade = enabled;
++            FadeNear = enabled ? near : 0;
++            FadeFar = enabled ? far : 0;
++        }
+         public string? EnvMap;
+         public StorageBuffer? Bones;
+         public int BufferOffset;
+diff --git a/src/LibreLancer/Render/CommandBuffer.cs b/src/LibreLancer/Render/CommandBuffer.cs
+--- a/src/LibreLancer/Render/CommandBuffer.cs
++++ b/src/LibreLancer/Render/CommandBuffer.cs
+@@ -397,11 +397,12 @@
+                 Material.EnvMap = EnvMap;
+                 Material.Bones = Bones;
+                 Material.BufferOffset = BoneOffset;
+-                if (CmdType == RenderCmdType.MaterialFade)
+-				{
+-					Material.Fade = true;
+-                    Material.FadeNear = Unsafe.BitCast<int, float>(Hash);
+-                    Material.FadeFar = Unsafe.BitCast<int, float>(Index);
++                var materialFade = CmdType == RenderCmdType.MaterialFade;
++                Material.SetFadeState(materialFade,
++                    materialFade ? Unsafe.BitCast<int, float>(Hash) : 0,
++                    materialFade ? Unsafe.BitCast<int, float>(Index) : 0);
++                if (materialFade)
++				{
+                     Material.OpacityMultiplier = 1;
+                 }
+                 else
+diff --git a/src/LibreLancer/Render/Materials/BasicMaterial.cs b/src/LibreLancer/Render/Materials/BasicMaterial.cs
+--- a/src/LibreLancer/Render/Materials/BasicMaterial.cs
++++ b/src/LibreLancer/Render/Materials/BasicMaterial.cs
+@@ -316,6 +316,8 @@
+             public float AmbientPadding;
+             public Vector4 TexCoordSelectors1;
+             public Vector4 TexCoordSelectors2;
++            public Vector2 FadeRange;
++            public Vector2 FadePadding;
+         }
+ 
+         private static float UvSelector(SamplerFlags flags) =>
+@@ -492,7 +494,8 @@
+                       TexCoordSelectors1 = new Vector4(
+                           UvSelector(DtFlags), UvSelector(EtFlags), UvSelector(normalFlags), UvSelector(metallicFlags)),
+                       TexCoordSelectors2 = new Vector4(
+-                        UvSelector(roughnessFlags), UvSelector(BtFlags), 0, 0) };
++                        UvSelector(roughnessFlags), UvSelector(BtFlags), 0, 0),
++                      FadeRange = Fade ? new Vector2(FadeNear, FadeFar) : Vector2.Zero };
+                 shader.SetUniformBlock(3, ref param);
+ 
+                 if (!string.IsNullOrEmpty(MtSampler))
+diff --git a/src/LibreLancer/Shaders/PBR.frag.hlsl b/src/LibreLancer/Shaders/PBR.frag.hlsl
+--- a/src/LibreLancer/Shaders/PBR.frag.hlsl
++++ b/src/LibreLancer/Shaders/PBR.frag.hlsl
+@@ -79,6 +79,8 @@
+     float AmbientPadding;
+     float4 TexCoordSelectors1;
+     float4 TexCoordSelectors2;
++    float2 FadeRange;
++    float2 FadePadding;
+ };
+ 
+ bool HasFeature(uint feature)
+@@ -410,6 +412,12 @@
+         color = lerp(color, illuminationSample.rgb, illuminationSample.a);
+ 
+     float outputAlpha = HasFeature(8) || HasFeature(16) || HasFeature(128) ? 1.0 : baseColor.a;
+-    return ToDisplayOutput(float4(color, outputAlpha * Oc));
+-}
+-#endif
++    float fadeFactor = 1.0;
++    if (FadeRange.y > FadeRange.x)
++    {
++        float dist = length(input.viewPosition);
++        fadeFactor = saturate((FadeRange.y - dist) / (FadeRange.y - FadeRange.x));
++    }
++    return ToDisplayOutput(float4(color, outputAlpha * Oc * fadeFactor));
++}
++#endif
+diff --git a/src/LibreLancer/Render/Materials/AtmosphereMaterial.cs b/src/LibreLancer/Render/Materials/AtmosphereMaterial.cs
+--- a/src/LibreLancer/Render/Materials/AtmosphereMaterial.cs
++++ b/src/LibreLancer/Render/Materials/AtmosphereMaterial.cs
+@@ -20,7 +20,7 @@
+         public string DtSampler;
+         public SamplerFlags DtFlags;
+         public float Alpha;
+-        public float Fade; // Passed in AtmosphereParameters; the retail shader behavior is still unknown.
++        public new float Fade; // Passed in AtmosphereParameters; the retail shader behavior is still unknown.
+         public float Scale;
+ 
+         public AtmosphereMaterial(ResourceManager library, string dtSampler) : base(library)
+diff --git a/src/LibreLancer.Tests/NormalMapShaderTests.cs b/src/LibreLancer.Tests/NormalMapShaderTests.cs
+--- a/src/LibreLancer.Tests/NormalMapShaderTests.cs
++++ b/src/LibreLancer.Tests/NormalMapShaderTests.cs
+@@ -23,7 +23,7 @@
+         Assert.Equal(1,material.NormalStrength);
+     }
+     [Theory]
+-    [InlineData("BasicParameters",64,48)] [InlineData("PBRParameters",80,44)]
++    [InlineData("BasicParameters",64,48)] [InlineData("PBRParameters",160,44)]
+     public void UniformLayoutMatchesHlslRegisters(string name,int size,int strengthOffset)
+     {
+         var type=typeof(BasicMaterial).GetNestedType(name,BindingFlags.NonPublic)!;
+@@ -35,7 +35,7 @@
+     public void PbrEnvironmentMipCountMatchesHlslRegister()
+     {
+         var type=typeof(BasicMaterial).GetNestedType("PBRParameters",BindingFlags.NonPublic)!;
+-        Assert.Equal(80,Marshal.SizeOf(type));
++        Assert.Equal(160,Marshal.SizeOf(type));
+         Assert.Equal(48,Marshal.OffsetOf(type,"EnvMipCount").ToInt32());
+         Assert.Equal(52,Marshal.OffsetOf(type,"EnvMapStrength").ToInt32());
+     }
+@@ -46,7 +46,15 @@
+     public void EnvironmentMapStrengthUsesTheFinalMaterialRegister(string name)
+     {
+         var type=typeof(BasicMaterial).GetNestedType(name,BindingFlags.NonPublic)!;
+-        Assert.Equal(name == "PBRParameters" ? 80 : 64,Marshal.SizeOf(type));
++        Assert.Equal(name == "PBRParameters" ? 160 : 64,Marshal.SizeOf(type));
+         Assert.Equal(52,Marshal.OffsetOf(type,"EnvMapStrength").ToInt32());
+     }
++
++    [Fact]
++    public void PbrFadeRangeMatchesHlslRegister()
++    {
++        var type=typeof(BasicMaterial).GetNestedType("PBRParameters",BindingFlags.NonPublic)!;
++        Assert.Equal(144,Marshal.OffsetOf(type,"FadeRange").ToInt32());
++        Assert.Equal(152,Marshal.OffsetOf(type,"FadePadding").ToInt32());
++    }
+ }
+diff --git a/src/LibreLancer.Tests/RenderCommandBufferCapacityTests.cs b/src/LibreLancer.Tests/RenderCommandBufferCapacityTests.cs
+--- a/src/LibreLancer.Tests/RenderCommandBufferCapacityTests.cs
++++ b/src/LibreLancer.Tests/RenderCommandBufferCapacityTests.cs
+@@ -36,6 +36,22 @@
+     public void CapacityDoesNotShrinkWhenCurrentAllocationIsEnough()
+     {
+         Assert.Equal(32768, CommandBuffer.GetExpandedCapacity(32768, 16385));
++    }
++
++    [Fact]
++    public void FadeStateDoesNotLeakIntoFollowingMaterialCommands()
++    {
++        var material = new TransparentMaterial();
++
++        material.SetFadeState(true, 8f, 16f);
++        Assert.True(material.Fade);
++        Assert.Equal(8f, material.FadeNear);
++        Assert.Equal(16f, material.FadeFar);
++
++        material.SetFadeState(false, 0f, 0f);
++        Assert.False(material.Fade);
++        Assert.Equal(0f, material.FadeNear);
++        Assert.Equal(0f, material.FadeFar);
+     }
+ 
+     [Fact]
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -742,3 +742,16 @@
+ bleibt deckend. Ohne PBR-Daten bleibt der Legacy-Shader aktiv. Der Release-Build
+ bestand mit 119 vorhandenen Warnungen und 0 Fehlern; die Overlay-Prüfung
+ rekonstruierte 1.115 Dateien. Visuelle Laufzeitabnahme ist offen.
++
++## LOD-Fade im PBR-Pfad (2026-10-20)
++
++Asteroidenfelder übergeben LOD-Überblendungen über `RenderCmdType.MaterialFade`.
++Der Legacy-Shader wertet `FadeRange` anhand der View-Distanz aus, der PBR-Shader
++ließ diesen Alpha-Fade bisher aus. `PBRParameters` trägt `FadeRange` jetzt in
++einem 160-Byte-Uniformblock; `PBR.frag.hlsl` verwendet dieselbe View-Distanz-
++Überblendung. Der CommandBuffer setzt den Fade-Zustand nun für jeden Draw neu
++und löscht Fade-Bereichswerte bei normalen Materialbefehlen, damit ein Fade nicht
++auf nachfolgende Draws durchschlägt. Die Shaderpermutationen wurden beim
++gezielten Testbuild kompiliert; Layout-, Fade-Zustands- und Materialrouten-Tests
++bestanden zusammen (22/22). Eine visuelle Abnahme in einem Asteroidenfeld und
++GPU-Kostenmessung stehen noch aus.
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -449,3 +449,4 @@
+ client 2455-detailmap-mat-normal-pbr-route.patch
+ client 2456-correct-atmosphere-fade-comment.patch
+ client 2457-cover-mat-normal-routing-for-detail-materials.patch
++client 2458-preserve-lod-fade-in-pbr-materials.patch
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -387,3 +387,4 @@
+ | 2455 | Route DetailMap MAT normal maps through the lit PBR shader and cover the routing gate |
+ | 2456 | Remove unsupported Atmosphere Fade behavior speculation and record binary scan limits |
+ | 2457 | Cover MAT normal-map PBR routing for all specialized detail-map materials |
++| 2458 | Preserve asteroid LOD fades in PBR draws and reset per-command material fade state |

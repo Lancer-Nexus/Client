@@ -1,0 +1,259 @@
+diff --git a/docs/evidence/renderer/sdl-gpu-cmp-texture-lookup-20261019.md b/docs/evidence/renderer/sdl-gpu-cmp-texture-lookup-20261019.md
+new file mode 100644
+--- /dev/null
++++ b/docs/evidence/renderer/sdl-gpu-cmp-texture-lookup-20261019.md
+@@ -0,0 +1,35 @@
++# SDL_GPU CMP-Diffuse-Texturauflösung (2026-10-19)
++
++Der NAP-gestützte CMP-Diagnosepfad sucht die zum MAT-Material gehörende
++Diffuse-Textur in dieser Reihenfolge: Texturbibliothek des gewählten CMP-Teils,
++CMP-Texturbibliothek, anschließend die externe MAT/TXM-Texturbibliothek. Ein
++exakter Schlüssel hat Vorrang. Bei Fallbacks werden zuerst vollständige
++Schlüssel, danach nur eindeutige Dateibasisnamen ohne Berücksichtigung der
++Groß-/Kleinschreibung verglichen. Mehrdeutige Treffer liefern keine Textur,
++statt beliebig einen Eintrag zu wählen. Die Diagnose gibt die
++gefundene Quelle (`component`, `cmp`, `external` oder `none`) aus.
++
++## Laufzeitnachweis und Grenze
++
++Der NAP-only SDL_GPU/Vulkan-Lauf für `br_elite.cmp`, Teil `br_tail_lod1`, mit
++der externen `br_playerships.mat` war erfolgreich. Diffuse DDS sowie Normal-,
++Roughness- und Metallic-Surface-Texturen wurden in den Produktions-PBR-Draw
++hochgeladen; die 4/4 Coverage-Proben trafen Geometrie. Die Surface-Maps wurden
++über den aktiven NAP-Snapshot geladen.
++
++Ein zweiter Lauf ohne externe MAT-Datei konnte für `br_elite` keinen
++indizierten VMesh-Draw auflösen. Die Materialbibliothek dieses Assets liegt
++extern; deshalb belegt dieser Lauf die eingebettete Texturauflösung nicht.
++
++Zur Suche nach einem geeigneten Fixture wurden zusätzlich alle elf CMPs des
++verifizierten 23-Einträge-NAP-Pakets `cmp-multisubmesh-qa` ohne externe MAT
++geöffnet. Alle elf Root-Meshes wurden gezeichnet, aber bei allen blieb das MAT-Material
++unaufgelöst. Das Paket bietet daher keinen
++Laufzeitbeleg für eingebettete MAT/TXM-Daten. Der neue Suchpfad für Texturen aus
++CMP-Komponenten und CMP-TXM ist implementiert, aber mit einem Asset mit
++eingebetteter Materialbibliothek noch nicht zur Laufzeit bestätigt. Die
++Einzelteil-Draws sind keine vollständige CMP-Montage oder Ingame-Abnahme. Der
++verwendete Intel Haswell Vulkan-Treiber meldet unvollständige Unterstützung.
++
++Ausführliche Ausgangsdaten und Paketprovenienz: [NAP SDL_GPU CMP-Part A/B](cmp-part-transform-20261019/README.md)
++und [Bretonia Elite Material-Surface-Smoke](br-elite-sdl-gpu-nap-20261019/README.md).
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -278,6 +278,14 @@
+    Das bleibt ein Draw und ist kein vollständiger Schiffsnachweis. CMP-Transforms
+    und sämtliche Materialien aller Komponenten, BC4/BC5, Cubemaps, Skinning,
+    Renderziele und Präsentation müssen in realen Szenen zusammen geprüft werden.
++   Patch 2426 ergänzt für den SDL_GPU-Diagnosepfad die Diffuse-Textursuche in
++   Komponenten-TXM, CMP-TXM und zuletzt externer MAT/TXM. Der `br_elite`-Lauf
++   mit externer MAT zeichnet den Tail-Teil und lädt seine Surface-Karten; ein
++   Lauf ohne MAT löst diesen Asset-Satz nicht auf, weil seine Materialbibliothek
++   extern liegt. Die eingebettete Suchreihenfolge ist damit noch nicht durch ein
++   eingebettetes Asset zur Laufzeit bestätigt und bleibt Diagnosecode, kein
++   Ersatz für die noch fehlende SDL_GPU-Spielrenderer-Ausführung. Siehe
++   [CMP-Texturauflösung](evidence/renderer/sdl-gpu-cmp-texture-lookup-20261019.md).
+    Erst nach erfolgreichem vollständigem Spike den gesamten
+    Spiel- und Editorpfad portieren; OpenGL bleibt währenddessen die Vergleichs-
+    und Rückfallreferenz. Der Audit auf Mesa/Vulkan Haswell ist wegen der
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -364,3 +364,4 @@
+ | 2423 | Record repeated full-quality renderer profiles with NAP-only provenance |
+ | 2424 | Capture cumulative dropped simulation ticks in renderer profile CSVs |
+ | 2425 | Document the local invulnerability option in renderer smoke evidence |
++| 2426 | Resolve diffuse textures from embedded CMP libraries in SDL_GPU diagnostics |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -417,3 +417,4 @@
+ client 2423-full-quality-profile-repeat-evidence.patch
+ client 2424-render-profile-simulation-overload-counter.patch
+ client 2425-document-local-invulnerability-render-smokes.patch
++client 2426-sdl-gpu-cmp-embedded-texture-lookup.patch
+diff --git a/src/LibreLancer.Tests/TxmTextureLookupTests.cs b/src/LibreLancer.Tests/TxmTextureLookupTests.cs
+new file mode 100644
+--- /dev/null
++++ b/src/LibreLancer.Tests/TxmTextureLookupTests.cs
+@@ -0,0 +1,61 @@
++using System.Linq;
++using LibreLancer.Utf;
++using LibreLancer.Utf.Mat;
++using Xunit;
++
++namespace LibreLancer.Tests;
++
++public class TxmTextureLookupTests
++{
++    [Fact]
++    public void ExactKeyTakesPriorityOverCaseInsensitiveDuplicate()
++    {
++        var txm = CreateLibrary("Ships/Hull.dds", "ships/hull.dds");
++        var expected = txm.Textures["Ships/Hull.dds"];
++
++        Assert.Same(expected, txm.FindTexture("Ships/Hull.dds"));
++    }
++
++    [Fact]
++    public void CaseInsensitiveFullPathResolvesUniqueEntry()
++    {
++        var txm = CreateLibrary("Ships/Hull.dds");
++
++        Assert.Same(txm.Textures["Ships/Hull.dds"], txm.FindTexture("ships/hull.DDS"));
++    }
++
++    [Fact]
++    public void BasenameResolvesOnlyWhenUnique()
++    {
++        var txm = CreateLibrary("Ships\\Hull.dds", "Stations/Port.dds");
++
++        Assert.Same(txm.Textures["Ships\\Hull.dds"], txm.FindTexture("hull.tga"));
++        Assert.Null(txm.FindTexture("unknown.tga"));
++    }
++
++    [Fact]
++    public void AmbiguousBasenameIsRejected()
++    {
++        var txm = CreateLibrary("Ships/Hull.dds", "Stations/Hull.dds");
++
++        Assert.Null(txm.FindTexture("hull.tga"));
++    }
++
++    [Theory]
++    [InlineData(null)]
++    [InlineData("")]
++    [InlineData("  ")]
++    public void EmptyTextureNameDoesNotResolve(string? textureName)
++    {
++        var txm = CreateLibrary("Ships/Hull.dds");
++
++        Assert.Null(txm.FindTexture(textureName));
++    }
++
++    private static TxmFile CreateLibrary(params string[] names)
++    {
++        var textures = names.Select(name => (Node)new IntermediateNode(name,
++            [new LeafNode("mips", [0x44, 0x44, 0x53])]));
++        return new TxmFile(new IntermediateNode("texture library", textures.ToList()));
++    }
++}
+diff --git a/src/LibreLancer/Utf/Mat/TxmFile.cs b/src/LibreLancer/Utf/Mat/TxmFile.cs
+--- a/src/LibreLancer/Utf/Mat/TxmFile.cs
++++ b/src/LibreLancer/Utf/Mat/TxmFile.cs
+@@ -24,6 +24,47 @@
+             : this()
+         {
+             setTextures(textureLibraryNode);
++        }
++
++        public TextureData? FindTexture(string? textureName)
++        {
++            if (string.IsNullOrWhiteSpace(textureName))
++                return null;
++            if (Textures.TryGetValue(textureName, out var exact))
++                return exact;
++
++            TextureData? caseInsensitiveMatch = null;
++            foreach (var texture in Textures)
++            {
++                if (!string.Equals(texture.Key, textureName, StringComparison.OrdinalIgnoreCase))
++                    continue;
++                if (caseInsensitiveMatch != null && !ReferenceEquals(caseInsensitiveMatch, texture.Value))
++                    return null;
++                caseInsensitiveMatch = texture.Value;
++            }
++            if (caseInsensitiveMatch != null)
++                return caseInsensitiveMatch;
++
++            var basename = GetBasename(textureName);
++            TextureData? basenameMatch = null;
++            foreach (var texture in Textures)
++            {
++                if (!string.Equals(GetBasename(texture.Key), basename,
++                        StringComparison.OrdinalIgnoreCase))
++                    continue;
++                if (basenameMatch != null && !ReferenceEquals(basenameMatch, texture.Value))
++                    return null;
++                basenameMatch = texture.Value;
++            }
++            return basenameMatch;
++        }
++
++        private static string GetBasename(string name)
++        {
++            var separator = Math.Max(name.LastIndexOf('/'), name.LastIndexOf('\\'));
++            var filename = name[(separator + 1)..];
++            var extension = filename.LastIndexOf('.');
++            return extension > 0 ? filename[..extension] : filename;
+         }
+ 
+         private void setTextures(IntermediateNode textureLibraryNode)
+diff --git a/src/lancer/Program.cs b/src/lancer/Program.cs
+--- a/src/lancer/Program.cs
++++ b/src/lancer/Program.cs
+@@ -224,7 +224,7 @@
+         return LoadVmeshDraw(path, materialPath, File.OpenRead, surfaceVfs, surfaceEnabled);
+     }
+ 
+-    private static VMeshDraw LoadVmeshDraw(FileSystem vfs, string path, string materialPath,
++    private static VMeshDraw LoadVmeshDraw(FileSystem vfs, string path, string? materialPath,
+         bool surfaceEnabled, string? partName = null)
+     {
+         return LoadVmeshDraw(path, materialPath, vfs.Open, vfs, surfaceEnabled, partName);
+@@ -548,14 +548,9 @@
+ 
+         var material = selectedMaterial;
+         var color = material?.Dc ?? LibreLancer.Color4.White;
+-        TextureData? diffuseTexture = null;
+-        if (material?.DtName is { } diffuseName && externalTextures != null)
+-        {
+-            diffuseTexture = externalTextures.Textures.FirstOrDefault(x =>
+-                string.Equals(x.Key, diffuseName, StringComparison.OrdinalIgnoreCase) ||
+-                string.Equals(Path.GetFileNameWithoutExtension(x.Key),
+-                    Path.GetFileNameWithoutExtension(diffuseName), StringComparison.OrdinalIgnoreCase)).Value;
+-        }
++        var diffuseTexture = selectedModel.TextureLibrary?.FindTexture(material?.DtName) ??
++                            cmp.TextureLibrary?.FindTexture(material?.DtName) ??
++                            externalTextures?.FindTexture(material?.DtName);
+         var diffuseImage = diffuseTexture?.GetImageResource();
+         byte[]? diffuseDds = diffuseImage?.Type == ImageType.DDS ? diffuseImage.Data : null;
+         var normalStrength = selectedSurface?.NormalStrength ?? 1.0f;
+@@ -570,6 +565,9 @@
+                 decodedDiffuseInfo = $"{mipImages[0].Format} {mipImages[0].Width}x{mipImages[0].Height} " +
+                                      $"mips={mipImages.Length}";
+         }
++        var textureLibrarySource = diffuseTexture == null ? "none" :
++            selectedModel.TextureLibrary?.Textures.Values.Contains(diffuseTexture) == true ? "component" :
++            cmp.TextureLibrary?.Textures.Values.Contains(diffuseTexture) == true ? "cmp" : "external";
+         var description = $"{path} part={selectedPart.ObjectName} transform=" +
+                           $"({rigidPart.LocalTransform.Position.X:F3},{rigidPart.LocalTransform.Position.Y:F3}," +
+                           $"{rigidPart.LocalTransform.Position.Z:F3}) model={selectedModel.Path}/{selectedRef.MeshCrc:X8}, " +
+@@ -577,7 +575,7 @@
+                           (material == null ? " (material unresolved)" :
+                               $" name={material.Name}, type={material.Type}, diffuse={material.DtName ?? "<none>"}, " +
+                               $"Dc=({color.R:F3},{color.G:F3},{color.B:F3},{color.A:F3}), " +
+-                              $"embeddedDiffuse={diffuseTexture?.GetType().Name ?? "<missing>"}/" +
++                              $"diffuseSource={textureLibrarySource}, embeddedDiffuse={diffuseTexture?.GetType().Name ?? "<missing>"}/" +
+                               $"{diffuseImage?.Type.ToString() ?? "none"}:{diffuseImage?.Data.Length ?? 0} bytes, " +
+                               $"txmEntries={externalTextures?.Textures.Count ?? 0}, image={decodedDiffuseInfo}") +
+                           $", sourceReferences={drawIndexCount}, sameMaterialSubmeshes={drawMeshes.Count}, baseVertex={drawBaseVertex}";
+@@ -638,7 +636,8 @@
+                 var packageProvider = NexusPackageFileProvider.LoadActive(args[1])
+                     ?? throw new InvalidDataException($"No active NAP manifest was found under {args[1]}.");
+                 var packageVfs = new FileSystem(packageProvider);
+-                var vmesh = LoadVmeshDraw(packageVfs, args[2], args[3], surfaceMode == "on", selectedPart);
++                var materialPath = args[3] == "-" ? null : args[3];
++                var vmesh = LoadVmeshDraw(packageVfs, args[2], materialPath, surfaceMode == "on", selectedPart);
+                 Console.WriteLine($"Loaded complete Freelancer VMesh draw from active NAP: {vmesh.Description}.");
+                 Environment.ExitCode = SDL3GpuSmoke.Run(
+                     () => new FVFVertex(vmesh.Format).GetVertexDeclaration(),
+@@ -750,7 +749,7 @@
+             Console.WriteLine("       Standalone test option: --invulnerable=on|off (local embedded server only)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-smoke (SDL3 GPU shader, pipeline, draw, and swapchain test)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-vmesh-smoke <cmp-path> [mat-path [surface-data-root [on|off]]] (draw a VMesh with MAT diffuse and optional NAP Surface maps)");
+-            Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-vmesh-nap-smoke <application-dir> <cmp-virtual-path> <mat-virtual-path> [part-name] [on|off] (draw one CMP part and its Surface maps from the active NAP snapshot)");
++            Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-vmesh-nap-smoke <application-dir> <cmp-virtual-path> <mat-virtual-path|-> [part-name] [on|off] (draw one CMP part using embedded or external materials and active NAP Surface maps)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-dfm-smoke <dfm-path> [surface-data-root [on|off]] (draw an embedded DFM material with production GPU skinning)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-dfm-nap-smoke <application-dir> <dfm-virtual-path> [on|off] (draw an embedded DFM from the verified active NAP snapshot)");
+             Console.WriteLine("       Renderer backend diagnostic: --sdl-gpu-shader-bundle-audit (parse every built-in shader variant and validate SDL_GPU slot maps)");

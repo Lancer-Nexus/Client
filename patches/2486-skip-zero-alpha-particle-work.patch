@@ -1,0 +1,127 @@
+--- a/src/LibreLancer/Fx/ParticleEffectPool.cs
++++ b/src/LibreLancer/Fx/ParticleEffectPool.cs
+@@ -43,6 +43,7 @@
+             public Color4 Color;
+         }
+ 
++        internal const float MinimumVisibleAlpha = 0.0001f;
+         public const int MaxParticles = 30_000;
+ 
+         private VertexBuffer vbo;
+@@ -94,7 +95,7 @@
+             bool flipV,
+             bool motionBlurEnabled = false)
+         {
+-            if (color.A <= 0.0001f) //won't render
++            if (color.A <= MinimumVisibleAlpha) //won't render
+                 return;
+             if (!TryReserveParticle(ref nextParticle, MaxParticles, out var particleIndex))
+                 return;
+--- a/src/LibreLancer/Fx/Appearances/FxBasicAppearance.cs
++++ b/src/LibreLancer/Fx/Appearances/FxBasicAppearance.cs
+@@ -112,12 +112,16 @@
+             {
+                 ref var particle = ref instance.Buffer[nodeIdx, i];
+                 var time = particle.TimeAlive / particle.LifeSpan;
++                var a = Alpha.GetValue(sparam, time);
++                // AddParticle discards these particles before writing GPU data. Skip
++                // position, visibility, velocity, color and texture-frame work too.
++                if (a <= ParticleEffectPool.MinimumVisibleAlpha)
++                    continue;
+                 var p = Vector3.Transform(Vector3.Transform(particle.Position, particle.Orientation), nodeTr);
+                 if (!PassesVisibilityFields(node, instance, p, sparam))
+                     continue;
+                 var v = Vector3.TransformNormal(particle.Velocity, nodeTr);
+                 var c = Color.GetValue(sparam, time);
+-                var a = Alpha.GetValue(sparam, time);
+                 var size = Size?.GetValue(sparam, time) ?? 1.0f;
+                 var aspect = HToVAspect?.GetValue(sparam, time) ?? 1.0f;
+                 instance.Pool?.AddParticle(
+--- a/src/LibreLancer/Fx/Appearances/FxOrientedAppearance.cs
++++ b/src/LibreLancer/Fx/Appearances/FxOrientedAppearance.cs
+@@ -40,12 +40,14 @@
+             {
+                 ref var particle = ref instance.Buffer[nodeIdx, i];
+                 var time = particle.TimeAlive / particle.LifeSpan;
++                var alpha = Alpha.GetValue(sparam, time);
++                if (alpha <= ParticleEffectPool.MinimumVisibleAlpha)
++                    continue;
+                 var position = Vector3.Transform(Vector3.Transform(particle.Position, particle.Orientation), nodeTr);
+                 if (!PassesVisibilityFields(node, instance, position, sparam))
+                     continue;
+                 var velocity = Vector3.TransformNormal(particle.Velocity, nodeTr);
+                 var color = Color.GetValue(sparam, time);
+-                var alpha = Alpha.GetValue(sparam, time);
+                 var width = Width?.GetValue(sparam, time) ?? 1f;
+                 var height = Height?.GetValue(sparam, time) ?? 1f;
+ 
+--- a/src/LibreLancer/Fx/Appearances/FxRectAppearance.cs
++++ b/src/LibreLancer/Fx/Appearances/FxRectAppearance.cs
+@@ -85,6 +85,9 @@
+                 particle.Normal = GetNormal(particle.Velocity, particle.Normal);
+ 
+                 var time = particle.TimeAlive / particle.LifeSpan;
++                var a = Alpha!.GetValue(sparam, time);
++                if (a <= ParticleEffectPool.MinimumVisibleAlpha)
++                    continue;
+                 var src_pos = particle.Position;
+                 var l = Length!.GetValue(sparam, time);
+                 var w = Width!.GetValue(sparam, time);
+@@ -100,7 +103,6 @@
+                 if (!PassesVisibilityFields(node, instance, p, sparam))
+                     continue;
+                 var c = Color!.GetValue(sparam, time);
+-                var a = Alpha!.GetValue(sparam, time);
+                 var n = Vector3.TransformNormal(particle.Normal, node_tr);
+                 if (ViewingAngleFade)
+                 {
+--- a/src/LibreLancer/Fx/Appearances/FxPerpAppearance.cs
++++ b/src/LibreLancer/Fx/Appearances/FxPerpAppearance.cs
+@@ -52,11 +52,12 @@
+                 ref var particle = ref instance.Buffer[nodeIdx, i];
+                 var time = particle.TimeAlive / particle.LifeSpan;
+ 
+-                var c = Color.GetValue(sparam, time);
+-                var a = Alpha.GetValue(sparam, time);
+                 var q = particle.Orientation * Transform.GetDeltaRotation(sparam,
+                     (float)instance.LastTime, (float)instance.GlobalTime);
+                 particle.Orientation = q;
++                var a = Alpha.GetValue(sparam, time);
++                if (a <= ParticleEffectPool.MinimumVisibleAlpha)
++                    continue;
+                 var p = TransformPosition(particle.Position, q, node_tr);
+                 if (!PassesVisibilityFields(node, instance, p, sparam))
+                     continue;
+@@ -65,6 +66,7 @@
+                 var n = GetDirection(p - p2, fallbackDirection);
+                 if (ViewingAngleFade)
+                     a *= GetViewingAngleFade(n, instance.Pool.Camera.Position - p);
++                var c = Color.GetValue(sparam, time);
+                 instance.Pool.AddParticle(
+                     TextureHandler,
+                     p,
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -15,7 +15,7 @@
+ | Legacy-Environment-Maps | Bestehende Freelancer-Cubemap-Reflexionen lassen sich unabhängig vom PBR-IBL per Einstellung oder `--render-legacy-environment-maps=on|off` umschalten. Der Standard bleibt `on`, damit ältere Materialien ihr bisheriges Verhalten behalten. | Beide Startwerte laden bis ins Intro. Der gleiche Kamera-A/B-Bildvergleich fehlt noch; externe Bildschirmaufnahmen waren in der letzten Sitzung schwarz. |
+ | HDR und Tonemapping | Linearisiertes Scene-Target, ACES-Tonemapping, linearisierte PBR-Albedo-/Licht-/Emissionswerte und exakte sRGB-Ausgabe im PBR-LDR-Pfad. System- und Nebel-Clearfarben werden ebenfalls vor dem HDR-Clear linearisiert; LDR bleibt unverändert. Ein Source-Audit hat alle 19 Ingame-Fragmentshader und den Postprocess-Ausgang geprüft; 2 Farbraum- und 21 Ambientlicht-Regressionstests bestehen. | Retail-Farbannahmen, visuelle Gleichheit zwischen Legacy/PBR, transparente Effekte, Fog und zusammengesetzte Ingame-Szenen brauchen weiterhin feste Bildvergleiche, Original-Client-Referenz und Hardware-GPU-Abnahme. HDR/LDR-Vergleiche: `docs/evidence/renderer/postprocess-four-mode-ab-20261017/` und der same-session-Hi02-Lauf `docs/evidence/renderer/hdr-ldr-hi02-live-ab-20261018/`; letzterer zeigt in dieser Legacy-Szene nur geringe Pixelabweichung und ersetzt keine Material-/Emissions-Referenz. Shaderaudit: `docs/evidence/renderer/hdr-shader-color-contract-audit-20261018.md`; Clear-Farbvertrag: `docs/evidence/renderer/hdr-clear-color-contract-20261018.md`. |
+ | Bloom | HDR-Extraktion mittelt jetzt ein vollständiges 4×4-Quellfenster in Viertelauflösung; aufrundende Zielmaße behalten Randpixel bei ungeraden Fenstergrößen. Basis-, mittlere und breite Blur-Stufen sowie Schwelle, Radius, Auflösung und Kernel sind konfigurierbar. | Die Extraktion beseitigt das bisherige Unterabtasten der zentralen vier Texel. Der Code führt alle drei Stufen aus. NAP-only M01A-Läufe am 19.10. vergleichen Bloom ein/aus und schalten in einem dritten Lauf zusätzlich Partikeleffekte aus. Der große Ring verschwindet mit den Explosionspartikeln; NAP-Fuse- und ALE-Daten verknüpfen ihn mit dem `planetflare`-Flashbang der Freeport-7-Explosion und grenzen ihn von Bloom ab. Die bewegten Frames sind nicht pixelgenau, die einzelne Flashbang-Instanz bleibt offen. Siehe [`NAP M01A Bloom-/Partikelmatrix`](evidence/renderer/nap-full-runtime-20261019/README.md). GPU-Kosten bleiben offen. |
+-| Partikelpuffer | `ParticleBuffer.RemoveAt` verschiebt beim Entfernen die kürzere Seite des Ringpuffers und bewahrt dabei die Reihenfolge. | Der maximale Verschiebeaufwand sinkt von der gesamten Restlänge auf `min(prefix, suffix)`; tatsächliche FPS-/GPU-Wirkung muss in festen Partikelszenen gemessen werden. |
++| Partikelpfad | `ParticleBuffer.RemoveAt` verschiebt beim Entfernen die kürzere Seite des Ringpuffers und bewahrt dabei die Reihenfolge. Basic-, orientierte, rechteckige und Perp-Partikel überspringen jetzt CPU-Arbeit für Alpha-Werte bis `ParticleEffectPool.MinimumVisibleAlpha`; bei Perp-Partikeln wird zuerst die akkumulierte Orientierung aktualisiert. | `AddParticle` verwirft dieselben Alpha-Werte, daher ändern sich weder sichtbare Geometrie noch Blend-Reihenfolge. Wie häufig der Fall auftritt und welchen Framezeitgewinn er bringt, ist noch nicht gemessen. Beam-Punkte bleiben unverändert, da ihr Entfernen die Beam-Topologie verändern könnte. |
+ | Projektil-Effekt-Culling | `ProjectileRenderer` prüft den Partikeleffekt nach der Simulation gegen die aktuelle Kamerafrustum und lässt Simulation, Beams und Effektlichter weiterlaufen. Für Effekte ohne statischen Radius berechnet `ParticleEffectInstance` einen konservativen Radius aus den aktuell lebenden Billboards, Rechtecken, Beam-Punkten und verschachtelten Partikeleffekten. Quadratische Distanzschranken überspringen Partikel, die den bisherigen Maximalradius sicher nicht erweitern; Motion-Blur-Partikel verwenden dafür eine konservative Cauchy-Schwarz-Schranke. Profil-CSV-Zähler unterscheiden geprüfte Effekte, verfügbare Bounds und verworfene Draws. | Ein NAP-only-Hi02-Capture belegt 5.954 verfügbare Bounds und 977 übersprungene Effektinstanzen in 300 Frames; ohne dynamische Bounds waren es null. Drawcall- und GPU-Zeit-p50 sanken im zweiten Lauf, aber bewegte Szene und Projektilverlauf waren nicht fixiert und FPS-p50 änderte sich nicht. Daraus folgt kein Performancegewinn. Die CPU-Arithmetik wurde reduziert, der Laufzeitgewinn ist noch nicht kontrolliert gemessen. Unbekannte Appearance-Typen, ungültige Werte und mehr als 16 Verschachtelungsebenen deaktivieren das Culling sicher. Eine visuelle Prüfung mit fester Kamera und eine kontrollierte Vorher-/Nachher-Leistungsmessung bleiben offen. Siehe [Projectile-effect culling live profile](evidence/renderer/projectile-effect-culling-live-20261020/README.md). |
+ | Transparente Draw-Commands | Transparent-Commands und Sortierindizes wachsen bei Bedarf geometrisch über die bisherige 16.384-Grenze hinaus; beide Arrays behalten dieselbe Kapazität. Der Sortiervergleich wird pro CommandBuffer wiederverwendet und nach einer Puffervergrößerung auf das neue Array umgestellt. Leere Queues werden ohne Sortieraufruf übersprungen. | Unit-Tests prüfen geometrisches Wachstum und fügen 16.385 Commands ein; derselbe Test sortiert die leere und anschließend vergrößerte Queue. Dichte Ingame-Szenen müssen die höhere Kapazität, ihren Speicherbedarf und die FPS-Wirkung der geringeren Allokationen noch prüfen. |
+ | Objektlicht-Bindung | `RenderHelpers.ApplyLights` übergibt die nach Priorität ausgewählten Quellindizes kompakt. `RenderMaterial.SetLights` verarbeitet so direkt höchstens acht Lichtindizes pro Materialdraw statt bis zu 128 Frame-Einträge erneut zu durchsuchen; manuell gebaute Lighting-Werte behalten den Bitset-Fallback. | Auswahl-/Bitset-Übereinstimmung ist im `TransientLightTests`-Pfad geprüft. Der CPU- und FPS-Gewinn muss mit derselben festen Szene vor/nach der Änderung gemessen werden. |
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -419,3 +419,4 @@
+ | 2483 | Compute conservative bounds for live particles in unbounded effects |
+ | 2484 | Record live projectile-effect culling bounds and profile evidence |
+ | 2485 | Skip redundant square-root work while measuring conservative projectile-effect bounds |
++| 2486 | Skip CPU work for fully transparent particles before GPU submission |
+--- a/patches/series
++++ b/patches/series
+@@ -477,3 +477,4 @@
+ client 2483-dynamic-particle-effect-cull-bounds.patch
+ client 2484-projectile-effect-culling-live-evidence.patch
+ client 2485-render-particle-cull-bound-math.patch
++client 2486-skip-zero-alpha-particle-work.patch

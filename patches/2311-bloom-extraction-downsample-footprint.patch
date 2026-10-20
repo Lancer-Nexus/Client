@@ -1,0 +1,109 @@
+--- a/src/LibreLancer.Base/Graphics/BloomPass.cs
++++ b/src/LibreLancer.Base/Graphics/BloomPass.cs
+@@ -46,8 +46,8 @@
+         int kernelPairs)
+     {
+         radius = float.IsFinite(radius) ? System.Math.Clamp(radius, 0.25f, 4f) : 1f;
+-        var targetWidth = System.Math.Max(1, source.Width / 4);
+-        var targetHeight = System.Math.Max(1, source.Height / 4);
++        var targetWidth = CalculateBloomExtractExtent(source.Width);
++        var targetHeight = CalculateBloomExtractExtent(source.Height);
+         if (failed && (width != targetWidth || height != targetHeight))
+             failed = false;
+         if (failed)
+@@ -109,6 +109,9 @@
+             mediumWeight, wideWeight);
+     }
+ 
++    internal static int CalculateBloomExtractExtent(int sourceExtent) =>
++        System.Math.Max(1, sourceExtent / 4 + (sourceExtent % 4 == 0 ? 0 : 1));
++
+     private void Draw(Shader shader, Texture2D source, RenderTarget2D target, Vector4 parameters)
+     {
+         var previousTarget = context.RenderTarget;
+--- a/src/LibreLancer.Base/Shaders/BloomExtract.frag.hlsl
++++ b/src/LibreLancer.Base/Shaders/BloomExtract.frag.hlsl
+@@ -7,10 +7,11 @@
+ float4 main(float4 position : SV_Position, float2 uv : TEXCOORD0) : SV_Target0
+ {
+     float2 texel = BloomParameters.xy;
+-    float3 color = (SampleScene(uv + texel * float2(-0.5, -0.5)) +
+-                    SampleScene(uv + texel * float2( 0.5, -0.5)) +
+-                    SampleScene(uv + texel * float2(-0.5,  0.5)) +
+-                    SampleScene(uv + texel * float2( 0.5,  0.5))) * 0.25;
++    // Each bilinear tap averages one 2x2 quadrant of the 4x4 source footprint.
++    float3 color = (SampleScene(uv + texel * float2(-1.0, -1.0)) +
++                    SampleScene(uv + texel * float2( 1.0, -1.0)) +
++                    SampleScene(uv + texel * float2(-1.0,  1.0)) +
++                    SampleScene(uv + texel * float2( 1.0,  1.0))) * 0.25;
+     // The scene is linear HDR here. A Rec. 709 luminance threshold avoids
+     // treating a saturated channel as equally bright to a neutral source.
+     float brightness = dot(color, float3(0.2126, 0.7152, 0.0722));
+--- a/src/LibreLancer.Tests/BloomPyramidPassTests.cs
++++ b/src/LibreLancer.Tests/BloomPyramidPassTests.cs
+@@ -4,6 +4,17 @@
+ public class BloomPyramidPassTests
+ {
+     [Theory]
++    [InlineData(1, 1)]
++    [InlineData(4, 1)]
++    [InlineData(5, 2)]
++    [InlineData(7, 2)]
++    [InlineData(8, 2)]
++    public void QuarterResolutionExtractionCoversOddAndSmallEdges(int sourceExtent, int expectedExtent)
++    {
++        Assert.Equal(expectedExtent, BloomPass.CalculateBloomExtractExtent(sourceExtent));
++    }
++
++    [Theory]
+     [InlineData(SystemRenderSubpass.BloomMediumHorizontalBlur,
+         SystemRenderResource.BloomExtractColor, SystemRenderResource.BloomMediumHorizontalColor)]
+     [InlineData(SystemRenderSubpass.BloomMediumVerticalBlur,
+--- a/docs/graphics-implementation-plan.md
++++ b/docs/graphics-implementation-plan.md
+@@ -532,7 +532,10 @@
+     Retail-Belege mit den offenen Prüfschritten stehen im
+     [HDR-Sun-Ambient-Nachweis](evidence/renderer/hdr-sun-ambient-linear-20261018/README.md).
+ - [x] Erste optionale HDR-Bloom-Stufe mit Helligkeitsschwelle bei 1.0,
+-  Viertelauflösung und separablem Gauß-Blur. `render_bloom`,
++  Viertelauflösung (vier bilineare Samples mitteln das gesamte 4×4-Quellfenster;
++  aufgerundete Zielmaße schließen ungerade Bildränder ein) und separablem
++  Gauß-Blur.
++  `render_bloom`,
+   `--render-bloom=on|off` und ein Effekte-Schalter steuern sie unabhängig; sie
+   Die Belichtungskompensation `render_hdr_exposure` (-4 bis +4 EV, Standard 0) steuert die ACES-Eingangshelligkeit mit `exp2(EV)` und ist im Effekte-Menü sowie über `--render-hdr-exposure` einstellbar.
+   Sie benötigt `render_hdr` und fällt bei nicht verfügbaren Bloom-Zielen auf HDR
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -14,7 +14,7 @@
+ | Cubemaps / Reflexion | PBR bindet GGX-vorgefilterte Specular-Cubes und cosine-konvolvierte diffuse Irradiance. DDS-Cubemaps unterstützen zusätzlich lineare DX10-RGBA16F-Daten für HDR-Werte über 1. Die drei erzeugten Umwelt-Cubes und Metadaten liegen in `Data/NAP/Surface/` und `Data/SDK/fx/SurfaceMaps.ini`. | Lancer und LancerEdit bauen. Der NAP-only-Datenstart erreicht `Finished loading game data`; ein sichtbarer HDR-Cube-Lade- und Bildvergleich bleibt offen. Retail-Orientierung, Materialkalibrierung und breite Spielabnahme bleiben offen. Siehe `docs/evidence/renderer/pbr-world-reflection-20261017/` und `docs/evidence/renderer/pbr-environment-20261014/`. |
+ | Legacy-Environment-Maps | Bestehende Freelancer-Cubemap-Reflexionen lassen sich unabhängig vom PBR-IBL per Einstellung oder `--render-legacy-environment-maps=on|off` umschalten. Der Standard bleibt `on`, damit ältere Materialien ihr bisheriges Verhalten behalten. | Beide Startwerte laden bis ins Intro. Der gleiche Kamera-A/B-Bildvergleich fehlt noch; externe Bildschirmaufnahmen waren in der letzten Sitzung schwarz. |
+ | HDR und Tonemapping | Linearisiertes Scene-Target, ACES-Tonemapping, linearisierte PBR-Albedo-/Licht-/Emissionswerte und exakte sRGB-Ausgabe im PBR-LDR-Pfad. PBR nutzt denselben piecewise sRGB-zu-linear-Helper wie die übrigen Farbpfade. | Der Farbvertrag für Legacy-Vertexfarben, Transparenz, Fog und zusammengesetzte Effekte ist noch nicht für alle Pfade visuell abgenommen. Ein HDR/LDR-Vergleich ist unter `docs/evidence/renderer/postprocess-four-mode-ab-20261017/` dokumentiert. |
+-| Bloom | HDR-Extraktion plus Basis-, mittlere und breite Blur-Stufe; Schwelle, Radius, Auflösung und Kernel sind konfigurierbar. | Der Code führt alle drei Stufen aus. Die vorhandene Bloom-Pyramidenaufnahme nennt ein Laufzeitpaket/Manifest vom 18.10. und gilt am Dokumentstand 17.10. nicht als verifizierter NAP-Lauf. Laufzeitabnahme, Halo-Kalibrierung und GPU-Kosten bleiben offen. |
++| Bloom | HDR-Extraktion mittelt jetzt ein vollständiges 4×4-Quellfenster in Viertelauflösung; aufrundende Zielmaße behalten Randpixel bei ungeraden Fenstergrößen. Basis-, mittlere und breite Blur-Stufen sowie Schwelle, Radius, Auflösung und Kernel sind konfigurierbar. | Die Extraktion beseitigt das bisherige Unterabtasten der zentralen vier Texel. Der Code führt alle drei Stufen aus. Die vorhandene Bloom-Pyramidenaufnahme nennt ein Laufzeitpaket/Manifest vom 18.10. und gilt am Dokumentstand 17.10. nicht als verifizierter NAP-Lauf. Laufzeitabnahme, Halo-Kalibrierung und GPU-Kosten bleiben offen. |
+ | Antialiasing | SMAA-Pässe und MSAA-Auflösung; HDR/LDR-Kombinationen sowie Resize und Minimize/Restore wurden auf OpenGL/Mesa geprüft. | Andere Backends/Treiber, wiederholte Lifecycle-Zyklen und Fehler-Injektion stehen aus. |
+ | Dynamische Lichter und Schatten | Persistente und kurzlebige Lichter werden priorisiert; ein ausgewähltes Richtungslicht läuft durch Shadow-Map-Pass und 3×3-PCF. Alpha-Test-Texturen werden auch in PBR-Depth-/Shadow-Pässen anhand eines Material-Uniforms ausgeschnitten; dafür entstehen keine zusätzlichen Shader-Varianten. Blendtransparente Materialien werfen keine Schatten. Quelle und Ein/Aus-Schaltung sind konfigurierbar. | Hi02 belegt Pass, Lichtauswahl und Live-Schaltung auf einer OpenGL-GPU. Bias, Caster-Abdeckung und Bildqualität über weitere Materialien/Szenen brauchen kontrollierte Vergleiche. Siehe `docs/evidence/renderer/shadow-map-hi02-live-toggle-20261017/`. |
+ | Diagnose | CPU-Framezeitprofile, asynchrone OpenGL-GPU-Passzeiten, Bloom-/Shadow-Passzeiten, Ziel-/Speicherschätzungen und CSV-Ausgabe. Environment-Cubemaps mit mehreren Catalog-Aliasen werden im geschätzten GPU-Texturspeicher nur einmal gezählt und bei Bereinigung auch nur einmal freigegeben. | Langzeitprofile und plattformübergreifende Vergleichsbaselines fehlen. Einzelne asynchrone Samples sind keine FPS-Baseline. |
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -1,6 +1,6 @@
+ # Client patch groups
+ 
+-The active series contains 309 Client bundles and two native bundles. Each
++The active series contains 310 Client bundles and two native bundles. Each
+ file belongs to one functional bundle; the combined output preserves the
+ integration, upstream compatibility fixes, tests and project documentation.
+ 
+@@ -267,3 +267,5 @@
+ | 2309 | Track aliased environment cubemaps once in GPU texture memory diagnostics |
+ 
+ | 2310 | Blend sun-tinted system ambient in linear space for HDR output |
++
++| 2311 | Sample full bloom downsample footprints and retain odd image edges |
+--- a/patches/series
++++ b/patches/series
+@@ -310,3 +310,4 @@
+ client 2308-hdr-dds-cubemap-tests.patch
+ client 2309-account-aliased-ibl-cubes.patch
+ client 2310-sunambient-linear-hdr-mix.patch
++client 2311-bloom-extraction-downsample-footprint.patch

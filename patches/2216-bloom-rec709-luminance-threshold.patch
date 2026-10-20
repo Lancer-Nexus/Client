@@ -1,0 +1,63 @@
+--- a/src/LibreLancer.Base/Shaders/BloomExtract.frag.hlsl
++++ b/src/LibreLancer.Base/Shaders/BloomExtract.frag.hlsl
+@@ -11,7 +11,9 @@
+                     SampleScene(uv + texel * float2( 0.5, -0.5)) +
+                     SampleScene(uv + texel * float2(-0.5,  0.5)) +
+                     SampleScene(uv + texel * float2( 0.5,  0.5))) * 0.25;
+-    float brightness = max(color.r, max(color.g, color.b));
++    // The scene is linear HDR here. A Rec. 709 luminance threshold avoids
++    // treating a saturated channel as equally bright to a neutral source.
++    float brightness = dot(color, float3(0.2126, 0.7152, 0.0722));
+     float threshold = BloomParameters.z;
+     float soft = max(BloomParameters.w, 0.0001);
+     float softContribution = clamp(brightness - threshold + soft, 0.0, 2.0 * soft);
+--- a/docs/evidence/renderer/hdr-bloom-stage-20261016.md
++++ b/docs/evidence/renderer/hdr-bloom-stage-20261016.md
+@@ -2,9 +2,10 @@
+ 
+ ## Umsetzung
+ 
+-- Die optionale Bloom-Stufe filtert lineare HDR-Szenenwerte ab einer
+-  luminanzbasierten Max-Kanal-Schwelle von 1.0. Ein weicher Knee von 0.5
+-  verhindert einen harten Übergang an der Schwelle.
++- Die optionale Bloom-Stufe filtert lineare HDR-Szenenwerte anhand der
++  Rec.-709-Luminanz `dot(RGB, (0.2126, 0.7152, 0.0722))` ab einer Schwelle
++  von 1.0. Ein weicher Knee von 0.5 verhindert einen harten Übergang an der
++  Schwelle. Gesättigtes Blau trägt dadurch weniger zur Luminanz bei als Grün.
+ - Die Extraktion wird auf ein Viertel der Szenenauflösung heruntergesampelt,
+   danach wird ein separabler 5-Tap-Gauß-Blur horizontal und vertikal ausgeführt.
+   Das geblurte Licht wird vor der ACES-Kurve zur linearen Szene addiert.
+@@ -22,11 +23,11 @@
+ ## Grenzen und Prüfung
+ 
+ - Release-Build am 2026-10-16 mit .NET 10 erfolgreich; der Shadercompiler hat
+-  beide neuen Bloom-Bundles verarbeitet. Der Build meldete vorhandene
+-  Codewarnungen, aber keine Fehler.
+-- Noch keine Laufzeit- oder Bildabnahme: `Data/NAP/` enthält derzeit keine
+-  verwendbaren NAP-Archive. Schwelle, Stärke, Halo-Radius, Farbverhalten und
+-  Performance müssen mit einer gültigen NAP-only-Szene geprüft werden.
++  beide neuen Bloom-Bundles verarbeitet. Am 2026-10-17 wurde die Extraktion
++  auf Rec.-709-Luminanz vereinheitlicht und erneut im Release-Build kompiliert.
++- Der NAP-Laufzeitpfad ist auf OpenGL/Mesa vorhanden. Ein kontrollierter
++  gesättigt-blau/grün/weiß-Vergleich für diese Luminanzschwelle, Bloomstärke,
++  Halo-Radius und Performance bleibt offen.
+ - Dies ist ein einfacher Viertelauflösungs-Blur und noch keine mehrstufige
+   Bloom-Pyramide. UI-/Cutscene-Blur bleibt davon getrennt.
+ - Der Effekte-Tab hat nun Regler für beide Werte. Sie werden beim Verlassen der
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -123,6 +123,7 @@
+ | 2213 | Add executable pass interface for Bloom and HDR tone mapping |
+ | 2214 | Add configurable bilinear Gaussian kernel width for Bloom blur |
+ | 2215 | Add HDR exposure compensation to tone mapping, settings, CLI and Effects options |
++| 2216 | Use linear Rec. 709 luminance for the Bloom extraction threshold |
+ | 2116 | Estimate active SMAA and MSAA render-target memory |
+ | 2117 | Record the M01A dark station and ship lighting report |
+ | 2118 | Apply THN ambient and dynamic lights to shared gameplay lighting, then remove them on cleanup |
+--- a/patches/series
++++ b/patches/series
+@@ -215,3 +215,4 @@
+ client 2213-executable-hdr-postprocess-pipeline.patch
+ client 2214-variable-bloom-gaussian-kernel.patch
+ client 2215-hdr-exposure-control.patch
++client 2216-bloom-rec709-luminance-threshold.patch

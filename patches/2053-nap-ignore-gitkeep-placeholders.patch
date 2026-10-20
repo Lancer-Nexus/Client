@@ -1,0 +1,58 @@
+diff --git a/src/Nexus.Assets/NapWriter.cs b/src/Nexus.Assets/NapWriter.cs
+--- a/src/Nexus.Assets/NapWriter.cs
++++ b/src/Nexus.Assets/NapWriter.cs
+@@ -49,7 +49,9 @@
+             foreach (var file in Directory.EnumerateFiles(directory))
+             {
+                 if ((File.GetAttributes(file) & FileAttributes.ReparsePoint) != 0)
+                     throw new InvalidDataException($"Symbolic links and reparse points are not packable: {file}");
++                if (string.Equals(Path.GetFileName(file), ".gitkeep", StringComparison.OrdinalIgnoreCase))
++                    continue;
+                 var relative = Path.GetRelativePath(root, file).Replace(Path.DirectorySeparatorChar, '/');
+                 yield return new NapSourceEntry(NapPath.Normalize(relative), file);
+             }
+diff --git a/src/Nexus.Assets.Tests/NapArchiveTests.cs b/src/Nexus.Assets.Tests/NapArchiveTests.cs
+--- a/src/Nexus.Assets.Tests/NapArchiveTests.cs
++++ b/src/Nexus.Assets.Tests/NapArchiveTests.cs
+@@ -146,5 +146,33 @@
+         Assert.False(File.Exists(Path.Combine(destination, "removed.ini")));
+     }
+ 
++    [Fact]
++    public void PackDirectorySkipsGitKeepPlaceholdersAcrossClassPackages()
++    {
++        using var fixture = new Fixture();
++        var equipment = fixture.PathFor("equipment");
++        var effects = fixture.PathFor("effects");
++        Directory.CreateDirectory(equipment);
++        Directory.CreateDirectory(effects);
++        File.WriteAllBytes(Path.Combine(equipment, ".gitkeep"), []);
++        File.WriteAllBytes(Path.Combine(effects, ".gitkeep"), []);
++        File.WriteAllBytes(Path.Combine(equipment, "ship.cmp"), "asset"u8.ToArray());
++
++        var equipmentPackage = fixture.PathFor("equipment.nap");
++        var effectsPackage = fixture.PathFor("effects.nap");
++        NapWriter.PackDirectory(equipment, equipmentPackage);
++        NapWriter.PackDirectory(effects, effectsPackage);
++
++        var emptyOverrides = new HashSet<string>(StringComparer.Ordinal);
++        var provider = new NexusPackageFileProvider(
++        [
++            new NexusPackageMount("equipment", NapArchive.Open(equipmentPackage), 10, 1, emptyOverrides),
++            new NexusPackageMount("effects", NapArchive.Open(effectsPackage), 10, 2, emptyOverrides)
++        ]);
++
++        Assert.True(provider.FileExists("ship.cmp"));
++        Assert.False(provider.FileExists(".gitkeep"));
++    }
++
+     [Fact]
+     public void EditorPackAndUnpackPreservesCompleteDirectoryTree()
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -49,3 +49,4 @@
+ client 2050-beam-and-explosion-effect-audit.patch
+ client 2051-configurable-modding-parameters-todo.patch
+ client 2052-retail-beam-parser-audit.patch
++client 2053-nap-ignore-gitkeep-placeholders.patch

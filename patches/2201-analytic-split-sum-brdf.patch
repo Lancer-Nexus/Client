@@ -1,0 +1,50 @@
+--- a/src/LibreLancer/Shaders/PBR.frag.hlsl
++++ b/src/LibreLancer/Shaders/PBR.frag.hlsl
+@@ -173,6 +173,18 @@
+     float3 linOut = lerp( srgbIn.xyz/(float3)12.92, pow((srgbIn.xyz+(float3)0.055)/(float3)1.055,(float3)2.4), bLess );
+     return float4(linOut, srgbIn.a);
+ }
++
++#ifdef ENVMAP
++// Analytic approximation of the split-sum specular BRDF integral (Epic Games).
++float2 IntegrateEnvironmentBrdfApprox(float NdotV, float roughness)
++{
++    const float4 c0 = float4(-1.0, -0.0275, -0.572, 0.022);
++    const float4 c1 = float4(1.0, 0.0425, 1.04, -0.04);
++    float4 r = roughness * c0 + c1;
++    float a004 = min(r.x * r.x, exp2(-9.28 * NdotV)) * r.x + r.y;
++    return float2(-1.04, 1.04) * a004 + r.zw;
++}
++#endif
+ 
+ float fquadratic(float x, float3 params)
+ {
+@@ -299,7 +311,8 @@
+     float3 envColor = SRGBtoLinear(EnvTexture.SampleLevel(EnvSampler, reflection, envMip)).rgb;
+     float NdotV = saturate(abs(dot(n, v)));
+     float3 envFresnel = specularColor + (1.0 - specularColor) * pow(1.0 - NdotV, 5.0);
+-    color += envColor * envFresnel * EnvMapStrength;
++    float2 envBrdf = IntegrateEnvironmentBrdfApprox(NdotV, perceptualRoughness);
++    color += envColor * (specularColor * envBrdf.x + envBrdf.y) * EnvMapStrength;
+     // The last authored mip is a low-frequency approximation of diffuse irradiance.
+     // Keep this inexpensive until the asset pipeline can provide convolved irradiance cubes.
+     float3 diffuseEnvironment = SRGBtoLinear(
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -277,7 +277,8 @@
+ - [ ] **Forward oder Clustered Forward statt Deferred:** Transparenz und MSAA/SMAA sprechen gegen Deferred. Forward+ gegen die aktuelle Beleuchtung benchmarken.
+ - [x] **Cubemap-Grundpfad:** Surface-Katalog-Cubes `envcube_*` bedarfsgesteuert laden und `[CubeMap] strength` im opt-in PBR-Pfad anwenden; kontrollierte Produktionsshader-GPU-Proben sind dokumentiert.
+ - [x] **Diffuse IBL-Grundbeitrag:** Im opt-in PBR-Pfad wird die niedrigste Cubemap-Mipstufe als kostengünstige diffuse Umgebungsfarbe ausgewertet und Fresnel-/Metallic-gewichtet zum direkten Licht addiert. Das ist eine Laufzeit-Approximation, keine vorberechnete diffuse Irradiance.
+-- [ ] **Image-Based Lighting:** Retail-Orientierung und sichtbare Cubemap-Reflexion im Spiel abnehmen; GGX-Reflexionsfilterung, konvolvierte diffuse Irradiance und BRDF-LUT bleiben offen. Die LI_ELITE-ModelViewer-A/B änderte bislang 0 Modellpixel; die inzwischen verdrahtete Preview-Auswahl muss mit einem frischen visuellen Vergleich erneut geprüft werden.
++- [x] **Split-Sum-BRDF-Grundbeitrag:** Die PBR-Umgebungsreflexion wertet den analytischen Epic-BRDF-Fit für `NdotV` und Rauheit aus; eine BRDF-LUT-Textur ist dafür nicht erforderlich. Der Fit ersetzt keine GGX-vorgefilterte Radiance-Cubemap.
++- [ ] **Image-Based Lighting:** Retail-Orientierung und sichtbare Cubemap-Reflexion im Spiel abnehmen; GGX-Reflexionsfilterung und konvolvierte diffuse Irradiance bleiben offen. Die LI_ELITE-ModelViewer-A/B änderte bislang 0 Modellpixel; die inzwischen verdrahtete Preview-Auswahl muss mit einem frischen visuellen Vergleich erneut geprüft werden.
+ - [ ] **Volumetrische Nebel und Soft Particles:** Nebelfelder sind ein Merkmal des Spiels; als eigene Qualitätsstufe mit Fallback.
+ - [ ] **Vulkan-Backend (Spike):** Prüfen, wie weit `IRenderContext` und die HLSL→SPIR-V-Kette tragen. Nutzen: Linux/Steam Deck, Mehrkern-Befehlsaufzeichnung für viele Schiffe, RenderDoc, MoltenVK für macOS. Aufwand und Risiko groß, vorher messen.
+ - [ ] **Direct3D 11 und Metal nur bei konkretem Bedarf:** D3D11 nur, wenn OpenGL unter Windows Probleme macht; Metal besser über MoltenVK.
+--- a/patches/series
++++ b/patches/series
+@@ -200,3 +200,4 @@
+ client 2198-configurable-bloom-blur-radius.patch
+ client 2199-bloom-radius-runtime-evidence.patch
+ client 2200-approximate-diffuse-ibl.patch
++client 2201-analytic-split-sum-brdf.patch

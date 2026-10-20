@@ -1,0 +1,123 @@
+--- a/src/LibreLancer/Render/ObjectRenderer.cs
++++ b/src/LibreLancer/Render/ObjectRenderer.cs
+@@ -10,7 +10,7 @@
+ 	{
+ 		public abstract void Update(double time, Transform3D transform);
+ 		public abstract void Draw(ICamera camera, CommandBuffer commands, SystemLighting lights, NebulaRenderer nr);
+-		public virtual void DepthPrepass(ICamera camera, RenderContext rstate) { }
++		public virtual void DepthPrepass(ICamera camera, CommandBuffer commands, SystemLighting lights, NebulaRenderer nr) { }
+ 		// Rendering Parameters
+         private int _flags =
+             (1 << 0) | // Ambient
+--- a/src/LibreLancer/Render/SystemRenderer.cs
++++ b/src/LibreLancer/Render/SystemRenderer.cs
+@@ -361,15 +361,15 @@
+             // Clear depth buffer for game objects
+             billboards.Begin(camera, Commands);
+             SystemLighting.NumberOfTilesX = -1;
+-            // Simple depth pre-pass
++            // Optional opaque depth pre-pass
+             rstate.ColorWrite = false;
+             rstate.DepthFunction = DepthFunction.Less;
+             BeginGpuPass(SystemRenderPass.DepthPrepass, sceneTarget);
+             try
+             {
+-                foreach (var obj in objects) obj.DepthPrepass(camera, rstate);
++                foreach (var obj in objects) obj.DepthPrepass(camera, Commands, SystemLighting, nr!);
+             }
+             finally { EndGpuPass(SystemRenderPass.DepthPrepass, sceneTarget); }
+             rstate.DepthFunction = DepthFunction.LessEqual;
+             rstate.ColorWrite = true;
+             // Actual Drawing
+--- a/src/LibreLancer/Render/ModelRenderer.cs
++++ b/src/LibreLancer/Render/ModelRenderer.cs
+@@ -167,9 +167,36 @@
+             return true; // not visible
+         }
+ 
+-        public override void DepthPrepass(ICamera camera, RenderContext rstate)
+-        {
+-
++        public override void DepthPrepass(ICamera camera, CommandBuffer commands, SystemLighting lights, NebulaRenderer nr)
++        {
++            if (Model == null || sysr == null)
++                return;
++
++            Model.Update(sysr.Game.TotalTime);
++            for (var i = 0; i < Model.AllParts.Length; i++)
++            {
++                if (!visibleParts[i])
++                    continue;
++
++                var part = Model.AllParts[i];
++                var world = part.LocalTransform.Matrix() * _worldSph;
++                var center = Vector3.Transform(part.Mesh!.Center, world);
++                var level = GetLevel(part, center, camera.Position);
++                if (level == -1)
++                    continue;
++
++                var lighting = RenderHelpers.ApplyLights(lights, LightGroup, center, part.GetRadius(), nr,
++                    LitAmbient, LitDynamic, NoFog);
++                var radius = part.GetRadius() + lighting.FogRange.Y;
++                var canFogCullPart = lighting.FogMode == FogModes.Linear &&
++                                     (nr == null || nr.FogTransitionOpacity() >= 1f || Nebula == nr);
++                if (canFogCullPart && Vector3.DistanceSquared(camera.Position, center) > radius * radius)
++                    continue;
++
++                var userData = ColorOverride is { } color ? BasicMaterial.SetDc(color) : 0;
++                part.Mesh.DrawBuffer(level, sysr.ResourceManager, commands, world, ref lighting,
++                    Model.MaterialAnims, userData, null, OpacityMultiplier, EnvMapMaterial, opaqueOnly: true);
++            }
+         }
+ 
+         private Matrix4x4 _worldSph;
+--- a/src/LibreLancer/RigidModel.cs
++++ b/src/LibreLancer/RigidModel.cs
+@@ -95,7 +95,7 @@
+ 
+         public void DrawBuffer(int level, ResourceManager res, CommandBuffer buffer, Matrix4x4 world,
+             ref Lighting lights, MaterialAnimCollection? mc, int userData = 0, Material? overrideMat = null,
+-            float opacity = 1.0f, string? envMap = null)
++            float opacity = 1.0f, string? envMap = null, bool opaqueOnly = false)
+         {
+             if (Levels == null || Levels.Length <= level)
+             {
+@@ -146,6 +146,9 @@
+                         mat = res.DefaultMaterial;
+                     }
+                 }
++
++                if (opaqueOnly && (mat.Render.IsTransparent || opacity < 1.0f))
++                    continue;
+ 
+                 float z = 0;
+ 
+--- a/src/LibreLancer/Render/ProjectileRenderer.cs
++++ b/src/LibreLancer/Render/ProjectileRenderer.cs
+@@ -24,10 +24,6 @@
+             toRender = new Projectile[Projectiles.Projectiles.Length];
+         }
+ 
+-        public override void DepthPrepass(ICamera camera, RenderContext rstate)
+-        {
+-        }
+-
+         public override bool PrepareRender(ICamera camera, NebulaRenderer nr, SystemRenderer sys, bool forceCull)
+         {
+             beams = sys.Beams;
+--- a/patches/series
++++ b/patches/series
+@@ -182,2 +182,3 @@
+ client 2180-document-bloom-startup-controls.patch
+ client 2181-sampleable-depth-only-render-targets.patch
++client 2182-draw-opaque-models-in-depth-prepass.patch
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -205,6 +205,7 @@
+ - [ ] Screen-Space Ambient Occlusion als optionale Ergänzung bewerten; Geometrie- und Nebelartefakte gegen Vanilla-Szenen abgleichen.
+ - [ ] Echtzeit-Schatten (zunächst gerichtete Lichter, Kaskaden und PCF) anhand vorhandener Freelancer-Lichtdaten und der GPU-Kosten bewerten.
+   - [x] Sampleable Depth-only-Renderziele im OpenGL-Backend und no-op-Ziele im Null-Backend bereitgestellt; Release-Build sowie OpenGL-4.6/Mesa-NAP-Smoke für FBO, Clear und Depth-Readback bestanden. GLES, Shader-Sampling und PCF bleiben offen; siehe [Depth-only-Smoke](evidence/renderer/depth-only-target-smoke-20261017/README.md).
++  - [x] Opake, sichtbare Model-Meshes schreiben im Main-Camera-Depth-Prepass mit LOD, World-Matrix und Material-Alpha-Test; transparente Teile bleiben ausgeschlossen. Der Pass nutzt vorerst die bestehenden Vollmaterial-Shader bei deaktiviertem Color-Write, kein dedizierter Depth-Shader und kein Schattenwurf. Release-Build und Overlay-Rekonstruktion bestanden.
+   - [ ] GL/GLES-FBO-Laufzeit prüfen, danach Caster-Draws, Lichtmatrizen, PCF und Receiver-Shading in den beleuchteten Materialpfaden implementieren.
+ - [ ] Screen-Space-Reflections als optionale Ergänzung prüfen; fehlende Bildinformation an Bildschirmrändern und bei verdeckten Objekten muss über den bestehenden PBR-Fallback abgefangen werden.
+ - [ ] Volumetrischen Nebel und volumetrische Lichtstrahlen als eigenständige, skalierbare Qualitätstufe evaluieren; vorhandene Freelancer-Nebelparameter und Transparenzreihenfolge als Referenz verwenden.

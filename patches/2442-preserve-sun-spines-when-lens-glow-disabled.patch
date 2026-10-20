@@ -1,0 +1,153 @@
+--- a/src/LibreLancer/Render/SunRenderer.cs
++++ b/src/LibreLancer/Render/SunRenderer.cs
+@@ -15,6 +15,8 @@
+ {
+     public class SunRenderer : ObjectRenderer
+ 	{
++        internal readonly record struct VertexLayout(int Center, int Glow, int LensGlow, int Spines);
++
+         public Sun Sun { get; private set; }
+         private Vector3 pos;
+         private SystemRenderer? sysr;
+@@ -30,6 +32,29 @@
+ 
+         private Vector3 genPos;
+         private int bufferIndex;
++
++        internal static VertexLayout GetVertexLayout(int firstIndex, bool hasCenter, bool hasLensGlow)
++        {
++            var index = firstIndex;
++            var center = -1;
++            if (hasCenter)
++            {
++                center = index;
++                index += 6;
++            }
++
++            var glow = index;
++            index += 6;
++
++            var lensGlow = -1;
++            if (hasLensGlow)
++            {
++                lensGlow = index;
++                index += 6;
++            }
++
++            return new VertexLayout(center, glow, lensGlow, index);
++        }
+ 
+ 		public SunRenderer (Sun sun)
+ 		{
+@@ -199,7 +224,7 @@
+ 
+             var distScale = nr != null ? nr.Nebula.SunBurnthroughScale : 1;
+             var alpha = nr != null ? nr.Nebula.SunBurnthroughIntensity : 1;
+-            var idx = bufferIndex;
++            var layout = GetVertexLayout(bufferIndex, Sun.CenterSprite != null, Sun.LensGlowSprite != null);
+             // draw center
+             if (Sun.CenterSprite != null)
+             {
+@@ -207,33 +232,32 @@
+                 centerMaterial.OuterAlpha = alpha;
+                 commands.AddCommand(centerMaterial, null, commands.WorldBuffer.Identity,
+                     Lighting.Empty, sysr.QuadBuffer.VertexBuffer, 1.0f, PrimitiveTypes.TriangleList,
+-                    0, idx, 2, SortLayers.SUN, z);
+-                idx += 6;
++                    0, layout.Center, 2, SortLayers.SUN, z);
+             }
+             // draw glow
+             glowMaterial.SizeMultiplier = new Vector2(distScale);
+             glowMaterial.OuterAlpha = alpha;
+             commands.AddCommand(glowMaterial, null, commands.WorldBuffer.Identity,
+                 Lighting.Empty, sysr.QuadBuffer.VertexBuffer, 1.0f, PrimitiveTypes.TriangleList,
+-                0, idx, 2, SortLayers.SUN, z, null, 1);
+-            // next
+-            idx += 6;
++                0, layout.Glow, 2, SortLayers.SUN, z, null, 1);
+             // draw lens glow
+-            if (Sun.LensGlowSprite != null && sysr.Settings.RenderSunLensGlow && lensGlowMaterial != null)
+-            {
+-                lensGlowMaterial.SizeMultiplier = new Vector2(distScale);
+-                lensGlowMaterial.OuterAlpha = alpha * lensGlowAlpha;
+-                commands.AddCommand(lensGlowMaterial, null, commands.WorldBuffer.Identity,
+-                    Lighting.Empty, sysr.QuadBuffer.VertexBuffer, 1.0f, PrimitiveTypes.TriangleList,
+-                    0, idx, 2, SortLayers.SUN, z, null, 2);
+-                idx += 6;
++            if (Sun.LensGlowSprite != null)
++            {
++                if (sysr.Settings.RenderSunLensGlow && lensGlowMaterial != null)
++                {
++                    lensGlowMaterial.SizeMultiplier = new Vector2(distScale);
++                    lensGlowMaterial.OuterAlpha = alpha * lensGlowAlpha;
++                    commands.AddCommand(lensGlowMaterial, null, commands.WorldBuffer.Identity,
++                        Lighting.Empty, sysr.QuadBuffer.VertexBuffer, 1.0f, PrimitiveTypes.TriangleList,
++                        0, layout.LensGlow, 2, SortLayers.SUN, z, null, 2);
++                }
+             }
+             // draw spines
+             if (Sun is { SpinesSprite: not null, Spines.Count: > 0 } && nr == null)
+             {
+                 commands.AddCommand(spineMaterial, null, commands.WorldBuffer.Identity,
+                     Lighting.Empty, sysr.QuadBuffer.VertexBuffer, 1.0f, PrimitiveTypes.TriangleList,
+-                    0, idx, 2 * Sun.Spines.Count, SortLayers.SUN, z, null, 2);
++                    0, layout.Spines, 2 * Sun.Spines.Count, SortLayers.SUN, z, null, 2);
+             }
+         }
+     }
+--- a/src/LibreLancer.Tests/SystemRenderPassGraphTests.cs
++++ b/src/LibreLancer.Tests/SystemRenderPassGraphTests.cs
+@@ -1,6 +1,32 @@
+ using System;
+ using LibreLancer.Graphics;
++using LibreLancer.Render;
+ using Xunit;
++
++public class SunRendererVertexLayoutTests
++{
++    [Fact]
++    public void ReservesLensGlowVerticesForSpinesWhenGlowDrawIsDisabled()
++    {
++        var layout = SunRenderer.GetVertexLayout(firstIndex: 12, hasCenter: true, hasLensGlow: true);
++
++        Assert.Equal(12, layout.Center);
++        Assert.Equal(18, layout.Glow);
++        Assert.Equal(24, layout.LensGlow);
++        Assert.Equal(30, layout.Spines);
++    }
++
++    [Fact]
++    public void OmitsAbsentCenterAndLensGlowQuads()
++    {
++        var layout = SunRenderer.GetVertexLayout(firstIndex: 12, hasCenter: false, hasLensGlow: false);
++
++        Assert.Equal(-1, layout.Center);
++        Assert.Equal(12, layout.Glow);
++        Assert.Equal(-1, layout.LensGlow);
++        Assert.Equal(18, layout.Spines);
++    }
++}
+ 
+ public class SystemRenderPassGraphTests
+ {
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -58,6 +58,11 @@
+ eine sichtbare Lens-Glow-Schalterwirkung. Der Fade-Cull berücksichtigt jetzt den konfigurierten Lens-Glow-Radius statt nur den Sonnenscheibenradius. Der `sun.sph`-Hinweis belegt daher
+ keine fehlende sichtbare Sonne oder Lens-Glow-Funktion; Details stehen unter
+ [`Sun sphere asset and renderer path`](evidence/renderer/sun-sph-placeholder-20261018.md).
++Ein deaktivierter Lens-Glow-Draw überspringt weiterhin seinen Vertexbereich, damit
++nachfolgende Sun-Spines ihre eigenen Vertices verwenden. Dieser Indexpfad ist
++quellseitig korrigiert und die vier Quad-Offsets sind durch
++`SunRendererVertexLayoutTests` abgedeckt; ein NAP-Lauf mit einer Sonne, die
++beide Effekte enthält, steht als visuelle Bestätigung noch aus.
+ 
+ Der NAP-only FP7-Intro-Vergleich vom 2026-10-17 zeigt im `Original`-Profil
+ und mit den zusätzlichen Renderfunktionen aus dieselben gesättigt blauen
+--- a/patches/series
++++ b/patches/series
+@@ -433,3 +433,4 @@
+ client 2439-fix-hdr-nap-profile-version-in-roadmap.patch
+ client 2440-declare-system-render-hook-resources.patch
+ client 2441-declare-frame-setup-resource.patch
++client 2442-preserve-sun-spines-when-lens-glow-disabled.patch

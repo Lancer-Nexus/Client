@@ -1,0 +1,156 @@
+--- a/src/LibreLancer/Render/CommandBuffer.cs
++++ b/src/LibreLancer/Render/CommandBuffer.cs
+@@ -211,6 +211,29 @@
+ 		internal int TransparentCommandCount => transparentCommand;
+ 		internal int TransparentCommandCapacity => Transparents.Length;
+ 		internal int TransparentSortCapacity => cmdptr.Length;
++		internal TransparentCommandCounts GetTransparentCommandCounts() =>
++			CountTransparentCommands(Transparents.AsSpan(0, transparentCommand));
++
++		internal static TransparentCommandCounts CountTransparentCommands(ReadOnlySpan<RenderCommand> commands)
++		{
++			var materials = 0;
++			var fades = 0;
++			var overrides = 0;
++			var billboards = 0;
++			foreach (var command in commands)
++			{
++				switch (command.CmdType)
++				{
++					case RenderCmdType.Material: materials++; break;
++					case RenderCmdType.MaterialFade: fades++; break;
++					case RenderCmdType.MaterialOverride: overrides++; break;
++					case RenderCmdType.Billboard: billboards++; break;
++					default:
++						throw new InvalidOperationException($"Unknown transparent render command type: {command.CmdType}");
++				}
++			}
++			return new TransparentCommandCounts(materials, fades, overrides, billboards);
++		}
+ 		private void ReserveTransparentCommand()
+ 		{
+ 			if (transparentCommand == int.MaxValue)
+@@ -265,6 +288,12 @@
+             WorldBuffer.Dispose();
+         }
+ 
++	}
++
++	internal readonly record struct TransparentCommandCounts(int Materials = 0, int Fades = 0,
++		int Overrides = 0, int Billboards = 0)
++	{
++		public int Total => Materials + Fades + Overrides + Billboards;
+ 	}
+ 
+     internal class KeyComparer : IComparer<int>
+--- a/src/LibreLancer/Interface/DebugView.cs
++++ b/src/LibreLancer/Interface/DebugView.cs
+@@ -30,6 +30,10 @@
+         private readonly int[] frameHeightSamples = new int[PerformanceSampleCount];
+         private readonly long[] droppedSimulationTickSamples = new long[PerformanceSampleCount];
+         private readonly int[] transparentCommandSamples = new int[PerformanceSampleCount];
++        private readonly int[] transparentMaterialSamples = new int[PerformanceSampleCount];
++        private readonly int[] transparentFadeSamples = new int[PerformanceSampleCount];
++        private readonly int[] transparentOverrideSamples = new int[PerformanceSampleCount];
++        private readonly int[] transparentBillboardSamples = new int[PerformanceSampleCount];
+         private readonly int[] vertexBufferDrawCallSamples = new int[PerformanceSampleCount];
+         private readonly long[] aaTargetMemorySamples = new long[PerformanceSampleCount];
+         private readonly long[] bloomTargetMemorySamples = new long[PerformanceSampleCount];
+@@ -225,7 +229,12 @@
+                     frameWidthSamples[performanceSampleIndex] = game.Width;
+                     frameHeightSamples[performanceSampleIndex] = game.Height;
+                     droppedSimulationTickSamples[performanceSampleIndex] = game.DroppedSimulationTicks;
+-                    transparentCommandSamples[performanceSampleIndex] = game.Commands.TransparentCommandCount;
++                    var transparentCommands = game.Commands.GetTransparentCommandCounts();
++                    transparentCommandSamples[performanceSampleIndex] = transparentCommands.Total;
++                    transparentMaterialSamples[performanceSampleIndex] = transparentCommands.Materials;
++                    transparentFadeSamples[performanceSampleIndex] = transparentCommands.Fades;
++                    transparentOverrideSamples[performanceSampleIndex] = transparentCommands.Overrides;
++                    transparentBillboardSamples[performanceSampleIndex] = transparentCommands.Billboards;
+                     vertexBufferDrawCallSamples[performanceSampleIndex] = VertexBuffer.TotalDrawcalls;
+                     rendererSamples[performanceSampleIndex] = game.Renderer;
+                     renderMemorySampleAvailable[performanceSampleIndex] = false;
+@@ -372,7 +381,7 @@
+                 csv.Append(",gpu_").Append(columnName).Append("_ms,gpu_")
+                     .Append(columnName).Append("_age_frames");
+             }
+-            csv.Append(",aa_target_estimated_bytes,bloom_targets_estimated_bytes,tonemap_output_target_estimated_bytes,dropped_simulation_ticks_total,transparent_command_count,vertex_buffer_draw_calls");
++            csv.Append(",aa_target_estimated_bytes,bloom_targets_estimated_bytes,tonemap_output_target_estimated_bytes,dropped_simulation_ticks_total,transparent_command_count,transparent_material_commands,transparent_fade_commands,transparent_override_commands,transparent_billboard_commands,vertex_buffer_draw_calls");
+             csv.AppendLine();
+             var start = (performanceSampleIndex - performanceSamplesRecorded + PerformanceSampleCount) % PerformanceSampleCount;
+             for (var i = 0; i < performanceSamplesRecorded; i++)
+@@ -419,6 +428,10 @@
+                 }
+                 csv.Append(',').Append(droppedSimulationTickSamples[index].ToString(CultureInfo.InvariantCulture))
+                     .Append(',').Append(transparentCommandSamples[index].ToString(CultureInfo.InvariantCulture))
++                    .Append(',').Append(transparentMaterialSamples[index].ToString(CultureInfo.InvariantCulture))
++                    .Append(',').Append(transparentFadeSamples[index].ToString(CultureInfo.InvariantCulture))
++                    .Append(',').Append(transparentOverrideSamples[index].ToString(CultureInfo.InvariantCulture))
++                    .Append(',').Append(transparentBillboardSamples[index].ToString(CultureInfo.InvariantCulture))
+                     .Append(',').Append(vertexBufferDrawCallSamples[index].ToString(CultureInfo.InvariantCulture));
+                 csv.AppendLine();
+             }
+--- a/src/LibreLancer.Tests/RenderCommandBufferCapacityTests.cs
++++ b/src/LibreLancer.Tests/RenderCommandBufferCapacityTests.cs
+@@ -39,6 +39,27 @@
+     }
+ 
+     [Fact]
++    public void TransparentCommandCountsSeparateRenderWorkTypes()
++    {
++        var commands = new[]
++        {
++            new RenderCommand { Type = RenderCommand.MakeType(RenderCmdType.Material) },
++            new RenderCommand { Type = RenderCommand.MakeType(RenderCmdType.Material) },
++            new RenderCommand { Type = RenderCommand.MakeType(RenderCmdType.MaterialFade) },
++            new RenderCommand { Type = RenderCommand.MakeType(RenderCmdType.MaterialOverride) },
++            new RenderCommand { Type = RenderCommand.MakeType(RenderCmdType.Billboard) }
++        };
++
++        var counts = CommandBuffer.CountTransparentCommands(commands);
++
++        Assert.Equal(5, counts.Total);
++        Assert.Equal(2, counts.Materials);
++        Assert.Equal(1, counts.Fades);
++        Assert.Equal(1, counts.Overrides);
++        Assert.Equal(1, counts.Billboards);
++    }
++
++    [Fact]
+     public void AddingCommandsPastOriginalLimitGrowsCommandAndSortBuffers()
+     {
+         var context = new HeadlessGame().RenderContext;
+--- a/docs/evidence/renderer/performance-acceptance-matrix-20261018.md
++++ b/docs/evidence/renderer/performance-acceptance-matrix-20261018.md
+@@ -40,6 +40,10 @@
+ - Frameintervall p50/p95/p99 und FPS-Verteilung, getrennt vom CPU Update+Draw.
+ - Asynchrone GPU-Zeit je Renderpass inklusive Sample-Alter; Passzeiten nicht als Gesamt-GPU-Zeit aufsummieren, falls sie sich überlappen.
+ - Auflösung, sichtbare Objekte, aktive Lichter/Partikel und Renderoptionen je Profil.
++- Transparenzbefehle je Frame, aufgeschlüsselt in Material-, Fade-, Override-
++  und Billboard-Befehle. Die Zähler beschreiben eingereihte Arbeit, nicht
++  ausgeführte GPU-Draws; zusammen mit GPU-Zeit des Transparent-Passes und
++  VertexBuffer-Drawcalls helfen sie, dichte transparente Szenen einzugrenzen.
+ - Simulation-overload- und Slow-update-Meldungen getrennt vom Renderprofil erfassen.
+   Der kumulative Zähler `dropped_simulation_ticks_total` erlaubt die Zuordnung
+   direkt zu einzelnen Renderframes. Der [NAP-only-Lauf mit Zähler](profile-overload-counter-20261019/README.md)
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -319,7 +319,10 @@
+    außerdem pro Frame die Anzahl transparenter Render-Commands sowie die bis zum
+    Capture-Punkt ausgeführten VertexBuffer-Drawcalls. Live-Änderungen während
+    einer Aufnahme müssen weiterhin getrennt protokolliert
+-   werden. Die CSV führt jetzt außerdem `dropped_simulation_ticks_total` pro
++   werden. Die Profil-CSV schlüsselt transparente Befehle zusätzlich in
++   Material-, Fade-, Override- und Billboard-Typen auf; diese Zähler zeigen
++   eingereihte Arbeit und ersetzen keine GPU-Draw- oder Pixelkostenmessung.
++   Die CSV führt jetzt außerdem `dropped_simulation_ticks_total` pro
+    Frame; ein Anstieg markiert überlastete Samples. Ein aktueller NAP-only-
+    Release-Lauf mit allen Renderoptionen an
+    bestätigte den CLI-Export und lieferte 300 CPU-/GPU-Samples samt Optionssnapshot
+--- a/patches/series
++++ b/patches/series
+@@ -428,3 +428,4 @@
+ client 2434-capture-first-space-frame.patch
+ client 2435-preserve-save-player-orientation.patch
+ client 2436-hi02-renderer-capture-evidence.patch
++client 2437-profile-transparent-command-breakdown.patch

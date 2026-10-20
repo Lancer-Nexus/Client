@@ -24,7 +24,7 @@ Quellen: `AGENTS.md`, `README.md`, `patches/series`, `src/LibreLancer.Data/IO/Fi
 
 ## 3. Architektur
 
-```text
+```plaintext
 Gateway/Version API -> signiertes Release-Manifest
                               |
                       Launcher / Updater
@@ -49,7 +49,7 @@ Der Mount Manager konsumiert das **lokale, verifizierte und aktivierte Manifest*
 
 ### Beispiel-Pakete
 
-```text
+```plaintext
 packages/core/game-config.nap
 packages/core/universe.nap
 packages/graphics/models.nap
@@ -153,7 +153,7 @@ Ein neues `.nap` enthält neue/geänderte Dateien und ggf. Tombstones. Download 
 
 ## 7. Updatezustandsmaschine und Ausfallsicherheit
 
-```text
+```plaintext
 Idle -> FetchManifest -> VerifySignature -> ResolveDependencies
  -> Plan -> DownloadToStaging (Resume/Range) -> VerifyHashes
  -> BuildDeltas(optional) -> VerifyCompleteSnapshot
@@ -187,7 +187,7 @@ Gateway gibt vor dem Eintritt die minimale Content-Protokollversion und einen si
 
 ## 10. C#-Komponenten und Projektaufteilung
 
-```text
+```plaintext
 src/Nexus.Assets/               # Portable .NET Library
   NapReader, NapIndex, NapStream, NapWriter
   NapManifest, PackageMountPlan, ChunkCache
@@ -211,7 +211,7 @@ Die konkreten Projektnamen und CLI-Flags werden an die tatsächliche Solution/Bu
 
 ### LancerEdit
 
-Im Menü **Data** kann ein NAP-Container über **Unpack NAP Container...** in einen neu angelegten Unterordner extrahiert oder ein ausgewählter Ordner über **Pack Folder as NAP...** gepackt werden. Vor dem Entpacken werden alle Einträge verifiziert; vorhandene Ziele werden nicht überschrieben. Nach dem Laden eines aktiven NAP-Snapshots steht **Export Edited NAP Snapshot...** bereit. Diese Aktion fasst Paketstand und persistente Workspace-Änderungen zu einem vollständigen NAP zusammen. Signierung und Aktivierung bleiben Publisher-/Updater-Schritte.
+Im Menü **Data** kann ein NAP-Container über **Unpack NAP Container...** in einen neu angelegten Unterordner extrahiert oder ein ausgewählter Ordner über **Pack Folder as NAP...** gepackt werden. `.gitkeep`-Dateien dienen nur als Git-Verzeichnisplatzhalter und werden beim Packen eines Ordners ausgelassen; dadurch erzeugen leere Quellklassen keine gleichnamigen Runtime-Einträge. Vor dem Entpacken werden alle Einträge verifiziert; vorhandene Ziele werden nicht überschrieben. Nach dem Laden eines aktiven NAP-Snapshots steht **Export Edited NAP Snapshot...** bereit. Diese Aktion fasst Paketstand und persistente Workspace-Änderungen zu einem vollständigen NAP zusammen. Signierung und Aktivierung bleiben Publisher-/Updater-Schritte.
 
 ## 11. Test- und Abnahmekriterien
 

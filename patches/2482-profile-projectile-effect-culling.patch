@@ -1,0 +1,133 @@
+diff --git a/src/LibreLancer/Render/GpuPassProfile.cs b/src/LibreLancer/Render/GpuPassProfile.cs
+--- a/src/LibreLancer/Render/GpuPassProfile.cs
++++ b/src/LibreLancer/Render/GpuPassProfile.cs
+@@ -25,7 +25,10 @@
+     int TransparentNebulae,
+     int TransparentEffects,
+     int TransparentBillboards,
+-    int TransparentOther);
++    int TransparentOther,
++    int ProjectileEffectCullCandidates,
++    int ProjectileEffectFiniteBounds,
++    int ProjectileEffectCulled);
+ 
+ internal enum TransparentDrawCallGroup : byte
+ {
+@@ -113,6 +116,18 @@
+ 
+     internal static void BeginDrawCallFrame() => drawCallCounts = default;
+ 
++    internal static void RecordProjectileEffectCull(bool hasFiniteBounds, bool culled)
++    {
++        drawCallCounts = drawCallCounts with
++        {
++            ProjectileEffectCullCandidates = drawCallCounts.ProjectileEffectCullCandidates + 1,
++            ProjectileEffectFiniteBounds = drawCallCounts.ProjectileEffectFiniteBounds +
++                                           (hasFiniteBounds ? 1 : 0),
++            ProjectileEffectCulled = drawCallCounts.ProjectileEffectCulled +
++                                     (hasFiniteBounds && culled ? 1 : 0)
++        };
++    }
++
+     internal static void SetOpaqueObjectDrawCalls(int count) =>
+         drawCallCounts = drawCallCounts with { OpaqueObjects = count };
+ 
+diff --git a/src/LibreLancer/Render/ProjectileRenderer.cs b/src/LibreLancer/Render/ProjectileRenderer.cs
+--- a/src/LibreLancer/Render/ProjectileRenderer.cs
++++ b/src/LibreLancer/Render/ProjectileRenderer.cs
+@@ -18,6 +18,7 @@
+         private BeamsBuffer beams = null!;
+         private bool renderBeams;
+         private ICamera frameCamera = null!;
++        private bool profileProjectileEffectCulling;
+ 
+         public ProjectileRenderer(ProjectileManager projs)
+         {
+@@ -28,6 +29,7 @@
+         public override bool PrepareRender(ICamera camera, NebulaRenderer nr, SystemRenderer sys, bool forceCull)
+         {
+             frameCamera = camera;
++            profileProjectileEffectCulling = sys.RenderContext.GpuTimingEnabled;
+             beams = sys.Beams;
+             renderBeams = sys.Settings.RenderProjectileBeams;
+             renderCount = 0;
+@@ -40,6 +42,9 @@
+                 {
+                     projectile.Effect!.Resources = sys.ResourceManager;
+                     projectile.Effect!.Pool = sys.FxPool;
++                    if (profileProjectileEffectCulling)
++                        GpuPassProfile.RecordProjectileEffectCull(
++                            float.IsFinite(projectile.Effect.Effect.Radius), projectile.Effect.Culled);
+                 }
+ 
+                 if (sys.Settings.RenderTransientEffectLights &&
+diff --git a/src/LibreLancer/Interface/DebugView.cs b/src/LibreLancer/Interface/DebugView.cs
+--- a/src/LibreLancer/Interface/DebugView.cs
++++ b/src/LibreLancer/Interface/DebugView.cs
+@@ -46,6 +46,9 @@
+         private readonly int[] transparentBeamDrawCallSamples = new int[PerformanceSampleCount];
+         private readonly int[] transparentCharacterDrawCallSamples = new int[PerformanceSampleCount];
+         private readonly int[] transparentProjectileDrawCallSamples = new int[PerformanceSampleCount];
++        private readonly int[] projectileEffectCullCandidateSamples = new int[PerformanceSampleCount];
++        private readonly int[] projectileEffectFiniteBoundSamples = new int[PerformanceSampleCount];
++        private readonly int[] projectileEffectCulledSamples = new int[PerformanceSampleCount];
+         private readonly int[] transparentParticleObjectDrawCallSamples = new int[PerformanceSampleCount];
+         private readonly int[] transparentSunDrawCallSamples = new int[PerformanceSampleCount];
+         private readonly int[] transparentLightEquipmentDrawCallSamples = new int[PerformanceSampleCount];
+@@ -272,6 +275,9 @@
+                     transparentBeamDrawCallSamples[performanceSampleIndex] = drawCalls.TransparentBeams;
+                     transparentCharacterDrawCallSamples[performanceSampleIndex] = drawCalls.TransparentCharacters;
+                     transparentProjectileDrawCallSamples[performanceSampleIndex] = drawCalls.TransparentProjectiles;
++                    projectileEffectCullCandidateSamples[performanceSampleIndex] = drawCalls.ProjectileEffectCullCandidates;
++                    projectileEffectFiniteBoundSamples[performanceSampleIndex] = drawCalls.ProjectileEffectFiniteBounds;
++                    projectileEffectCulledSamples[performanceSampleIndex] = drawCalls.ProjectileEffectCulled;
+                     transparentParticleObjectDrawCallSamples[performanceSampleIndex] = drawCalls.TransparentParticleObjects;
+                     transparentSunDrawCallSamples[performanceSampleIndex] = drawCalls.TransparentSuns;
+                     transparentLightEquipmentDrawCallSamples[performanceSampleIndex] = drawCalls.TransparentLightEquipment;
+@@ -432,7 +438,7 @@
+                 csv.Append(",gpu_").Append(columnName).Append("_ms,gpu_")
+                     .Append(columnName).Append("_age_frames");
+             }
+-            csv.Append(",aa_target_estimated_bytes,bloom_targets_estimated_bytes,tonemap_output_target_estimated_bytes,dropped_simulation_ticks_total,transparent_command_count,transparent_material_commands,transparent_fade_commands,transparent_override_commands,transparent_billboard_commands,vertex_buffer_draw_calls,opaque_object_draw_calls,opaque_asteroid_draw_calls,opaque_nebula_draw_calls,transparent_draw_calls,transparent_object_draw_calls,transparent_model_draw_calls,transparent_auxiliary_object_draw_calls,transparent_character_draw_calls,transparent_projectile_draw_calls,transparent_particle_object_draw_calls,transparent_sun_draw_calls,transparent_light_equipment_draw_calls,transparent_tractor_beam_draw_calls,transparent_gate_tunnel_draw_calls,transparent_beam_draw_calls,transparent_asteroid_draw_calls,transparent_nebula_draw_calls,transparent_effect_draw_calls,transparent_billboard_draw_calls,transparent_other_draw_calls");
++            csv.Append(",aa_target_estimated_bytes,bloom_targets_estimated_bytes,tonemap_output_target_estimated_bytes,dropped_simulation_ticks_total,transparent_command_count,transparent_material_commands,transparent_fade_commands,transparent_override_commands,transparent_billboard_commands,vertex_buffer_draw_calls,opaque_object_draw_calls,opaque_asteroid_draw_calls,opaque_nebula_draw_calls,transparent_draw_calls,transparent_object_draw_calls,transparent_model_draw_calls,transparent_auxiliary_object_draw_calls,transparent_character_draw_calls,transparent_projectile_draw_calls,projectile_effect_cull_candidates,projectile_effect_finite_bounds,projectile_effect_culled,transparent_particle_object_draw_calls,transparent_sun_draw_calls,transparent_light_equipment_draw_calls,transparent_tractor_beam_draw_calls,transparent_gate_tunnel_draw_calls,transparent_beam_draw_calls,transparent_asteroid_draw_calls,transparent_nebula_draw_calls,transparent_effect_draw_calls,transparent_billboard_draw_calls,transparent_other_draw_calls");
+             csv.AppendLine();
+             var start = (performanceSampleIndex - performanceSamplesRecorded + PerformanceSampleCount) % PerformanceSampleCount;
+             for (var i = 0; i < performanceSamplesRecorded; i++)
+@@ -497,6 +503,9 @@
+                     .Append(',').Append(transparentAuxiliaryDrawCallSamples[index].ToString(CultureInfo.InvariantCulture))
+                     .Append(',').Append(transparentCharacterDrawCallSamples[index].ToString(CultureInfo.InvariantCulture))
+                     .Append(',').Append(transparentProjectileDrawCallSamples[index].ToString(CultureInfo.InvariantCulture))
++                    .Append(',').Append(projectileEffectCullCandidateSamples[index].ToString(CultureInfo.InvariantCulture))
++                    .Append(',').Append(projectileEffectFiniteBoundSamples[index].ToString(CultureInfo.InvariantCulture))
++                    .Append(',').Append(projectileEffectCulledSamples[index].ToString(CultureInfo.InvariantCulture))
+                     .Append(',').Append(transparentParticleObjectDrawCallSamples[index].ToString(CultureInfo.InvariantCulture))
+                     .Append(',').Append(transparentSunDrawCallSamples[index].ToString(CultureInfo.InvariantCulture))
+                     .Append(',').Append(transparentLightEquipmentDrawCallSamples[index].ToString(CultureInfo.InvariantCulture))
+diff --git a/docs/renderer-roadmap.md b/docs/renderer-roadmap.md
+--- a/docs/renderer-roadmap.md
++++ b/docs/renderer-roadmap.md
+@@ -16,7 +16,7 @@
+ | HDR und Tonemapping | Linearisiertes Scene-Target, ACES-Tonemapping, linearisierte PBR-Albedo-/Licht-/Emissionswerte und exakte sRGB-Ausgabe im PBR-LDR-Pfad. System- und Nebel-Clearfarben werden ebenfalls vor dem HDR-Clear linearisiert; LDR bleibt unverändert. Ein Source-Audit hat alle 19 Ingame-Fragmentshader und den Postprocess-Ausgang geprüft; 2 Farbraum- und 21 Ambientlicht-Regressionstests bestehen. | Retail-Farbannahmen, visuelle Gleichheit zwischen Legacy/PBR, transparente Effekte, Fog und zusammengesetzte Ingame-Szenen brauchen weiterhin feste Bildvergleiche, Original-Client-Referenz und Hardware-GPU-Abnahme. HDR/LDR-Vergleiche: `docs/evidence/renderer/postprocess-four-mode-ab-20261017/` und der same-session-Hi02-Lauf `docs/evidence/renderer/hdr-ldr-hi02-live-ab-20261018/`; letzterer zeigt in dieser Legacy-Szene nur geringe Pixelabweichung und ersetzt keine Material-/Emissions-Referenz. Shaderaudit: `docs/evidence/renderer/hdr-shader-color-contract-audit-20261018.md`; Clear-Farbvertrag: `docs/evidence/renderer/hdr-clear-color-contract-20261018.md`. |
+ | Bloom | HDR-Extraktion mittelt jetzt ein vollständiges 4×4-Quellfenster in Viertelauflösung; aufrundende Zielmaße behalten Randpixel bei ungeraden Fenstergrößen. Basis-, mittlere und breite Blur-Stufen sowie Schwelle, Radius, Auflösung und Kernel sind konfigurierbar. | Die Extraktion beseitigt das bisherige Unterabtasten der zentralen vier Texel. Der Code führt alle drei Stufen aus. NAP-only M01A-Läufe am 19.10. vergleichen Bloom ein/aus und schalten in einem dritten Lauf zusätzlich Partikeleffekte aus. Der große Ring verschwindet mit den Explosionspartikeln; NAP-Fuse- und ALE-Daten verknüpfen ihn mit dem `planetflare`-Flashbang der Freeport-7-Explosion und grenzen ihn von Bloom ab. Die bewegten Frames sind nicht pixelgenau, die einzelne Flashbang-Instanz bleibt offen. Siehe [`NAP M01A Bloom-/Partikelmatrix`](evidence/renderer/nap-full-runtime-20261019/README.md). GPU-Kosten bleiben offen. |
+ | Partikelpuffer | `ParticleBuffer.RemoveAt` verschiebt beim Entfernen die kürzere Seite des Ringpuffers und bewahrt dabei die Reihenfolge. | Der maximale Verschiebeaufwand sinkt von der gesamten Restlänge auf `min(prefix, suffix)`; tatsächliche FPS-/GPU-Wirkung muss in festen Partikelszenen gemessen werden. |
+-| Projektil-Effekt-Culling | Nach dem Simulationsupdate prüft `ProjectileRenderer` den Partikel-Effekt gegen die aktuelle Kamerafrustum und überspringt nur dessen Draw, wenn der Effekt außerhalb liegt. Simulation, Beams und Effektlichter laufen weiter. | Es gilt derselbe Radiusvertrag wie bei anderen Partikeleffekt-Renderern. Effekte mit unendlichem Radius (z. B. nicht an einen Node gebundene Root-Emitter) bleiben sichtbar. Eine feste Szenenmessung der tatsächlich eingesparten Drawcalls steht noch aus. |
++| Projektil-Effekt-Culling | Nach dem Simulationsupdate prüft `ProjectileRenderer` den Partikel-Effekt gegen die aktuelle Kamerafrustum und überspringt nur dessen Draw, wenn der Effekt außerhalb liegt. Simulation, Beams und Effektlichter laufen weiter. Bei aktivem GPU-Profiling erfasst die CSV nun je Frame alle geprüften Projektil-Effekte, davon Effekte mit endlichem Radius und davon tatsächlich verworfene Draws. | Es gilt derselbe Radiusvertrag wie bei anderen Partikeleffekt-Renderern. Effekte mit unendlichem Radius (z. B. nicht an einen Node gebundene Root-Emitter) bleiben sichtbar. Die Zähler zeigen, ob die Abfrage greift, belegen aber noch keine eingesparten GPU-Zeit oder FPS. Ein fester Szenenvergleich vor/nach bleibt offen. |
+ | Transparente Draw-Commands | Transparent-Commands und Sortierindizes wachsen bei Bedarf geometrisch über die bisherige 16.384-Grenze hinaus; beide Arrays behalten dieselbe Kapazität. Der Sortiervergleich wird pro CommandBuffer wiederverwendet und nach einer Puffervergrößerung auf das neue Array umgestellt. Leere Queues werden ohne Sortieraufruf übersprungen. | Unit-Tests prüfen geometrisches Wachstum und fügen 16.385 Commands ein; derselbe Test sortiert die leere und anschließend vergrößerte Queue. Dichte Ingame-Szenen müssen die höhere Kapazität, ihren Speicherbedarf und die FPS-Wirkung der geringeren Allokationen noch prüfen. |
+ | Objektlicht-Bindung | `RenderHelpers.ApplyLights` übergibt die nach Priorität ausgewählten Quellindizes kompakt. `RenderMaterial.SetLights` verarbeitet so direkt höchstens acht Lichtindizes pro Materialdraw statt bis zu 128 Frame-Einträge erneut zu durchsuchen; manuell gebaute Lighting-Werte behalten den Bitset-Fallback. | Auswahl-/Bitset-Übereinstimmung ist im `TransientLightTests`-Pfad geprüft. Der CPU- und FPS-Gewinn muss mit derselben festen Szene vor/nach der Änderung gemessen werden. |
+ | LOD-/Modell-Culling | Die größte Archetyp- oder Mesh-LOD-Distanz wird ohne LINQ-Iteratoren ermittelt und pro Renderer gecacht, bis sich Modell oder Override-Array ändern. Leere Modelldistanzen blenden das Modell nicht mehr fälschlich aus; Mesh-eigene LOD-Distanzen aktivieren den frühen Distanz-Cull auch ohne Archetypwerte. | Vermeidet wiederholte Scans aller Modellteile im frühen Draw-Cull und erhält gültige Mesh-LODs. Der tatsächliche CPU-/FPS-Gewinn muss in festen Schiff-, Stations- und Asteroiden-Szenen gemessen werden. |
+diff --git a/patches/README.md b/patches/README.md
+--- a/patches/README.md
++++ b/patches/README.md
+@@ -432,3 +432,4 @@
+ | 2479 | Reuse particle child-effect update scratch collections |
+ | 2480 | Record NAP-only particle child-effect runtime and baseline limits |
+ | 2481 | Cull projectile particle effects outside the camera frustum |
++| 2482 | Profile projectile effect culling candidates, finite bounds and skipped draws |
+diff --git a/patches/series b/patches/series
+--- a/patches/series
++++ b/patches/series
+@@ -475,3 +475,4 @@
+ client 2479-reuse-particle-child-effect-update-scratch.patch
+ client 2480-particle-child-effect-runtime-evidence.patch
+ client 2481-cull-offscreen-projectile-effects.patch
++client 2482-profile-projectile-effect-culling.patch

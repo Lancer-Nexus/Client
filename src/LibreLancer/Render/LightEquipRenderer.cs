@@ -8,7 +8,6 @@ using LibreLancer.Data;
 using LibreLancer.Data.GameData.Items;
 using LibreLancer.Graphics;
 using LibreLancer.Resources;
-using LibreLancer.World;
 
 namespace LibreLancer.Render
 {
@@ -16,11 +15,10 @@ namespace LibreLancer.Render
     {
         private const float BASE_SIZE = 10f;
         private Vector3 pos;
-        private Vector3 forward;
+        private Vector3 forward = Vector3.UnitZ;
 
         private SystemRenderer? sys;
         private LightEquipment equip;
-        internal GameObject? OcclusionOwner { get; set; }
         public bool LightOn = true;
         private static Random rnd = new();
 
@@ -75,9 +73,8 @@ namespace LibreLancer.Render
                 new Vector2(shineshape.Dimensions.X + shineshape.Dimensions.Width,
                     shineshape.Dimensions.Y + shineshape.Dimensions.Height),
                 0,
-                SortLayers.CORONA,
-                BlendMode.Additive,
-                depthTest: false
+                SortLayers.OBJECT,
+                BlendMode.Additive
             );
         }
 
@@ -111,61 +108,66 @@ namespace LibreLancer.Render
             if (bulbtex == null || shinetex == null)
                 return;
 
-            var fade = GetViewConeFade(forward, sys!.Camera.Position - pos, equip.FlareCone);
-            if (fade <= 0)
-                return;
+            if (equip.FlareCone != null)
+            {
+                float cosAngle = Vector3.Dot(
+                    Vector3.Normalize(forward),
+                    Vector3.Normalize(sys!.Camera.Position - pos)
+                );
 
-            DrawShine(fade);
+                // flare cone is defined as outer, inner
+                float cosStart = MathF.Cos(equip.FlareCone.Value.Y * MathF.PI / 180f);
+                float cosEnd   = MathF.Cos(equip.FlareCone.Value.X   * MathF.PI / 180f);
+
+                float fade = MathHelper.Clamp(
+                    (cosAngle - cosEnd) / (cosStart - cosEnd),
+                    0f,
+                    1f
+                );
+                if(fade > 0)
+                    DrawShine(fade);
+            }
+            else
+            {
+                DrawShine(1);
+            }
+
+
 
             sys.Billboards.Draw(
                 bulbtex,
                 pos,
                 new Vector2(equip.BulbSize) * 2,
-                new Color4(colorBulb, fade),
+                new Color4(colorBulb, 1),
                 new Vector2(bulbshape.Dimensions.X, bulbshape.Dimensions.Y),
                 new Vector2(bulbshape.Dimensions.X + bulbshape.Dimensions.Width, bulbshape.Dimensions.Y),
                 new Vector2(bulbshape.Dimensions.X, bulbshape.Dimensions.Y + bulbshape.Dimensions.Height),
                 new Vector2(bulbshape.Dimensions.X + bulbshape.Dimensions.Width,
                     bulbshape.Dimensions.Y + bulbshape.Dimensions.Height),
                 0,
-                SortLayers.CORONA,
-                BlendMode.Additive,
-                depthTest: false
+                SortLayers.OBJECT,
+                BlendMode.Additive
             );
 
         }
-
-        internal static float GetViewConeFade(Vector3 lightForward, Vector3 cameraDirection,
-            Vector2? flareCone)
-        {
-            if (flareCone == null)
-                return 1f;
-
-            if (lightForward.LengthSquared() < 1e-8f || cameraDirection.LengthSquared() < 1e-8f)
-                return 1f;
-
-            var cosAngle = Vector3.Dot(Vector3.Normalize(lightForward), Vector3.Normalize(cameraDirection));
-            // Freelancer stores the flare cone as outer, inner angles.
-            var cosStart = MathF.Cos(flareCone.Value.Y * MathF.PI / 180f);
-            var cosEnd = MathF.Cos(flareCone.Value.X * MathF.PI / 180f);
-            if (MathF.Abs(cosStart - cosEnd) < 1e-6f)
-                return cosAngle >= cosStart ? 1f : 0f;
-
-            return MathHelper.Clamp((cosAngle - cosEnd) / (cosStart - cosEnd), 0f, 1f);
-        }
-
 
         private double timer = 0;
         private bool lt_on = true;
         private Color3f colorBulb;
         private Color3f colorGlow;
 
-        public override void Update(double time, Vector3 position, Matrix4x4 transform)
+        public void SetTransform(Transform3D transform)
+        {
+            pos = transform.Position;
+            if (equip.FlareCone != null)
+                forward = Vector3.Transform(new(0,0,-1), transform.Orientation);
+        }
+
+        public override void Update(double time, Transform3D transform)
         {
             if (!LightOn || sys == null)
                 return;
-            pos = position;
-            forward = transform.GetForward();
+
             if (equip.Animated)
             {
                 timer -= time;
@@ -190,33 +192,16 @@ namespace LibreLancer.Render
             }
         }
 
-        public override bool PrepareRender(ICamera camera, NebulaRenderer nr, SystemRenderer sys, bool forceCull)
+        public override bool PrepareRender(ICamera camera, NebulaRenderer? nr, SystemRenderer sys, bool forceCull)
         {
             var visible = (
                 !forceCull &&
                 LightOn &&
                 Vector3.DistanceSquared(camera.Position, pos) < CULL &&
-                camera.FrustumCheck(new BoundingSphere(pos, equip.BulbSize * 3)) &&
-                GetViewConeFade(forward, camera.Position - pos, equip.FlareCone) > 0
+                camera.FrustumCheck(new BoundingSphere(pos, equip.BulbSize * 3))
             );
             this.sys = sys;
             var showLight = !equip.Animated || !lt_on;
-
-            if (visible && sys.World.Physics is { } physics)
-            {
-                var toLight = pos - camera.Position;
-                var distance = toLight.Length();
-                if (distance > 0.01f && physics.PointRaycast(
-                        OcclusionOwner?.PhysicsComponent?.Body,
-                        camera.Position,
-                        toLight / distance,
-                        Math.Max(0, distance - Math.Max(0.1f, equip.BulbSize)),
-                        allowDynAsteroids: true,
-                        out _, out _, out _))
-                {
-                    visible = false;
-                }
-            }
 
             if (equip.EmitRange > 0 && showLight && camera.FrustumCheck(new BoundingSphere(pos, equip.EmitRange)))
             {
